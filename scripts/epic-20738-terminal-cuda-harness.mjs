@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, readFileSync } from "node:fs";
 import {
-  appendFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile,
+  appendFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile,
 } from "node:fs/promises";
 import { freemem, totalmem } from "node:os";
 import path from "node:path";
@@ -16,7 +16,10 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 export const PROFILE_NAME = "epic-20738-candle-cuda-terminal-v1";
 export const PROFILE_PATH = "config/terminal-evidence/epic-20738-cuda.json";
+export const PROFILE_SCHEMA_PATH = "config/terminal-evidence/epic-20738-profile.schema.json";
 export const RECEIPT_SCHEMA_PATH = "config/terminal-evidence/epic-20738-receipt.schema.json";
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SCHEMA_VALIDATOR_PATH = path.join(ROOT, "scripts/validate-epic-20738-terminal-schema.py");
 const SHA40 = /^[0-9a-f]{40}$/;
 const SAFE_ID = /^[a-z0-9][a-z0-9-]+$/;
 const BLOCKED = ["anima", "sana", "vace", "flux2", "true_v2", "true-v2", "eros"];
@@ -30,6 +33,8 @@ const EXPECTED_CELLS = [
 const SDXL_POSE_MODELS = [
   "sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2",
 ];
+const EXPECTED_CELL_SEMANTICS_SHA256 = "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879";
+const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e";
 
 function fail(message) {
   throw new Error(message);
@@ -46,6 +51,32 @@ function exactKeys(value, expected, label) {
   if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
     fail(`${label} fields must be exactly ${wanted.join(", ")}; got ${actual.join(", ")}`);
   }
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
+  }
+  return value;
+}
+
+function canonicalSha256(value) {
+  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
+}
+
+export function cellSemanticsSha256(cells) {
+  const tuples = cells.map((cell) => ({
+    id: cell.id,
+    modelId: cell.modelId,
+    engineId: cell.engineId,
+    kind: cell.kind,
+    requestedTier: cell.requestedTier,
+    capability: cell.capability ?? null,
+    artifactIds: cell.artifactIds,
+    request: cell.request,
+  }));
+  return canonicalSha256(tuples);
 }
 
 export function loadProfile(profilePath = PROFILE_PATH) {
@@ -70,6 +101,10 @@ export function validateProfile(profile) {
     fail(`profile cells or serial order drifted:\nexpected ${EXPECTED_CELLS.join(",")}\nactual ${ids.join(",")}`);
   }
   if (new Set(ids).size !== ids.length) fail("profile cell ids must be unique");
+  const semanticDigest = cellSemanticsSha256(profile.cells);
+  if (semanticDigest !== EXPECTED_CELL_SEMANTICS_SHA256) {
+    fail(`profile's exact ordered semantic tuples drifted: ${semanticDigest}`);
+  }
 
   for (const [id, artifact] of Object.entries(profile.artifacts)) {
     if (!SAFE_ID.test(id)) fail(`artifact id is not safe: ${id}`);
@@ -144,6 +179,10 @@ export function validateProfile(profile) {
   if (JSON.stringify(poseModels) !== JSON.stringify(SDXL_POSE_MODELS)) {
     fail(`OpenPose cells must cover the exact five approved SDXL backbones: ${SDXL_POSE_MODELS.join(", ")}`);
   }
+  const artifactDigest = canonicalSha256(profile.artifacts);
+  if (artifactDigest !== EXPECTED_ARTIFACT_SEMANTICS_SHA256) {
+    fail(`profile's exact artifact definitions drifted: ${artifactDigest}`);
+  }
   return profile;
 }
 
@@ -195,6 +234,26 @@ function run(command, args, options = {}) {
   return result.stdout.trim();
 }
 
+export function validateDocumentWithSchema(python, schemaPath, documentPath) {
+  return run(python, [
+    SCHEMA_VALIDATOR_PATH,
+    "--schema", path.resolve(ROOT, schemaPath),
+    "--document", path.resolve(documentPath),
+  ]);
+}
+
+async function writeJsonAtomically(file, value, { python, schemaPath } = {}) {
+  await mkdir(path.dirname(file), { recursive: true });
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    if (schemaPath) validateDocumentWithSchema(python, schemaPath, temporary);
+    await rename(temporary, file);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
 function git(repo, args) {
   return run("git", ["-C", repo, ...args]);
 }
@@ -225,6 +284,98 @@ function assertOutsideRepository(candidate, repositories, label) {
     }
   }
   return target;
+}
+
+function isWithin(parent, candidate, { allowEqual = false } = {}) {
+  const relative = path.relative(parent, candidate);
+  return (allowEqual && !relative) || Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function comparable(candidate) {
+  const normalized = path.resolve(candidate).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+async function nearestExistingParent(candidate) {
+  let current = path.dirname(path.resolve(candidate));
+  for (;;) {
+    try {
+      return { lexical: current, resolved: await realpath(current) };
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const parent = path.dirname(current);
+      if (parent === current) throw error;
+      current = parent;
+    }
+  }
+}
+
+async function assertNewConfinedDirectory(candidate, runnerTemp, repositories, label) {
+  const target = assertOutsideRepository(candidate, repositories, label);
+  if (!isWithin(runnerTemp, target)) fail(`${label} must be a descendant of the resolved RUNNER_TEMP`);
+  try {
+    await lstat(target);
+    fail(`${label} must not already exist`);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const parent = await nearestExistingParent(target);
+  if (!isWithin(runnerTemp, parent.resolved, { allowEqual: true })) {
+    fail(`${label} traverses a symlink or reparse point outside RUNNER_TEMP`);
+  }
+  const throughResolvedParent = path.resolve(parent.resolved, path.relative(parent.lexical, target));
+  if (!isWithin(runnerTemp, throughResolvedParent)) {
+    fail(`${label} resolves outside RUNNER_TEMP`);
+  }
+  return target;
+}
+
+export async function validateCampaignPaths({ runnerTemp, output, scratch, repositories }) {
+  if (!runnerTemp) fail("RUNNER_TEMP is required for terminal evidence confinement");
+  const runnerMetadata = await stat(runnerTemp);
+  if (!runnerMetadata.isDirectory()) fail("RUNNER_TEMP must be an existing directory");
+  const resolvedRunnerTemp = await realpath(runnerTemp);
+  const resolvedRepositories = await Promise.all(repositories.map((repository) => realpath(repository)));
+  const resolvedOutput = await assertNewConfinedDirectory(
+    output, resolvedRunnerTemp, resolvedRepositories, "output",
+  );
+  const resolvedScratch = await assertNewConfinedDirectory(
+    scratch, resolvedRunnerTemp, resolvedRepositories, "scratch",
+  );
+  if (comparable(resolvedOutput) === comparable(resolvedScratch)
+    || isWithin(resolvedOutput, resolvedScratch) || isWithin(resolvedScratch, resolvedOutput)) {
+    fail("output and scratch must be distinct, non-nested RUNNER_TEMP descendants");
+  }
+  return {
+    runnerTemp: resolvedRunnerTemp,
+    output: resolvedOutput,
+    scratch: resolvedScratch,
+    repositories: resolvedRepositories,
+  };
+}
+
+async function assertExistingConfinedTree(candidate, guard, label) {
+  const target = assertOutsideRepository(candidate, guard.repositories, label);
+  if (!isWithin(guard.runnerTemp, target)) fail(`${label} escaped RUNNER_TEMP before cleanup`);
+  const metadata = await lstat(target);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    fail(`${label} is not a controller-owned ordinary directory before cleanup`);
+  }
+  const resolved = await realpath(target);
+  if (comparable(resolved) !== comparable(target)) {
+    fail(`${label} was replaced by a symlink or reparse point before cleanup`);
+  }
+  const parent = await realpath(path.dirname(target));
+  if (!isWithin(guard.runnerTemp, parent, { allowEqual: true })) {
+    fail(`${label} parent escaped RUNNER_TEMP before cleanup`);
+  }
+  return target;
+}
+
+export async function safeRemoveTree(candidate, guard, label = "cleanup target") {
+  const target = await assertExistingConfinedTree(candidate, guard, label);
+  // This confinement/reparse check intentionally sits immediately beside the only recursive remove.
+  await rm(target, { recursive: true, force: false });
 }
 
 async function sha256File(file) {
@@ -314,18 +465,24 @@ export function receiptSkeleton({
       cudaVisibleDevices: process.env.CUDA_VISIBLE_DEVICES ?? "",
       rawVramSamples: [],
     },
+    cleanup: { attempted: false, completed: false, error: null },
     inputs: [], outputs: [], logs: [],
     startedAt,
     completedAt: startedAt,
   };
 }
 
-export function validateReceipt(receipt) {
+export function validateReceipt(receipt, expectedCell, profile) {
   if (receipt.schemaVersion !== 1 || receipt.profile !== PROFILE_NAME) fail("receipt identity mismatch");
   if (!new Set(["passed", "failed"]).has(receipt.status)) fail("receipt status is invalid");
   if (receipt.cell.ordinal < 1 || receipt.cell.ordinal > EXPECTED_CELLS.length
     || receipt.cell.id !== EXPECTED_CELLS[receipt.cell.ordinal - 1]) {
     fail("receipt cell identity or ordinal drifted from the serialized profile");
+  }
+  if (!expectedCell || !profile || receipt.cell.id !== expectedCell.id
+    || receipt.cell.modelId !== expectedCell.modelId || receipt.cell.engineId !== expectedCell.engineId
+    || receipt.cell.kind !== expectedCell.kind || receipt.cell.requestedTier !== expectedCell.requestedTier) {
+    fail("receipt cell semantics drifted from the frozen profile");
   }
   if (receipt.cell.requestedTier !== receipt.cell.resolvedTier || receipt.cell.denseFallback !== false) {
     fail(`${receipt.cell.id} receipt permits a dense or cross-tier fallback`);
@@ -338,12 +495,25 @@ export function validateReceipt(receipt) {
     || !receipt.execution.runId || !receipt.execution.runAttempt || !receipt.execution.runnerName) {
     fail("receipt source or workflow execution identity is incomplete");
   }
-  if (!Array.isArray(receipt.artifacts) || !receipt.artifacts.length
-    || receipt.artifacts.some((artifact) => !artifact.inventory || !SHA40.test(artifact.revision))) {
+  if (!Array.isArray(receipt.artifacts)
+    || receipt.artifacts.length !== expectedCell.artifactIds.length
+    || receipt.artifacts.some((artifact, index) => {
+      const expectedId = expectedCell.artifactIds[index];
+      const expected = profile.artifacts[expectedId];
+      return artifact.id !== expectedId || artifact.role !== expected.role
+        || artifact.repository !== expected.repository || artifact.revision !== expected.revision
+        || artifact.subdirectory !== expected.subdirectory
+        || JSON.stringify(artifact.allowPatterns) !== JSON.stringify(expected.allowPatterns)
+        || !artifact.inventory || typeof artifact.inventory.root !== "string";
+    })) {
     fail("receipt artifact authority binding is incomplete");
   }
   if (receipt.status === "passed" && receipt.artifacts.some((artifact) => (
     artifact.inventory.complete !== true || !/^[0-9a-f]{64}$/.test(artifact.inventory.sha256)
+      || artifact.inventory.files < 1 || artifact.inventory.bytes < 1
+      || typeof artifact.selectedRoot !== "string" || !artifact.selectedRoot
+      || comparable(artifact.inventory.root) !== comparable(artifact.selectedRoot)
+      || artifact.inventory.error !== null
   ))) {
     fail("passed receipt artifact inventory is incomplete");
   }
@@ -351,7 +521,8 @@ export function validateReceipt(receipt) {
     && typeof artifact.inventory.error !== "string")) {
     fail("failed artifact inventory must explain why it is incomplete");
   }
-  if (!Array.isArray(receipt.hardware?.gpuIdentity) || !receipt.hardware.gpuIdentity.length
+  if (!Array.isArray(receipt.hardware?.gpuIdentity)
+    || (receipt.status === "passed" && receipt.hardware.gpuIdentity.length === 0)
     || receipt.hardware.gpuIdentity.some((gpu) => !gpu.name || !gpu.uuid || !gpu.pciBusId
       || !gpu.computeCapability || !gpu.driverVersion || !Number.isInteger(gpu.index)
       || !Number.isFinite(gpu.memoryTotalMiB) || !gpu.raw)
@@ -365,15 +536,30 @@ export function validateReceipt(receipt) {
   const hashedFile = (file) => typeof file?.path === "string" && Number.isInteger(file.bytes)
     && /^[0-9a-f]{64}$/.test(file.sha256);
   if (!Array.isArray(receipt.inputs) || receipt.inputs.some((file) => !hashedFile(file))
+    || (receipt.status === "passed" && receipt.inputs.length === 0)
     || !Array.isArray(receipt.outputs) || receipt.outputs.some((file) => !hashedFile(file))
+    || (receipt.status === "passed" && receipt.outputs.length === 0)
     || !Array.isArray(receipt.logs) || !receipt.logs.length
     || receipt.logs.some((file) => !hashedFile(file))) {
     fail("receipt input, output, or log hashes are incomplete");
   }
+  if (!receipt.cleanup || typeof receipt.cleanup.attempted !== "boolean"
+    || typeof receipt.cleanup.completed !== "boolean"
+    || (receipt.cleanup.error !== null && typeof receipt.cleanup.error !== "string")) {
+    fail("receipt cleanup evidence is incomplete");
+  }
+  if (receipt.status === "passed" && (receipt.error !== null || !receipt.cleanup.completed
+    || receipt.cleanup.error !== null)) {
+    fail("passed receipt contains a failure or incomplete cleanup");
+  }
+  if (receipt.status === "failed" && (typeof receipt.error !== "string" || !receipt.error)) {
+    fail("failed receipt must retain an error");
+  }
   return receipt;
 }
 
-function pendingArtifact(id, artifact) {
+function pendingArtifact(id, artifact, scratch) {
+  const inventoryRoot = path.resolve(scratch, "artifacts", id, artifact.subdirectory);
   return {
     id,
     role: artifact.role,
@@ -382,7 +568,10 @@ function pendingArtifact(id, artifact) {
     subdirectory: artifact.subdirectory,
     selectedRoot: null,
     allowPatterns: artifact.allowPatterns,
-    inventory: { complete: false, sha256: null, files: 0, bytes: 0, error: "provisioning has not completed" },
+    inventory: {
+      root: inventoryRoot, complete: false, sha256: null, files: 0, bytes: 0,
+      error: "provisioning has not completed",
+    },
   };
 }
 
@@ -471,10 +660,79 @@ async function executeCell({ sceneworks, cellFile, cellDir, logFile, samples }) 
   });
 }
 
+function errorText(error) {
+  return error?.stack ?? error?.message ?? String(error);
+}
+
+function recordError(errors, label, error) {
+  const message = `${label}: ${errorText(error)}`;
+  errors.push(message);
+  return message;
+}
+
+function sampleGpuBestEffort(samples, errors, label) {
+  try {
+    samples.push(...sampleGpu());
+  } catch (error) {
+    const message = recordError(errors, label, error);
+    samples.push({ timestamp: new Date().toISOString(), raw: message });
+  }
+}
+
+async function refreshEvidence(receipt, cellDir, errors) {
+  try {
+    const evidence = await evidenceFiles(cellDir);
+    receipt.inputs = evidence.inputs;
+    receipt.outputs = evidence.outputs;
+    receipt.logs = evidence.logs;
+    if (!receipt.logs.length) fail("no controller or runtime log was available to hash");
+  } catch (error) {
+    const message = recordError(errors, "evidence hashing failed", error);
+    receipt.inputs = [];
+    receipt.outputs = [];
+    const fallbackLog = path.join(cellDir, "evidence-fallback.log");
+    await writeFile(fallbackLog, `${new Date().toISOString()} ${message}\n`, "utf8");
+    const fallback = await hashedFiles(cellDir, { exclude: new Set(["receipt.json"]) });
+    receipt.logs = fallback.filter((file) => file.path.endsWith(".log"));
+  }
+}
+
+async function writeEmergencyReceipt({
+  args, profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+  systemMemory, error,
+}) {
+  const cellDir = path.join(output, `${ordinalName}-emergency`);
+  await mkdir(cellDir);
+  const startedAt = new Date().toISOString();
+  const message = `unhandled cell setup/finalization failure: ${errorText(error)}`;
+  await writeFile(path.join(cellDir, "controller.log"), `${startedAt} ${message}\n`, "utf8");
+  const artifacts = cell.artifactIds.map((id) => pendingArtifact(
+    id, profile.artifacts[id], path.join(scratch, ordinalName),
+  ));
+  const receipt = receiptSkeleton({
+    cell, ordinal: index + 1, repositories, artifacts, execution, gpuIdentity, systemMemory,
+    startedAt,
+  });
+  receipt.error = message;
+  receipt.cleanup = { attempted: false, completed: true, error: null };
+  receipt.hardware.rawVramSamples = gpuIdentity.length
+    ? [...gpuIdentity]
+    : [{ timestamp: startedAt, raw: message }];
+  const evidence = await evidenceFiles(cellDir);
+  receipt.logs = evidence.logs;
+  receipt.completedAt = new Date().toISOString();
+  validateReceipt(receipt, cell, profile);
+  await writeJsonAtomically(path.join(cellDir, "receipt.json"), receipt, {
+    python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
+  });
+  return `${path.basename(cellDir)}/receipt.json`;
+}
+
 async function runCampaign(args) {
   if (process.env.SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA !== "1") {
     fail("terminal hardware execution is opt-in; set SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA=1 only for the frozen final dispatch");
   }
+  validateDocumentWithSchema(args.python, PROFILE_SCHEMA_PATH, args.profile);
   const profile = validateProfile(loadProfile(args.profile));
   const sceneworks = repositoryIdentity(args.sceneworks, "SceneWorks");
   const inference = repositoryIdentity(args.inference, "inference");
@@ -494,115 +752,200 @@ async function runCampaign(args) {
     inference: { sha: inference.sha, clean: true },
   };
   const execution = workflowExecution(sceneworks.sha);
-  const output = assertOutsideRepository(args.output, [sceneworks.root, inference.root], "output");
-  const scratch = assertOutsideRepository(args.scratch, [sceneworks.root, inference.root], "scratch");
-  if (path.resolve(output) === path.resolve(scratch)) fail("output and scratch must be separate");
+  const guard = await validateCampaignPaths({
+    runnerTemp: process.env.RUNNER_TEMP,
+    output: args.output,
+    scratch: args.scratch,
+    repositories: [sceneworks.root, inference.root],
+  });
+  const { output, scratch } = guard;
   await mkdir(output, { recursive: false });
   await mkdir(scratch, { recursive: false });
-  const gpuIdentity = sampleGpu();
-  const systemMemory = { totalBytes: totalmem(), availableBytesAtStart: freemem() };
-  const provisioned = new Map();
-  const receipts = [];
-
+  const startupErrors = [];
+  let gpuIdentity = [];
   try {
-    for (const [index, cell] of profile.cells.entries()) {
-      const startedAt = new Date().toISOString();
-      const cellDir = path.join(output, `${String(index + 1).padStart(2, "0")}-${cell.id}`);
-      await mkdir(cellDir);
-      const logFile = path.join(cellDir, "runtime.log");
-      const controllerLog = path.join(cellDir, "controller.log");
-      await writeFile(controllerLog, `${startedAt} starting ${cell.id}\n`, "utf8");
-      const artifacts = cell.artifactIds.map((id) => pendingArtifact(id, profile.artifacts[id]));
-      // Seed every provisional receipt with the campaign-start raw sample so an interruption during
-      // provisioning still leaves schema-valid hardware evidence for this cell.
-      const samples = [...gpuIdentity];
-      const receiptPath = path.join(cellDir, "receipt.json");
-      const receipt = receiptSkeleton({
-        cell, ordinal: index + 1, repositories, artifacts, execution, gpuIdentity, systemMemory,
-        startedAt,
-      });
-      receipt.hardware.rawVramSamples = samples;
-      let activeArtifactIndex = null;
-      receipt.logs = (await evidenceFiles(cellDir)).logs;
-      await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
-      try {
-        for (const [artifactIndex, artifactId] of cell.artifactIds.entries()) {
-          activeArtifactIndex = artifactIndex;
-          if (!provisioned.has(artifactId)) {
-            provisioned.set(artifactId, await provisionArtifact({
-              id: artifactId, artifact: profile.artifacts[artifactId], scratch, python: args.python,
-            }));
-          }
-          const artifact = provisioned.get(artifactId);
-          artifacts[artifactIndex] = {
-            id: artifact.id, role: artifact.role, repository: artifact.repository,
-            revision: artifact.revision, subdirectory: artifact.subdirectory,
-            selectedRoot: artifact.selectedRoot, allowPatterns: artifact.allowPatterns,
-            inventory: { ...artifact.inventory, complete: true, error: null },
-          };
-        }
-        activeArtifactIndex = null;
-        receipt.artifacts = artifacts;
-        await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
-        const runtimeCell = {
-          ...cell,
-          artifacts: artifacts.map(({ id, role, repository, revision, subdirectory, selectedRoot }) => ({
-            id, role, repository, revision, subdirectory, root: selectedRoot,
-          })),
-        };
-        const cellFile = path.join(cellDir, "cell.json");
-        await writeFile(cellFile, `${JSON.stringify(runtimeCell, null, 2)}\n`, "utf8");
-        samples.push(...sampleGpu());
-        await executeCell({ sceneworks: sceneworks.root, cellFile, cellDir, logFile, samples });
-        samples.push(...sampleGpu());
-        const runtimeResult = JSON.parse(await readFile(path.join(cellDir, "runtime-result.json"), "utf8"));
-        if (runtimeResult.requestedTier !== cell.requestedTier
-          || runtimeResult.resolvedTier !== cell.requestedTier || runtimeResult.denseFallback !== false) {
-          fail(`${cell.id} runtime result did not prove exact-tier/no-fallback execution`);
-        }
-        receipt.status = "passed";
-        receipt.error = null;
-      } catch (error) {
-        receipt.status = "failed";
-        receipt.error = error.stack ?? error.message;
-        if (activeArtifactIndex !== null && artifacts[activeArtifactIndex].inventory.complete === false) {
-          artifacts[activeArtifactIndex].inventory.error = receipt.error;
-        }
-        await appendFile(controllerLog, `${new Date().toISOString()} ${receipt.error}\n`, "utf8");
-        try { samples.push(...sampleGpu()); } catch { /* the controller error log retains the failure */ }
-      }
-      receipt.completedAt = new Date().toISOString();
-      receipt.hardware.rawVramSamples = samples;
-      const evidence = await evidenceFiles(cellDir);
-      receipt.inputs = evidence.inputs;
-      receipt.outputs = evidence.outputs;
-      receipt.logs = evidence.logs;
-      validateReceipt(receipt);
-      await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
-      receipts.push({ id: cell.id, status: receipt.status, receipt: path.basename(cellDir) + "/receipt.json" });
+    gpuIdentity = sampleGpu();
+  } catch (error) {
+    recordError(startupErrors, "initial GPU identity sample failed", error);
+  }
+  const systemMemory = { totalBytes: totalmem(), availableBytesAtStart: freemem() };
+  const receipts = [];
+  const campaignErrors = [];
+  for (const [index, cell] of profile.cells.entries()) {
+    const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    try {
+    let cellDir = path.join(output, ordinalName);
+    const cellScratch = path.join(scratch, ordinalName);
+    const startedAt = new Date().toISOString();
+    const errors = [...startupErrors];
+    const artifacts = cell.artifactIds.map((id) => pendingArtifact(id, profile.artifacts[id], cellScratch));
+    const samples = gpuIdentity.length
+      ? [...gpuIdentity]
+      : [{ timestamp: startedAt, raw: startupErrors.join("\n") || "GPU identity unavailable" }];
+    const receipt = receiptSkeleton({
+      cell, ordinal: index + 1, repositories, artifacts, execution, gpuIdentity, systemMemory,
+      startedAt,
+    });
+    receipt.hardware.rawVramSamples = samples;
+    let cellDirCreated = false;
+    let scratchCreated = false;
+    let executionPassed = false;
+    let controllerLog = path.join(cellDir, "controller.log");
+    let receiptPath = path.join(cellDir, "receipt.json");
+    let activeArtifactIndex = null;
 
-      const nextIds = new Set(profile.cells[index + 1]?.artifactIds ?? []);
-      for (const artifactId of [...provisioned.keys()]) {
-        if (!nextIds.has(artifactId)) {
-          const destination = path.join(scratch, "artifacts", artifactId);
-          const relative = path.relative(path.join(scratch, "artifacts"), destination);
-          if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) fail("artifact cleanup escaped campaign scratch");
-          await rm(destination, { recursive: true, force: true });
-          provisioned.delete(artifactId);
+    try {
+      await mkdir(cellDir);
+      cellDirCreated = true;
+      const logFile = path.join(cellDir, "runtime.log");
+      await writeFile(controllerLog, `${startedAt} starting ${cell.id}\n`, { encoding: "utf8", flag: "wx" });
+      receipt.logs = (await evidenceFiles(cellDir)).logs;
+      validateReceipt(receipt, cell, profile);
+      await writeJsonAtomically(receiptPath, receipt, {
+        python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
+      });
+
+      await mkdir(cellScratch);
+      scratchCreated = true;
+      for (const [artifactIndex, artifactId] of cell.artifactIds.entries()) {
+        activeArtifactIndex = artifactIndex;
+        const artifact = await provisionArtifact({
+          id: artifactId, artifact: profile.artifacts[artifactId], scratch: cellScratch, python: args.python,
+        });
+        artifacts[artifactIndex] = {
+          id: artifact.id, role: artifact.role, repository: artifact.repository,
+          revision: artifact.revision, subdirectory: artifact.subdirectory,
+          selectedRoot: artifact.selectedRoot, allowPatterns: artifact.allowPatterns,
+          inventory: { ...artifact.inventory, complete: true, error: null },
+        };
+      }
+      activeArtifactIndex = null;
+      receipt.artifacts = artifacts;
+      const runtimeCell = {
+        ...cell,
+        artifacts: artifacts.map(({ id, role, repository, revision, subdirectory, selectedRoot }) => ({
+          id, role, repository, revision, subdirectory, root: selectedRoot,
+        })),
+      };
+      const cellFile = path.join(cellDir, "cell.json");
+      await writeFile(cellFile, `${JSON.stringify(runtimeCell, null, 2)}\n`, "utf8");
+      sampleGpuBestEffort(samples, errors, "pre-execution VRAM sample failed");
+      await executeCell({ sceneworks: sceneworks.root, cellFile, cellDir, logFile, samples });
+      sampleGpuBestEffort(samples, errors, "post-execution VRAM sample failed");
+      const runtimeResult = JSON.parse(await readFile(path.join(cellDir, "runtime-result.json"), "utf8"));
+      if (runtimeResult.requestedTier !== cell.requestedTier
+        || runtimeResult.resolvedTier !== cell.requestedTier || runtimeResult.denseFallback !== false) {
+        fail(`${cell.id} runtime result did not prove exact-tier/no-fallback execution`);
+      }
+      executionPassed = true;
+    } catch (error) {
+      const message = recordError(errors, "cell lifecycle failed", error);
+      if (activeArtifactIndex !== null && artifacts[activeArtifactIndex].inventory.complete === false) {
+        artifacts[activeArtifactIndex].inventory.error = message;
+      }
+      if (cellDirCreated) {
+        try { await appendFile(controllerLog, `${new Date().toISOString()} ${message}\n`, "utf8"); } catch {
+          // The fallback log below is independently created and hashed if this path is unavailable.
         }
+      }
+      sampleGpuBestEffort(samples, [], "failure VRAM sample failed");
+    } finally {
+      receipt.cleanup.attempted = scratchCreated;
+      if (scratchCreated) {
+        try {
+          await safeRemoveTree(cellScratch, guard, `scratch for ${cell.id}`);
+          receipt.cleanup.completed = true;
+        } catch (error) {
+          const message = recordError(errors, "cell scratch cleanup failed", error);
+          receipt.cleanup.error = message;
+        }
+      } else {
+        receipt.cleanup.completed = true;
+      }
+
+      try {
+        if (!cellDirCreated) {
+          cellDir = path.join(output, `${ordinalName}-failure`);
+          await mkdir(cellDir);
+          cellDirCreated = true;
+          controllerLog = path.join(cellDir, "controller.log");
+          receiptPath = path.join(cellDir, "receipt.json");
+        }
+        try {
+          await appendFile(
+            controllerLog,
+            `${new Date().toISOString()} finalizing ${cell.id}; errors=${errors.length}\n`,
+            "utf8",
+          );
+        } catch (error) {
+          recordError(errors, "controller log finalization failed", error);
+          controllerLog = path.join(cellDir, "controller-fallback.log");
+          await writeFile(controllerLog, `${new Date().toISOString()} ${errors.join("\n")}\n`, "utf8");
+        }
+        receipt.artifacts = artifacts;
+        receipt.hardware.rawVramSamples = samples;
+        await refreshEvidence(receipt, cellDir, errors);
+        receipt.status = executionPassed && errors.length === 0 && receipt.cleanup.completed ? "passed" : "failed";
+        receipt.error = receipt.status === "passed" ? null : (errors.join("\n") || "cell did not complete");
+        receipt.completedAt = new Date().toISOString();
+        validateReceipt(receipt, cell, profile);
+        try {
+          await writeJsonAtomically(receiptPath, receipt, {
+            python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
+          });
+        } catch (error) {
+          recordError(errors, "atomic receipt write failed", error);
+          receipt.status = "failed";
+          receipt.error = errors.join("\n");
+          await appendFile(controllerLog, `${new Date().toISOString()} ${receipt.error}\n`, "utf8");
+          await refreshEvidence(receipt, cellDir, errors);
+          receipt.error = errors.join("\n");
+          receipt.completedAt = new Date().toISOString();
+          validateReceipt(receipt, cell, profile);
+          await writeJsonAtomically(receiptPath, receipt, {
+            python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
+          });
+        }
+        receipts.push({
+          id: cell.id, status: receipt.status,
+          receipt: `${path.basename(cellDir)}/receipt.json`, error: receipt.error,
+        });
+      } catch (error) {
+        const message = recordError(errors, "best-effort receipt finalization failed", error);
+        receipts.push({ id: cell.id, status: "failed", receipt: null, error: message });
       }
     }
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
+    } catch (error) {
+      let receiptPath = null;
+      let emergencyError = errorText(error);
+      try {
+        receiptPath = await writeEmergencyReceipt({
+          args, profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+          systemMemory, error,
+        });
+      } catch (receiptError) {
+        emergencyError += `\nemergency receipt failed: ${errorText(receiptError)}`;
+      }
+      receipts.push({ id: cell.id, status: "failed", receipt: receiptPath, error: emergencyError });
+    }
+  }
+
+  try {
+    await safeRemoveTree(scratch, guard, "campaign scratch");
+  } catch (error) {
+    campaignErrors.push(recordError([], "campaign scratch cleanup failed", error));
   }
 
   const summary = {
     schemaVersion: 1, profile: PROFILE_NAME, repositories, execution, receipts,
     passed: receipts.filter((receipt) => receipt.status === "passed").length,
     failed: receipts.filter((receipt) => receipt.status === "failed").length,
+    campaignErrors,
   };
-  await writeFile(path.join(output, "campaign-summary.json"), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
-  if (summary.failed) fail(`terminal campaign completed all 19 cells with ${summary.failed} failure(s)`);
+  await writeJsonAtomically(path.join(output, "campaign-summary.json"), summary);
+  if (summary.failed || campaignErrors.length) {
+    fail(`terminal campaign completed all 19 cells with ${summary.failed} cell failure(s) and ${campaignErrors.length} campaign cleanup failure(s)`);
+  }
 }
 
 function value(args, flag) {
@@ -615,6 +958,8 @@ async function main() {
   const [command, ...argv] = process.argv.slice(2);
   const profilePath = argv.includes("--profile") ? value(argv, "--profile") : PROFILE_PATH;
   if (command === "check") {
+    const python = value(argv, "--python");
+    validateDocumentWithSchema(python, PROFILE_SCHEMA_PATH, profilePath);
     const profile = validateProfile(loadProfile(profilePath));
     const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
     validateManifestAuthorities(profile, manifest);
@@ -632,7 +977,7 @@ async function main() {
     });
     return;
   }
-  fail("usage: epic-20738-terminal-cuda-harness.mjs check [--profile path] | run --profile path --sceneworks-repo path --inference-repo path --sceneworks-revision sha40 --inference-revision sha40 --output path --scratch path --python path");
+  fail("usage: epic-20738-terminal-cuda-harness.mjs check --python path [--profile path] | run --profile path --sceneworks-repo path --inference-repo path --sceneworks-revision sha40 --inference-revision sha40 --output path --scratch path --python path");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

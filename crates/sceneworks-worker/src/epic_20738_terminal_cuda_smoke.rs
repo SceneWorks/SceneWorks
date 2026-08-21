@@ -263,7 +263,7 @@ fn image_output(output: GenerationOutput, context: &str) -> Image {
 }
 
 fn generate_image(cell: &Cell, primary: &Artifact, bits: u64, output: &Path) -> Value {
-    let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
+    let mut spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
         .with_resolved_route(cell.model_id.clone());
     // FLUX.1's packed artifact marker is authoritative and its final consumer intentionally carries
     // quant=None. Chroma and SDXL retain their registered packed-load quant selector.
@@ -318,7 +318,7 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
     let tokenizer_l = artifact(cell, "tokenizer_clip_l");
     let tokenizer_bigg = artifact(cell, "tokenizer_clip_bigg");
     let vae = artifact(cell, "vae_fp16_fix");
-    let mut spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
+    let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
         .with_quant(Quant::Q4)
         .with_control(WeightsSource::File(exact_file(
             &control.root,

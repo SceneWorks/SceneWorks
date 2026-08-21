@@ -862,9 +862,9 @@ jobs:
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/sha256.txt
           if-no-files-found: error
       # SC-20945 terminal epic evidence. This is deliberately one opt-in profile in this existing
-      # Windows CUDA job: the checked-in controller validates the exact ordered 19-cell list, awaits
-      # one fresh worker process at a time, and keeps only artifacts needed by the immediately next
-      # cell. No matrix, child workflow, per-cell dispatch, cache/root override, or secret weight path
+      # Windows CUDA job: the checked-in controller validates the exact ordered 19-cell semantic
+      # digest and awaits one fresh worker process at a time in isolated per-cell scratch. No matrix,
+      # child workflow, per-cell dispatch, cache/root override, or secret weight path
       # is accepted. The four dismantled pin-keyed gates remain untouched; this profile runs once only
       # after the final paired pins are frozen.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -892,7 +892,6 @@ jobs:
           if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
             throw 'inference_revision must be an exact lowercase 40-hex commit'
           }
-          node scripts/epic-20738-terminal-cuda-harness.mjs check
       - name: Provision an isolated terminal Python client
         id: terminal_python
         continue-on-error: true
@@ -903,8 +902,10 @@ jobs:
           python -m venv $venv
           if ($LASTEXITCODE -ne 0) { throw 'Python 3 with venv support is required on the CUDA runner' }
           $python = Join-Path $venv 'Scripts\python.exe'
-          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0' 'jsonschema==4.25.1'
           if ($LASTEXITCODE -ne 0) { throw 'failed to provision the pinned anonymous artifact client' }
+          node scripts/epic-20738-terminal-cuda-harness.mjs check --python $python
+          if ($LASTEXITCODE -ne 0) { throw 'the frozen terminal profile or Draft 2020-12 schema validation failed' }
           Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_TERMINAL_PYTHON=$python"
       - name: Check out the exact terminal inference source
         id: terminal_inference

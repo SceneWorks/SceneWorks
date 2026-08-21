@@ -8,7 +8,8 @@ epic's SceneWorks and inference heads are final, clean, reviewed, and pin-matche
 ## Frozen scope
 
 `config/terminal-evidence/epic-20738-cuda.json` is the review authority. The controller rejects any
-change to its exact 19-cell order:
+change to the canonical digest of all 19 ordered semantic tuples, including model/engine/kind,
+artifact IDs, requested tier, capability, and every request key/value:
 
 1. Chroma 1 base, flash, and HD at q4 and q8 (six cells).
 2. FLUX.1 dev and schnell at q4 and q8 (four cells).
@@ -35,10 +36,12 @@ workflow rejects a combined dispatch. Its fixed terminal concurrency key admits 
 a time across the Windows CUDA pool.
 
 The job checks out exact source revisions and requires both checkouts to be clean. It creates a fresh
-Python environment and anonymously downloads each public Hugging Face artifact at its exact commit
-and allow-listed paths into run-scoped scratch. Runner caches, weight-root secrets, and pre-existing
-snapshots are not accepted as authorities. Scratch is outside both repositories and is removed after
-the serialized campaign.
+Python environment with pinned artifact and Draft 2020-12 schema clients, then anonymously downloads
+each public Hugging Face artifact at its exact commit and allow-listed paths into isolated per-cell
+scratch. Runner caches, weight-root secrets, and pre-existing snapshots are not accepted as
+authorities. Output and scratch must be fresh, distinct, non-nested descendants of the resolved
+`RUNNER_TEMP`, outside both repositories. Every recursive removal rechecks that confinement and
+rejects symlink/reparse replacement.
 
 The Node controller awaits one fresh `sceneworks-worker` process for each cell with
 `--test-threads=1`; it never starts cells in parallel and exposes no per-cell dispatch input. The Rust
@@ -59,8 +62,10 @@ persisted inputs, outputs, and logs. Receipts also bind:
 - workflow run, head, attempt, runner OS/architecture/name, system-memory identity, GPU index/PCI
   identity/UUID/compute capability/driver/total memory, and raw VRAM samples.
 
-A cell failure is recorded and the controller proceeds to the next reviewed cell. It reports the
-aggregate failure only after attempting all 19. The workflow uploads the run-scoped evidence with
+A cell failure anywhere in setup, provisioning, execution, hashing, schema validation, atomic
+receipt publication, or cleanup is recorded and the controller proceeds to the next reviewed cell.
+Cleanup failures are part of the receipt rather than aborting the campaign. It reports the aggregate
+failure only after attempting all 19. The workflow uploads the run-scoped evidence with
 `always()` before enforcing that aggregate verdict, so a later load, generation, comparison, or
 schema failure cannot hide earlier receipts. A provisioning failure records the exact attempted
 authority and the reason its inventory is incomplete.
@@ -70,7 +75,8 @@ authority and the reason its inventory is incomplete.
 These checks do not dispatch hardware or download weights:
 
 ```text
-node scripts/epic-20738-terminal-cuda-harness.mjs check
+python -m pip install "jsonschema==4.25.1"
+node scripts/epic-20738-terminal-cuda-harness.mjs check --python python
 node --test scripts/epic-20738-terminal-cuda-harness.test.mjs
 cargo fmt --all -- --check
 ```
