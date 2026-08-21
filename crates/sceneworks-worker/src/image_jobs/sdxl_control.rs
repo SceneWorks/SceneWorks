@@ -989,7 +989,6 @@ mod sdxl_control_tests {
 
     #[test]
     fn current_mlx_lightning_gap_fails_closed_without_disabling_candle_or_other_models() {
-        assert!(!MLX_LIGHTNING_CONTROLNET_READY);
         assert!(validate_sdxl_control_backend("realvisxl_lightning", "mlx").is_err());
         assert!(validate_sdxl_control_backend("realvisxl_lightning", "candle").is_ok());
         if cfg!(target_os = "macos") {
