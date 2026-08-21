@@ -1132,6 +1132,78 @@ fn flux1_lora_stays_on_candle() {
 }
 
 #[test]
+fn flux1_packed_tier_routing_accepts_only_exact_q4_q8_without_adapter_folding() {
+    for model in ["flux_schnell", "flux_dev"] {
+        assert!(
+            image_request_candle_eligible(
+                model,
+                &object(json!({ "model": model, "prompt": "a red fox" }))
+            ),
+            "{model}'s omitted picker value must keep its hosted q4 default"
+        );
+        for bits in [4, 8] {
+            let payload = object(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "advanced": { "mlxQuantize": bits }
+            }));
+            assert!(
+                image_request_candle_eligible(model, &payload),
+                "{model} q{bits} must reach the direct packed Candle loader"
+            );
+            assert_eq!(candle_image_first_refusal(model, &payload), None);
+        }
+
+        // The hosted FLUX.1 Candle surface has only q4/q8. Do not reinterpret a dense/q6 or
+        // malformed request as an adjacent packed tier.
+        for tier in [json!(0), json!(6), json!(-1), json!(true), json!("4.0")] {
+            let payload = object(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "advanced": { "mlxQuantize": tier }
+            }));
+            assert!(!image_request_candle_eligible(model, &payload));
+            assert_eq!(
+                candle_image_first_refusal(model, &payload),
+                Some(CandleImageRefusal::Flux1PackedTier),
+                "{model} must fail closed for {payload:?}"
+            );
+        }
+
+        let packed_lora = object(json!({
+            "model": model,
+            "prompt": "a red fox",
+            "advanced": { "mlxQuantize": 4 },
+            "loras": [{ "id": "style", "scale": 0.8 }]
+        }));
+        assert!(!image_request_candle_eligible(model, &packed_lora));
+        assert_eq!(
+            candle_image_first_refusal(model, &packed_lora),
+            Some(CandleImageRefusal::PackedTierAdapter),
+            "{model} must not imply packed-tier-plus-adapter support"
+        );
+    }
+
+    // True V2 remains the flat BF16 convert-at-install route. Promoting FLUX.1 must not make
+    // the similarly named FLUX.2 variant look packed-tier capable.
+    for bits in [4, 8] {
+        let payload = object(json!({
+            "model": "flux2_klein_9b_true_v2",
+            "prompt": "a red fox",
+            "advanced": { "mlxQuantize": bits }
+        }));
+        assert!(!image_request_candle_eligible(
+            "flux2_klein_9b_true_v2",
+            &payload
+        ));
+        assert_eq!(
+            candle_image_first_refusal("flux2_klein_9b_true_v2", &payload),
+            Some(CandleImageRefusal::QuantTier)
+        );
+    }
+}
+
+#[test]
 fn ideogram_candle_txt2img_and_edit_route_to_candle() {
     // sc-6597 (epic 6561): `ideogram_4` + `ideogram_4_turbo` route to the candle lane for plain
     // text-to-image via the generic `image_request_candle_eligible` gate. sc-6598: img2img / Remix +
@@ -4100,19 +4172,13 @@ fn an_unhealthy_worker_is_routed_nothing_even_with_full_capabilities() {
 // family. A message naming a conditioning bug that does not exist sends triage hunting one.
 // ---------------------------------------------------------------------------------------------
 
-/// The five families the sweep caught (`chroma1_*`, `flux_dev`, `flux_schnell`) advertise
-/// `supported_quants: &[]` — dense bf16/fp16 only — so `advanced.mlxQuantize: 4` is correctly
-/// refused rather than silently run dense (sc-5099). The refusal must SAY that: name the requested
-/// tier and what the family does serve, and never claim a conditioning shape the payload lacks.
+/// The three Chroma families the sweep caught advertise `supported_quants: &[]` — dense bf16/fp16
+/// only — so `advanced.mlxQuantize: 4` is correctly refused rather than silently run dense
+/// (sc-5099). The refusal must SAY that: name the requested tier and what the family does serve,
+/// and never claim a conditioning shape the payload lacks.
 #[test]
 fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_shape() {
-    for model in [
-        "chroma1_base",
-        "chroma1_flash",
-        "chroma1_hd",
-        "flux_dev",
-        "flux_schnell",
-    ] {
+    for model in ["chroma1_base", "chroma1_flash", "chroma1_hd"] {
         for bits in [4, 8] {
             let job = image_generate_job(json!({
                 "projectId": "project_1",
@@ -4160,17 +4226,11 @@ fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_
 }
 
 /// AC-4 mutation guard: the classification split must not move a single routing decision. The same
-/// five families with the quant override REMOVED still route to candle, and `mlxQuantize: 0` (the
-/// dense encoding) still routes too — only the refusal STRING changed.
+/// three dense families with the quant override REMOVED still route to candle, and `mlxQuantize: 0`
+/// (the dense encoding) still routes too — only the refusal STRING changed.
 #[test]
 fn quant_message_split_did_not_move_the_routing_decision() {
-    for model in [
-        "chroma1_base",
-        "chroma1_flash",
-        "chroma1_hd",
-        "flux_dev",
-        "flux_schnell",
-    ] {
+    for model in ["chroma1_base", "chroma1_flash", "chroma1_hd"] {
         let dense = image_generate_job(json!({
             "projectId": "project_1",
             "model": model,

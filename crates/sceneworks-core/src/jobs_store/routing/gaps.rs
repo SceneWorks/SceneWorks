@@ -765,6 +765,32 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("epic 5480"),
         ),
+        CandleImageRefusal::Flux1PackedTier => UnsupportedReason::new(
+            Some(model),
+            "FLUX.1 Candle packed-tier selection",
+            &format!(
+                "FLUX.1 on Candle opens only its hosted packed q4 or q8 artifacts. A bf16, q6, \
+                 or malformed advanced.mlxQuantize selection has no truthful Candle fallback, so \
+                 it is refused instead of loading a different tier.{also}"
+            ),
+            Some("sc-20742"),
+        ),
+        CandleImageRefusal::PackedTierAdapter => UnsupportedReason::new(
+            Some(model),
+            "user adapter on an explicitly selected packed Candle tier",
+            &format!(
+                "this request combines an explicit packed tier (advanced.mlxQuantize) with a user \
+                 LoRA / LyCORIS. Candle serves FLUX.1's existing adapter route and its q4/q8 packed \
+                 tiers separately, but it has not declared packed-tier-plus-adapter support, so the \
+                 combination is refused rather than guessing at a load shape.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit without the explicit packed-tier selection or without the adapter."
+                } else {
+                    ""
+                }
+            ),
+            Some("sc-20742"),
+        ),
         // The sc-5968 case generalized: a candle family with no strict-pose lane asked for poses —
         // it would otherwise silently render an unconditioned image, so it is a hard gap off-Mac.
         // A family that DOES have a pose lane reaches here only when that specialized lane already

@@ -587,8 +587,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("z_image", true, true, false, false, true),
     // `z_image_edit` (epic 3529 / sc-3923): MLX-only edit id on Turbo weights.
     ModelCaps::new("z_image_edit", true, false, false, false, false),
-    ModelCaps::new("flux_schnell", true, true, false, true, false),
-    ModelCaps::new("flux_dev", true, true, false, true, false),
+    // FLUX.1's Candle text-to-image provider directly opens the complete hosted q4/q8
+    // turnkeys. User adapters remain available on the established adapter-only route, but the
+    // provider has not declared an adapter-on-an-explicit-packed-tier contract, so this is
+    // deliberately NOT `candle_quant_lora`.
+    ModelCaps::new("flux_schnell", true, true, true, true, false),
+    ModelCaps::new("flux_dev", true, true, true, true, false),
     // Base `qwen_image` candle txt2img is a turnkey packed-quant family (sc-8669 wired the q4/q8/bf16
     // subdirs into `STANDARD_TIER_MODELS`; sc-10969 measured the tiers), so a tier-select `mlxQuantize`
     // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
@@ -1985,6 +1989,11 @@ mod tests {
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
+        // FLUX.1's q4/q8 requests select its complete hosted packed artifacts directly. It is
+        // intentionally separate from the quant+adapter set: explicit packed-tier + user-LoRA
+        // remains a fail-closed routing combination until the provider declares that support.
+        "flux_schnell",
+        "flux_dev",
         // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
         // the candle txt2img lane, so a tier-select stays on candle. Qwen now appears in the combined
         // quant+adapter list above.
@@ -2005,9 +2014,9 @@ mod tests {
     // family — the off-Mac engine dense-folds a LoRA/LoKr onto the split_files/ DiT, but advertises NO
     // candle quant (no packed tier off-Mac), so it is LoRA-only rather than BOTH.
     const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &[
+        "flux2_klein_9b_true_v2",
         "flux_schnell",
         "flux_dev",
-        "flux2_klein_9b_true_v2",
         "chroma1_hd",
         "chroma1_base",
         "chroma1_flash",

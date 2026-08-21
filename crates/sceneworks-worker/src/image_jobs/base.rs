@@ -1900,6 +1900,59 @@ pub(crate) fn resolve_weights_dir(
     Ok(snapshot)
 }
 
+/// FLUX.1's generic Candle route reads only the hosted packed q4/q8 turnkeys. The shared resolver
+/// deliberately has a best-available fallback chain for ordinary matrix models; using it unchecked
+/// here could turn an explicit FLUX q4/q8 selection into a different tier (or a dense root). Probe the
+/// shared resolver with the exact requested tier, then accept its answer only when the resolved
+/// directory names that same tier.
+///
+/// This is intentionally limited to generic Candle text-to-image. The existing FLUX IP-Adapter and
+/// strict-control providers retain their own established weight-resolution and load contracts.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_flux1_packed_requested_tier(request: &ImageRequest) -> WorkerResult<&'static str> {
+    match request.advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => Ok("q4"),
+        Some(value) => match value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+        {
+            Some(4) => Ok("q4"),
+            Some(8) => Ok("q8"),
+            _ => Err(WorkerError::InvalidPayload(format!(
+                "{} on Candle supports only its hosted packed q4 or q8 tiers",
+                request.model
+            ))),
+        },
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_flux1_packed_resolution_is_exact(requested_tier: &str, resolved: &Path) -> bool {
+    resolved.file_name().and_then(|name| name.to_str()) == Some(requested_tier)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_flux1_packed_weights_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    let requested_tier = candle_flux1_packed_requested_tier(request)?;
+    let mut probe = request.clone();
+    probe.advanced.insert(
+        "mlxQuantize".to_owned(),
+        Value::from(if requested_tier == "q4" { 4 } else { 8 }),
+    );
+    let resolved = resolve_weights_dir(&probe, settings)?;
+    match resolved {
+        Some(dir) if candle_flux1_packed_resolution_is_exact(requested_tier, &dir) => Ok(Some(dir)),
+        Some(_) | None => Err(WorkerError::InvalidPayload(format!(
+            "{} requested Candle packed {requested_tier}, but that exact artifact is not installed; \
+             refusing to fall back to a different tier",
+            request.model
+        ))),
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn resolved_mlx_artifact_tier(
     weights_dir: &Path,
@@ -9385,6 +9438,65 @@ mod candle_resolved_tier_contract_tests {
             }
         }
     }
+
+    fn flux1_request(quantize: Option<Value>) -> ImageRequest {
+        let mut payload = json!({
+            "model": "flux_dev",
+            "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+        });
+        if let Some(quantize) = quantize {
+            payload["advanced"] = json!({ "mlxQuantize": quantize });
+        }
+        ImageRequest::from_payload(payload.as_object().expect("request object"))
+    }
+
+    #[test]
+    fn flux1_candle_packed_tiers_are_exact_and_keep_the_load_receipt_truthful() {
+        for (requested, expected) in [(None, "q4"), (Some(json!(4)), "q4"), (Some(json!(8)), "q8")] {
+            let request = flux1_request(requested);
+            assert_eq!(candle_flux1_packed_requested_tier(&request).unwrap(), expected);
+
+            let exact = Path::new("/models/flux1-dev-mlx").join(expected);
+            let other = Path::new("/models/flux1-dev-mlx").join(if expected == "q4" {
+                "q8"
+            } else {
+                "q4"
+            });
+            assert!(candle_flux1_packed_resolution_is_exact(expected, &exact));
+            assert!(
+                !candle_flux1_packed_resolution_is_exact(expected, &other),
+                "a requested {expected} must not fall back to {}",
+                other.display()
+            );
+
+            let (quant, bits) =
+                candle_quant_for_resolved_tier(&request, expected, &exact, true, false);
+            let expected_quant = (expected == "q4").then_some(Quant::Q4).or_else(|| {
+                (expected == "q8").then_some(Quant::Q8)
+            });
+            let expected_bits = (expected == "q4").then_some(4).or_else(|| {
+                (expected == "q8").then_some(8)
+            });
+            assert_eq!((quant, bits), (expected_quant, expected_bits));
+            assert_eq!(
+                load_spec(exact.clone(), quant, Vec::new(), None).quantize,
+                expected_quant,
+                "LoadSpec must record the exact packed artifact tier"
+            );
+            assert_eq!(
+                effective_quant_label_gated(&request, false, Some(&exact)),
+                (Some(expected.to_owned()), expected_bits),
+                "asset telemetry must name the exact packed artifact tier"
+            );
+        }
+
+        for unsupported in [json!(0), json!(6), json!(-1), json!(true), json!("4.0")] {
+            assert!(
+                candle_flux1_packed_requested_tier(&flux1_request(Some(unsupported))).is_err(),
+                "bf16, q6, and malformed FLUX.1 selections must fail closed"
+            );
+        }
+    }
 }
 
 /// sc-13960 — the evict-then-reclaim gate driver the bespoke (non-cache-evicting) candle image lanes
@@ -9530,6 +9642,13 @@ async fn generate_candle_stream(
     // live VRAM budget is re-pointed at the highest installed tier that does, before the spec is built.
     let mut weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
         base_dir.clone()
+    } else if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        resolve_candle_flux1_packed_weights_dir(request, settings)?.ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Candle packed FLUX.1 weights snapshot not found for {}",
+                request.model
+            ))
+        })?
     } else {
         resolve_weights_dir(request, settings)?.ok_or_else(|| {
             let repo = model_repo(request, &model);
@@ -9853,11 +9972,13 @@ async fn generate_candle_stream(
     // `Keep`. Downtiering NVFP4 to q4/q8 would silently swap the numerics of an explicitly-picked tier —
     // exactly the creative-choice violation SC#5 forbids. Pinned by
     // `nvfp4_tier_is_never_downtiered_by_the_capability_clamp`.
-    let explicit_pick = request
-        .advanced
-        .get("mlxQuantizeExplicit")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let explicit_pick = (matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
+        && request.advanced.contains_key("mlxQuantize"))
+        || request
+            .advanced
+            .get("mlxQuantizeExplicit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if convrot.is_none() && !explicit_pick {
         let floor = capability_downtier_floor(
             krea_turbo_ladder,
@@ -10895,6 +11016,20 @@ fn effective_quant_label_gated(
             _ => (Some("bf16".to_owned()), None),
         };
     }
+    // FLUX.1's generic Candle route accepts only an exact packed q4/q8 directory. Its omitted
+    // selection defaults to q4 (rather than the shared resolver's q8 default), so derive the
+    // LoadSpec/asset telemetry from that resolved directory instead of re-deriving a different
+    // request default here.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        if let Some(tier) = tier_dir.and_then(tier_key_from_resolved_dir) {
+            return match tier {
+                "q4" => (Some("q4".to_owned()), Some(4)),
+                "q8" => (Some("q8".to_owned()), Some(8)),
+                _ => unreachable!("FLUX.1 generic Candle route resolves only q4/q8"),
+            };
+        }
+    }
     let (selected_quant, selected_bits) = resolve_quant_gated(request, nvfp4_host, tier_dir);
     let resolved = match (selected_quant, selected_bits) {
         // The distinct NVFP4 tier, matched on the VARIANT (see the note above): its bit count is
@@ -11431,7 +11566,13 @@ async fn consume_gen_events_with_disclosure(
     // `.ok().flatten()` because a metrics block must never fail a completed generation: an unresolvable
     // dir yields `None`, which conservatively reports the request-derived q4/q8/bf16 label exactly as
     // it did before this parameter existed.
-    let tier_dir = resolve_weights_dir(&plan.request, settings).ok().flatten();
+    let tier_dir = if matches!(plan.request.model.as_str(), "flux_schnell" | "flux_dev") {
+        resolve_candle_flux1_packed_weights_dir(&plan.request, settings)
+            .ok()
+            .flatten()
+    } else {
+        resolve_weights_dir(&plan.request, settings).ok().flatten()
+    };
     let mut metrics = build_image_metrics(
         &plan.request,
         effective_steps,
