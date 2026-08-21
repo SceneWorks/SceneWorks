@@ -1,24 +1,24 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:734f5a61cdf0e38b598ccc33a5f8b0ca92c9658ae2cf88d144f91b441788d17e",
+    "sceneWorksRevision": "source-tree:2e1064d602f3fa8f4209fbe95fe445e4e82bef4e626a08dd35e6b762f707d026",
     "inferenceRevision": "c3bfb064843f517abfe65660be57456214982770",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "acea453683466d797bed6ab1d6d5e55a3c654510ab2ecbfdb1c94d08e3a5fae2"
+        "sha256": "c6b2179286d85b54c16413d7816022be81dcf1e0ee391bbafbac8aff108bf72d"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "6567129d5cf9c089a6124669efbfde93c4032701b235b01bb9c9f727e42933cb"
+        "sha256": "b2e79787b049a7f208c3a91efcb8ec2e55f810f86409cc2ae0b11374b4d91298"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "3911460b8bde2aab93bafb69aca87c63c6d49660bb103c3cd2326660393dacf5"
+        "sha256": "35fcd8d82989d78c5030e3d89eb9cf481f2f3ef72da7d532a62f6665c8abfa44"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "45c1cff1dbd1effd7fbb33d0018f8fe40fb777a7d0db6a35ead6201e5b5551a0"
+        "sha256": "20ad6127322f3acfc5888d892bca035ead712d2c0afb6171a7234ecde671331b"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "a34d9d47da8547186eb3c77aa578c76a73e481246d4a77bce276c2b03796aa6c"
+        "sha256": "936e5751e92127e132599dcebd1f2f8a4fc3e3e2dd0b6ad54dc4be2f329473a1"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -34,7 +34,7 @@
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
-        "sha256": "e3fd775ad37e012e116f6c2e05fa0c08c8de5e60776f17844c738f7fb6444769"
+        "sha256": "08ef7b1f1eae426daba2dba611b548ab779a4d6dadd39772ae3f95f834f72a9a"
       },
       "videoRouteSvd": {
         "path": "crates/sceneworks-worker/src/video_jobs/svd.rs",
@@ -54,11 +54,11 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "e54ac0f6c7d9ef60f82175b6eaff70d3ad0a029d6ee2947411fc3c9d95a2ee7b"
+        "sha256": "4f4b3d9353229feb432f3dfd228592bd6a299b4ccfbc1a6af635fcc2b456f6c3"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "aee1d0aebab237cdde87f8f4e1e87fc32a13cd62ec64be5b41d7a7039e0c014a"
+        "sha256": "367bbd0ad02b0b3261f3823860e1b1ed63ad860447262c6a98aa31fa93fb974e"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -16595,6 +16595,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16633,6 +16638,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16670,6 +16680,11 @@
         {
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
           "variant": null
         }
       ]

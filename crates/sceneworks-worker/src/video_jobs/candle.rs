@@ -4,7 +4,8 @@ use super::prelude::*;
 use super::{
     ltx::{
         resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
-        resolve_video_clip_conditioning,
+        resolve_video_clip_conditioning, LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
     },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
@@ -60,8 +61,6 @@ pub(super) const CANDLE_WAN_5B_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
 const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_LTX_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
@@ -134,7 +133,7 @@ pub(super) fn candle_video_adapter_label(engine_id: &str) -> &'static str {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
     match engine_id {
-        "ltx_2_3_distilled" => CANDLE_LTX_REPO,
+        "ltx_2_3_distilled" => LTX_BUNDLE_REPO,
         "svd_xt" => SVD_REPO,
         "wan2_2_t2v_14b" => CANDLE_WAN_T2V_14B_REPO,
         "wan2_2_i2v_14b" => CANDLE_WAN_I2V_14B_REPO,
@@ -278,23 +277,116 @@ fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
     }
 }
 
-/// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. The checkpoint is
-/// already packed, so the returned load quant is deliberately `None`: `LoadSpec::quantize` means
-/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros has no
-/// Candle route after SC-18902 acceptance, and the SceneWorks model-id guard prevents its dense
-/// standalone checkpoint from being mistaken for this base-LTX turnkey tier.
+/// Whether a Candle LTX tier is complete enough for the packed provider. The Candle engine reads the
+/// packed transformer and its quant marker directly, so a partial on-demand `q8/` download must never
+/// win over a complete tier or be treated as a dense root checkpoint.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_tier_complete(dir: &Path) -> bool {
+    dir.join("transformer.safetensors").is_file() && dir.join("quantize_config.json").is_file()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleLtxTier {
+    Q4,
+    Q8,
+}
+
+/// Parse the Candle LTX tier without conflating an absent override with a present malformed one.
+/// Only an absent value gets the q4 default; every explicit value must parse exactly to 4 or 8.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
+    let Some(value) = request.advanced.get("mlxQuantize") else {
+        return Some(CandleLtxTier::Q4);
+    };
+    let bits = value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    match bits {
+        4 => Some(CandleLtxTier::Q4),
+        8 => Some(CandleLtxTier::Q8),
+        _ => None,
+    }
+}
+
+/// Find an exact packed tier in only the current immutable bundle revision or its approved parent.
+/// The selected root is used only to locate the cache's `snapshots/` directory: it is never itself
+/// admitted, because `huggingface_snapshot_dir` may select a mutable `refs/main` target or an
+/// arbitrary complete sibling by file count.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> Option<PathBuf> {
+    let tier = match tier {
+        CandleLtxTier::Q4 => "q4",
+        CandleLtxTier::Q8 => "q8",
+    };
+    let roots = root
+        .parent()
+        .filter(|parent| parent.file_name().and_then(|name| name.to_str()) == Some("snapshots"))
+        .map(|snapshots| {
+            [
+                snapshots.join(LTX_BUNDLE_REVISION),
+                snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION),
+            ]
+        });
+    let resolve = |candidate: PathBuf| {
+        let dir = candidate.join(tier);
+        candle_ltx_tier_complete(&dir).then_some(dir)
+    };
+    roots.into_iter().flatten().find_map(resolve)
+}
+
+/// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
+/// the returned load quant is deliberately `None`: `LoadSpec::quantize` means on-the-fly
+/// quantization to the Candle LTX provider and must never be set for these tiers. Base LTX supports
+/// only the published q4/q8 Candle tiers; an explicit bf16 or other value returns `None` so callers
+/// fail closed rather than silently loading q4. Eros has no Candle route after SC-18902 acceptance.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,
     engine_id: &str,
     model: &str,
+    request: &VideoRequest,
 ) -> Option<(PathBuf, Option<Quant>)> {
     if engine_id != "ltx_2_3_distilled" || model != "ltx_2_3" {
         return None;
     }
-    let q4 = root.join("q4");
-    (q4.join("transformer.safetensors").is_file() && q4.join("quantize_config.json").is_file())
-        .then_some((q4, None))
+    let tier = candle_ltx_requested_tier(request)?;
+    // Keep the Candle resolver aligned with the immutable bundle compatibility policy: an existing
+    // q4 install may still live at the proven parent while an on-demand q8 fetch lands at the
+    // current revision. Do not scan arbitrary cache siblings, which would let an unpinned checkpoint
+    // satisfy an explicit tier request.
+    candle_ltx_bundle_tier_across_revisions(root, tier).map(|dir| (dir, None))
+}
+
+/// Fetch the base LTX packed `q8/` tier on demand for the off-Mac Candle provider. A q8 request
+/// must resolve q8 after this completes; it may never silently downgrade to the default q4 tier.
+/// The bundle is intentionally fixed to the same immutable revision as the MLX resolver.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) async fn ensure_candle_ltx_q8_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model != "ltx_2_3" || candle_ltx_requested_tier(request) != Some(CandleLtxTier::Q8) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
+        return Ok(());
+    };
+    if candle_ltx_bundle_tier_across_revisions(&root, CandleLtxTier::Q8).is_some() {
+        return Ok(());
+    }
+    crate::model_jobs::ensure_hf_files_cached(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
+        &["q8/*".to_owned()],
+    )
+    .await
+    .map(|_| ())
 }
 
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
@@ -358,7 +450,7 @@ pub(super) fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
         .or_else(|| {
             complete_ltx_bundle_gemma_dir(huggingface_snapshot_dir(
                 &settings.data_dir,
-                CANDLE_LTX_REPO,
+                LTX_BUNDLE_REPO,
             ))
         })
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO))
@@ -1040,6 +1132,12 @@ pub(super) async fn generate_candle_video_using(
         ensure_mochi_q8_present(api, settings, job, request).await?;
         ensure_mochi_bf16_present(api, settings, job, request).await?;
     }
+    // The base LTX turnkey defaults to q4, but an admitted explicit q8 request must first fetch
+    // the published q8 subdir. Keep this ahead of snapshot resolution so the resolver can prove it
+    // selected q8 rather than quietly reusing q4.
+    if engine_id == "ltx_2_3_distilled" {
+        ensure_candle_ltx_q8_present(api, settings, job, request).await?;
+    }
     // sc-14492: gate SVD before even resolving its already-installed snapshot. A full/default
     // 25-frame burst OOMed twice on real 32 GB hardware, while the reduced 8-frame / chunk-1 / 12-step
     // recipe completed. The returned recipe fields are the only ones the SVD generation arm can
@@ -1072,6 +1170,14 @@ pub(super) async fn generate_candle_video_using(
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
     let is_ltx = engine_id == "ltx_2_3_distilled";
+    let ltx_tier = candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model, request);
+    if is_ltx && ltx_tier.is_none() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} requires a complete Candle LTX q4 or q8 packed tier matching advanced.mlxQuantize \
+             from an approved immutable bundle revision; repair this model in Model Manager",
+            request.model
+        )));
+    }
     let (mut model_dir, wan_quant) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
@@ -1086,9 +1192,7 @@ pub(super) async fn generate_candle_video_using(
             candle_video_vram_budget(settings).await,
         )?;
         (snapshot_dir, quant)
-    } else if let Some((dir, quant)) =
-        candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model)
-    {
+    } else if let Some((dir, quant)) = ltx_tier {
         (dir, quant)
     } else {
         let (dir, quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {

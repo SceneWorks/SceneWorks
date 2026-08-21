@@ -795,8 +795,9 @@ pub(crate) async fn canonicalize_image_model_payload(
     };
     validate_model_id(&model_id)?;
 
-    let model_manifest_entry =
-        crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    let model_manifest_entry = project_image_manifest_for_worker(
+        crate::models::resolve_model_manifest_entry(state, &model_id).await?,
+    );
     if matches!(job_type, JobType::ImageDetail)
         && !model_manifest_entry
             .as_object()
@@ -818,6 +819,29 @@ pub(crate) async fn canonicalize_image_model_payload(
         canonicalize_image_detail_dense_tier(payload)?;
     }
     Ok(Some(model_manifest_entry))
+}
+
+/// Project catalog-only, request-scoped components out of the generic image worker payload.
+///
+/// The shared SDXL OpenPose checkpoint is a soft install companion so Model Manager can provision
+/// and repair it alongside each supported backbone. It is not a descriptor-required component and
+/// must never be staged by ordinary txt2img, edit, or Batch Detail jobs. The dedicated
+/// `sdxl_control` pose route owns its strict authority tuple and resolves that exact component
+/// synchronously from the pinned cache before load, so forwarding this catalog row to unrelated
+/// jobs only broadens their worker-visible artifact set without helping the pose route.
+///
+/// Keep every other soft component: selected decoders and other request-specific features resolve
+/// their own authored component ids from this worker-private entry.
+fn project_image_manifest_for_worker(mut entry: Value) -> Value {
+    if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
+        downloads.retain(|download| {
+            !(download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                && download.get("required").and_then(Value::as_str) == Some("soft")
+                && download.get("componentId").and_then(Value::as_str)
+                    == Some("controlnet_openpose"))
+        });
+    }
+    entry
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2052,4 +2076,57 @@ pub(crate) async fn register_trained_control_overlay(
     })
     .await?;
     Ok(Some((overlay_id, manifest_path)))
+}
+
+#[cfg(test)]
+mod image_manifest_projection_tests {
+    use super::*;
+
+    #[test]
+    fn worker_projection_removes_only_the_exact_soft_openpose_component() {
+        let primary = json!({
+            "provider": "huggingface",
+            "repo": "SceneWorks/sdxl-base-mlx",
+            "files": ["q4/*"]
+        });
+        let hard = json!({
+            "coRequisite": true,
+            "componentId": "vae_fp16_fix",
+            "repo": "madebyollin/sdxl-vae-fp16-fix"
+        });
+        let selected_vae = json!({
+            "coRequisite": true,
+            "required": "soft",
+            "componentId": "vae",
+            "repo": "operator/selected-vae",
+            "files": ["vae.safetensors"]
+        });
+        let openpose = json!({
+            "coRequisite": true,
+            "required": "soft",
+            "componentId": "controlnet_openpose",
+            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+            "files": ["diffusion_pytorch_model.safetensors"]
+        });
+        let entry = json!({
+            "id": "projection-probe",
+            "downloads": [
+                primary.clone(),
+                hard.clone(),
+                selected_vae.clone(),
+                openpose
+            ],
+            "ui": { "description": "preserved metadata" }
+        });
+
+        assert_eq!(
+            project_image_manifest_for_worker(entry),
+            json!({
+                "id": "projection-probe",
+                "downloads": [primary, hard, selected_vae],
+                "ui": { "description": "preserved metadata" }
+            }),
+            "projection must remove only required:soft/controlnet_openpose and preserve every other Value exactly"
+        );
+    }
 }
