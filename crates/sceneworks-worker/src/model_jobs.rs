@@ -4809,7 +4809,9 @@ pub(crate) async fn run_model_import_job(
     // source-URL, and uploaded imports uniformly (the API's synchronous `import_source_supported`
     // only sees on-disk uploads at queue time). NEVER a silent fallback. `target_dir` is
     // app-managed (`resolve_model_import_target`) — this gate is purely additive to confinement.
-    let (base_weight_family, import_source_shape) = match imported_model_file.as_ref() {
+    let (base_weight_family, import_source_shape, import_quant_format) = match imported_model_file
+        .as_ref()
+    {
         Some(weight_file) => match detect_base_weight_file(weight_file) {
             Ok(detection) => {
                 if let Err(reason) = import_detection_supported(&detection) {
@@ -4874,9 +4876,9 @@ pub(crate) async fn run_model_import_job(
                                 .await;
                             }
                         };
-                        (verdict.family, Some(source))
+                        (verdict.family, Some(source), Some(verdict.quant.as_str()))
                     }
-                    BaseWeightDetection::Unrecognized { .. } => (None, None),
+                    BaseWeightDetection::Unrecognized { .. } => (None, None, None),
                 }
             }
             Err(error) => {
@@ -4972,6 +4974,12 @@ pub(crate) async fn run_model_import_job(
                 Value::String(source.to_owned()),
             );
         }
+        if let Some(quant) = import_quant_format {
+            manifest_entry.insert(
+                "importQuantFormat".to_owned(),
+                Value::String(quant.to_owned()),
+            );
+        }
         let model_type = manifest_entry
             .get("type")
             .and_then(Value::as_str)
@@ -5019,6 +5027,12 @@ pub(crate) async fn run_model_import_job(
     result.insert(
         "family".to_owned(),
         resolved_family.map(Value::String).unwrap_or(Value::Null),
+    );
+    result.insert(
+        "importQuantFormat".to_owned(),
+        import_quant_format
+            .map(|quant| Value::String(quant.to_owned()))
+            .unwrap_or(Value::Null),
     );
     result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
     update_job(
