@@ -885,7 +885,9 @@ export function calibrationBinding(
 //                              membership is the right binding, because whether a rung executes
 //                              does not depend on the resolution it executed at.
 //   `memoryCharacterization` — the rung's PEAKS are known across the envelope. Geometry-sensitive
-//                              by construction: the curve `vram_gate.rs#krea_phase_curve` evaluates
+//                              by construction: the curve `estimate_synthesis.rs`'s
+//                              `fitted_phase_curve_gb` evaluates (sc-19058 folded it out of
+//                              `vram_gate.rs#krea_phase_curve` onto the shared mechanism)
 //                              is `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames`, so it takes
 //                              as many independent measured geometries as the lane has
 //                              coefficients — two on the image lane, three once the temporal term

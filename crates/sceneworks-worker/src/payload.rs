@@ -27,7 +27,19 @@ pub(crate) fn quant_int(value: &Value) -> Option<i64> {
 // sc-19049 widened this from the candle-lane cfg to the image-pipeline cfg: the candle scalar
 // admission gate's manifest reads moved to `crate::candle_scalar_gate`, which compiles wherever the
 // image pipeline does so the epic-19048 decision baseline can drive the real gate off a CUDA box.
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+//
+// sc-19058 removed the condition entirely, for the same reason one more step along: the fitted
+// per-phase curve law moved into `crate::estimate_synthesis`, which is unconditional by design
+// (epic 19048 R1 — one prediction mechanism, not one per platform), and it reads its coefficients
+// through this helper. That the lane-permissive "numeric string is a number" reading is THIS
+// helper's and not `Value::as_f64`'s is load-bearing and pinned by
+// `a_malformed_temporal_coefficient_fails_the_curve_closed`, so the mechanism could not switch to
+// the stricter accessor to dodge the cfg. Only the build with neither image backend leaves it
+// unread.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
 pub(crate) fn json_f64(value: &Value) -> Option<f64> {
     value
         .as_f64()
