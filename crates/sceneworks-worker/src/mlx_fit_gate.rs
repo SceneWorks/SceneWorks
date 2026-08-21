@@ -4364,6 +4364,7 @@ pub(crate) fn decide_residency_on_live_host(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decide_residency_with_headroom(
     total_bytes: u64,
     te_bytes: u64,
