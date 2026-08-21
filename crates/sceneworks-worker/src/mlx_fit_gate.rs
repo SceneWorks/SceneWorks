@@ -4298,6 +4298,27 @@ fn weights_source_path(source: &WeightsSource) -> &Path {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ResolvedTextEncoderSource {
+    path: PathBuf,
+    direct_shard_bytes: u64,
+}
+
+/// Resolve the selected encoder exactly as gen-core's loader does. In particular, a complete
+/// snapshot remains the requested `LoadSpec` source for identity/replay, while admission follows
+/// only its direct `text_encoder/` shards and never recursively prices sibling transformer/VAE
+/// trees.
+fn resolved_text_encoder_source(
+    source: &WeightsSource,
+) -> gen_core::Result<ResolvedTextEncoderSource> {
+    gen_core::read_text_encoder_source_unchanged(source, |resolved| {
+        Ok(ResolvedTextEncoderSource {
+            path: weights_source_path(resolved).to_path_buf(),
+            direct_shard_bytes: gen_core::text_encoder_source_bytes(resolved)?,
+        })
+    })
+}
+
 fn adapter_path_bytes(path: &Path) -> u64 {
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => sum_safetensors_bytes(path),
@@ -5045,10 +5066,20 @@ fn spec_component_bytes_with_provider_footprint(
     footprint: Option<PerComponentBytes>,
 ) -> (u64, u64, HeadroomAllowance) {
     let external_adapter_bytes = external_adapter_source_bytes_for_gate(engine_id, spec);
+    // The infallible compatibility/planning seam predates prepared specs. Valid selected encoders
+    // resolve through gen-core; an invalid ad-hoc spec retains the old conservative recursive
+    // estimate and will still fail contract validation before a real provider load.
+    let selected_text_encoder = spec.text_encoder.as_ref().map(|source| {
+        resolved_text_encoder_source(source).unwrap_or_else(|_| ResolvedTextEncoderSource {
+            path: weights_source_path(source).to_path_buf(),
+            direct_shard_bytes: weights_source_bytes(source),
+        })
+    });
     spec_component_bytes_with_provider_footprint_and_sizes(
         engine_id,
         spec,
         footprint,
+        selected_text_encoder.as_ref(),
         weights_source_bytes,
         external_adapter_bytes,
         adapter_path_bytes,
@@ -5059,6 +5090,7 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
     engine_id: &str,
     spec: &LoadSpec,
     footprint: Option<PerComponentBytes>,
+    selected_text_encoder: Option<&ResolvedTextEncoderSource>,
     source_bytes: impl Fn(&WeightsSource) -> u64,
     external_adapter_bytes: u64,
     adapter_source_bytes: impl Fn(&Path) -> u64,
@@ -5103,11 +5135,14 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
             },
         ),
     };
-    let mut priced_external_paths = Vec::new();
+    // Every directory source in this set was priced recursively. A selected encoder at the same
+    // path or below one is already covered; a selected encoder above one is not, because its exact
+    // loader inventory contains direct shards only and excludes nested descendants.
+    let mut recursively_priced_paths = vec![weights_source_path(&spec.weights)];
     if let Some(control) = &spec.control {
         let bytes = source_bytes(control);
         total_bytes = total_bytes.saturating_add(bytes);
-        priced_external_paths.push((weights_source_path(control), bytes));
+        recursively_priced_paths.push(weights_source_path(control));
     }
     // Read the actual adapter sources at the same pre-load seam as controls. Provider-specific
     // residency matters: packed Wan keeps additive residuals, while dense Wan folds them into the
@@ -5115,12 +5150,12 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
     // a typed component contract may replace them with a more exact resident measurement below.
     total_bytes = total_bytes.saturating_add(external_adapter_bytes);
     if external_adapter_bytes > 0 {
-        priced_external_paths.extend(spec.adapters.iter().filter_map(|adapter| {
+        recursively_priced_paths.extend(spec.adapters.iter().filter_map(|adapter| {
             let inside = match &spec.weights {
                 WeightsSource::Dir(root) => adapter.path.starts_with(root),
                 WeightsSource::File(_) => false,
             };
-            (!inside).then(|| (adapter.path.as_path(), adapter_source_bytes(&adapter.path)))
+            (!inside && adapter_source_bytes(&adapter.path) > 0).then_some(adapter.path.as_path())
         }));
     }
     // Caller-provisioned components (epic 13657) are staged from a DIFFERENT snapshot than
@@ -5170,7 +5205,7 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
         if !inside {
             let component_bytes = source_bytes(source);
             total_bytes = total_bytes.saturating_add(component_bytes);
-            priced_external_paths.push((weights_source_path(source), component_bytes));
+            recursively_priced_paths.push(weights_source_path(source));
             if matches!(&spec.weights, WeightsSource::File(_))
                 && component_id == gen_core::COMFYUI_TEXT_ENCODER_COMPONENT
             {
@@ -5179,48 +5214,26 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
         }
     }
     // The optional selected encoder is a typed source, not a named component. Include its exact
-    // source bytes in the resident total and the staged text-encoder phase. The primary directory is
-    // already scanned recursively, and the same selected source can also be carried by a named slot,
-    // so charge only the part not already covered by an ancestor/duplicate/descendant source.
-    // Provider-owned File footprints are complete assemblies and remain authoritative.
+    // resolved direct-shard bytes in the resident total. Equal/child paths are already covered by a
+    // recursively priced source. A selected encoder that is a parent of the base/control/component
+    // still adds all of its direct shards: gen-core's loader does not recurse into those descendants.
+    // A selection-aware provider owns the staged/materialized TE footprint; exact direct-shard bytes
+    // are the fallback only when that provider fact is absent or zero. Provider-owned File
+    // footprints are complete assemblies and remain authoritative.
     if provider_owned_file_footprint.is_none() {
-        if let Some(text_encoder) = &spec.text_encoder {
-            let text_encoder_path = weights_source_path(text_encoder);
-            let inside_primary = match &spec.weights {
-                WeightsSource::Dir(root) => text_encoder_path.starts_with(root),
-                WeightsSource::File(_) => false,
-            };
-            let text_encoder_bytes = source_bytes(text_encoder);
-            let additional_bytes = if inside_primary
-                || priced_external_paths
-                    .iter()
-                    .any(|(path, _)| text_encoder_path.starts_with(path))
-            {
+        if let Some(selected) = selected_text_encoder {
+            let already_priced = recursively_priced_paths
+                .iter()
+                .any(|path| selected.path.starts_with(path));
+            let additional_bytes = if already_priced {
                 0
             } else {
-                let mut descendants: Vec<(&Path, u64)> = priced_external_paths
-                    .iter()
-                    .copied()
-                    .filter(|(path, _)| path.starts_with(text_encoder_path))
-                    .collect();
-                descendants.sort_by_key(|(path, _)| path.as_os_str().len());
-                let mut kept: Vec<(&Path, u64)> = Vec::with_capacity(descendants.len());
-                for (path, bytes) in descendants {
-                    if kept.iter().any(|(parent, _)| path.starts_with(parent)) {
-                        continue;
-                    }
-                    kept.push((path, bytes));
-                }
-                let already_priced = kept
-                    .into_iter()
-                    .fold(0_u64, |total, (_, bytes)| total.saturating_add(bytes));
-                text_encoder_bytes.saturating_sub(already_priced)
+                selected.direct_shard_bytes
             };
             total_bytes = total_bytes.saturating_add(additional_bytes);
-            // A selection-aware provider footprint may already report this source's projected TE
-            // residency. `max`, rather than addition, preserves that provider contract while making
-            // a base-subdir-only footprint account for the external selection.
-            te_bytes = te_bytes.max(text_encoder_bytes);
+            te_bytes = footprint_te
+                .filter(|bytes| *bytes > 0)
+                .unwrap_or(selected.direct_shard_bytes);
         }
     }
     (total_bytes, te_bytes, headroom)
@@ -5232,6 +5245,11 @@ fn spec_component_bytes_with_provider_footprint_checked(
     footprint: Option<PerComponentBytes>,
 ) -> gen_core::Result<(u64, u64, HeadroomAllowance)> {
     let file_sizes = prepared_file_sizes(spec)?;
+    let selected_text_encoder = spec
+        .text_encoder
+        .as_ref()
+        .map(resolved_text_encoder_source)
+        .transpose()?;
     // Keep the provider's component layout/materialization facts, but replace every generic File
     // slot it reports with the exact prepared target size. Compatibility-mode provider code may
     // still stat a path while producing its fact; that stat never becomes prepared admission
@@ -5264,6 +5282,7 @@ fn spec_component_bytes_with_provider_footprint_checked(
         engine_id,
         spec,
         footprint,
+        selected_text_encoder.as_ref(),
         |source| prepared_source_bytes(source, &file_sizes),
         external_adapter_bytes,
         |path| {
@@ -15730,8 +15749,8 @@ mod tests {
         };
         let base = write(root.join("base"), 1_000);
 
-        // The selected encoder contains a separately named component. The component is already in
-        // the running total, so only the encoder directory's remaining bytes are additive.
+        // A nested named component is not part of the selected encoder's direct-shard inventory.
+        // Both sources are loaded and priced, but only the direct shard belongs to the TE phase.
         let external_te = write(root.join("selected-te"), 500);
         let nested_component = write(external_te.join("projection"), 200);
         let external = LoadSpec::new(WeightsSource::Dir(base.clone()))
@@ -15739,15 +15758,72 @@ mod tests {
             .with_text_encoder(WeightsSource::Dir(external_te));
         let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &external);
         assert_eq!(total, 1_000 + 500 + 200);
-        assert_eq!(te_bytes, 500 + 200);
+        assert_eq!(te_bytes, 500);
 
         // A selected source nested under the primary directory is already covered by the base scan.
         let nested_te = write(base.join("selected-te"), 300);
-        let nested = LoadSpec::new(WeightsSource::Dir(base))
-            .with_text_encoder(WeightsSource::Dir(nested_te));
+        let nested = LoadSpec::new(WeightsSource::Dir(base.clone()))
+            .with_text_encoder(WeightsSource::Dir(nested_te.clone()));
         let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &nested);
         assert_eq!(total, 1_000 + 300);
         assert_eq!(te_bytes, 300);
+
+        // Equal is likewise already covered, but the TE phase is only the base directory's direct
+        // shard and excludes the nested selected-te descendant.
+        let equal = LoadSpec::new(WeightsSource::Dir(base.clone()))
+            .with_text_encoder(WeightsSource::Dir(base));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &equal);
+        assert_eq!(total, 1_000 + 300);
+        assert_eq!(te_bytes, 1_000);
+
+        // Parent is intentionally asymmetric: the exact selected inventory contains only direct
+        // shards, so the nested primary remains separately priced and is never subtracted from TE.
+        let selected_parent = write(root.join("selected-parent"), 400);
+        let nested_base = write(selected_parent.join("base"), 600);
+        let parent = LoadSpec::new(WeightsSource::Dir(nested_base))
+            .with_text_encoder(WeightsSource::Dir(selected_parent));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &parent);
+        assert_eq!(total, 600 + 400);
+        assert_eq!(te_bytes, 400);
+    }
+
+    #[test]
+    fn complete_snapshot_selection_prices_only_resolved_encoder_direct_shards() {
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_selected_snapshot_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
+        let write = |path: std::path::PathBuf, bytes: usize| {
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mk dir");
+            std::fs::write(&path, vec![0_u8; bytes]).expect("write");
+        };
+        let base = root.join("base");
+        write(base.join("model.safetensors"), 1_000);
+        let snapshot = root.join("complete-selected-snapshot");
+        write(snapshot.join("text_encoder/model.safetensors"), 500);
+        write(snapshot.join("text_encoder/config.json"), 2);
+        write(snapshot.join("transformer/model.safetensors"), 700);
+        write(snapshot.join("vae/model.safetensors"), 300);
+
+        let spec =
+            LoadSpec::new(WeightsSource::Dir(base)).with_text_encoder(WeightsSource::Dir(snapshot));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &spec);
+        assert_eq!(total, 1_000 + 500);
+        assert_eq!(te_bytes, 500);
+
+        // A selection-aware provider owns materialized residency. Its smaller projection must not
+        // be overwritten by either the exact stored bytes or the snapshot's unrelated siblings.
+        let (_, projected_te, _) = spec_component_bytes_with_provider_footprint(
+            "unregistered_fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: 450,
+                dit: 1_000,
+                vae: 0,
+            }),
+        );
+        assert_eq!(projected_te, 450);
     }
 
     /// sc-15154 — the Mage q4 admit boundary, from the REAL published install sizes.
