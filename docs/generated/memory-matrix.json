@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:cd39ceb027b945c04fdfb75a87223f23d98fc860221d49c31f4e87189d20b842",
+    "sceneWorksRevision": "source-tree:734f5a61cdf0e38b598ccc33a5f8b0ca92c9658ae2cf88d144f91b441788d17e",
     "inferenceRevision": "c3bfb064843f517abfe65660be57456214982770",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "db45d9369386f75ab33e13d258bbbb99c712e4c081eb885449fe152ec248d4d8"
+        "sha256": "acea453683466d797bed6ab1d6d5e55a3c654510ab2ecbfdb1c94d08e3a5fae2"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -14,7 +14,7 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "d54eaeb777184d0f0610177bfa00c8d9b2ea7a95eddfeb6353d2b1e6d91ff49d"
+        "sha256": "3911460b8bde2aab93bafb69aca87c63c6d49660bb103c3cd2326660393dacf5"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -46,7 +46,7 @@
       },
       "videoRouteScail2": {
         "path": "crates/sceneworks-worker/src/video_jobs/scail2.rs",
-        "sha256": "f0e70418357e6e72662d4c729819f69b57eb64220f9d011a2d1d5208b2757a9c"
+        "sha256": "976cae2c9c13f953ffc8eb5a7886d8fffb53fb15e1c674ea0841a8dba3d3ffb9"
       },
       "videoRouteKreaRealtime": {
         "path": "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
@@ -54,7 +54,7 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "2b6af0c5b3c8e240eb378ccd0aac9549d399a5fe0c35947d861d262cf05ecf9c"
+        "sha256": "e54ac0f6c7d9ef60f82175b6eaff70d3ad0a029d6ee2947411fc3c9d95a2ee7b"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "e9013fd319929e18fb2ec196e2ba71ce59280fa38de3659984ef9bd33733cea5"
+        "sha256": "b399ed70b9f656b6ee7c956956f3788c5e53da43e2ffbdec284dd6fe7a220ce7"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",

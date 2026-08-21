@@ -34,6 +34,11 @@ const DEFAULT_MODEL: &str = "ltx_2_3";
 const DEFAULT_QUALITY: &str = "balanced";
 const DEFAULT_REPLACEMENT_MODE: &str = "face_only";
 
+/// SCAIL-2's source-position table has six character slots: the primary reference plus up to
+/// five ordered extra references. This is deliberately narrower than the general video-reference
+/// payload ceiling; callers must reject rather than silently discard a seventh character.
+pub const MAX_SCAIL2_REFERENCE_CHARACTERS: usize = 6;
+
 /// Whether a selected LoRA stack contains the LTX in-context conditioning adapter required by
 /// extend, bridge, and native replacement. Routing and execution share this predicate so a job
 /// cannot be claimed and then rejected by a stricter worker-side spelling of the contract.
