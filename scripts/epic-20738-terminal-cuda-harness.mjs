@@ -211,8 +211,9 @@ export function validateManifestAuthorities(profile, manifest) {
         fail(`artifact ${id} allowPatterns are not the manifest's exact download surface`);
       }
     } else if (authority.kind === "explicitPublicArtifact") {
-      // The five-backbone route lands in sc-20747. This terminal story freezes only its immutable
-      // public weight tuple; it deliberately does not duplicate or depend on that production route.
+      // The profile keeps one shared authority for all five cells. Bind it to the production
+      // sc-20747 soft co-requisite rows without copying those rows into a fake utility model or
+      // allowing another consumer/duplicate row to drift into the terminal campaign.
       const expected = {
         repository: "xinsir/controlnet-openpose-sdxl-1.0",
         revision: "23f966cd5cfdd3f7729c903e243d87152162d2b7",
@@ -222,6 +223,27 @@ export function validateManifestAuthorities(profile, manifest) {
         || authority.file !== expected.file || artifact.subdirectory !== "."
         || artifact.allowPatterns.length !== 1 || artifact.allowPatterns[0] !== expected.file) {
         fail(`artifact ${id} drifted from the frozen public OpenPose ControlNet tuple`);
+      }
+      const consumers = manifest.models.flatMap((model) => (model.downloads ?? [])
+        .filter((download) => download.componentId === "controlnet_openpose")
+        .map((download) => ({ model: model.id, download })));
+      const actualModels = consumers.map(({ model }) => model).sort();
+      const expectedModels = [...SDXL_POSE_MODELS].sort();
+      if (JSON.stringify(actualModels) !== JSON.stringify(expectedModels)) {
+        fail(`OpenPose ControlNet manifest authority must have the exact five approved consumers`);
+      }
+      for (const modelId of SDXL_POSE_MODELS) {
+        const rows = consumers.filter(({ model }) => model === modelId);
+        if (rows.length !== 1) {
+          fail(`OpenPose ControlNet manifest authority must have exactly one row for ${modelId}`);
+        }
+        const row = rows[0].download;
+        if (row.provider !== "huggingface" || row.repo !== expected.repository
+          || row.revision !== expected.revision || row.coRequisite !== true
+          || row.required !== "soft" || JSON.stringify(row.files) !== JSON.stringify([expected.file])
+          || JSON.stringify(row.platforms) !== JSON.stringify(["macos", "windows", "linux"])) {
+          fail(`OpenPose ControlNet manifest authority drifted for ${modelId}`);
+        }
       }
     } else {
       fail(`artifact ${id} has unknown authority kind ${authority.kind}`);

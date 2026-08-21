@@ -99,6 +99,33 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   controlDrift.artifacts["sdxl-openpose"].revision = "b".repeat(40);
   assert.throws(() => validateManifestAuthorities(controlDrift, manifest), /artifact definitions drifted/);
 
+  const controlManifestDrift = structuredClone(manifest);
+  controlManifestDrift.models.find((model) => model.id === "realvisxl").downloads
+    .find((download) => download.componentId === "controlnet_openpose").required = "hard";
+  assert.throws(
+    () => validateManifestAuthorities(profile(), controlManifestDrift),
+    /manifest authority drifted for realvisxl/,
+  );
+
+  const duplicateControlAuthority = structuredClone(manifest);
+  const sdxl = duplicateControlAuthority.models.find((model) => model.id === "sdxl");
+  sdxl.downloads.push(structuredClone(
+    sdxl.downloads.find((download) => download.componentId === "controlnet_openpose"),
+  ));
+  assert.throws(
+    () => validateManifestAuthorities(profile(), duplicateControlAuthority),
+    /exact five approved consumers/,
+  );
+
+  const extraControlConsumer = structuredClone(manifest);
+  const extra = structuredClone(extraControlConsumer.models.find((model) => model.id === "sdxl")
+    .downloads.find((download) => download.componentId === "controlnet_openpose"));
+  extraControlConsumer.models.find((model) => model.id === "flux_dev").downloads.push(extra);
+  assert.throws(
+    () => validateManifestAuthorities(profile(), extraControlConsumer),
+    /exact five approved consumers/,
+  );
+
   const artifactDefinitionDrift = profile();
   artifactDefinitionDrift.artifacts["chroma1-base-q4"].allowPatterns.push("duplicate-unreviewed.bin");
   assert.throws(() => validateProfile(artifactDefinitionDrift), /artifact definitions drifted/);
