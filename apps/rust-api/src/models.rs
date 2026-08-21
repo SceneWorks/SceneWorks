@@ -4782,19 +4782,29 @@ mod download_receipt_tests {
         }
     }
 
-    /// sc-13682: the three SDXL shared components (CLIP-L/bigG tokenizers + fp16-fix VAE) are declared as
-    /// candle-only (`platforms: [windows, linux]`) hard co-requisites on every candle-SDXL base +
-    /// InstantID. On macOS `retain_downloads_for_os` strips them, so the self-contained MLX turnkey's
-    /// install state does NOT gate on them; on the candle OSes all three are retained and gate the entry.
-    /// Binds to the LIVE builtin manifest so a lost platform tag or a dropped component fails here.
+    /// The three descriptor-required SDXL components (CLIP-L/bigG tokenizers + fp16-fix VAE) remain
+    /// Candle-only hard co-requisites on every Candle-SDXL base + InstantID. OpenPose is different: it
+    /// is one cross-platform soft install companion on exactly the five pose-capable base models.
+    /// Missing it must offer an update without making ordinary MLX or Candle generation uninstalled.
+    /// Binds both contracts to the LIVE builtin manifest and install-state implementation.
     #[test]
-    fn sdxl_shared_components_are_candle_only_and_gate_install_state_off_macos() {
+    fn sdxl_shared_components_separate_hard_candle_and_soft_cross_platform_state() {
         use std::collections::BTreeSet;
 
-        let want: BTreeSet<String> = ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]
-            .iter()
-            .map(|id| (*id).to_owned())
-            .collect();
+        let _env = isolate_hf_cache();
+        let hard_want: BTreeSet<String> =
+            ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect();
+        let soft_want = BTreeSet::from(["controlnet_openpose".to_owned()]);
+        let pose_models = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
 
         for model_id in [
             "sdxl",
@@ -4805,32 +4815,78 @@ mod download_receipt_tests {
             "instantid_realvisxl",
         ] {
             let entry = builtin_models_entry(model_id);
-
-            // macOS: the candle-only components are filtered out, so the MLX turnkey gates on NO coReq.
-            let mut macos = entry.clone();
-            retain_downloads_for_os(&mut macos, "macos");
-            assert!(
-                model_co_requisite_downloads(&macos).is_empty(),
-                "{model_id}: the SDXL CLIP/VAE components must not gate the macOS MLX turnkey install state",
-            );
-
-            // Windows + Linux: all three components are retained and gate the candle entry.
-            for os in ["windows", "linux"] {
-                let mut candle = entry.clone();
-                retain_downloads_for_os(&mut candle, os);
-                let ids: BTreeSet<String> = model_co_requisite_downloads(&candle)
-                    .iter()
-                    .filter_map(|download| {
-                        download
-                            .get("componentId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .collect();
+            for os in ["macos", "windows", "linux"] {
+                let mut platform_entry = entry.clone();
+                retain_downloads_for_os(&mut platform_entry, os);
+                let co_requisites = model_co_requisite_downloads(&platform_entry);
+                let ids_for = |soft: bool| -> BTreeSet<String> {
+                    co_requisites
+                        .iter()
+                        .filter(|download| {
+                            (download.get("required").and_then(Value::as_str) == Some("soft"))
+                                == soft
+                        })
+                        .filter_map(|download| {
+                            download
+                                .get("componentId")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                };
+                let expected_hard = if os == "macos" {
+                    BTreeSet::new()
+                } else {
+                    hard_want.clone()
+                };
                 assert_eq!(
-                    ids, want,
-                    "{model_id} on {os}: the candle SDXL entry must gate on all three shared components",
+                    ids_for(false),
+                    expected_hard,
+                    "{model_id} on {os}: only Candle must gate on the three hard CLIP/VAE components",
                 );
+                let expected_soft = if pose_models.contains(&model_id) {
+                    soft_want.clone()
+                } else {
+                    BTreeSet::new()
+                };
+                assert_eq!(
+                    ids_for(true),
+                    expected_soft,
+                    "{model_id} on {os}: OpenPose must be soft, cross-platform, and limited to the five pose backbones",
+                );
+
+                if pose_models.contains(&model_id) {
+                    let data = tempfile::tempdir().unwrap();
+                    for download in platform_entry
+                        .get("downloads")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|download| {
+                            download.get("required").and_then(Value::as_str) != Some("soft")
+                        })
+                    {
+                        seed_manifest_download(data.path(), download);
+                    }
+                    let state = install_state_for(
+                        model_download_context(&platform_entry).unwrap(),
+                        &platform_entry,
+                        data.path(),
+                    );
+                    assert!(
+                        state.installed,
+                        "{model_id} on {os}: missing soft OpenPose must not block ordinary generation",
+                    );
+                    assert!(
+                        state.update_available,
+                        "{model_id} on {os}: missing soft OpenPose must remain installable/repairable",
+                    );
+                    assert!(
+                        !state.cache_incomplete && state.missing_required_files.is_empty(),
+                        "{model_id} on {os}: a missing soft component is not a torn hard install; missing={:?}",
+                        state.missing_required_files,
+                    );
+                }
             }
         }
     }

@@ -478,11 +478,33 @@ mod tests {
         .clone();
         assert!(validate_raw_control_weights(&mut shipped).is_ok());
 
+        let mut sdxl = json!({
+            "advanced": {
+                "controlWeights": {
+                    "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                    "filename": "diffusion_pytorch_model.safetensors",
+                    "revision": "attacker-supplied-and-removed",
+                    "_catalogAuthorized": true
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(validate_raw_control_weights(&mut sdxl).is_ok());
+        let canonical = sdxl["advanced"]["controlWeights"].as_object().unwrap();
+        assert!(!canonical.contains_key("revision"));
+        assert!(!canonical.contains_key("_catalogAuthorized"));
+
         for weights in [
             json!({"repo": "attacker/payload", "filename": "model.safetensors"}),
             json!({
                 "repo": "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
                 "filename": "other.safetensors"
+            }),
+            json!({
+                "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                "filename": "canny.safetensors"
             }),
             json!({"path": "/tmp/payload.safetensors"}),
         ] {

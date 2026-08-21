@@ -3418,6 +3418,121 @@ async fn model_download_job_enqueues_co_requisite_dependencies() {
 }
 
 #[tokio::test]
+async fn sdxl_openpose_is_one_shared_soft_component_installed_with_each_backbone() {
+    const CONTROL_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
+    const CONTROL_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
+    const CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let stage = |repo: &str, revision: &str, file: &str| {
+        let path = huggingface_repo_cache_path(&data_dir, repo)
+            .expect("HF cache path")
+            .join("snapshots")
+            .join(revision)
+            .join(file);
+        std::fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("snapshot dirs create");
+        std::fs::write(path, b"installed fixture").expect("snapshot file writes");
+    };
+    // One complete SDXL q4 base plus every hard Candle component. The optional OpenPose snapshot is
+    // deliberately absent: ordinary generation must remain installed while Model Manager offers it.
+    stage(
+        "SceneWorks/sdxl-base-mlx",
+        "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+        "q4/model.safetensors",
+    );
+    for (repo, revision, file) in [
+        (
+            "openai/clip-vit-large-patch14",
+            "32bd64288804d66eefd0ccbe215aa642df71cc41",
+            "tokenizer.json",
+        ),
+        (
+            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+            "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+            "tokenizer.json",
+        ),
+        (
+            "madebyollin/sdxl-vae-fp16-fix",
+            "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+            "diffusion_pytorch_model.safetensors",
+        ),
+    ] {
+        stage(repo, revision, file);
+    }
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        models
+            .as_array()
+            .expect("model array")
+            .iter()
+            .all(|model| model["id"] != "controlnet_openpose_sdxl"),
+        "the optional checkpoint must not appear as a fake runnable utility model"
+    );
+    let sdxl = models
+        .as_array()
+        .expect("model array")
+        .iter()
+        .find(|model| model["id"] == "sdxl")
+        .expect("SDXL catalog row");
+    assert_eq!(sdxl["installState"], "installed");
+    assert_eq!(sdxl["cacheState"], "complete");
+    assert_eq!(sdxl["repairAvailable"], false);
+    assert_eq!(
+        sdxl["updateAvailable"], true,
+        "a missing soft OpenPose component is an install/update affordance, not a base-model outage"
+    );
+
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/sdxl/download",
+        json!({ "requestedGpu": "auto", "variant": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(primary["payload"]["repo"], "SceneWorks/sdxl-base-mlx");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let control_jobs = jobs
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .filter(|job| job["payload"]["repo"] == CONTROL_REPO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        control_jobs.len(),
+        1,
+        "one backbone install enqueues the shared OpenPose artifact exactly once"
+    );
+    let control = control_jobs[0];
+    assert_eq!(control["payload"]["revision"], CONTROL_REVISION);
+    assert_eq!(control["payload"]["files"], json!([CONTROL_FILE]));
+    assert!(
+        control["payload"]
+            .get("family")
+            .map_or(true, Value::is_null),
+        "a shared conditioning component is not reconciled as the SDXL base family"
+    );
+}
+
+#[tokio::test]
 async fn mmaudio_repo_rename_keeps_legacy_install_ready_and_skips_duplicate_clip_download() {
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
