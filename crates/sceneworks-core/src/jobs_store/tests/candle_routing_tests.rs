@@ -2523,10 +2523,22 @@ fn candle_video_tier_selects_match_published_platform_tiers() {
         "ltx_2_3",
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
     ));
-    assert!(video_request_candle_eligible(
-        "ltx_2_3",
-        &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
-    ));
+    assert!(
+        !video_request_candle_eligible(
+            "ltx_2_3",
+            &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
+        ),
+        "the source-ready LTX q8 resolver must remain behind the terminal capability-fact gate"
+    );
+    let q8_job = video_generate_job(json!({
+        "model": "ltx_2_3",
+        "mode": "text_to_video",
+        "advanced": { "mlxQuantize": 8 }
+    }));
+    assert!(
+        !video_job_is_candle_eligible(&q8_job),
+        "the production job route must keep LTX q8 fail-closed until the terminal campaign"
+    );
     for invalid_tier in [
         json!(0),
         json!(5),
@@ -2543,7 +2555,7 @@ fn candle_video_tier_selects_match_published_platform_tiers() {
                     "advanced": { "mlxQuantize": invalid_tier.clone() }
                 }))
             ),
-            "LTX Candle has only the published q4/q8 packed tiers; {invalid_tier} must fail closed"
+            "an unsupported LTX Candle tier {invalid_tier} must fail closed"
         );
     }
     assert!(!video_request_candle_eligible(
@@ -2593,8 +2605,14 @@ fn candle_ltx_replace_is_model_native_and_requires_its_ic_adapter() {
     let mut q8_shape = object(shape.clone());
     q8_shape.insert("advanced".into(), json!({ "mlxQuantize": 8 }));
     assert!(
-        ltx_replace_candle_eligible("ltx_2_3", &q8_shape),
-        "the q8 LTX turnkey tier must preserve native replacement routing"
+        !ltx_replace_candle_eligible("ltx_2_3", &q8_shape),
+        "q8 replacement must remain behind the same terminal capability-fact gate"
+    );
+    let mut q4_shape = object(shape.clone());
+    q4_shape.insert("advanced".into(), json!({ "mlxQuantize": 4 }));
+    assert!(
+        ltx_replace_candle_eligible("ltx_2_3", &q4_shape),
+        "the already-proven q4 tier must preserve native replacement routing"
     );
     let mut invalid_tier_shape = object(shape.clone());
     invalid_tier_shape.insert("advanced".into(), json!({ "mlxQuantize": 0 }));

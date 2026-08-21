@@ -12145,7 +12145,7 @@ mod candle_video_label_tests {
     }
 
     #[test]
-    fn candle_ltx_resolves_the_exact_requested_packed_tier_only_for_the_base_model() {
+    fn candle_ltx_source_resolver_prepares_exact_tiers_without_promoting_q8() {
         let temp = tempfile::tempdir().expect("tempdir");
         let q4 = temp.path().join("q4");
         let q8 = temp.path().join("q8");
@@ -12188,6 +12188,8 @@ mod candle_video_label_tests {
             spec.quantize.is_none(),
             "production LTX provider spec must load the pre-packed q4 tier with quantize=None"
         );
+        // This directly exercises reusable source plumbing below the product router. The core route
+        // remains the authority that withholds q8 until terminal evidence advances its capability.
         let (resolved_q8, q8_quant) =
             candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q8_request)
                 .expect("base LTX q8 tier");
