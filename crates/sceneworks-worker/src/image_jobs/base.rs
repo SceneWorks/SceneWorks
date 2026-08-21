@@ -180,6 +180,8 @@ enum ImageRoute {
     /// conditioning and the fine-tuned entrypoint refuses adapters.
     MageFinetuned,
     InstantId,
+    /// Generic SDXL OpenPose ControlNet, shared by the five shipped SDXL-family model ids.
+    SdxlControl,
     PulidFlux,
     SdxlAdvanced,
     SensenovaEdit,
@@ -190,8 +192,7 @@ enum ImageRoute {
     /// falling through to `Mlx` (plain txt2img) and silently dropping the poses (sc-11796 generalized to
     /// every wired family, sc-11814) — the MLX twin of the candle `CandleImageRoute::PoseControlBaseMissing`.
     PoseControlBaseMissing,
-    /// A strict-pose job on an MLX model with NO pose-control lane (e.g. a plain `sdxl` pose job with no
-    /// reference — SDXL identity-pose ships via InstantID / IP-Adapter) that `mlx_available` would
+    /// A strict-pose job on an MLX model with NO pose-control lane that `mlx_available` would
     /// otherwise render as plain txt2img, dropping the poses. Reject loudly (sc-5968) — the MLX twin of
     /// the candle `CandleImageRoute::PoseReject`.
     PoseReject,
@@ -213,7 +214,7 @@ enum ImageRoute {
 ///   - `flux_dev`      → `flux1_dev_control_available` (Shakker Union-Pro-2.0)
 ///   - `flux2_dev`     → `flux2_dev_control_available` (Fun-Controlnet-Union)
 ///
-/// Distinct from a non-wired MLX pose family (e.g. `sdxl`), which reaches the sc-5968
+/// Distinct from a non-wired MLX pose family, which reaches the sc-5968
 /// [`ImageRoute::PoseReject`] instead. (sc-11814.)
 #[cfg(target_os = "macos")]
 const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
@@ -329,6 +330,11 @@ fn resolve_image_route_with_imported_availability(
         Some(ImageRoute::MageFinetuned)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
+    } else if sdxl_control_candidate(request) {
+        // Keep the generic SDXL ControlNet route after InstantID and before every SDXL edit,
+        // IP-Adapter, and generic route. The handler validates conflicts and malformed carriers,
+        // so a pose can never be silently discarded by a sibling conditioned path.
+        Some(ImageRoute::SdxlControl)
     } else if pulid_flux_available(request, settings) {
         Some(ImageRoute::PulidFlux)
     } else if sdxl_advanced_available(request, settings) {
@@ -356,8 +362,7 @@ fn resolve_image_route_with_imported_availability(
         //    `mlx_available` succeeds — for `krea_2_turbo` the control base (`resolve_krea_control_base`) diverges
         //    from the txt2img base (the reported sc-11796 silent-drop), and for `kolors` the lane additionally
         //    needs a `referenceAssetId`. Generalizes the sc-11796 krea-only reject to every wired family (sc-11814).
-        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img (e.g. a plain `sdxl`
-        //    pose job with no reference — SDXL identity-pose ships via InstantID / IP-Adapter, claimed above) →
+        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img →
         //    the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the generic `mlx_available` arm.
         if WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str()) {
@@ -460,6 +465,7 @@ impl ImageRoute {
             self,
             ImageRoute::ZImageControl
                 | ImageRoute::ZImageBaseControl
+                | ImageRoute::SdxlControl
                 | ImageRoute::QwenControl
                 | ImageRoute::KolorsControl
                 | ImageRoute::KreaControl
@@ -483,6 +489,7 @@ impl ImageRoute {
         match self {
             ImageRoute::ZImageControl
             | ImageRoute::ZImageBaseControl
+            | ImageRoute::SdxlControl
             | ImageRoute::QwenControl
             | ImageRoute::KolorsControl
             | ImageRoute::KreaControl
@@ -531,6 +538,7 @@ impl ImageRoute {
     /// descriptor label their stream resolves.
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
+            ImageRoute::SdxlControl => SDXL_CONTROL_ADAPTER_LABEL,
             ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
             ImageRoute::KreaImported | ImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
@@ -557,6 +565,8 @@ enum CandleImageRoute {
     /// InstantID identity (sc-5491) — the off-Mac sibling of `ImageRoute::InstantId`. Checked first
     /// because `instantid_realvisxl` is not an `is_candle_engine` txt2img id.
     InstantId,
+    /// Generic SDXL OpenPose ControlNet, shared with the macOS route through registry id `sdxl`.
+    SdxlControl,
     /// SDXL img2img / inpaint / outpaint edit (sc-5487).
     SdxlEdit,
     /// FLUX.2-klein reference / img2img edit (sc-5487).
@@ -844,6 +854,7 @@ impl CandleImageRoute {
     fn applies_request_loras(self, request: &ImageRequest) -> bool {
         match self {
             CandleImageRoute::InstantId
+            | CandleImageRoute::SdxlControl
             | CandleImageRoute::SdxlEdit
             | CandleImageRoute::SdxlIpAdapter
             | CandleImageRoute::KolorsIpAdapter
@@ -885,6 +896,7 @@ impl CandleImageRoute {
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
             CandleImageRoute::QwenControl
+            | CandleImageRoute::SdxlControl
             | CandleImageRoute::KolorsControl
             | CandleImageRoute::ZimageControl
             | CandleImageRoute::Flux2Control
@@ -916,6 +928,7 @@ impl CandleImageRoute {
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
             CandleImageRoute::InstantId => INSTANTID_ENGINE,
+            CandleImageRoute::SdxlControl => SDXL_CONTROL_ADAPTER_LABEL,
             CandleImageRoute::SdxlEdit => sdxl_edit_candle::SDXL_EDIT_CANDLE_ENGINE,
             CandleImageRoute::Flux2Edit => flux2_edit_candle::FLUX2_EDIT_CANDLE_ENGINE,
             CandleImageRoute::QwenEdit => qwen_edit_candle::QWEN_EDIT_CANDLE_ENGINE,
@@ -1018,6 +1031,10 @@ fn resolve_candle_image_route_with_prepared_availability(
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
     if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
+    } else if sdxl_control_candidate(request) {
+        // Same precedence as the core router: InstantID stays isolated, then generic SDXL control
+        // claims every material pose carrier before edit/IP/generic routes can discard it.
+        Some(CandleImageRoute::SdxlControl)
     } else if sdxl_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SdxlEdit)
     } else if matches!(
@@ -1157,7 +1174,7 @@ fn resolve_candle_image_route_with_prepared_availability(
         //    snapshot is absent (the lane's local weight-gate failed) → `PoseControlBaseMissing`
         //    ("control base snapshot not installed"). Previously this family was excluded from the reject
         //    entirely and fell through to `CandleTxt2Img`, silently dropping the poses (sc-11171, F-008).
-        //  - No candle pose lane (e.g. sdxl) → the sc-5968 no-silent-T2I `PoseReject`.
+        //  - No candle pose lane → the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the txt2img arm below.
         if WIRED_CANDLE_POSE_FAMILIES.contains(&request.model.as_str()) {
             Some(CandleImageRoute::PoseControlBaseMissing)

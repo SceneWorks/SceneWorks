@@ -19,7 +19,7 @@
 // the candle siblings (`qwen_control.rs` / `zimage_control.rs` / `flux2_control_candle.rs`) are bespoke
 // non-registry providers and are NOT collapsed here (see the sc-8243 PR / follow-up).
 
-/// One Fun-Union strict-control engine: its registry id, default control-weights repo, and the set of
+/// One strict-control engine: its registry id, default control-weights repo, and the set of
 /// [`ControlKind`]s it accepts. THE authority for `supported_kinds` (sc-8244 manifest / sc-8245 web
 /// picker consume the same notion). `repo` is the shipped Fun-Union control repo for the engine.
 /// Per-engine streams accept only an exact shipped tuple or an API-canonicalized registered overlay
@@ -35,8 +35,9 @@ struct StrictControlEngine {
     supported_kinds: &'static [ControlKind],
 }
 
-/// The Fun-Union strict-control catalog (S0 table). SINGLE SOURCE OF TRUTH for `(engine_id, control_repo,
+/// The shared strict-control catalog (S0 table). SINGLE SOURCE OF TRUTH for `(engine_id, control_repo,
 /// supported_kinds)`:
+/// - `sdxl` — `{Pose}` (generic xinsir OpenPose ControlNet; sc-20747)
 /// - `flux1_dev_control` — `{Pose, Canny, Depth}` (Shakker Union-Pro-2.0; E2 sc-8239 / wiring sc-8244)
 /// - `flux2_dev_control` — `{Pose, Canny, Depth}`
 /// - `z_image_turbo_control` — `{Pose, Canny, Depth}`
@@ -51,6 +52,13 @@ struct StrictControlEngine {
 /// The SDXL tile detail-upscale path (`ControlKind::Other("tile")`, `image_jobs/detail.rs`) is OUTSIDE
 /// this family and is deliberately NOT listed.
 const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
+    StrictControlEngine {
+        // Generic SDXL ControlNet is deliberately pose-only. The same row validates both runtime
+        // bundles because both register the provider under `sdxl`.
+        engine_id: "sdxl",
+        repo: "xinsir/controlnet-openpose-sdxl-1.0",
+        supported_kinds: &[ControlKind::Pose],
+    },
     StrictControlEngine {
         engine_id: "flux1_dev_control",
         repo: "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0",
@@ -112,24 +120,23 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
     },
 ];
 
-/// The catalog row for a registry strict-control engine id, or `None` if it is not a Fun-Union
-/// strict-control engine (e.g. the SDXL tile detail path, which must never route through this driver).
+/// The catalog row for a registry strict-control engine id, or `None` if it is not registered here
+/// (e.g. the SDXL tile detail path, which must never route through this driver).
 fn strict_control_engine(engine_id: &str) -> Option<&'static StrictControlEngine> {
     STRICT_CONTROL_ENGINES
         .iter()
         .find(|entry| entry.engine_id == engine_id)
 }
 
-/// The catalog DEFAULT control-weights repo for a Fun-Union strict-control engine — the single source of
-/// truth each engine's control-weight resolver falls back to. Panics on a non-Fun-Union
-/// engine id (a programming error: only the three registry strict-control streams call this with their
-/// own engine id). Off-Mac the candle strict-control lanes keep their own per-lane default-repo constants
-/// (the qwen candle lane now resolves the table's 2512-Fun row, sc-8350), so this is unused on the candle
-/// lane.
+/// The catalog DEFAULT control-weights repo for a registered strict-control engine — the single source of
+/// truth each engine's control-weight resolver falls back to. Panics on an unregistered
+/// engine id (a programming error: only registered strict-control streams call this with their
+/// own engine id). Existing bespoke off-Mac lanes keep their own per-lane default-repo constants; the
+/// backend-neutral SDXL route consumes this shared row on both platforms.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn strict_control_default_repo(engine_id: &str) -> &'static str {
     let catalog_repo = strict_control_engine(engine_id)
-        .unwrap_or_else(|| panic!("{engine_id} is not a strict-control engine"))
+        .unwrap_or_else(|| panic!("{engine_id} is not a registered strict-control engine"))
         .repo;
     let artifact_repo = sceneworks_core::control_weights::default_control_repo(engine_id)
         .unwrap_or_else(|| panic!("{engine_id} has no shipped control-weight artifact"));
@@ -193,11 +200,11 @@ fn trusted_control_weight_revision(
 
 /// Validate a requested [`ControlKind`] against an engine's `supported_kinds` (the [`STRICT_CONTROL_ENGINES`]
 /// authority). `Ok(())` when supported; a clear, actionable `InvalidPayload` otherwise. An unknown engine
-/// id is itself an error — only the Fun-Union catalog engines route here.
+/// id is itself an error — only registered catalog engines route here.
 fn validate_control_kind(engine_id: &str, kind: &ControlKind) -> WorkerResult<()> {
     let Some(entry) = strict_control_engine(engine_id) else {
         return Err(WorkerError::InvalidPayload(format!(
-            "{engine_id} is not a Fun-Union strict-control engine"
+            "{engine_id} is not a registered strict-control engine"
         )));
     };
     if entry.supported_kinds.contains(kind) {

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:734f5a61cdf0e38b598ccc33a5f8b0ca92c9658ae2cf88d144f91b441788d17e",
+    "sceneWorksRevision": "source-tree:a288be57e07fdfcd75b41dc028c79e9e1658b7cb76ef9d37d6ded713dd81b38a",
     "inferenceRevision": "c3bfb064843f517abfe65660be57456214982770",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "acea453683466d797bed6ab1d6d5e55a3c654510ab2ecbfdb1c94d08e3a5fae2"
+        "sha256": "c6b2179286d85b54c16413d7816022be81dcf1e0ee391bbafbac8aff108bf72d"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -14,11 +14,11 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "3911460b8bde2aab93bafb69aca87c63c6d49660bb103c3cd2326660393dacf5"
+        "sha256": "74949c47b6ce09f1571bf719158d6ff1b49976460a5882c8eaed6ee10146ff47"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "45c1cff1dbd1effd7fbb33d0018f8fe40fb777a7d0db6a35ead6201e5b5551a0"
+        "sha256": "20ad6127322f3acfc5888d892bca035ead712d2c0afb6171a7234ecde671331b"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "a34d9d47da8547186eb3c77aa578c76a73e481246d4a77bce276c2b03796aa6c"
+        "sha256": "0c81430d5dd26949ddf1bf3347fddb19eb013243d7d0cfa286eb65c3b64c982f"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -58,7 +58,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "aee1d0aebab237cdde87f8f4e1e87fc32a13cd62ec64be5b41d7a7039e0c014a"
+        "sha256": "367bbd0ad02b0b3261f3823860e1b1ed63ad860447262c6a98aa31fa93fb974e"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -16595,6 +16595,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16633,6 +16638,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16670,6 +16680,11 @@
         {
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
           "variant": null
         }
       ]
