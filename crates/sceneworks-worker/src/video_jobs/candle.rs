@@ -1631,6 +1631,7 @@ impl Scail2CandleTier {
 /// admission and into `VideoGenInput.quant`; returning a bare path here was how an installed q8
 /// payload could previously be accounted as dense.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug)]
 pub(super) struct ResolvedCandleScail2Model {
     pub(super) model_dir: PathBuf,
     pub(super) tier: Scail2CandleTier,
@@ -1737,12 +1738,14 @@ pub(super) fn validate_candle_scail2_tier_dir(
 /// It remains a dense-only compatibility path; never use it to satisfy a q4/q8 request.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn validate_candle_scail2_legacy_bf16_dir(path: &Path) -> WorkerResult<()> {
-    runtime_cuda::providers::scail2::snapshot_layout(path).map_err(|error| {
-        WorkerError::InvalidPayload(format!(
-            "scail2 (candle): legacy bf16 snapshot at {} is incomplete: {error}",
-            path.display(),
-        ))
-    })
+    runtime_cuda::providers::scail2::snapshot_layout(path)
+        .map(|_| ())
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "scail2 (candle): legacy bf16 snapshot at {} is incomplete: {error}",
+                path.display(),
+            ))
+        })
 }
 
 /// Resolve Candle SCAIL-2 weights from an explicit override, then the exact Model Manager tier, or
