@@ -79,6 +79,14 @@ describe("videoGenerateValidation", () => {
     expect(summary.surfaced[0].message).toContain("No live GPU worker");
   });
 
+  it("rejects a seventh ordered SCAIL-2 reference instead of silently trimming it", () => {
+    const summary = summarize(videoGenerateValidation({ ...whole, scail2ReferenceOverflow: true }));
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced.map((entry) => entry.message)).toContain(
+      "SCAIL-2 Animate Character supports at most 6 reference characters.",
+    );
+  });
+
   it("surfaces preset and selected-LoRA problems", () => {
     const summary = summarize(
       videoGenerateValidation({ ...whole, presetMissing: ["a"], presetIncompatible: ["b"], loraIncompatible: ["c"] }),

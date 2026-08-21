@@ -672,15 +672,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // PuLID-FLUX on FLUX.1-dev (sc-3344): `character_image` with a reference face runs through native
     // MLX or the bespoke `pulid_flux_candle_eligible` lane, not the plain txt2img gate.
     ModelCaps::new("pulid_flux_dev", true, false, false, false, false),
-    // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). The hosted standard-tier
-    // snapshots already contain the packed q4/q8 transformer directories and candle-gen-chroma
-    // consumes them without a dense staging fallback (sc-20741). `mlxQuantize` is therefore a
-    // tier-select that must reach Candle for all three provider ids. Preserve the existing dense
-    // LoRA/LoKr lane, but keep `candle_quant_lora` false because adapter-on-packed has not been
-    // independently admitted.
-    ModelCaps::new("chroma1_hd", true, true, true, true, false),
-    ModelCaps::new("chroma1_base", true, true, true, true, false),
-    ModelCaps::new("chroma1_flash", true, true, true, true, false),
+    // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). The packed q4/q8 resolver and
+    // exact-tier refusal plumbing are staged by sc-20741, but product admission remains false until
+    // the epic-end CUDA evidence phase proves the published tiers. Preserve the existing dense
+    // LoRA/LoKr lane; a later evidence-backed promotion may set `candle_quant` while leaving
+    // `candle_quant_lora` false because adapter-on-packed is independently unsupported.
+    ModelCaps::new("chroma1_hd", true, true, false, true, false),
+    ModelCaps::new("chroma1_base", true, true, false, true, false),
+    ModelCaps::new("chroma1_flash", true, true, false, true, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
     //
     // sc-14249 (epic 9083): `candle_quant = true` across the whole family. `candle-gen-sensenova`
@@ -1991,9 +1990,6 @@ mod tests {
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
         // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
         // the candle txt2img lane, so a tier-select stays on candle. Qwen now appears in the combined
         // quant+adapter list above.
@@ -2196,9 +2192,8 @@ mod tests {
                 );
             }
             // A combined-capability row is complete in itself rather than being duplicated into the
-            // two standalone lists. The standalone lists MAY overlap: that precisely encodes a model
-            // (currently Chroma) whose dense adapter and packed-tier paths are independently admitted
-            // while their composition is not.
+            // two standalone lists. The standalone lists MAY overlap when a future evidence-backed
+            // row admits dense adapters and packed tiers independently but not their composition.
             assert!(
                 !caps.candle_quant_lora || !(caps.candle_quant || caps.candle_lora),
                 "{}: candle_quant_lora must not be duplicated into standalone columns",

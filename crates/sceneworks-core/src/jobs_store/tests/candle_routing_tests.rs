@@ -1400,9 +1400,17 @@ fn boogu_base_and_turbo_img2img_route_to_candle() {
 #[test]
 fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
     // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
-    // explicit `advanced.mlxQuantize > 0` is refused rather than silently running dense.
-    // `flux_schnell` remains an image-side dense-only counter-example; Chroma's shared q4/q8
-    // turnkey is covered by its own complete three-id matrix immediately after this test.
+    // explicit `advanced.mlxQuantize > 0` request away rather than silently running dense. Chroma's
+    // resolver plumbing is staged, but its product catalog stays in this fail-closed class until the
+    // terminal CUDA evidence phase promotes the exact q4/q8 cells.
+    for model in ["chroma1_base", "chroma1_flash", "chroma1_hd"] {
+        for bits in [4, 8] {
+            assert!(!image_request_candle_eligible(
+                model,
+                &object(json!({ "advanced": { "mlxQuantize": bits } }))
+            ));
+        }
+    }
     // NOTE: qwen_image USED to be a dense-only counter-example here; sc-11020 moved it to
     // CANDLE_QUANT_MODELS (its turnkey q4/q8 packed tiers load off-Mac), so its quant tier-select now
     // STAYS on candle — covered by `qwen_image_quant_and_lora_stay_on_candle`.
@@ -1428,18 +1436,18 @@ fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
 }
 
 #[test]
-fn chroma_turnkey_q4_q8_tiers_stay_on_candle_without_adapters_or_conditioning() {
-    // sc-20741: each Chroma provider id resolves its own hosted standard-tier snapshot, but all
-    // three share the packed candle-gen-chroma loader. Test BOTH published packed directories for
-    // EVERY id rather than proving one sibling and assuming the catalog aliases the others.
+fn chroma_packed_tiers_remain_staged_while_dense_adapters_stay_on_candle() {
+    // sc-20741 stages the exact q4/q8 and quant-plus-adapter refusal plumbing without advertising an
+    // unmeasured product cell. All three ids therefore continue to refuse every positive quant
+    // request, while their pre-existing dense LoRA/LoKr path remains available.
     for model in ["chroma1_base", "chroma1_flash", "chroma1_hd"] {
         for bits in [4, 8] {
             assert!(
-                image_request_candle_eligible(
+                !image_request_candle_eligible(
                     model,
                     &object(json!({ "prompt": "a red fox", "advanced": { "mlxQuantize": bits } }))
                 ),
-                "{model} q{bits} packed tier-select must stay on Candle"
+                "{model} q{bits} must remain fail-closed before terminal evidence"
             );
         }
 
@@ -1464,7 +1472,7 @@ fn chroma_turnkey_q4_q8_tiers_stay_on_candle_without_adapters_or_conditioning() 
             );
         }
 
-        // No Candle evidence proves composing either adapter kind with the packed q4/q8 codes.
+        // Adding an adapter must not launder a staged packed tier into the dense adapter lane.
         for bits in [4, 8] {
             for network_type in ["lora", "lokr"] {
                 assert!(
@@ -1479,24 +1487,40 @@ fn chroma_turnkey_q4_q8_tiers_stay_on_candle_without_adapters_or_conditioning() 
                             }]
                         }))
                     ),
-                    "{model} must refuse an unproven q{bits}+{network_type} composition"
+                    "{model} must keep staged q{bits}+{network_type} fail-closed"
                 );
             }
         }
-
-        // The native Candle Chroma route is text-to-image only; an image carrier must not be
-        // reinterpreted as an unconditioned q4/q8 request.
-        assert!(
-            !image_request_candle_eligible(
-                model,
-                &object(json!({
-                    "advanced": { "mlxQuantize": 8 },
-                    "referenceAssetId": "asset_1"
-                }))
-            ),
-            "{model} must refuse a conditioned packed-tier shape"
-        );
     }
+}
+
+#[test]
+fn standalone_quant_and_adapter_capabilities_do_not_admit_their_composition() {
+    let quant_only = object(json!({ "advanced": { "mlxQuantize": 4 } }));
+    let adapter_only = object(json!({ "loras": [{ "id": "adapter_1" }] }));
+    let combined = object(json!({
+        "advanced": { "mlxQuantize": 4 },
+        "loras": [{ "id": "adapter_1" }]
+    }));
+
+    assert!(!candle_quant_lora_combination_is_unsupported(
+        true,
+        true,
+        false,
+        &quant_only
+    ));
+    assert!(!candle_quant_lora_combination_is_unsupported(
+        true,
+        true,
+        false,
+        &adapter_only
+    ));
+    assert!(candle_quant_lora_combination_is_unsupported(
+        true, true, false, &combined
+    ));
+    assert!(!candle_quant_lora_combination_is_unsupported(
+        true, true, true, &combined
+    ));
 }
 
 #[test]
@@ -2823,7 +2847,7 @@ fn person_replace_job(payload: Value) -> JobSnapshot {
 }
 
 #[test]
-fn scail2_candle_serves_animation_and_replace_in_native_shape() {
+fn scail2_candle_separates_source_ready_tiers_from_the_pinned_descriptor_gate() {
     // Standalone character animation: scail2_14b + animate_character + a reference + a driving clip.
     // The reference can be referenceAssetIds, a bare referenceAssetId, or the i2v sourceAssetId.
     for reference in [
@@ -2835,12 +2859,16 @@ fn scail2_candle_serves_animation_and_replace_in_native_shape() {
         payload.insert("mode".into(), json!("animate_character"));
         payload.insert("sourceClipAssetId".into(), json!("clip_1"));
         assert!(
+            scail2_candle_source_tier_eligible(&payload),
+            "default SCAIL-2 animation retains the dense bf16 Candle baseline: {payload:?}"
+        );
+        assert!(
             scail2_animate_candle_eligible("scail2_14b", &payload),
-            "scail2 animate_character must be candle-eligible: {payload:?}"
+            "the current pinned descriptor continues to admit the dense baseline: {payload:?}"
         );
     }
-    // An animate job carrying an inference LoRA (DPO / lightning / user adapter) stays on candle —
-    // the provider merges it into the dense DiT (sc-6838); only on-the-fly quant is refused.
+    // An animate job carrying an inference LoRA remains a dense bf16 flow. It is both source-ready
+    // and currently descriptor-admitted because the existing Candle provider advertises bf16.
     assert!(
         scail2_animate_candle_eligible(
             "scail2_14b",
@@ -2851,16 +2879,18 @@ fn scail2_candle_serves_animation_and_replace_in_native_shape() {
                 "loras": [{ "name": "scail2-dpo" }]
             }))
         ),
-        "scail2 animate with a LoRA must stay candle-eligible (sc-6838)"
+        "dense SCAIL-2 animate with a LoRA must stay candle-eligible"
     );
-    // Cross-identity replacement: scail2_14b PersonReplace with the clip + track + character.
+    // Cross-identity replacement follows the same dense default / descriptor gate.
+    let replace_default = object(json!({
+        "sourceClipAssetId": "clip_1",
+        "personTrackId": "track_1",
+        "characterId": "char_1"
+    }));
+    assert!(scail2_candle_source_tier_eligible(&replace_default));
     assert!(scail2_replace_candle_eligible(
         "scail2_14b",
-        &object(json!({
-            "sourceClipAssetId": "clip_1",
-            "personTrackId": "track_1",
-            "characterId": "char_1"
-        }))
+        &replace_default
     ));
     assert!(scail2_replace_candle_eligible(
         "scail2_14b",
@@ -2871,19 +2901,61 @@ fn scail2_candle_serves_animation_and_replace_in_native_shape() {
             "loras": [{ "name": "scail2-dpo" }]
         }))
     ));
-    // Through the full video claim gate: animate_character (VideoGenerate) + replace (PersonReplace).
+    // The dense adapter forms claim the full video gate, preserving animation and replacement
+    // conditioning/masks/driving-clip paths while packed tiers wait for descriptor promotion.
     assert!(video_job_is_candle_eligible(&video_generate_job(json!({
         "model": "scail2_14b",
         "mode": "animate_character",
         "referenceAssetIds": ["ref_1"],
-        "sourceClipAssetId": "clip_1"
+        "sourceClipAssetId": "clip_1",
+        "loras": [{ "name": "scail2-dpo" }]
     }))));
     assert!(video_job_is_candle_eligible(&person_replace_job(json!({
         "model": "scail2_14b",
         "sourceClipAssetId": "clip_1",
         "personTrackId": "track_1",
-        "characterId": "char_1"
+        "characterId": "char_1",
+        "loras": [{ "name": "scail2-dpo" }]
     }))));
+
+    // The resolver can consume exact packaged q4/q8 directories, but these are source-readiness
+    // proofs only until the current runtime capability artifact is regenerated from the final pin.
+    for (bits, mode_payload) in [
+        (
+            4,
+            json!({
+                "model": "scail2_14b",
+                "mode": "animate_character",
+                "referenceAssetIds": ["ref_1"],
+                "sourceClipAssetId": "clip_1"
+            }),
+        ),
+        (
+            8,
+            json!({
+                "model": "scail2_14b",
+                "sourceClipAssetId": "clip_1",
+                "personTrackId": "track_1",
+                "characterId": "char_1"
+            }),
+        ),
+    ] {
+        let mut payload = object(mode_payload);
+        payload.insert("advanced".into(), json!({ "mlxQuantize": bits }));
+        assert!(
+            scail2_candle_source_tier_eligible(&payload),
+            "q{bits} must retain its exact source package: {payload:?}"
+        );
+        let production_eligible = if payload.contains_key("mode") {
+            scail2_animate_candle_eligible("scail2_14b", &payload)
+        } else {
+            scail2_replace_candle_eligible("scail2_14b", &payload)
+        };
+        assert!(
+            !production_eligible,
+            "q{bits} must remain closed until the pinned descriptor advertises it: {payload:?}"
+        );
+    }
 }
 
 #[test]
@@ -2988,7 +3060,7 @@ fn bernini_video_candle_rejects_wrong_model_or_mode() {
 }
 
 #[test]
-fn scail2_candle_rejects_incomplete_or_wrong_shape() {
+fn scail2_candle_rejects_incomplete_wrong_or_unsupported_precision_shape() {
     // animate_character needs BOTH a reference image and a driving clip.
     assert!(!scail2_animate_candle_eligible(
         "scail2_14b",
@@ -3015,19 +3087,47 @@ fn scail2_candle_rejects_incomplete_or_wrong_shape() {
             "sourceClipAssetId": "c"
         }))
     ));
-    // On-the-fly quant is still refused (the candle SCAIL-2 provider is dense).
-    {
+    // SCAIL-2 names exact hosted tiers — q6, malformed values, and a fractional bit count cannot
+    // silently select q4/q8 or dense bf16.
+    for value in [json!(6), json!("q8"), json!(4.0)] {
         let mut payload = object(json!({
             "mode": "animate_character",
             "sourceAssetId": "i",
             "sourceClipAssetId": "c"
         }));
-        payload.insert("advanced".into(), json!({ "mlxQuantize": 8 }));
+        payload.insert("advanced".into(), json!({ "mlxQuantize": value }));
+        assert!(
+            !scail2_candle_source_tier_eligible(&payload),
+            "unsupported SCAIL-2 precision must not select any hosted package: {payload:?}"
+        );
         assert!(
             !scail2_animate_candle_eligible("scail2_14b", &payload),
-            "scail2 animate with on-the-fly quant must defer to torch: {payload:?}"
+            "unsupported SCAIL-2 precision must never select another tier: {payload:?}"
         );
     }
+    // Packed artifacts explicitly refuse adapter merging; dense bf16 (`<= 0`) retains the existing
+    // adapter route. Omitted tier is also dense once the worker sees adapters.
+    let packed_adapter = object(json!({
+        "mode": "animate_character",
+        "sourceAssetId": "i",
+        "sourceClipAssetId": "c",
+        "loras": [{ "name": "style" }],
+        "advanced": { "mlxQuantize": 4 }
+    }));
+    assert!(!scail2_animate_candle_eligible(
+        "scail2_14b",
+        &packed_adapter
+    ));
+    assert!(!scail2_candle_source_tier_eligible(&packed_adapter));
+    let dense_adapter = object(json!({
+        "mode": "animate_character",
+        "sourceAssetId": "i",
+        "sourceClipAssetId": "c",
+        "loras": [{ "name": "style" }],
+        "advanced": { "mlxQuantize": 0 }
+    }));
+    assert!(scail2_candle_source_tier_eligible(&dense_adapter));
+    assert!(scail2_animate_candle_eligible("scail2_14b", &dense_adapter));
     // replace_person needs the clip + track + character; missing any makes it ineligible.
     for case in [
         json!({ "sourceClipAssetId": "c", "personTrackId": "t" }),

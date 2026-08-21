@@ -514,12 +514,27 @@ fn candle_refuses_user_lora(model: &str, payload: &Map<String, Value>) -> bool {
 }
 
 /// Some families admit quant and adapters independently without proving their composition.
-/// Chroma is the current case: dense LoRA/LoKr remains supported, q4/q8 tier selection is supported,
-/// but an adapter on packed codes must fail closed until the engine advertises and validates it.
 fn candle_refuses_quant_lora_combination(model: &str, payload: &Map<String, Value>) -> bool {
-    candle_family_serves_quant(model)
-        && candle_family_serves_lora(model)
-        && !candle_family_serves_quant_lora(model)
+    candle_quant_lora_combination_is_unsupported(
+        candle_family_serves_quant(model),
+        candle_family_serves_lora(model),
+        candle_family_serves_quant_lora(model),
+        payload,
+    )
+}
+
+/// Pure decision seam for the deliberate standalone-quant + standalone-adapter catalog shape.
+/// Keeping this independent of a currently promoted model lets the staged Chroma catalog remain
+/// fail-closed while the composition rule stays directly testable.
+pub(crate) fn candle_quant_lora_combination_is_unsupported(
+    serves_quant: bool,
+    serves_lora: bool,
+    serves_quant_lora: bool,
+    payload: &Map<String, Value>,
+) -> bool {
+    serves_quant
+        && serves_lora
+        && !serves_quant_lora
         && candle_request_wants_quant(payload)
         && has_nonempty_array(payload, "loras")
 }
@@ -542,9 +557,9 @@ fn candle_refuses_phases(_model: &str, payload: &Map<String, Value>) -> bool {
 /// (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
 /// families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
 /// stay on candle. For the packed families the `mlxQuantize` value is a turnkey tier-SELECT (which
-/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize. Chroma
-/// has exactly those two published packed directories, so it additionally rejects a non-q4/q8 value
-/// instead of letting the downstream directory resolver reinterpret it as another tier.
+/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize. Once
+/// Chroma's staged catalog promotion lands, it has exactly those two published packed directories,
+/// so a non-q4/q8 value remains refused instead of reaching the downstream directory resolver.
 fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool {
     let Some(bits) = candle_requested_quant_bits(payload) else {
         return false;
@@ -913,14 +928,53 @@ pub(crate) fn video_request_candle_vace_eligible(
     true
 }
 
+/// The exact hosted tier this SCAIL-2 request can use, or `None` for a malformed/unsupported
+/// precision. Absence retains the established dense bf16 Candle baseline; q4/q8 are exact explicit
+/// package selections. This is deliberately stricter than the historical MLX range mapping: q6
+/// must not silently select q4/q8.
+fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static str> {
+    let value = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"));
+    match value {
+        None | Some(Value::Null) => Some("bf16"),
+        Some(value) => match value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+        {
+            Some(..=0) => Some("bf16"),
+            Some(4) => Some("q4"),
+            Some(8) => Some("q8"),
+            _ => None,
+        },
+    }
+}
+
+/// Source/package readiness only: the request selects one exact tier and never asks the packed
+/// provider to merge an adapter. Production routing additionally requires the pinned Candle
+/// descriptor to advertise that tier; keeping those checks separate lets an audited hosted package
+/// exist before the final runtime-facts/pin promotion without turning stale facts into a claim.
+pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -> bool {
+    let has_adapters = payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty());
+    let Some(tier) = scail2_candle_effective_tier(payload) else {
+        return false;
+    };
+    !has_adapters || tier == "bf16"
+}
+
 /// Candle SCAIL-2 `animate_character` eligibility (sc-6837, epic 6563). SCAIL-2 is a DISTINCT candle
 /// engine (NOT Wan-VACE), so it has its own gate rather than membership in [`CANDLE_VIDEO_VACE_MODELS`]:
 /// the `scail2_14b` model + the `animate_character` mode + a reference character image
 /// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
-/// Inference LoRA / LoKr / LoHa + the Bias-Aware DPO LoRA + the lightx2v lightning diff-patch ARE on the
-/// candle path now (sc-6838 — the provider merges them into the dense DiT), so a LoRA-bearing animate job
-/// stays on candle. On-the-fly quantization is refused and remains queued (the provider is dense). Mirrors the
-/// MLX `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
+/// The exact q4/q8 hosted artifacts and dense bf16 tier are source-ready; unsupported or malformed
+/// precision requests fail closed. Production also consults the pinned Candle descriptor, so q4/q8
+/// remain unclaimed until their runtime fact row is promoted. Packed tiers refuse adapters, while a
+/// dense adapter request is preserved and resolved to bf16 by the worker. Mirrors the MLX
+/// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "scail2_14b" {
@@ -938,19 +992,19 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
     if !has_nonempty_string(payload, "sourceClipAssetId") {
         return false;
     }
-    // Inference LoRA (DPO / lightning / user adapter) merges into the candle DiT (sc-6838), so a
-    // LoRA-bearing animate job is candle-eligible — only on-the-fly quant is still refused.
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
+    scail2_candle_source_tier_eligible(payload)
+        && super::matrix::candle_video_descriptor_supports_quant(
+            model,
+            "animate_character",
+            scail2_candle_effective_tier(payload).expect("source eligibility chose a tier"),
+        )
 }
 
 /// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
 /// `PersonReplace` job: the source control clip + the tracked person + the character references (the
 /// same per-mode assets the Wan-VACE replace gate requires). Inference adapters use the same provider
-/// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch); only on-the-fly quant remains
-/// unsupported. A distinct candle engine, so it is gated here rather than
+/// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch) on dense bf16 only; the exact
+/// q4/q8 package tiers reject adapter merging. A distinct candle engine, so it is gated here rather than
 /// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
 pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "scail2_14b" {
@@ -962,10 +1016,12 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
     {
         return false;
     }
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
+    scail2_candle_source_tier_eligible(payload)
+        && super::matrix::candle_video_descriptor_supports_quant(
+            model,
+            "replace_person",
+            scail2_candle_effective_tier(payload).expect("source eligibility chose a tier"),
+        )
 }
 
 /// Candle Bernini VIDEO eligibility (sc-10997, epic 6562). Bernini is a DISTINCT candle engine (the

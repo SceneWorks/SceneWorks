@@ -827,7 +827,9 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
         ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();
-            if candle_family_serves_quant(model) {
+            if matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")
+                && candle_family_serves_quant(model)
+            {
                 return UnsupportedReason::new(
                     Some(model),
                     &format!("unsupported q{bits} packed Candle tier"),
