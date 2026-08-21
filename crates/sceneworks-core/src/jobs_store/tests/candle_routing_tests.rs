@@ -2523,10 +2523,29 @@ fn candle_video_tier_selects_match_published_platform_tiers() {
         "ltx_2_3",
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
     ));
-    assert!(!video_request_candle_eligible(
+    assert!(video_request_candle_eligible(
         "ltx_2_3",
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
     ));
+    for invalid_tier in [
+        json!(0),
+        json!(5),
+        json!(7),
+        json!(9),
+        json!("8.0"),
+        json!("bf16"),
+    ] {
+        assert!(
+            !video_request_candle_eligible(
+                "ltx_2_3",
+                &object(json!({
+                    "mode": "text_to_video",
+                    "advanced": { "mlxQuantize": invalid_tier.clone() }
+                }))
+            ),
+            "LTX Candle has only the published q4/q8 packed tiers; {invalid_tier} must fail closed"
+        );
+    }
     assert!(!video_request_candle_eligible(
         "ltx_2_3_eros",
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
@@ -2571,6 +2590,18 @@ fn candle_ltx_replace_is_model_native_and_requires_its_ic_adapter() {
         "ltx_2_3",
         &object(shape.clone())
     ));
+    let mut q8_shape = object(shape.clone());
+    q8_shape.insert("advanced".into(), json!({ "mlxQuantize": 8 }));
+    assert!(
+        ltx_replace_candle_eligible("ltx_2_3", &q8_shape),
+        "the q8 LTX turnkey tier must preserve native replacement routing"
+    );
+    let mut invalid_tier_shape = object(shape.clone());
+    invalid_tier_shape.insert("advanced".into(), json!({ "mlxQuantize": 0 }));
+    assert!(
+        !ltx_replace_candle_eligible("ltx_2_3", &invalid_tier_shape),
+        "LTX Candle replacement must fail closed for its unsupported dense/bf16 request"
+    );
     let mut payload = object(shape.clone());
     payload.insert("model".into(), json!("ltx_2_3"));
     assert!(video_job_is_candle_eligible(&person_replace_job(

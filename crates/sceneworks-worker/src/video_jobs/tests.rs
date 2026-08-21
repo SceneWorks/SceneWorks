@@ -11850,15 +11850,28 @@ mod candle_video_label_tests {
     }
 
     #[test]
-    fn candle_ltx_resolves_the_shared_q4_turnkey_tier_only_for_the_base_model() {
+    fn candle_ltx_resolves_the_exact_requested_packed_tier_only_for_the_base_model() {
         let temp = tempfile::tempdir().expect("tempdir");
         let q4 = temp.path().join("q4");
+        let q8 = temp.path().join("q8");
         std::fs::create_dir_all(&q4).expect("q4");
+        std::fs::create_dir_all(&q8).expect("q8");
         std::fs::write(q4.join("transformer.safetensors"), "x").expect("transformer");
         std::fs::write(q4.join("quantize_config.json"), "{}").expect("quant config");
+        std::fs::write(q8.join("transformer.safetensors"), "x").expect("transformer");
+        std::fs::write(q8.join("quantize_config.json"), "{}").expect("quant config");
 
-        let (resolved, quant) = candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3")
-            .expect("base LTX q4 tier");
+        let q4_request = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 4 }
+        }));
+        let q8_request = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 8 }
+        }));
+        let default_request = request(json!({ "projectId": "p", "model": "ltx_2_3" }));
+
+        let (resolved, quant) =
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q4_request)
+                .expect("base LTX q4 tier");
         assert_eq!(resolved, q4);
         assert_eq!(
             quant, None,
@@ -11880,15 +11893,147 @@ mod candle_video_label_tests {
             spec.quantize.is_none(),
             "production LTX provider spec must load the pre-packed q4 tier with quantize=None"
         );
+        let (resolved_q8, q8_quant) =
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q8_request)
+                .expect("base LTX q8 tier");
+        assert_eq!(resolved_q8, q8, "an explicit q8 request must select q8");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3_eros").is_none(),
+            q8_quant.is_none(),
+            "the pre-packed q8 tier must not request a second load-time quantization"
+        );
+        assert_eq!(
+            candle_ltx_tier_subdir(
+                temp.path(),
+                "ltx_2_3_distilled",
+                "ltx_2_3",
+                &default_request,
+            )
+            .map(|(dir, _)| dir),
+            Some(q4.clone()),
+            "the no-override default remains q4"
+        );
+        for invalid_tier in [0, 5, 7, 9] {
+            let invalid = request(json!({
+                "projectId": "p", "model": "ltx_2_3",
+                "advanced": { "mlxQuantize": invalid_tier }
+            }));
+            assert!(
+                candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &invalid)
+                    .is_none(),
+                "unsupported LTX Candle tier {invalid_tier} must fail closed"
+            );
+        }
+        assert!(
+            candle_ltx_tier_subdir(
+                temp.path(),
+                "ltx_2_3_distilled",
+                "ltx_2_3_eros",
+                &q4_request,
+            )
+            .is_none(),
             "Eros stays on its dense standalone checkpoint"
         );
 
+        std::fs::remove_file(q8.join("quantize_config.json")).expect("tear q8 tier");
+        assert!(
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q8_request,)
+                .is_none(),
+            "an explicit q8 request must never silently select q4"
+        );
         std::fs::remove_file(q4.join("quantize_config.json")).expect("tear tier");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3").is_none(),
+            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q4_request,)
+                .is_none(),
             "a partial q4 tier is never selected"
+        );
+
+        let split = tempfile::tempdir().expect("split cache");
+        let snapshots = split.path().join("snapshots");
+        let prior = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        for (dir, tier) in [(&prior, "q4"), (&current, "q8")] {
+            let tier_dir = dir.join(tier);
+            std::fs::create_dir_all(&tier_dir).expect("tier dir");
+            std::fs::write(tier_dir.join("transformer.safetensors"), "x").expect("transformer");
+            std::fs::write(tier_dir.join("quantize_config.json"), "{}").expect("quant marker");
+        }
+        assert_eq!(
+            candle_ltx_tier_subdir(&prior, "ltx_2_3_distilled", "ltx_2_3", &q8_request)
+                .map(|(dir, _)| dir),
+            Some(current.join("q8")),
+            "an on-demand q8 tier in the current revision must beat q4 in the selected prior revision"
+        );
+    }
+
+    #[test]
+    fn candle_ltx_q8_fetch_is_on_demand_and_never_required_when_complete() {
+        fn block_on<F: std::future::Future>(future: F) -> F::Output {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(future)
+        }
+
+        let hub = tempfile::tempdir().expect("hub");
+        let snapshot = hub
+            .path()
+            .join(format!(
+                "models--{}",
+                sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("repo slug")
+            ))
+            .join("snapshots")
+            .join(LTX_BUNDLE_REVISION);
+        for tier in ["q4", "q8"] {
+            let dir = snapshot.join(tier);
+            std::fs::create_dir_all(&dir).expect("tier dir");
+            std::fs::write(dir.join("transformer.safetensors"), "x").expect("transformer");
+            std::fs::write(dir.join("quantize_config.json"), "{}").expect("quant marker");
+        }
+        let data = tempfile::tempdir().expect("data");
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-candle-ltx-q8", "type": "video_generate", "status": "running",
+            "projectId": "p", "projectName": "P", "payload": { "model": "ltx_2_3" },
+            "result": {}, "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0, "stage": "queued", "message": "", "error": null, "etaSeconds": null,
+            "attempts": 1, "cancelRequested": false,
+            "createdAt": "2026-08-13T00:00:00Z", "updatedAt": "2026-08-13T00:00:00Z"
+        }))
+        .expect("job snapshot");
+        let q8 = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 8 }
+        }));
+
+        let cached = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            cached.is_ok(),
+            "a complete q8 tier must skip the network: {cached:?}"
+        );
+
+        std::fs::remove_file(snapshot.join("q8/quantize_config.json")).expect("tear q8");
+        let missing = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            missing.is_err(),
+            "an incomplete q8 tier must attempt its q8/* on-demand fetch instead of loading q4"
         );
     }
 

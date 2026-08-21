@@ -785,11 +785,23 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
-    // LTX base's shared packed-q4 turnkey. Other video providers remain dense and fail closed.
-    if candle_request_wants_quant(payload) && !candle_video_tier_select_eligible(model, payload) {
+    // base LTX's packed q4/q8 Candle turnkey. LTX intentionally has no dense/bf16 Candle tier, so
+    // any explicit value must be one of its two published tiers. Other video providers remain dense
+    // and fail closed for positive quant requests.
+    let ltx_explicit_tier = model == "ltx_2_3" && candle_ltx_has_explicit_tier(payload);
+    if (candle_request_wants_quant(payload) || ltx_explicit_tier)
+        && !candle_video_tier_select_eligible(model, payload)
+    {
         return false;
     }
     true
+}
+
+fn candle_ltx_has_explicit_tier(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| advanced.contains_key("mlxQuantize"))
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -806,7 +818,7 @@ fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) 
                     .as_i64()
                     .or_else(|| value.as_str()?.trim().parse().ok())
             })
-            == Some(4)
+            .is_some_and(|bits| matches!(bits, 4 | 8))
 }
 
 /// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
@@ -827,7 +839,7 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
     {
         return false;
     }
-    !candle_request_wants_quant(payload) || candle_video_tier_select_eligible(model, payload)
+    !candle_ltx_has_explicit_tier(payload) || candle_video_tier_select_eligible(model, payload)
 }
 
 /// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
