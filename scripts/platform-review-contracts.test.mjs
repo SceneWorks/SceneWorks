@@ -208,7 +208,7 @@ test("windows-candle enforces GitHub's current 25-input workflow_dispatch ceilin
     (_, index) => `      mutation_input_${index}:\n        type: boolean\n        default: false\n`,
   ).join("");
   const overLimit = workflow.replace("      run_sc19057_wan_capture:\n", `${extra}      run_sc19057_wan_capture:\n`);
-  assert.throws(() => assertDispatchInputLimit(overLimit), /at most 25 inputs, found 35/);
+  assert.throws(() => assertDispatchInputLimit(overLimit), /at most 25 inputs, found 36/);
 });
 
 test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
@@ -305,7 +305,7 @@ test("windows-candle keeps the provisioning and five-rung timeout budgets", asyn
     workflow,
     // The LTX Eros acceptance arm (SC-18902, from main) rides ahead of the provisioning budget;
     // the provisioning / five-rung / default budgets keep their exact prior values behind it.
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_ltx_eros_acceptance \|\| inputs\.run_sc19057_wan_capture\) && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_ltx_eros_acceptance \|\| inputs\.run_sc19057_wan_capture\) && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
   );
 });
 
@@ -362,7 +362,7 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   // `real-weights`; a provisioning job on the other half finds no snapshot.
   assert.match(
     candle,
-    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19057_wan_capture\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19054_flux_acceptance \|\| inputs\.run_sc19057_wan_capture\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
   );
   // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
   // available pool for this ~24m lane in half for no coverage.
@@ -656,12 +656,12 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   const workflow = await source(".github/workflows/windows-candle.yml");
 
   // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true AND
-  // neither real execution mode selected; every other shape must still compile. Half of this is
-  // not a weaker version of it -- dropping either negative arm would strip the compile chain off
-  // that real capture, and dropping `github.event_name == 'workflow_dispatch'` would strip it off
-  // every PR and push.
+  // neither provisioning-backed execution mode selected; every other shape must still compile.
+  // Half of this is not a weaker version of it -- dropping any negative arm would strip the
+  // compile chain off that real capture, and dropping `github.event_name == 'workflow_dispatch'`
+  // would strip it off every PR and push.
   const skip =
-    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference && !inputs\.run_sc19057_wan_capture\) \}\}$/m;
+    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference && !inputs\.run_sc19054_flux_acceptance && !inputs\.run_sc19057_wan_capture\) \}\}$/m;
 
   // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
   // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
@@ -678,10 +678,184 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   for (const step of jobSteps(workflow).filter((candidate) => candidate.cargo)) {
     assert.ok(
       skip.test(step.body) ||
-        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance|run_sc19057_wan_capture)/.test(step.body),
+        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance|run_sc19054_flux_acceptance|run_sc19057_wan_capture)/.test(step.body),
       `${step.name} would compile on a weights-only dispatch; guard it or gate it`,
     );
   }
+});
+
+function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-19054") {
+  const { names } = dispatchInputs(workflow);
+  assert.ok(names.includes("run_sc19054_flux_acceptance"), `${context}: dispatch input missing`);
+  assert.match(
+    workflow,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19054_flux_acceptance \|\| inputs\.run_sc19057_wan_capture\)\)/,
+    `${context}: real-weight runner routing drifted`,
+  );
+
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  for (const exact of [
+    "run_sc19054_flux_acceptance requires provision_snapshot=true",
+    "4013049764172ee7dc707101c7da8c83c1483f2d",
+    "SceneWorks/flux1-schnell-mlx",
+    "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+    "q4/**",
+    "INFERENCE_RUNTIME_REVISION",
+  ]) {
+    assert.ok(validate.includes(exact), `${context}: dispatch validation lost ${exact}`);
+  }
+  assert.match(
+    validate,
+    /if \(\$env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true'\) \{ \$selectedModes \+= 'run_sc19054_flux_acceptance' \}/,
+    `${context}: acceptance modes must be mutually exclusive`,
+  );
+  assert.match(validate, /if \(\$selectedModes\.Count -gt 1\)/);
+
+  const seal = stepBody(workflow, "Seal the SC-19054 FLUX acceptance identity");
+  for (const exact of [
+    "git rev-parse HEAD",
+    "$head -ne $env:GITHUB_SHA",
+    "nvidia-smi --query-gpu=name,uuid,driver_version,memory.total",
+    "Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256",
+    "SC19054_FLUX_Q4_ROOT=$env:SCENEWORKS_PROVISIONED_ROOT",
+  ]) {
+    assert.ok(seal.includes(exact), `${context}: identity receipt lost ${exact}`);
+  }
+  const evidencePath = seal.indexOf(
+    '$evidence = Join-Path $env:RUNNER_TEMP "sc19054-flux-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"',
+  );
+  const evidenceExport = seal.indexOf(
+    '"SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+  );
+  const firstFailableSealCheck = seal.indexOf("if (Test-Path -LiteralPath $evidence)");
+  assert.ok(
+    evidencePath >= 0 &&
+      evidencePath < evidenceExport &&
+      evidenceExport < firstFailableSealCheck,
+    `${context}: bounded evidence path must reach GITHUB_ENV before any seal check or mkdir can fail`,
+  );
+  const run = stepBody(workflow, "Run the exact SC-19054 admission-to-FLUX render");
+  assert.match(
+    run,
+    /cargo test -p sceneworks-worker --features backend-candle --lib sc19054_flux_acceptance::sc19054_flux_candle_acceptance -- --ignored --exact --nocapture/,
+    `${context}: workflow no longer invokes the exact ignored product test`,
+  );
+  assert.match(run, /SCENEWORKS_CUDA_VRAM_CAP_GB: "24"/, `${context}: runtime cap drifted`);
+  const verify = stepBody(workflow, "Verify and hash the SC-19054 acceptance evidence");
+  for (const exact of [
+    "$events.Count -ne 1",
+    "$event.modelId -ne 'flux_schnell'",
+    "$event.engineId -ne 'flux1_schnell'",
+    "$event.tier -ne 'q4'",
+    "$event.geometry.width -ne 1024",
+    "$event.budgetGb -ne 24",
+    "$event.sequentialCapable -ne $true",
+    "$event.oldPlan -ne 'resident'",
+    "$event.selectedPlan -ne 'sequential'",
+    "$event.widenedResidentPeakGb -ne 24.232",
+    "$event.widenedSequentialPeakGb -ne 21.216",
+    "$receipt.runtime.stageResidency -ne $true",
+    "$receipt.runtime.backend -ne 'candle'",
+    "$receipt.runtime.vramCapGb -ne 24",
+    "Get-FileHash -LiteralPath $imagePath -Algorithm SHA256",
+  ]) {
+    assert.ok(verify.includes(exact), `${context}: evidence verifier lost ${exact}`);
+  }
+  assert.match(
+    stepBody(workflow, "Upload the SC-19054 FLUX acceptance evidence"),
+    /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance \}\}/,
+  );
+  const cleanup = stepBody(workflow, "Clean up the SC-19054 FLUX acceptance scratch");
+  assert.match(
+    cleanup,
+    /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance \}\}/,
+  );
+  assert.match(cleanup, /\$env:SC19054_EVIDENCE_DIR/);
+  assert.match(cleanup, /StartsWith\('sc19054-flux-acceptance-'\)/);
+
+  for (const exact of [
+    'const MODEL_ID: &str = "flux_schnell";',
+    'const ENGINE_ID: &str = "flux1_schnell";',
+    'const TIER: &str = "q4";',
+    "const WIDTH: u32 = 1024;",
+    "const HEIGHT: u32 = 1024;",
+    "const BUDGET_GB: f64 = 24.0;",
+    "candle_scalar_gate::predicted_peak_gb_for_request(",
+    "candle_scalar_gate::predicted_sequential_peak_gb_for_request(",
+    "spec.quantize.is_none()",
+    "stage_residency: true",
+    "let stage_residency = execution.memory.stage_residency;",
+    '"stageResidency": stage_residency',
+    "crate::inference_runtime::media_descriptor(ENGINE_ID)",
+    'assert_eq!(descriptor.backend, "candle", "acceptance requires Candle");',
+    'crate::inference_runtime::load(ENGINE_ID, &execution.spec)',
+    "memory: Some(execution.memory)",
+    ".generate(&request,",
+  ]) {
+    assert.ok(rust.includes(exact), `${context}: Rust route lost ${exact}`);
+  }
+  const descriptor = rust.indexOf("crate::inference_runtime::media_descriptor(ENGINE_ID)");
+  const admission = rust.indexOf(
+    "let admission = admission_contract(descriptor.capabilities.supports_sequential_offload);",
+    descriptor,
+  );
+  const spec = rust.indexOf("let execution = acceptance_execution(&root, admission);", admission);
+  const load = rust.indexOf("crate::inference_runtime::load(ENGINE_ID, &execution.spec)", spec);
+  const requestMemory = rust.indexOf("memory: Some(execution.memory)", load);
+  const generate = rust.indexOf(".generate(&request,", requestMemory);
+  assert.ok(
+    descriptor >= 0 && descriptor < admission && admission < spec && spec < load && load < requestMemory && requestMemory < generate,
+    `${context}: linked capability admission must construct the packed load and request-scoped residency`,
+  );
+}
+
+test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle render", async () => {
+  const documents = {
+    workflow: await source(".github/workflows/windows-candle.yml"),
+    rust: await source("crates/sceneworks-worker/src/sc19054_flux_acceptance.rs"),
+  };
+  assertSc19054FluxAcceptanceContract(documents);
+
+  const mutations = [
+    ["wrong repository", "workflow", "SceneWorks/flux1-schnell-mlx", "SceneWorks/other-model"],
+    ["wrong inference pin", "workflow", "4013049764172ee7dc707101c7da8c83c1483f2d", "0000000000000000000000000000000000000000"],
+    ["wrong tier", "rust", 'const TIER: &str = "q4";', 'const TIER: &str = "q8";'],
+    ["wrong geometry", "rust", "const WIDTH: u32 = 1024;", "const WIDTH: u32 = 768;"],
+    ["wrong cap", "rust", "const BUDGET_GB: f64 = 24.0;", "const BUDGET_GB: f64 = 32.0;"],
+    ["wrong engine", "rust", 'const ENGINE_ID: &str = "flux1_schnell";', 'const ENGINE_ID: &str = "flux1_dev";'],
+    ["on-the-fly quantization", "rust", "spec.quantize.is_none()", "spec.quantize.is_some()"],
+    ["resident request", "rust", "stage_residency: true", "stage_residency: false"],
+    ["fake residency receipt", "rust", '"stageResidency": stage_residency', '"stageResidency": true'],
+    ["hardcoded sequential capability", "rust", "admission_contract(descriptor.capabilities.supports_sequential_offload)", "admission_contract(true)"],
+    ["disconnected admission", "rust", "let execution = acceptance_execution(&root, admission);", "let execution = acceptance_execution(&root, admission_contract(true));"],
+    ["request drops selected memory", "rust", "memory: Some(execution.memory)", "memory: None"],
+  ];
+  for (const [name, key, from, to] of mutations) {
+    const mutated = { ...documents, [key]: documents[key].replaceAll(from, to) };
+    assert.notEqual(mutated[key], documents[key], `${name}: mutation did not apply`);
+    assert.throws(
+      () => assertSc19054FluxAcceptanceContract(mutated, name),
+      undefined,
+      `${name} must be killed by the acceptance contract`,
+    );
+  }
+
+  const earlyExport =
+    '          "SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append\n';
+  const firstFailableSealCheck = "          if (Test-Path -LiteralPath $evidence) {\n";
+  const lateExportWorkflow = documents.workflow
+    .replace(earlyExport, "")
+    .replace(firstFailableSealCheck, `${firstFailableSealCheck}${earlyExport}`);
+  assert.notEqual(lateExportWorkflow, documents.workflow, "late evidence export mutation did not apply");
+  assert.throws(
+    () =>
+      assertSc19054FluxAcceptanceContract(
+        { ...documents, workflow: lateExportWorkflow },
+        "late evidence export",
+      ),
+    /bounded evidence path must reach GITHUB_ENV/,
+    "cleanup must retain the attempt path when the first failable seal check aborts",
+  );
 });
 
 // sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With
@@ -700,8 +874,9 @@ test("every failure mode a weights-only dispatch can hit is still fatal", async 
     // repo-id shape, revision shape, empty allow-list, rooted pattern, the two containment guards
     // (segment shape + canonical probe), subdir shape, subdir traversal, cache-dir newline,
     // cache-dir absoluteness; the three five-rung guards (inference_revision shape, the fixed Krea
-    // repository, INFERENCE_PIN agreement); mutual exclusion; and six exact SC-19057 guards.
-    "Validate dispatch inputs": 20,
+    // repository, INFERENCE_PIN agreement); mutual exclusion; six exact SC-19057 guards; and six
+    // exact SC-19054 artifact/pin/provider guards.
+    "Validate dispatch inputs": 26,
     // Pure derivation: it writes GITHUB_ENV and throws nothing.
     "Resolve snapshot provisioning parameters": 0,
     // A non-zero `python --version`, and a minor version below 12.

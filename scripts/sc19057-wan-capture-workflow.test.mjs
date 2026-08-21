@@ -28,7 +28,7 @@ function assertWorkflowContract(workflow) {
   assert.match(workflow, /^ {6}run_sc19057_wan_capture:$/m);
   assert.match(
     workflow,
-    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19057_wan_capture\)\)/,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19054_flux_acceptance \|\| inputs\.run_sc19057_wan_capture\)\)/,
   );
   assert.match(
     workflow,
@@ -40,6 +40,7 @@ function assertWorkflowContract(workflow) {
   assert.deepEqual(realModes, [
     "run_five_rung_reference",
     "run_ltx_eros_acceptance",
+    "run_sc19054_flux_acceptance",
     "run_sc19057_wan_capture",
   ]);
   for (const mode of realModes) {

@@ -202,6 +202,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_sc19054_flux_acceptance:
+        description: "Run the SC-19054 FLUX.1 Schnell q4 1024x1024 admission-to-render acceptance"
+        required: false
+        type: boolean
+        default: false
       run_sc19057_wan_capture:
         description: "Capture the exact SC-19057 Wan q4 six-row runtime-complete terminal bundle"
         required: false
@@ -330,7 +335,7 @@ jobs:
     # correct the day a `cuda` runner is added on a second machine: without it the job lands on a
     # box with no snapshot and fails at the resolve step, which is loud but wasteful; with it the
     # job simply queues for a box that has the weights.
-    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_sc19057_wan_capture)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_sc19054_flux_acceptance || inputs.run_sc19057_wan_capture)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
@@ -351,7 +356,8 @@ jobs:
     # five-rung + provision 240, five-rung alone 120, everything else 45.
     # The LTX Eros acceptance capture (sc-18902, from main) and SC-19057's six cold Wan loads plus
     # warm repeats each keep GitHub's maximum six-hour job ceiling ahead of provisioning.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_ltx_eros_acceptance || inputs.run_sc19057_wan_capture) && 360 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
+    # SC-19054's one real FLUX render retains the provisioning-sized four-hour ceiling.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_ltx_eros_acceptance || inputs.run_sc19057_wan_capture) && 360 || github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance && 240 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PROVISIONING RUNS BEFORE ANY CARGO INVOCATION (sc-18691). It used to sit BELOW the three
@@ -422,6 +428,7 @@ jobs:
         shell: powershell
         env:
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          RUN_SC19054_FLUX_ACCEPTANCE: ${{ inputs.run_sc19054_flux_acceptance }}
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
           RUN_SC19057_WAN_CAPTURE: ${{ inputs.run_sc19057_wan_capture }}
           PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
@@ -438,6 +445,7 @@ jobs:
           $selectedModes = @()
           if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true') { $selectedModes += 'run_five_rung_reference' }
           if ($env:RUN_LTX_EROS_ACCEPTANCE -eq 'true') { $selectedModes += 'run_ltx_eros_acceptance' }
+          if ($env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true') { $selectedModes += 'run_sc19054_flux_acceptance' }
           if ($env:RUN_SC19057_WAN_CAPTURE -eq 'true') { $selectedModes += 'run_sc19057_wan_capture' }
           if ($selectedModes.Count -gt 1) {
             throw "real-weight execution modes are mutually exclusive: $($selectedModes -join ', ')"
@@ -521,6 +529,27 @@ jobs:
               if ($env:PROVISION_CACHE_DIR_INPUT -notmatch '^[A-Za-z]:\\') {
                 throw 'provision_cache_dir must be an absolute path with a drive letter'
               }
+            }
+          }
+          if ($env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true') {
+            if ($env:PROVISION_SNAPSHOT -ne 'true') {
+              throw 'run_sc19054_flux_acceptance requires provision_snapshot=true so the exact public artifact is resolved before loading'
+            }
+            if ($env:INFERENCE_REVISION -ne '4013049764172ee7dc707101c7da8c83c1483f2d') {
+              throw 'SC-19054 requires the exact pinned inference revision 4013049764172ee7dc707101c7da8c83c1483f2d'
+            }
+            if ($env:PROVISION_REPOSITORY -ne 'SceneWorks/flux1-schnell-mlx') {
+              throw 'SC-19054 requires the exact public SceneWorks/flux1-schnell-mlx artifact repository'
+            }
+            if ($env:PROVISION_REVISION -ne 'bba3ae01dfd94089f173c05edd4e1a4c551f2599') {
+              throw 'SC-19054 requires the exact FLUX.1 Schnell artifact revision bba3ae01dfd94089f173c05edd4e1a4c551f2599'
+            }
+            if ($env:PROVISION_PATTERNS -ne 'q4/**' -or $env:PROVISION_SUBDIR -ne 'q4') {
+              throw 'SC-19054 requires the packed q4/** artifact rooted at the q4 tier'
+            }
+            $workerPin = Select-String -Path 'crates/sceneworks-worker/src/catalog_semantic_jobs.rs' -Pattern '^pub\(crate\) const INFERENCE_RUNTIME_REVISION: &str = "([0-9a-f]{40})";$'
+            if (-not $workerPin -or $workerPin.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
+              throw "input inference_revision does not match the worker's compiled INFERENCE_RUNTIME_REVISION"
             }
           }
           if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_SC19057_WAN_CAPTURE -eq 'true') {
@@ -787,7 +816,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
       # THE COMPILE CHAIN, skipped for a weights-only dispatch (sc-18691). The condition names
       # exactly one dispatch shape -- `provision_snapshot` true with neither the five-rung nor the
-      # SC-19057 execution mode selected -- and excludes only that. Everything else is untouched:
+      # SC-19054/SC-19057 execution modes selected -- and excludes only that. Everything else is untouched:
       # PR and push runs (`github.event_name` is not `workflow_dispatch`, so the inner conjunction is
       # false), a plain no-input dispatch, and every selected execution mode.
       #
@@ -800,7 +829,7 @@ jobs:
       # byte-identical neighbours are precisely why that scoping exists: sc-18677's third review
       # round found three narrowing mutations green against a file-wide `assert.match`.
       - name: Fetch the pinned inference release
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19057_wan_capture) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
@@ -812,7 +841,7 @@ jobs:
       # rejects). Load the BuildTools vcvars in-shell, then build+test in the same
       # cmd invocation so the toolchain env survives (each step is a fresh shell).
       - name: Test the candle GPU worker (backend-candle)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19057_wan_capture) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -831,7 +860,7 @@ jobs:
       # release.yml package builds, where web/dist exists. (Release-only codegen/link
       # breaks also still surface first in those builds.)
       - name: Check the candle sidecar builds (rust-api, backend-candle)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19057_wan_capture) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -853,7 +882,7 @@ jobs:
       # ran in zero lanes on either platform. The CHECK step above it keeps its selector on purpose:
       # it is the production-typecheck half and the lib compiles on every platform anyway.
       - name: Check and test the candle memory adapter (lib + memory-candle-adapter)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19057_wan_capture) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -903,12 +932,154 @@ jobs:
             ${{ runner.temp }}/sc-16059-candle-reuse-comparison.json
           if-no-files-found: error
       - name: Clippy (candle worker)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19057_wan_capture) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings
+      # SC-19054 terminal acceptance. This stays explicit and dispatch-only: it hashes and loads
+      # real packed FLUX weights, so it must never join the ordinary PR/push lane. The ignored Rust
+      # test owns both sides of the proof: the production admission result constructs the exact
+      # LoadSpec consumed by the pinned Candle provider before one 1024x1024 image is rendered.
+      - name: Seal the SC-19054 FLUX acceptance identity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance }}
+        shell: powershell
+        env:
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          FLUX_REVISION: ${{ inputs.provision_revision }}
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP "sc19054-flux-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          # Export the bounded attempt path before any check or mkdir can fail. The always upload
+          # and cleanup steps must still be able to find scratch left by an interrupted seal.
+          "SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (Test-Path -LiteralPath $evidence) {
+            throw "refusing stale SC-19054 evidence directory: $evidence"
+          }
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          $output = Join-Path $evidence 'output'
+          New-Item -ItemType Directory -Path $output | Out-Null
+          $head = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) {
+            throw "checked-out SceneWorks head $head does not match workflow head $env:GITHUB_SHA"
+          }
+          $status = @(git status --porcelain)
+          if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
+            throw "the checked-out SceneWorks tree is not clean before acceptance: $($status -join '; ')"
+          }
+          $gpu = @(& nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader)
+          if ($LASTEXITCODE -ne 0 -or $gpu.Count -lt 1) {
+            throw 'nvidia-smi did not return a CUDA GPU identity'
+          }
+          $modelFiles = @(Get-ChildItem -LiteralPath $env:SCENEWORKS_PROVISIONED_ROOT -File -Recurse |
+            Sort-Object FullName)
+          if ($modelFiles.Count -lt 1) {
+            throw "the exact packed q4 root contains no files: $env:SCENEWORKS_PROVISIONED_ROOT"
+          }
+          $modelHashes = foreach ($file in $modelFiles) {
+            [ordered]@{
+              path = $file.FullName.Substring($env:SCENEWORKS_PROVISIONED_ROOT.Length).TrimStart('\\')
+              bytes = $file.Length
+              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          }
+          $modelHashes | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidence 'model-files.json') -Encoding utf8
+          $identity = [ordered]@{
+            story = 'SC-19054'
+            workflowRunId = $env:GITHUB_RUN_ID
+            workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
+            sceneWorksRepository = $env:GITHUB_REPOSITORY
+            sceneWorksRevision = $head
+            inferenceRevision = $env:INFERENCE_REVISION
+            modelRepository = 'SceneWorks/flux1-schnell-mlx'
+            modelRevision = $env:FLUX_REVISION
+            modelTier = 'q4'
+            modelRoot = $env:SCENEWORKS_PROVISIONED_ROOT
+            runnerName = $env:RUNNER_NAME
+            runnerOs = $env:RUNNER_OS
+            runnerArch = $env:RUNNER_ARCH
+            gpu = $gpu
+          }
+          $identity | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $evidence 'identity.json') -Encoding utf8
+          "SC19054_FLUX_Q4_ROOT=$env:SCENEWORKS_PROVISIONED_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SC19054_OUTPUT_DIR=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SC19054_SCENEWORKS_REVISION=$head" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SC19054_INFERENCE_REVISION=$env:INFERENCE_REVISION" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SC19054_FLUX_REVISION=$env:FLUX_REVISION" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run the exact SC-19054 admission-to-FLUX render
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance }}
+        shell: cmd
+        env:
+          SCENEWORKS_CUDA_VRAM_CAP_GB: "24"
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --lib sc19054_flux_acceptance::sc19054_flux_candle_acceptance -- --ignored --exact --nocapture > "%SC19054_EVIDENCE_DIR%\acceptance.log" 2>&1
+          set test_exit=%ERRORLEVEL%
+          type "%SC19054_EVIDENCE_DIR%\acceptance.log"
+          exit /b %test_exit%
+      - name: Verify and hash the SC-19054 acceptance evidence
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance }}
+        shell: powershell
+        run: |
+          $logPath = Join-Path $env:SC19054_EVIDENCE_DIR 'acceptance.log'
+          $receiptPath = Join-Path $env:SC19054_OUTPUT_DIR 'sc19054-flux-acceptance.json'
+          $imagePath = Join-Path $env:SC19054_OUTPUT_DIR 'sc19054-flux-schnell-q4-1024.png'
+          foreach ($path in @($logPath, $receiptPath, $imagePath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing SC-19054 evidence file: $path" }
+          }
+          $events = @(Select-String -LiteralPath $logPath -Pattern '^SC19054_ADMISSION_EVENT=(\{.*\})$')
+          if ($events.Count -ne 1) { throw "expected exactly one admission event, found $($events.Count)" }
+          $event = $events[0].Matches[0].Groups[1].Value | ConvertFrom-Json
+          if ($event.event -ne 'sc19054_candle_admission_selected' -or
+              $event.modelId -ne 'flux_schnell' -or $event.engineId -ne 'flux1_schnell' -or
+              $event.tier -ne 'q4' -or $event.geometry.width -ne 1024 -or $event.geometry.height -ne 1024 -or
+              $event.budgetGb -ne 24 -or $event.sequentialCapable -ne $true -or
+              $event.oldPlan -ne 'resident' -or $event.selectedPlan -ne 'sequential' -or
+              $event.widenedResidentPeakGb -ne 24.232 -or $event.widenedSequentialPeakGb -ne 21.216) {
+            throw "SC-19054 admission event does not match the exact acceptance cell: $($event | ConvertTo-Json -Compress -Depth 5)"
+          }
+          $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+          if ($receipt.verdict -ne 'PASS' -or $receipt.sceneWorksRevision -ne $env:GITHUB_SHA -or
+              $receipt.inferenceRevision -ne '4013049764172ee7dc707101c7da8c83c1483f2d' -or
+              $receipt.artifact.repository -ne 'SceneWorks/flux1-schnell-mlx' -or
+              $receipt.artifact.revision -ne 'bba3ae01dfd94089f173c05edd4e1a4c551f2599' -or
+              $receipt.artifact.tier -ne 'q4' -or $receipt.runtime.engineId -ne 'flux1_schnell' -or
+              $receipt.runtime.backend -ne 'candle' -or
+              $receipt.runtime.stageResidency -ne $true -or $receipt.runtime.vramCapGb -ne 24 -or
+              $receipt.request.width -ne 1024 -or $receipt.request.height -ne 1024 -or
+              $receipt.request.steps -ne 4 -or $receipt.request.seed -ne 42 -or
+              $receipt.output.width -ne 1024 -or $receipt.output.height -ne 1024) {
+            throw "SC-19054 acceptance receipt drifted from the fixed route contract: $($receipt | ConvertTo-Json -Compress -Depth 8)"
+          }
+          $imageHash = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($receipt.output.sha256 -ne $imageHash) { throw 'rendered image SHA-256 does not match its runtime receipt' }
+          Get-ChildItem -LiteralPath $env:SC19054_EVIDENCE_DIR -File -Recurse |
+            Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
+            Sort-Object FullName |
+            ForEach-Object {
+              $relative = $_.FullName.Substring($env:SC19054_EVIDENCE_DIR.Length).TrimStart('\\')
+              "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative.Replace('\\', '/')
+            } | Set-Content -LiteralPath (Join-Path $env:SC19054_EVIDENCE_DIR 'SHA256SUMS.txt') -Encoding ascii
+      - name: Upload the SC-19054 FLUX acceptance evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-19054-flux-candle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SC19054_EVIDENCE_DIR }}
+          if-no-files-found: warn
+      - name: Clean up the SC-19054 FLUX acceptance scratch
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance }}
+        shell: powershell
+        run: |
+          if (-not $env:SC19054_EVIDENCE_DIR -or -not $env:RUNNER_TEMP) { exit 0 }
+          $evidence = [System.IO.Path]::GetFullPath($env:SC19054_EVIDENCE_DIR)
+          $temp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\\') + '\\'
+          if (-not $evidence.StartsWith($temp, [StringComparison]::OrdinalIgnoreCase) -or
+              -not (Split-Path -Leaf $evidence).StartsWith('sc19054-flux-acceptance-')) {
+            throw "refusing to clean an untrusted SC-19054 path: $evidence"
+          }
+          if (Test-Path -LiteralPath $evidence) { Remove-Item -LiteralPath $evidence -Recurse -Force }
       # sc-17592, the off-Mac mirror of macos-mlx.yml's MLX step. THE ONLY PR LANE THAT CAN PRODUCE
       # capabilities.candle.json, so it is the only place the checked-in file can be checked against
       # a real registry rather than taken on trust. (desktop-windows.yml builds the candle sidecar on
@@ -962,7 +1133,7 @@ jobs:
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
       - name: Verify capabilities.candle.json content against a fresh dump
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19057_wan_capture) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         id: verify_candle_capabilities
         shell: cmd
         run: |

@@ -373,6 +373,13 @@ mod lora_train_driver;
     )
 ))]
 mod smoke_support;
+// SC-19054 terminal acceptance: this module calls the Candle-only scalar gate, linked media
+// descriptor/load surface, and smoke helpers, so compile the whole file only where all three exist.
+// Its backend-neutral source/workflow contract (including mutation checks for the exact provider,
+// geometry, packed-tier load shape, and request-scoped staged residency) lives in
+// scripts/platform-review-contracts.test.mjs and therefore still runs on every ordinary PR lane.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod sc19054_flux_acceptance;
 // sc-12409: parity guard tying the shipped video manifest's `limits.maxPixels` to the area cap of
 // the ENGINE PINNED by Cargo.toml (mlx via `runtime-macos` on macOS, candle via `runtime-cuda`
 // off-mac under backend-candle). Not a smoke — no weights, no GPU; just the shipped manifest bytes
