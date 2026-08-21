@@ -967,7 +967,7 @@ jobs:
               $receipt.artifact.revision -ne 'bba3ae01dfd94089f173c05edd4e1a4c551f2599' -or
               $receipt.artifact.tier -ne 'q4' -or $receipt.runtime.engineId -ne 'flux1_schnell' -or
               $receipt.runtime.backend -ne 'candle' -or
-              $receipt.runtime.offloadPolicy -ne 'sequential' -or $receipt.runtime.vramCapGb -ne 24 -or
+              $receipt.runtime.stageResidency -ne $true -or $receipt.runtime.vramCapGb -ne 24 -or
               $receipt.request.width -ne 1024 -or $receipt.request.height -ne 1024 -or
               $receipt.request.steps -ne 4 -or $receipt.request.seed -ne 42 -or
               $receipt.output.width -ne 1024 -or $receipt.output.height -ne 1024) {

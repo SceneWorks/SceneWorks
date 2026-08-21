@@ -1,14 +1,14 @@
 //! Terminal Windows/CUDA acceptance for SC-19054's geometry-aware Candle scalar gate.
 //!
-//! The pure contract tests run on every host. The ignored real-weight test is compiled only in the
-//! Windows/Linux Candle bundle and is invoked explicitly by `windows-candle.yml`. One value returned
+//! This Candle-only module is invoked explicitly by `windows-candle.yml`. The backend-neutral
+//! source/workflow contract runs in `scripts/platform-review-contracts.test.mjs`. One value returned
 //! by [`admission_contract`] drives both the machine-countable admission receipt and the
-//! [`LoadSpec`] consumed by the real `flux1_schnell` provider, so the decision and render cannot pass
-//! independently.
+//! request-scoped [`gen_core::GenerationMemory`] consumed by the real `flux1_schnell` provider, so
+//! the decision and render cannot pass independently.
 
 use std::path::{Path, PathBuf};
 
-use gen_core::{LoadSpec, OffloadPolicy, Quant, WeightsSource};
+use gen_core::{GenerationMemory, LoadSpec, WeightsSource};
 use serde_json::{json, Value};
 
 use crate::candle_scalar_gate::{self, LoadPlan, VramBudget};
@@ -34,6 +34,12 @@ struct AdmissionContract {
     widened_resident_peak_gb: f64,
     raw_sequential_peak_gb: f64,
     widened_sequential_peak_gb: f64,
+}
+
+#[derive(Clone, Debug)]
+struct AcceptanceExecution {
+    spec: LoadSpec,
+    memory: GenerationMemory,
 }
 
 fn builtin_manifest_entry() -> serde_json::Map<String, Value> {
@@ -106,18 +112,30 @@ fn admission_contract(sequential_capable: bool) -> AdmissionContract {
     }
 }
 
-/// Bind the actual provider load to the selected plan. A mutation back to resident or forward to
-/// reject stops before weight I/O instead of producing a render with a disconnected decision.
-fn acceptance_load_spec(root: &Path, admission: AdmissionContract) -> LoadSpec {
+/// Bind the admitted plan to the exact two-part provider execution contract.
+///
+/// The packed q4 tier is detected from `transformer/config.json`; setting `LoadSpec::quantize`
+/// requests unsupported on-the-fly quantization and is therefore deliberately forbidden. FLUX.1
+/// consumes Sequential at generation time through `GenerationMemory::stage_residency`, so that bit
+/// is derived directly from the admitted plan and carried into the real request.
+fn acceptance_execution(root: &Path, admission: AdmissionContract) -> AcceptanceExecution {
     assert_eq!(
         admission.selected_plan,
         LoadPlan::Sequential,
         "the exact SC-19054 cell must select Sequential before real weights are touched"
     );
-    LoadSpec::new(WeightsSource::Dir(root.to_owned()))
-        .with_quant(Quant::Q4)
-        .with_offload_policy(OffloadPolicy::Sequential)
-        .with_resolved_route(MODEL_ID)
+    let spec = LoadSpec::new(WeightsSource::Dir(root.to_owned())).with_resolved_route(MODEL_ID);
+    assert!(
+        spec.quantize.is_none(),
+        "packed FLUX q4 must be inferred from transformer/config.json"
+    );
+    AcceptanceExecution {
+        spec,
+        memory: GenerationMemory {
+            stage_residency: true,
+            ..Default::default()
+        },
+    }
 }
 
 fn plan_label(plan: LoadPlan) -> &'static str {
@@ -211,9 +229,11 @@ fn run_sc19054_flux_candle_acceptance() {
         "SC19054_ADMISSION_EVENT={}",
         serde_json::to_string(&event).expect("serialize admission event")
     );
-    let spec = acceptance_load_spec(&root, admission);
+    let execution = acceptance_execution(&root, admission);
+    let stage_residency = execution.memory.stage_residency;
+    assert!(stage_residency, "Sequential must engage staged residency");
     let load_started = Instant::now();
-    let generator = crate::inference_runtime::load(ENGINE_ID, &spec)
+    let generator = crate::inference_runtime::load(ENGINE_ID, &execution.spec)
         .unwrap_or_else(|error| panic!("load exact packed FLUX.1 Schnell q4: {error}"));
     let load_seconds = load_started.elapsed().as_secs_f64();
     assert_eq!(generator.descriptor().id, ENGINE_ID);
@@ -233,6 +253,7 @@ fn run_sc19054_flux_candle_acceptance() {
         count: 1,
         seed: Some(SEED),
         steps: Some(STEPS),
+        memory: Some(execution.memory),
         ..Default::default()
     };
     let render_started = Instant::now();
@@ -302,7 +323,7 @@ fn run_sc19054_flux_candle_acceptance() {
             "engineId": generator.descriptor().id,
             "backend": generator.descriptor().backend,
             "supportsSequentialOffload": generator.descriptor().capabilities.supports_sequential_offload,
-            "offloadPolicy": "sequential",
+            "stageResidency": stage_residency,
             "vramCapGb": runtime_cap_gb,
             "loadSeconds": load_seconds,
             "renderSeconds": render_seconds,
@@ -369,16 +390,23 @@ mod contract_tests {
     #[test]
     fn selected_admission_is_load_bearing_for_the_exact_q4_provider_spec() {
         let root = PathBuf::from("exact-snapshot").join(TIER);
-        let spec = acceptance_load_spec(&root, admission_contract(true));
-        assert_eq!(spec.weights, WeightsSource::Dir(root));
-        assert_eq!(spec.quantize, Some(Quant::Q4));
-        assert_eq!(spec.offload_policy, OffloadPolicy::Sequential);
-        assert_eq!(spec.resolved_route.as_deref(), Some(MODEL_ID));
+        let execution = acceptance_execution(&root, admission_contract(true));
+        assert_eq!(execution.spec.weights, WeightsSource::Dir(root));
+        assert_eq!(execution.spec.quantize, None);
+        assert_eq!(execution.spec.resolved_route.as_deref(), Some(MODEL_ID));
+        assert!(execution.memory.stage_residency);
+        assert_eq!(
+            execution.memory,
+            GenerationMemory {
+                stage_residency: true,
+                ..Default::default()
+            }
+        );
 
         let mut disconnected = admission_contract(true);
         disconnected.selected_plan = LoadPlan::Resident;
         assert!(
-            std::panic::catch_unwind(|| acceptance_load_spec(Path::new("wrong"), disconnected))
+            std::panic::catch_unwind(|| acceptance_execution(Path::new("wrong"), disconnected))
                 .is_err(),
             "a resident-plan mutation must stop before provider load"
         );

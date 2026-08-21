@@ -725,7 +725,7 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
     "$event.selectedPlan -ne 'sequential'",
     "$event.widenedResidentPeakGb -ne 24.232",
     "$event.widenedSequentialPeakGb -ne 21.216",
-    "$receipt.runtime.offloadPolicy -ne 'sequential'",
+    "$receipt.runtime.stageResidency -ne $true",
     "$receipt.runtime.backend -ne 'candle'",
     "$receipt.runtime.vramCapGb -ne 24",
     "Get-FileHash -LiteralPath $imagePath -Algorithm SHA256",
@@ -750,11 +750,15 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
     "const BUDGET_GB: f64 = 24.0;",
     "candle_scalar_gate::predicted_peak_gb_for_request(",
     "candle_scalar_gate::predicted_sequential_peak_gb_for_request(",
-    ".with_quant(Quant::Q4)",
-    ".with_offload_policy(OffloadPolicy::Sequential)",
+    "spec.quantize.is_none()",
+    "stage_residency: true",
+    "let stage_residency = execution.memory.stage_residency;",
+    '"stageResidency": stage_residency',
     "crate::inference_runtime::media_descriptor(ENGINE_ID)",
     'assert_eq!(descriptor.backend, "candle", "acceptance requires Candle");',
-    'crate::inference_runtime::load(ENGINE_ID, &spec)',
+    'crate::inference_runtime::load(ENGINE_ID, &execution.spec)',
+    "memory: Some(execution.memory)",
+    ".generate(&request,",
   ]) {
     assert.ok(rust.includes(exact), `${context}: Rust route lost ${exact}`);
   }
@@ -763,11 +767,13 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
     "let admission = admission_contract(descriptor.capabilities.supports_sequential_offload);",
     descriptor,
   );
-  const spec = rust.indexOf("let spec = acceptance_load_spec(&root, admission);", admission);
-  const load = rust.indexOf("crate::inference_runtime::load(ENGINE_ID, &spec)", spec);
+  const spec = rust.indexOf("let execution = acceptance_execution(&root, admission);", admission);
+  const load = rust.indexOf("crate::inference_runtime::load(ENGINE_ID, &execution.spec)", spec);
+  const requestMemory = rust.indexOf("memory: Some(execution.memory)", load);
+  const generate = rust.indexOf(".generate(&request,", requestMemory);
   assert.ok(
-    descriptor >= 0 && descriptor < admission && admission < spec && spec < load,
-    `${context}: linked capability admission must construct the loaded spec`,
+    descriptor >= 0 && descriptor < admission && admission < spec && spec < load && load < requestMemory && requestMemory < generate,
+    `${context}: linked capability admission must construct the packed load and request-scoped residency`,
   );
 }
 
@@ -785,10 +791,12 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
     ["wrong geometry", "rust", "const WIDTH: u32 = 1024;", "const WIDTH: u32 = 768;"],
     ["wrong cap", "rust", "const BUDGET_GB: f64 = 24.0;", "const BUDGET_GB: f64 = 32.0;"],
     ["wrong engine", "rust", 'const ENGINE_ID: &str = "flux1_schnell";', 'const ENGINE_ID: &str = "flux1_dev";'],
-    ["wrong quantization", "rust", ".with_quant(Quant::Q4)", ".with_quant(Quant::Q8)"],
-    ["wrong offload", "rust", ".with_offload_policy(OffloadPolicy::Sequential)", ".with_offload_policy(OffloadPolicy::Full)"],
+    ["on-the-fly quantization", "rust", "spec.quantize.is_none()", "spec.quantize.is_some()"],
+    ["resident request", "rust", "stage_residency: true", "stage_residency: false"],
+    ["fake residency receipt", "rust", '"stageResidency": stage_residency', '"stageResidency": true'],
     ["hardcoded sequential capability", "rust", "admission_contract(descriptor.capabilities.supports_sequential_offload)", "admission_contract(true)"],
-    ["disconnected admission", "rust", "let spec = acceptance_load_spec(&root, admission);", "let spec = LoadSpec::new(WeightsSource::Dir(root.clone()));"],
+    ["disconnected admission", "rust", "let execution = acceptance_execution(&root, admission);", "let execution = acceptance_execution(&root, admission_contract(true));"],
+    ["request drops selected memory", "rust", "memory: Some(execution.memory)", "memory: None"],
   ];
   for (const [name, key, from, to] of mutations) {
     const mutated = { ...documents, [key]: documents[key].replaceAll(from, to) };
