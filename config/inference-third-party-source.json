@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 2881696c is the sc-17137 inference feature head after the 2026-08-19 inference-main sync (inference PR #710), so it is the UNION of the two prior audits: main 6f47e670 (sc-20528 SDXL long-prompt chunking; see that audit for the mlx-gen-sdxl long_prompt.rs first-party port marker) and the epic 75d66db5 head (which added crates/media/mlx-gen/mlx-gen-minimax-h3 and crates/media/candle-gen/candle-gen-minimax-h3, both architecture-reimplementation-existing-terms — MiniMaxAI/MiniMax-H3 terms are already mapped in the About manifest, builtin.models.jsonc minimax_h3 / minimax_h3_ref). The exact scanner finds 649 provenance candidates and 96 production-Rust crate prefixes; the one path-population change beyond the two prior audits is crates/media/candle-gen/candle-gen/build.rs (sc-19545, the quantized-kernel arch-ladder diagnostic), a first-party build script inside the already-classified candle-gen crate prefix — its disposition area was widened from src/ to the crate root to cover it. No LICENSE file or crate-prefix classification changed beyond that union; every other row differs only in git_blob_sha1, which is not a licensing signal. The coordinator re-audits at the epic-final pin bump. Re-audited at the sc-18650 epic-final pin bump: f17c82544 is the merge of 2881696cd into inference main (inference PR #711) and `git diff 2881696cd f17c82544` is EMPTY — the two revisions share one tree, so every blob, LICENSE file, include-site and crate-prefix classification of the 2881696c audit carries over verbatim (scanner re-run at f17c82544: same 649 provenance candidates, population sha256 334f7b1c…, same 96 crate prefixes, population sha256 ab6f0f6f…). Nil vendored-dependency delta; only the revision labels moved.",
-  "inferenceRevision": "f17c82544558666f8d843b4e344e3efa0fd08ed7",
-  "auditDigest": "49b3e395c0f9b144ab5059a1d0ec8d77b407c5cb77d92334137e7a408fc818d1",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin a829226b advances inference main through the merged SC-17181 MLX SDXL/Kolors preview correction and the intervening MiniMax-H3 integration. The exact scanner finds 649 provenance candidates and 96 production-Rust crate prefixes. Nineteen paths were added: seventeen MiniMax-H3 implementation files across the Candle and MLX crates, plus candle-gen/build.rs and candle-gen/src/cuda_arch.rs. No path was removed, no normalized marker or source-area assignment changed, and 35 existing rows differ only in git_blob_sha1, which is not a licensing signal. The two new MiniMax-H3 crate prefixes and eighteen ported-source candidates are not yet classified; under the sc-19751 report-only policy, check-license-coverage.mjs records those 20 compliance worklist items and exits successfully. No LICENSE file or production include_str!/include_bytes! site changed.",
+  "inferenceRevision": "c6abde8fc5717e34919dba025b307608e84a24c3",
+  "auditDigest": "a0f6210edf847909c106fa799a4c987f537c0dc65ee20581d7e393e9428ce180",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "f17c82544558666f8d843b4e344e3efa0fd08ed7",
+    "revision": "c6abde8fc5717e34919dba025b307608e84a24c3",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 649,
-    "populationSha256": "334f7b1c515c09eca2dfd52fbcd25bb974978beba04c4419faa3731a437b95b6"
+    "populationSha256": "d2eac8f5667a6ee106b2d9fad1e99d15cb9c06e16b3ba225e2107f8f3593199c"
   },
   "portedSourceAreas": [
     {
@@ -139,7 +139,7 @@
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen",
-      "pathPrefix": "crates/media/candle-gen/candle-gen/",
+      "pathPrefix": "crates/media/candle-gen/candle-gen/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
@@ -256,13 +256,6 @@
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-ltx",
       "pathPrefix": "crates/media/candle-gen/candle-gen-ltx/src/",
-      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
-    },
-    {
-      "id": "architecture:crates/media/candle-gen/candle-gen-minimax-h3",
-      "pathPrefix": "crates/media/candle-gen/candle-gen-minimax-h3/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
@@ -499,13 +492,6 @@
       "excludePaths": [
         "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
       ]
-    },
-    {
-      "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
-      "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
-      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
@@ -844,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "f17c82544558666f8d843b4e344e3efa0fd08ed7",
+    "revision": "c6abde8fc5717e34919dba025b307608e84a24c3",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 96,
     "cratePopulationSha256": "ab6f0f6f4c71a93339973ba3054d40b651b8db7f96ed219d5d152c3c624c49fc"

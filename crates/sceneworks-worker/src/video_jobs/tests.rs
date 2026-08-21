@@ -971,14 +971,11 @@ fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
     let root = root_guard.path();
     let high = root.join("high.safetensors");
     let low = root.join("low.safetensors");
-    std::fs::File::create(&high)
-        .unwrap()
-        .set_len(20 * 1024 * 1024 * 1024)
-        .unwrap();
-    std::fs::File::create(&low)
-        .unwrap()
-        .set_len(20 * 1024 * 1024 * 1024)
-        .unwrap();
+    // 2 x 20 GiB. Sparse, or this one test allocates 40 GiB of NTFS (see
+    // `crate::test_fixture_disk`); the gate reads the length, not the bytes.
+    for path in [&high, &low] {
+        crate::test_fixture_disk::create_sparse_weights(path, 20 * 1024 * 1024 * 1024);
+    }
     let make_paths =
         || ComfyuiWanPaths::test_fixture(high.clone(), low.clone(), None, None, root.to_path_buf());
     assert!(
@@ -2414,9 +2411,9 @@ fn mochi_root_real_sized(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        // ~20.1 GB per call, and 17 tests call this. Sparse, or a parallel run of them fills the
+        // disk outright (see `crate::test_fixture_disk`).
+        crate::test_fixture_disk::create_sparse_weights(&root.join(relative), len);
     }
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     std::fs::write(
@@ -3459,9 +3456,8 @@ fn mochi_hf_cache_shared_only(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = snapshot.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        // ~10.4 GB of encoder + VAE; sparse (see `crate::test_fixture_disk`).
+        crate::test_fixture_disk::create_sparse_weights(&snapshot.join(relative), len);
     }
     std::fs::create_dir_all(snapshot.join("tokenizer")).unwrap();
     std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
@@ -3710,9 +3706,8 @@ fn mochi_root_shared_only(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        // ~10.4 GB per call, and 7 tests call this; sparse (see `crate::test_fixture_disk`).
+        crate::test_fixture_disk::create_sparse_weights(&root.join(relative), len);
     }
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     root_guard

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c63ebe815dc94957b16ec00bdf2a322e786a5a3f3f89c2c179180ab402d8c277",
+    "sceneWorksRevision": "source-tree:01c33c3c8acf9a53e53f9f207bfd0066bd6676738340f4f8ca99195155ff5ce2",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -10,7 +10,7 @@
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "14a5d42b6dbb3fc87776e9ead46cc93605eeef82f9e5db40a9d7646983ffde35"
+        "sha256": "fe927562117d616d1d6be27841d56d984ba735a928f85f8d17213829ffa8e256"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
@@ -58,7 +58,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "49e3f64d70622a6b3bfe66fc7733a555de143289f257862d814db4218068a7af"
+        "sha256": "06cc064c9b3ef1fcf1088149401be5841fb6141bede77e08abb159e808d2788d"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "e9013fd319929e18fb2ec196e2ba71ce59280fa38de3659984ef9bd33733cea5"
+        "sha256": "2d4fe1efd4113a782667886144276ab0a9d1dc3612842d3028927031f36c468b"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -94,11 +94,11 @@
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "9a8e3cd5f635df24c9a8b7cb008ad7d4889a806de13fadaf053fc7e562d2986d"
+        "sha256": "2c63683b20e5ff70631ea3cded3c58ad5bd6d57377def55bfbe5ef3d008a8174"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "6ef975d4f7875861a1a0dd239fac60dbedad7414b4934ea9fec2f832fd5cc970"
+        "sha256": "e3c8a0a59ce6ea34c6e0845bc3f7c90b2dd8a2b8c382b7543a0415a5ebbc66da"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -193,11 +193,14 @@
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 0,
-      "bespokeWaivers": 0,
-      "mismatches": 0,
-      "byLeg": {},
-      "unavailable": "engine capability facts for mlx are keyed to f17c82544558666f8d843b4e344e3efa0fd08ed7, but Cargo pins 4013049764172ee7dc707101c7da8c83c1483f2d"
+      "providers": 73,
+      "bespokeWaivers": 1,
+      "mismatches": 503,
+      "byLeg": {
+        "engine_manifest": 284,
+        "manifest_route": 70,
+        "survey_engine": 149
+      }
     },
     "rung4Survey": {
       "story": 15969,

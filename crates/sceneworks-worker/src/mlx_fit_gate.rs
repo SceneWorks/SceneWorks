@@ -12543,15 +12543,6 @@ mod tests {
         ))
     }
 
-    fn set_sparse_len(path: &Path, bytes: u64) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("sparse fixture parent");
-        }
-        std::fs::File::create(path)
-            .and_then(|file| file.set_len(bytes))
-            .expect("sparse fixture size");
-    }
-
     /// Build the exact FLUX.2 encoder/config/tokenizer admission surface used by the source-bound
     /// audit without loading a tensor. Klein's Qwen3 stays dense across every DiT tier; Dev follows
     /// the selected tier and its base route also retains the builtin Pixtral vision surface.
@@ -12629,37 +12620,6 @@ mod tests {
             }
         }
         Ok(Some(sum_safetensors_bytes(&encoder_root)))
-    }
-
-    #[cfg(target_os = "macos")]
-    fn set_sparse_valid_safetensor(path: &Path, bytes: u64) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let mut data_bytes = bytes
-            .checked_sub(128)
-            .ok_or_else(|| format!("{bytes} bytes is too small for a safetensors fixture"))?;
-        let header = loop {
-            let mut header = format!(
-                r#"{{"weight":{{"dtype":"U8","shape":[{data_bytes}],"data_offsets":[0,{data_bytes}]}}}}"#
-            );
-            while (8 + header.len()) % 8 != 0 {
-                header.push(' ');
-            }
-            let next_data_bytes = bytes
-                .checked_sub(8 + header.len() as u64)
-                .ok_or_else(|| format!("{bytes} bytes is too small for its safetensors header"))?;
-            if next_data_bytes == data_bytes {
-                break header;
-            }
-            data_bytes = next_data_bytes;
-        };
-        use std::io::Write;
-        let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
-        file.write_all(&(header.len() as u64).to_le_bytes())
-            .and_then(|()| file.write_all(header.as_bytes()))
-            .and_then(|()| file.set_len(bytes))
-            .map_err(|error| error.to_string())
     }
 
     #[cfg(target_os = "macos")]
@@ -12925,6 +12885,7 @@ mod tests {
         base_asset_bytes: u64,
         control_bytes: u64,
     ) -> Result<(tempfile::TempDir, LoadSpec), String> {
+        use crate::test_fixture_disk::{create_sparse_weights, set_sparse_valid_safetensor};
         use gen_core::Quant;
 
         let fixture = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -12960,11 +12921,11 @@ mod tests {
                     "Lens bf16 asset {base_asset_bytes} is smaller than its source encoder"
                 ));
             }
-            set_sparse_len(
+            create_sparse_weights(
                 &weights.join("text_encoder/model.safetensors"),
                 LENS_BF16_TEXT_ENCODER_DISK_BYTES,
             );
-            set_sparse_len(
+            create_sparse_weights(
                 &weights.join("transformer/model.safetensors"),
                 base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
             );
@@ -12990,7 +12951,7 @@ mod tests {
             )?;
             set_sparse_valid_safetensor(&weights.join("vae/model.safetensors"), vae_bytes)?;
         } else {
-            set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
+            create_sparse_weights(&weights.join("model.safetensors"), base_asset_bytes);
         }
         let spec = match tier {
             "q4" => LoadSpec::new(WeightsSource::Dir(weights)).with_quant(Quant::Q4),
@@ -13002,7 +12963,7 @@ mod tests {
             spec
         } else {
             let control = fixture.path().join("control.safetensors");
-            set_sparse_len(&control, control_bytes);
+            create_sparse_weights(&control, control_bytes);
             spec.with_control(WeightsSource::File(control))
         };
         Ok((
@@ -14904,7 +14865,8 @@ mod tests {
     #[test]
     fn production_control_spec_replaces_raw_checkpoint_with_one_typed_residency() {
         use gen_core::{
-            MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
+            MemoryComponentKind, MemoryComponentResidency, MemoryFormulaKind,
+            MemoryFormulaVariable, MemoryResidentComponent,
         };
         use std::fs::File;
 
@@ -14960,7 +14922,7 @@ mod tests {
                     kind: MemoryComponentKind::ControlBranch,
                     resident_bytes: CONTROL_RESIDENT_BYTES,
                     bounded_by: None,
-                    residency: gen_core::MemoryComponentResidency::WholeRender,
+                    residency: MemoryComponentResidency::WholeRender,
                 }],
             };
         }
@@ -15105,8 +15067,9 @@ mod tests {
     #[test]
     fn mage_adapter_requests_require_and_consume_declared_residency() {
         use gen_core::{
-            ComponentPrecisionFloor, MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable,
-            MemoryResidentComponent, PrecisionFloorComponent,
+            ComponentPrecisionFloor, MemoryComponentKind, MemoryComponentResidency,
+            MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
+            PrecisionFloorComponent,
         };
 
         let mut inputs = request_inputs(512, 512, 1);
@@ -15167,7 +15130,7 @@ mod tests {
                 kind: MemoryComponentKind::AdapterStack,
                 resident_bytes: gib_to_bytes(ADAPTER_GIB),
                 bounded_by: None,
-                residency: gen_core::MemoryComponentResidency::WholeRender,
+                residency: MemoryComponentResidency::WholeRender,
             }],
         };
         const PRECISION_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {

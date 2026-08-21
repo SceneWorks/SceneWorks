@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "f17c82544558666f8d843b4e344e3efa0fd08ed7",
+    "inferenceRevision": "a829226bdd81a9a46571bc0abfa2c423f35901fa",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -205,34 +205,6 @@
       "mode": "video_bridge",
       "engineIds": [
         "ltx_2_3"
-      ]
-    },
-    {
-      "modelId": "minimax_h3",
-      "mode": "first_last_frame",
-      "engineIds": [
-        "minimax_h3"
-      ]
-    },
-    {
-      "modelId": "minimax_h3",
-      "mode": "image_to_video",
-      "engineIds": [
-        "minimax_h3"
-      ]
-    },
-    {
-      "modelId": "minimax_h3",
-      "mode": "text_to_video",
-      "engineIds": [
-        "minimax_h3"
-      ]
-    },
-    {
-      "modelId": "minimax_h3_ref",
-      "mode": "reference_to_video",
-      "engineIds": [
-        "minimax_h3"
       ]
     },
     {

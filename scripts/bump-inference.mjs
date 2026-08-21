@@ -518,7 +518,7 @@ function deriveLicenseAudit(sha, repo, io = {}) {
  */
 function reportCrossLaneWork(sha) {
   const dir = join(repoRoot, "config/engine-capabilities");
-  const stale = [];
+  const revisionMismatches = [];
   for (const [sub, name] of [
     ["", "capabilities.mlx.json"],
     ["", "capabilities.candle.json"],
@@ -527,25 +527,27 @@ function reportCrossLaneWork(sha) {
     try {
       const facts = JSON.parse(readFileSync(join(dir, sub, name), "utf8"));
       const at = facts?.generatedFrom?.inferenceRevision;
-      if (at && at !== sha) stale.push([join(sub, name), at]);
+      if (at && at !== sha) revisionMismatches.push([join(sub, name), at]);
     } catch {
       /* absent files are the existing checker's business, not this preview's */
     }
   }
-  if (stale.length === 0) return;
-  console.log("bump-inference: engine-capability facts this bump makes stale —");
-  for (const [name, at] of stale) {
+  if (revisionMismatches.length === 0) return;
+  console.log("bump-inference: engine-capability revision labels that differ from this pin —");
+  for (const [name, at] of revisionMismatches) {
     const needsOtherLane = name === "capabilities.candle.json" && process.platform === "darwin";
     console.log(
       `    ${name}  (at ${at.slice(0, 12)}…)  ${needsOtherLane ? "NEEDS A LINUX/WINDOWS LANE" : "dumpable here"}`,
     );
   }
-  if (stale.some(([name]) => name === "capabilities.candle.json") && process.platform === "darwin") {
+  if (
+    revisionMismatches.some(([name]) => name === "capabilities.candle.json") &&
+    process.platform === "darwin"
+  ) {
     console.log(
       "  capabilities.candle.json cannot be dumped on macOS. Land the bump, then re-dump it on a\n" +
-        "  Linux/Windows lane. Note the macOS dump ALSO rewrites audio/capabilities.candle.json,\n" +
-        "  which splits the candle backend across two revisions and makes gen:preview-support refuse\n" +
-        "  outright — so leave audio/ at its current revision until both can move together.",
+        "  Linux/Windows lane if declared Candle capabilities changed. A revision-only mismatch is\n" +
+        "  informational and does not require either producer machine.",
     );
   }
 }
@@ -570,19 +572,16 @@ function regenerateMemoryMatrix() {
 // to be regenerated here as the second step of the matrix cascade. The memory matrix now has no
 // generated consumer, so the regen above is the whole of that cascade.
 
-// Every checked-in file under `config/engine-capabilities/` is keyed to the pin exactly like the
-// licence audit above: each file stamps `generatedFrom.inferenceRevision`, and it is a dump of
-// the preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability
-// surfaces read off the LINKED registries at that revision (sc-16965,
-// epic 16948). A bump can move any descriptor's flag — every remaining family story in that epic
-// flips more of them — so the checked-in dumps go stale by construction.
+// Every checked-in file under `config/engine-capabilities/` records the producing revision and the
+// preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability surfaces
+// read off the LINKED registries (sc-16965, epic 16948). A pin change alone does not invalidate that
+// content (e14171984); the revision label is retained as provenance and reported when it differs.
 //
 // Like the licence audit, and unlike the memory matrix, this CANNOT be regenerated blindly from
 // here: the dumper needs a lane that actually links engines (macOS for mlx,
 // `--features backend-candle` off-Mac for candle), which a bump does not otherwise require and
-// which no single host can supply for both backends. So verify, and let the remediation text name
-// the exact invocation. Fail-closed on purpose: the pins are already written by now, so the bump is
-// genuinely incomplete until the dumps are refreshed and the stage-2 artifacts regenerated.
+// which no single host can supply for both backends. So verify structural completeness and native
+// content shape, report revision-label drift, and let the remediation text name the exact invocation.
 //
 // Downstream cascade, same shape as the memory-matrix regen above: re-dumping a facts file
 // makes `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
@@ -722,7 +721,6 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   // Audio facts remain a separate registry and deliberately carry no image-memory contracts.
   validateMemoryContractFacts(
     names.map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))),
-    sha,
   );
 
   const stale = [];
@@ -762,7 +760,8 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   if (root === repoRoot) {
     console.log(
       `OK: ${names.length} engine-capability facts file(s) + ${audioNames.length} audio file(s) ` +
-        `+ ${runtimeNames.length} rich runtime file(s) dumped at ${sha}`,
+        `+ ${runtimeNames.length} rich runtime file(s) are structurally complete; Cargo pin ${sha} ` +
+        "(revision-label differences are informational)",
     );
   }
 }

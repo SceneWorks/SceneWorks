@@ -3371,7 +3371,7 @@ mod tests {
         let actual = backend_capability_matrix().expect("capability matrix generates");
         checked_in_matrix_matches_live(expected, actual).unwrap_or_else(|error| {
             panic!(
-                "backend capability matrix drifted ({error}); run `{GENERATOR} > config/backend-capabilities/matrix.json` only for an intentional capability recapture"
+                "backend capability matrix drifted ({error}); run `{GENERATOR} -- config/backend-capabilities/matrix.json` only for an intentional capability recapture"
             )
         });
     }

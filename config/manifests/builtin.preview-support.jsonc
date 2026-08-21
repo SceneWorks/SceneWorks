@@ -7,10 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "f17c82544558666f8d843b4e344e3efa0fd08ed7"
+      "inferenceRevision": "c6abde8fc5717e34919dba025b307608e84a24c3"
     },
     "mlx": {
-      "inferenceRevision": "f17c82544558666f8d843b4e344e3efa0fd08ed7"
+      "inferenceRevision": "a829226bdd81a9a46571bc0abfa2c423f35901fa"
     }
   },
   "models": {
@@ -34,15 +34,15 @@
       "mlx": false
     },
     "boogu_image": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_edit": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_turbo": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "chatterbox_tts": {

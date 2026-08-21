@@ -1481,6 +1481,16 @@ pub fn imported_image_request_provider_eligible(
     let Some(source) = imported_source_shape(entry) else {
         return false;
     };
+    let native_nvfp4 = entry
+        .get("importQuantFormat")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"));
+    // Native Kitchen NVFP4 is a Candle/CUDA source encoding. MLX has no consumer for its packed
+    // E2M1 weights and blocked scales, so it must never win the family route merely because dense
+    // Krea imports are cross-platform.
+    if native_nvfp4 && backend != "candle" {
+        return false;
+    }
     let has_nonempty_path = entry
         .get("modelPath")
         .and_then(Value::as_str)
@@ -1517,6 +1527,12 @@ pub fn imported_image_request_provider_eligible(
     }
 
     let operation = imported_payload_operation(payload);
+    // The native prepacked loader intentionally starts with the proven generate surface only.
+    // Adapters mutate dense Linear weights and edit/pose/multi-phase lanes introduce companion
+    // modules that have not been validated against this source encoding.
+    if native_nvfp4 && (operation != "generate" || has_loras) {
+        return false;
+    }
     // An explicit user control map/mode is semantically material. It may only accompany a selected
     // Pose operation; never flatten it into Generate/Edit/MultiPhase. The exact route lookup and
     // Control-conditioning check below then prove that this source/backend can consume the request.
@@ -1543,6 +1559,18 @@ pub fn imported_image_request_provider_eligible(
         return false;
     }
     let ignore_quant_tier = family == "flux2" && source == "comfy_ui_tree";
+    if native_nvfp4 {
+        let advanced = payload.get("advanced").and_then(Value::as_object);
+        let named = advanced
+            .and_then(|advanced| advanced.get("quantTier").or_else(|| advanced.get("quant")))
+            .and_then(Value::as_str)
+            .map(str::trim);
+        if named.is_some_and(|quant| !quant.eq_ignore_ascii_case("nvfp4"))
+            || advanced.is_some_and(|advanced| advanced.contains_key("mlxQuantize"))
+        {
+            return false;
+        }
+    }
     match imported_requested_quant(payload, ignore_quant_tier) {
         Ok(Some(quant)) if !route.supported_quants.iter().any(|value| value == quant) => {
             return false;
@@ -2625,6 +2653,56 @@ mod tests {
             missing_source.as_object().expect("probe is an object"),
             "mlx"
         ));
+    }
+
+    #[test]
+    fn imported_kitchen_nvfp4_is_candle_generate_only() {
+        let imported_id = "user_kreamania_variant7";
+        let payload = |extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "model": imported_id,
+                "modelManifestEntry": {
+                    "id": imported_id,
+                    "family": "krea_2",
+                    "importSourceShape": "transformer_file",
+                    "importQuantFormat": "nvfp4",
+                    "paths": { "model": "/app/models/imports/kreamania_variant7" }
+                }
+            });
+            value
+                .as_object_mut()
+                .expect("payload is an object")
+                .extend(extra.as_object().expect("extra is an object").clone());
+            value.as_object().expect("payload is an object").clone()
+        };
+
+        assert!(imported_image_request_provider_eligible(
+            imported_id,
+            &payload(serde_json::json!({"mode": "text_to_image"})),
+            "candle"
+        ));
+        assert!(imported_image_request_provider_eligible(
+            imported_id,
+            &payload(serde_json::json!({"referenceAssetId": "asset-1"})),
+            "candle"
+        ));
+        assert!(!imported_image_request_provider_eligible(
+            imported_id,
+            &payload(serde_json::json!({"mode": "text_to_image"})),
+            "mlx"
+        ));
+        for unsupported in [
+            serde_json::json!({"loras": [{"id": "adapter"}]}),
+            serde_json::json!({"mode": "edit_image", "sourceAssetId": "asset-1"}),
+            serde_json::json!({"advanced": {"poses": [{}]}}),
+            serde_json::json!({"advanced": {"quantTier": "q8"}}),
+        ] {
+            assert!(!imported_image_request_provider_eligible(
+                imported_id,
+                &payload(unsupported),
+                "candle"
+            ));
+        }
     }
 
     #[test]
