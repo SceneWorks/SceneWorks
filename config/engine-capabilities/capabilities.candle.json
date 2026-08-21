@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "c6abde8fc5717e34919dba025b307608e84a24c3",
+    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -1193,7 +1193,9 @@
       "source": "fused_checkpoint",
       "operation": "generate",
       "providerId": "sdxl",
-      "conditioning": [],
+      "conditioning": [
+        "control"
+      ],
       "supportsLora": true,
       "supportsLokr": true,
       "supportedQuants": [

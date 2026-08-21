@@ -5,9 +5,9 @@
     "modelCount": 94,
     "importedFamilyCount": 3,
     "cellCount": 918,
-    "mlxOnlyCellCount": 81,
+    "mlxOnlyCellCount": 75,
     "candleOnlyCellCount": 47,
-    "exceptionCount": 19
+    "exceptionCount": 18
   },
   "sources": {
     "apiContractEntry": "67da4bd170ee62f6bebcb13a8fdd19b4c96577b7efe9f18d2139d877ed5f41c5",
@@ -16,14 +16,14 @@
     "apiValidation": "62c9d13220f46a19b59ca9a66b1d3e3af2b1b3afcc36d21b3311d4fe953162d1",
     "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
     "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
-    "descriptorCandleFacts": "98c9e8a4f669dab820612694eae5ff2bd2310a098adf243705e71cdc39f924ac",
-    "descriptorCandleRuntime": "0109a8cf029d837bb68ac9435b2073e4b2fda58a18cd0dc35689cfd2444ec987",
+    "descriptorCandleFacts": "e2b4448d0ee00cd84af113ee3367bc36b1d615f131779c0d53ce934bc47c7b90",
+    "descriptorCandleRuntime": "24888b0ebde298d11eb0961a86e3d701b1a242e5684717652964b8e9625a8d4e",
     "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
     "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
-    "descriptorPreviewFacts": "54a538f81b243d8cfe211d378e9fad0f4918af8bbc571df87fa80b620694abbe",
-    "exceptionRegister": "f18f64eacbe1884afd097c182d78115fbd4354516277209311975b384a57f903",
+    "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
+    "exceptionRegister": "cfb1370284c87c61b61a44d55ef645a8bde6c0cb3484969397ea4adb87039e54",
     "manifest": "2b5c6f6925297454359499121646717c5f72bf723d1f6d7adfac579a9ba886a8",
-    "modelImportDefaults": "3deca8f714c71174c29c064274f9b923e929ea9c8d25e9e17afe72f75e8d25f2",
+    "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
     "routerCandle": "307f4fe042e3e2ad0c09be1995d5a5cc5aecd08b1c3815e3ec4a3d7f2659c58d",
     "routerCatalog": "cc9cf0a18b0196b75841fdd4a1689be8c92a82df5336b43ffcb45e953b0ba51d",
     "routerGaps": "f0f4fb5046e48ba5e5b3d4dac925ee6f25da721714f7e2f0641131f746c2c6bd",
@@ -1813,12 +1813,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -1932,12 +1927,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -4373,12 +4363,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -4464,12 +4449,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -4816,12 +4796,7 @@
         {
           "capability": "multiReference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "reference",
@@ -5122,12 +5097,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -7562,25 +7532,6 @@
         "models/krea_realtime_14b/precisionTier/bf16",
         "models/krea_realtime_14b/precisionTier/q4",
         "models/krea_realtime_14b/precisionTier/q8"
-      ]
-    },
-    {
-      "id": "epic-8588-conditioning-sequencing",
-      "category": "conditioning",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying these exact six MLX-only conditioning cells under epic-8588 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
-      "approver": "Michael Trefry",
-      "authority": "epic-8588",
-      "approvedDate": "2026-08-14",
-      "userFacingBehavior": "Unsupported Candle conditioning controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
-      "revisitCondition": "Revisit when epic-8588 ships the named Candle conditioning work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
-      "cells": [
-        "models/illustrious_xl_v1/conditioningShape/control",
-        "models/illustrious_xl_v2/conditioningShape/control",
-        "models/realvisxl/conditioningShape/control",
-        "models/realvisxl_lightning/conditioningShape/control",
-        "models/scail2_14b/conditioningShape/multiReference",
-        "models/sdxl/conditioningShape/control"
       ]
     },
     {
