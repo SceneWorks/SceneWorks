@@ -48,18 +48,15 @@
  * A parser that starts reading a file nobody fingerprinted fails the test rather than silently
  * producing an artifact that cannot go stale.
  *
- * ## KNOWN GAP, deliberately NOT fixed here: the memory-matrix fingerprint under-covers this surface
+ * ## Terminal fingerprint closure (sc-19059)
  *
- * `scripts/generate-memory-matrix.mjs`'s own `SOURCE_PATHS` does **not** include
- * `candle_memory_strategy.rs`, `video_admission.rs`, `conditioning_fit.rs`, `krea_control_fit.rs`
- * or `sceneworks-core/src/video_memory_curves.rs` â€” five files that decide candle admission. A
- * change to any of them leaves `docs/generated/memory-matrix.json`'s revision unrotated, so the
- * matrix can claim currency it does not have on exactly the surface this epic rewrites.
- *
- * It is recorded here (`knownGaps[]`, and the "Known gaps" section of the generated Markdown)
- * rather than fixed, because adding entries to the matrix's `SOURCE_PATHS` rotates ITS fingerprint
- * and forces a full memory-matrix regeneration into every subsequent story's PR in this epic. The
- * epic's terminal acceptance story (sc-19059) owns closing it, once, at the end.
+ * The inventory originally recorded that the memory-matrix fingerprint omitted production
+ * admission inputs. The terminal acceptance closes that gap once, after the feature train is
+ * integrated: `scripts/generate-memory-matrix.mjs` now fingerprints `candle_scalar_gate.rs`,
+ * `candle_memory_strategy.rs`, `video_admission.rs`, `conditioning_fit.rs`,
+ * `krea_control_fit.rs`, `sceneworks-core/src/video_memory_curves.rs`, and `payload.rs`.
+ * A change to any of those inputs now rotates the matrix provenance instead of leaving a falsely
+ * current artifact.
  *
  * ## Why the mechanism taxonomy is derived rather than declared
  *
@@ -1621,44 +1618,8 @@ export function buildInventory(bodies) {
  * Structural gaps this inventory records but does NOT close, each with the story that owns it.
  * Recorded in the artifact rather than in prose so a later slice can assert on them mechanically.
  */
-function knownGaps({ curveLanes, routes }) {
-  const missingFingerprint = [
-    // sc-19049 moved the scalar gate's arithmetic here out of `vram_gate.rs`, which the matrix DOES
-    // fingerprint. The matrix therefore no longer rotates on a change to the candle scalar gate at
-    // all, which makes closing this gap strictly more urgent than it was when it listed five files.
-    "crates/sceneworks-worker/src/candle_scalar_gate.rs",
-    "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-    "crates/sceneworks-worker/src/video_admission.rs",
-    "crates/sceneworks-worker/src/conditioning_fit.rs",
-    "crates/sceneworks-worker/src/krea_control_fit.rs",
-    "crates/sceneworks-core/src/video_memory_curves.rs",
-    // sc-19058: `payload.rs` is not admission plumbing any more, it is an input to the prediction
-    // law. `estimate_synthesis::fitted_phase_curve_gb` reads every curve coefficient through
-    // `json_f64`, whose lane-permissive "a numeric string is a number" reading is load-bearing and
-    // pinned by `a_malformed_temporal_coefficient_fails_the_curve_closed`. Narrowing it to
-    // `Value::as_f64` would move predictions while rotating neither generator's fingerprint.
-    "crates/sceneworks-worker/src/payload.rs",
-  ];
+function knownGaps({ curveLanes }) {
   return [
-    {
-      id: "memory-matrix-source-paths-under-cover-candle-admission",
-      owner: "sc-19059",
-      severity: "high",
-      detail:
-        `scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits ${missingFingerprint.length} ` +
-        "files that decide candle admission, so a change to any of them leaves " +
-        "docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims " +
-        "a currency it does not have. `candle_scalar_gate.rs` joined the list in sc-19049: the " +
-        "scalar gate's arithmetic moved there out of `vram_gate.rs`, which the matrix DOES " +
-        "fingerprint, so the matrix now rotates on none of the candle admission law. `payload.rs` " +
-        "joined in sc-19058 for the same reason one step further in: the fitted phase-curve law " +
-        "moved into `estimate_synthesis.rs` (which the matrix does fingerprint) and reads every " +
-        "coefficient through `json_f64`, so that helper is now prediction law nothing covers. " +
-        "Adding them " +
-        "rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal " +
-        "acceptance story owns the fix rather than every slice paying for it.",
-      paths: missingFingerprint,
-    },
     {
       id: "measured-flag-is-a-bare-boolean",
       owner: "sc-19053",
@@ -1707,20 +1668,6 @@ function knownGaps({ curveLanes, routes }) {
         "crates/sceneworks-worker/src/image_jobs/base.rs",
         "crates/sceneworks-worker/src/mlx_fit_gate.rs",
       ],
-    },
-    {
-      id: "candle-image-admission-is-geometry-blind",
-      owner: "sc-19054",
-      severity: "high",
-      detail:
-        `${routes.filter((route) => route.modality === "image" && route.mechanisms.includes("legacy_scalar_gate")).length} ` +
-        "image routes are admitted by the per-tier scalar gate, whose signature takes no width, " +
-        "height or frames â€” a 1024x1024 and a 2048x2048 request are admitted identically. The " +
-        "decision baseline records that explicitly (`geometrySensitive: false`) so the slice that " +
-        "fixes it produces a visible, enumerable diff.",
-      // The gate to change is in candle_scalar_gate.rs since sc-19049; vram_gate.rs re-exports it
-      // and still owns the geometry-AWARE candle paths (the Krea turbo ladder, svd/mochi).
-      paths: ["crates/sceneworks-worker/src/candle_scalar_gate.rs"],
     },
   ];
 }

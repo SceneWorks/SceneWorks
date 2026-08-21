@@ -868,22 +868,35 @@ test("the baseline refuses decisions that contradict the derived gate facts", ()
 // Recorded gaps
 // -------------------------------------------------------------------------------------------------
 
-test("the memory-matrix fingerprint gap is recorded, owned, and still real", async () => {
-  const gap = artifacts.inventory.knownGaps.find(
-    (entry) => entry.id === "memory-matrix-source-paths-under-cover-candle-admission",
+test("the memory-matrix fingerprints every candle admission input named by sc-19059", async () => {
+  assert.ok(
+    !artifacts.inventory.knownGaps.some(
+      (entry) => entry.id === "memory-matrix-source-paths-under-cover-candle-admission",
+    ),
+    "the retired SOURCE_PATHS gap must not survive its repair",
   );
-  assert.ok(gap, "the memory-matrix SOURCE_PATHS gap is not recorded");
-  assert.equal(gap.owner, "sc-19059");
-  // Recorded gaps must be checked, not just asserted: the day the matrix DOES fingerprint these
-  // files, this test fails and the stale gap gets deleted rather than quietly outliving its truth.
   const matrix = await readFile(new URL("./generate-memory-matrix.mjs", import.meta.url), "utf8");
   const declared = matrix.slice(matrix.indexOf("export const SOURCE_PATHS"));
-  for (const relative of gap.paths) {
+  for (const relative of [
+    "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+    "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+    "crates/sceneworks-worker/src/video_admission.rs",
+    "crates/sceneworks-worker/src/conditioning_fit.rs",
+    "crates/sceneworks-worker/src/krea_control_fit.rs",
+    "crates/sceneworks-core/src/video_memory_curves.rs",
+    "crates/sceneworks-worker/src/payload.rs",
+  ]) {
     assert.ok(
-      !declared.includes(`"${relative}"`),
-      `${relative} is now in the matrix SOURCE_PATHS — delete the recorded gap`,
+      declared.includes(`"${relative}"`),
+      `${relative} is a candle admission input missing from the matrix fingerprint`,
     );
   }
+});
+
+test("closed terminal gaps do not survive as generated acceptance debt", () => {
+  const ids = new Set(artifacts.inventory.knownGaps.map(({ id }) => id));
+  assert.ok(!ids.has("memory-matrix-source-paths-under-cover-candle-admission"));
+  assert.ok(!ids.has("candle-image-admission-is-geometry-blind"));
 });
 
 test("the manifest carries a bare `measured` boolean and no evidence-class enum", async () => {
