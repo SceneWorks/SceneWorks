@@ -1707,6 +1707,21 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    /// Build one synthetic shipped-Candle manifest cell through the same explicit provenance
+    /// contract production requires. Tests that exercise missing, foreign, or malformed
+    /// provenance construct their manifests directly instead.
+    fn candle_measurement_manifest(candle: Value) -> JsonObject<String, Value> {
+        let mut candle = candle
+            .as_object()
+            .expect("synthetic Candle manifest object")
+            .clone();
+        candle.insert(
+            "measurementLane".to_owned(),
+            Value::String("candle".to_owned()),
+        );
+        JsonObject::from_iter([("candle".to_owned(), Value::Object(candle))])
+    }
+
     /// sc-17728, the Candle sibling of the MLX fit gate's coverage. The required parameter set
     /// follows the ENGAGED composition, so a provider that implements rung 4 with rungs 2 and 3
     /// `Missing` reads cleanly, while an engaged rung must still name every parameter it owns and a
@@ -1764,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_scalar_provenance_reaches_the_production_selector_empty_and_unverified() {
+    fn missing_foreign_and_malformed_scalar_provenance_stays_unverified_in_production() {
         let geometry = MemoryGeometry {
             width: 1024,
             height: 1024,
@@ -1790,16 +1805,23 @@ mod tests {
             .with_quant(Quant::Q4)
             .with_resolved_route("boogu_image");
 
-        for malformed in [json!(null), json!(true), json!(1), json!({}), json!([])] {
-            let manifest = json!({
-                "candle": {
-                    "measurementLane": malformed,
-                    "vramGbByTier": { "q4": 30.0 }
-                }
-            })
-            .as_object()
-            .expect("manifest object")
-            .clone();
+        for provenance in [
+            None,
+            Some(json!("mlx")),
+            Some(json!(null)),
+            Some(json!(true)),
+            Some(json!(1)),
+            Some(json!({})),
+            Some(json!([])),
+        ] {
+            let mut candle = json!({ "vramGbByTier": { "q4": 30.0 } })
+                .as_object()
+                .expect("candle object")
+                .clone();
+            if let Some(provenance) = provenance {
+                candle.insert("measurementLane".to_owned(), provenance);
+            }
+            let manifest = JsonObject::from_iter([("candle".to_owned(), Value::Object(candle))]);
             assert!(matches!(
                 select_unverified_scalar_provenance(
                     "boogu_image",
@@ -1839,7 +1861,7 @@ mod tests {
                 )
                 .expect("production scalar evaluation")
                 .is_none(),
-                "Unverified provenance must preserve legacy resident execution"
+                "missing, foreign, or malformed provenance must preserve legacy resident execution"
             );
         }
     }
@@ -1964,10 +1986,9 @@ mod tests {
         // `Budget::effective_gb` subtracts it, so the staged floor competes against
         // `free_gb - SELECTOR_RESERVE_GB`.
         const SELECTOR_RESERVE_GB: f64 = 2.0;
-        let manifest = json!({ "candle": { "sequentialPeakGb": { "q4": STAGED_ROW_GB } } })
-            .as_object()
-            .expect("manifest object")
-            .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "sequentialPeakGb": { "q4": STAGED_ROW_GB }
+        }));
         // Derived through the production formula rather than guessed: the staged row is padded by
         // the allocator reserve and then widened by the candle estimate margin before the fit check.
         // The previous literals (4.0 row, 8.0 free) missed by 0.24 GiB even with the map shape, and
@@ -2510,16 +2531,11 @@ mod tests {
     /// exactly the staged floor.
     #[test]
     fn unmeasured_provider_under_a_small_budget_engages_the_estimate_floor_ladder() {
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 6.0 },
-                "sequentialPeakGb": { "q4": 2.5 },
-                "supportsSequentialOffload": true
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 6.0 },
+            "sequentialPeakGb": { "q4": 2.5 },
+            "supportsSequentialOffload": true
+        }));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         let evaluate_as = |free_gb: f64, artifact_is_certified: bool| {
             evaluate_shared_image(
@@ -2700,15 +2716,10 @@ mod tests {
 
     #[test]
     fn eligible_lens_selector_contract_can_select_sequential_without_mutating_the_load_spec() {
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 6.0 },
-                "sequentialPeakGb": { "q4": 2.5 }
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 6.0 },
+            "sequentialPeakGb": { "q4": 2.5 }
+        }));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-lens-q4")))
             .with_quant(Quant::Q4)
             .with_resolved_route("lens")
@@ -2878,16 +2889,11 @@ mod tests {
     /// flips this arm red.
     #[test]
     fn a_staging_free_ladder_never_admits_on_the_staged_row() {
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 6.0 },
-                "sequentialPeakGb": { "q4": 2.5 },
-                "supportsSequentialOffload": true
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 6.0 },
+            "sequentialPeakGb": { "q4": 2.5 },
+            "supportsSequentialOffload": true
+        }));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         // A budget where the WIDENED staged-row floor fits but the resident estimate (8.0 GiB)
         // does not — recomputed from the policy margin, never a frozen literal.
@@ -3035,16 +3041,11 @@ mod tests {
     ///    manifest floor would admit at each budget).
     #[test]
     fn a_measured_cell_at_another_geometry_seeds_a_fitted_estimate_through_the_generic_module() {
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 30.0 },
-                "sequentialPeakGb": { "q4": 2.5 },
-                "supportsSequentialOffload": true
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 30.0 },
+            "sequentialPeakGb": { "q4": 2.5 },
+            "supportsSequentialOffload": true
+        }));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         let geometry = MemoryGeometry {
             width: 2048,
@@ -3234,16 +3235,11 @@ mod tests {
     ///    the exactness assertion red (7.0 != 12.0).
     #[test]
     fn a_resident_record_at_another_geometry_supersedes_the_scalar_baseline() {
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 5.0 },
-                "sequentialPeakGb": { "q4": 2.5 },
-                "supportsSequentialOffload": true
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 5.0 },
+            "sequentialPeakGb": { "q4": 2.5 },
+            "supportsSequentialOffload": true
+        }));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         let geometry = MemoryGeometry {
             width: 2048,
@@ -3342,18 +3338,13 @@ mod tests {
     #[test]
     fn an_uncovered_scalar_resident_estimate_is_graded_as_the_declared_floor() {
         let manifest = |measured: bool| {
-            json!({
-                "candle": {
-                    "measured": measured,
-                    "vramMeasuredPixels": 1_048_576,
-                    "vramGbByTier": { "q4": 30.0 },
-                    "sequentialPeakGb": { "q4": 2.5 },
-                    "supportsSequentialOffload": true
-                }
-            })
-            .as_object()
-            .unwrap()
-            .clone()
+            candle_measurement_manifest(json!({
+                "measured": measured,
+                "vramMeasuredPixels": 1_048_576,
+                "vramGbByTier": { "q4": 30.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }))
         };
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         let scalar_peak_gb = 32.0; // 30.0 row + 2.0 headroom, the caller's raw prediction
@@ -3505,16 +3496,11 @@ mod tests {
             envelope_peak_bytes: 3 * GIB,
             record_id: "imc-sc19054-attention-probe".to_owned(),
         };
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 30.0 },
-                "sequentialPeakGb": { "q4": 2.5 },
-                "supportsSequentialOffload": true
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 30.0 },
+            "sequentialPeakGb": { "q4": 2.5 },
+            "supportsSequentialOffload": true
+        }));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         // A fitted STAGED candidate too, so every rung with a floor carries better evidence and
         // the coarse filter withholds all of them.
@@ -3802,16 +3788,11 @@ mod tests {
         // Staged floor = `sequentialPeakGb` 2.5 + 2.0 headroom = 4.5 GiB, widened by the 4% candle
         // estimate margin to 4.68; the resident estimate is 8.0. A 7 GiB budget (5.0 effective)
         // therefore separates "floor available" from "resident only".
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 6.0 },
-                "sequentialPeakGb": { "q4": 2.5 },
-                "supportsSequentialOffload": true
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 6.0 },
+            "sequentialPeakGb": { "q4": 2.5 },
+            "supportsSequentialOffload": true
+        }));
         let evaluate = |artifact_is_certified: bool, free_gb: f64| {
             evaluate_shared_image(
                 "flux1_dev",
@@ -3874,21 +3855,16 @@ mod tests {
 
     #[test]
     fn edit_alias_enters_turbo_contract_as_an_edit_reference_scope() {
-        let manifest = json!({
-            "candle": {
-                "vramGbByTier": { "q4": 8.0 },
-                "supportsSequentialOffload": true,
-                "memoryStrategyCapabilities": {
-                    "bounded_decode": {
-                        "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
-                        "overlays": ["none", "lora"]
-                    }
+        let manifest = candle_measurement_manifest(json!({
+            "vramGbByTier": { "q4": 8.0 },
+            "supportsSequentialOffload": true,
+            "memoryStrategyCapabilities": {
+                "bounded_decode": {
+                    "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+                    "overlays": ["none", "lora"]
                 }
             }
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        }));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         let evaluation = evaluate_shared_image(
             "z_image_turbo",
@@ -3935,7 +3911,7 @@ mod tests {
 
     #[test]
     fn hires_fix_does_not_reuse_one_geometry_scope_for_both_passes() {
-        let manifest = JsonObject::new();
+        let manifest = candle_measurement_manifest(json!({}));
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
         let evaluation = evaluate_shared_image(
             "z_image",

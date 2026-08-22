@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9765da17b01e7fb7470f399f94f82e4c84646fcf8c2682fe682a4e8d704dc33d",
+    "sceneWorksRevision": "source-tree:9296cdd2ad7f1937b26749f30f204d43585815b4b116e15a24e3cda8dc3fc955",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -39,7 +39,7 @@
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "5e550f921e40f6f3e594ddc301093bee08679510a2ed79836a20392f3ccef911"
+        "sha256": "028a96728ef31607f4cb7a24f46107a7ef219789c09a0e06b83ed49dba7c303d"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -67,7 +67,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "93c1db6de5eb598547f01c3a12a533f21748be5137e108fa40dfe9ba56730c27"
+        "sha256": "2a600b0ce88dc96102a52b6b36bebfdad18406fbb14129427f33fbe7ab629802"
       },
       "imageBaseAdmission": {
         "path": "crates/sceneworks-worker/src/image_jobs/base_admission.rs",

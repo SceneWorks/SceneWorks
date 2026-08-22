@@ -9355,12 +9355,22 @@ mod candle_resolved_tier_contract_tests {
                 let spec = mage_spec(engine_id, &resolved, resolved_quant);
                 assert_eq!(spec.quantize, expected_quant, "engine={engine_id} tier={tier}");
                 let edit = engine_id.contains("_edit");
+                let manifest = crate::training_jobs::builtin_model_manifest_entry(engine_id)
+                    .unwrap_or_else(|| panic!("missing builtin Mage manifest {engine_id}"));
+                let manifest = manifest
+                    .as_object()
+                    .unwrap_or_else(|| panic!("builtin Mage manifest is not an object: {engine_id}"));
+                assert_eq!(
+                    manifest["candle"]["measurementLane"],
+                    "candle",
+                    "engine={engine_id} must carry the production Candle provenance tag"
+                );
                 let evaluation = crate::candle_memory_strategy::evaluate_shared_image(
                     engine_id,
                     engine_id,
                     &spec,
                     false,
-                    &JsonObject::new(),
+                    manifest,
                     tier,
                     if edit { "edit_image" } else { "image_generation" },
                     None,
