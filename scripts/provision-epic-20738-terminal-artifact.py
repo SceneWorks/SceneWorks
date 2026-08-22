@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Audit, stage, and resolve immutable epic-20738 artifacts.
+"""Audit and just-in-time stage immutable epic-20738 artifacts.
 
-The trusted runner cache is always audited first. Each distinct reviewed authority is then copied
-once into a campaign-owned staging tree and reused by every cell. Network access is impossible
-except while staging the one frozen missing FLUX Schnell q8 file; that download names one exact
-repo/revision/filename and lands only in fresh campaign staging. Runtime resolution is fully offline.
+The trusted runner cache is fully audited before GPU work.  The sole reviewed missing file can be
+downloaded once into an isolated campaign-owned store.  Individual authorities are subsequently
+copied into fresh, short-lived staging roots with network access disabled.
 """
 
 from __future__ import annotations
@@ -238,29 +237,143 @@ def _stage_root(staging_root: Path) -> Path:
     return _ordinary_directory(staging_root, "campaign artifact staging root")
 
 
+def _missing_store_root(missing_store: Path) -> Path:
+    if not missing_store.is_absolute():
+        raise ValueError("missing-file store must be an absolute path")
+    return _ordinary_directory(missing_store, "campaign missing-file store")
+
+
+def download_reviewed_missing(request: dict, cache_root: Path, missing_store: Path) -> dict:
+    audit = audit_cached_artifact(request, cache_root)
+    reviewed = list(NETWORK_FILL_AUTHORITY)
+    if [request["repository"], request["revision"], *audit["missingFiles"]] != reviewed:
+        raise RuntimeError("network fill requires exactly the sole reviewed missing filename")
+
+    destination_root = _missing_store_root(missing_store)
+    repository, revision, filename = NETWORK_FILL_AUTHORITY
+    owner, name = repository.split("/", 1)
+    destination_snapshot = (
+        destination_root / f"models--{owner}--{name}" / "snapshots" / revision
+    )
+    destination = destination_snapshot / filename
+    receipt_path = destination_root / "download-receipt.json"
+    if destination.exists() or destination.is_symlink() or receipt_path.exists():
+        raise RuntimeError("refusing to overwrite the campaign missing-file store")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    from huggingface_hub import (
+        __version__,
+        get_hf_file_metadata,
+        hf_hub_download,
+        hf_hub_url,
+    )
+
+    if __version__ != "0.36.0":
+        raise RuntimeError(
+            f"network fill requires huggingface_hub 0.36.0, got {__version__}"
+        )
+    url = hf_hub_url(repo_id=repository, filename=filename, revision=revision)
+    metadata = get_hf_file_metadata(url, token=False)
+    etag = str(metadata.etag or "").strip('"')
+    if (
+        metadata.commit_hash != revision
+        or not SHA256.fullmatch(etag)
+        or not isinstance(metadata.size, int)
+        or metadata.size < 1
+    ):
+        raise RuntimeError("exact missing-file metadata did not bind commit, LFS SHA, and size")
+    network_cache = destination_root / ".hf-network-staging"
+    downloaded = Path(
+        hf_hub_download(
+            repo_id=repository,
+            filename=filename,
+            revision=revision,
+            repo_type="model",
+            local_dir=destination_snapshot,
+            cache_dir=network_cache,
+            token=False,
+            force_download=False,
+            local_files_only=False,
+        )
+    )
+    if downloaded != destination or not destination.is_file():
+        raise RuntimeError("pinned missing-file download did not materialize the exact store path")
+    if destination.is_symlink():
+        raise RuntimeError("pinned missing-file download produced a reparse target")
+    actual_sha = _sha256(destination)
+    if destination.stat().st_size != metadata.size or actual_sha != etag:
+        raise RuntimeError("downloaded missing file failed exact size/LFS SHA verification")
+    if network_cache.exists():
+        shutil.rmtree(network_cache, ignore_errors=False)
+    local_metadata = destination_snapshot / ".cache"
+    if local_metadata.exists():
+        shutil.rmtree(local_metadata, ignore_errors=False)
+    if not destination.is_file() or destination.stat().st_size != metadata.size or _sha256(destination) != etag:
+        raise RuntimeError("downloaded missing file did not remain durable after network-cache cleanup")
+    record = {
+        "path": Path(filename).relative_to(request["subdirectory"]).as_posix(),
+        "bytes": metadata.size,
+        "sha256": actual_sha,
+        "lfsSha256": etag,
+        "commitSha": metadata.commit_hash,
+    }
+    receipt_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    return {
+        "id": request["id"],
+        "storeRoot": str(destination_root),
+        "downloadedFiles": [record],
+    }
+
+
+def _stored_missing_file(request: dict, missing_store: Path) -> dict:
+    root = _missing_store_root(missing_store)
+    if _reviewed_missing(request) != [NETWORK_FILL_AUTHORITY[2]]:
+        raise RuntimeError("missing-file store is not approved for this authority")
+    receipt_path = root / "download-receipt.json"
+    try:
+        record = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+        raise RuntimeError("campaign missing-file receipt is absent or invalid") from error
+    if set(record) != {"path", "bytes", "sha256", "lfsSha256", "commitSha"}:
+        raise RuntimeError("campaign missing-file receipt fields drifted")
+    expected = NETWORK_FILL_AUTHORITY[2]
+    expected_selected = Path(expected).relative_to(request["subdirectory"]).as_posix()
+    owner, name = NETWORK_FILL_AUTHORITY[0].split("/", 1)
+    stored = (
+        root / f"models--{owner}--{name}" / "snapshots"
+        / NETWORK_FILL_AUTHORITY[1] / expected
+    )
+    if (
+        record["path"] != expected_selected
+        or record["commitSha"] != NETWORK_FILL_AUTHORITY[1]
+        or record["sha256"] != record["lfsSha256"]
+        or not SHA256.fullmatch(record["sha256"])
+        or not isinstance(record["bytes"], int)
+        or record["bytes"] < 1
+        or not stored.is_file()
+        or stored.is_symlink()
+        or stored.stat().st_size != record["bytes"]
+        or _sha256(stored) != record["sha256"]
+    ):
+        raise RuntimeError("campaign missing-file store failed exact identity verification")
+    return record
+
+
 def stage_artifact(
     request: dict,
     cache_root: Path,
     staging_root: Path,
-    allow_reviewed_download: bool,
+    missing_store: Path | None,
 ) -> dict:
     audit = audit_cached_artifact(request, cache_root)
-    reviewed = list(NETWORK_FILL_AUTHORITY)
-    if audit["missingFiles"] and (
-        not allow_reviewed_download
-        or [
-            request["repository"],
-            request["revision"],
-            *audit["missingFiles"],
-        ]
-        != reviewed
-    ):
-        raise RuntimeError(
-            "network staging is not approved for missing set: "
-            + ", ".join(audit["missingFiles"])
-        )
-    if allow_reviewed_download and audit["missingFiles"] != [NETWORK_FILL_AUTHORITY[2]]:
-        raise RuntimeError("network staging requires exactly the sole reviewed missing filename")
+    stored_missing = None
+    if audit["missingFiles"]:
+        if audit["missingFiles"] != [NETWORK_FILL_AUTHORITY[2]] or missing_store is None:
+            raise RuntimeError(
+                "offline JIT staging lacks the exact reviewed missing file: "
+                + ", ".join(audit["missingFiles"])
+            )
+        stored_missing = _stored_missing_file(request, missing_store)
 
     destination_root = _stage_root(staging_root)
     owner, name = request["repository"].split("/", 1)
@@ -277,68 +390,35 @@ def stage_artifact(
         source = Path(audit["selectedRoot"]) / record["path"]
         destination = destination_selected / record["path"]
         if destination.exists() or destination.is_symlink():
-            raise RuntimeError(f"refusing to overwrite staged cache file: {destination}")
+            if not destination.is_symlink() and destination.is_file() and destination.stat().st_size == record["bytes"] and _sha256(destination) == record["sha256"]:
+                continue
+            raise RuntimeError(f"refusing to overwrite non-identical staged cache file: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source.resolve(strict=True), destination)
         if destination.stat().st_size != record["bytes"] or _sha256(destination) != record["sha256"]:
             raise RuntimeError(f"staged cache copy failed byte verification: {destination}")
 
     downloaded_files = []
-    if audit["missingFiles"]:
-        repository, revision, filename = NETWORK_FILL_AUTHORITY
-        destination = destination_snapshot / filename
-        if destination.exists() or destination.is_symlink():
-            raise RuntimeError("refusing to overwrite the reviewed missing staging target")
+    if stored_missing:
+        owner, name = NETWORK_FILL_AUTHORITY[0].split("/", 1)
+        source = (
+            _missing_store_root(missing_store)
+            / f"models--{owner}--{name}" / "snapshots"
+            / NETWORK_FILL_AUTHORITY[1] / NETWORK_FILL_AUTHORITY[2]
+        )
+        destination = destination_selected / stored_missing["path"]
         destination.parent.mkdir(parents=True, exist_ok=True)
-
-        from huggingface_hub import (
-            __version__,
-            get_hf_file_metadata,
-            hf_hub_download,
-            hf_hub_url,
-        )
-
-        if __version__ != "0.36.0":
-            raise RuntimeError(
-                f"network staging requires huggingface_hub 0.36.0, got {__version__}"
-            )
-        url = hf_hub_url(repo_id=repository, filename=filename, revision=revision)
-        metadata = get_hf_file_metadata(url, token=False)
-        etag = str(metadata.etag or "").strip('"')
-        if (
-            metadata.commit_hash != revision
-            or not SHA256.fullmatch(etag)
-            or not isinstance(metadata.size, int)
-            or metadata.size < 1
-        ):
-            raise RuntimeError("exact missing-file metadata did not bind commit, LFS SHA, and size")
-        downloaded = Path(
-            hf_hub_download(
-                repo_id=repository,
-                filename=filename,
-                revision=revision,
-                repo_type="model",
-                local_dir=destination_snapshot,
-                cache_dir=destination_root / ".hf-network-staging",
-                token=False,
-                force_download=False,
-                local_files_only=False,
-            )
-        )
-        if downloaded != destination or not destination.is_file():
-            raise RuntimeError(
-                "pinned missing-file download did not materialize the exact staging path"
-            )
-        actual_sha = _sha256(destination)
-        if destination.stat().st_size != metadata.size or actual_sha != etag:
-            raise RuntimeError("downloaded missing file failed exact size/LFS SHA verification")
+        if destination.exists() or destination.is_symlink():
+            if not (not destination.is_symlink() and destination.is_file() and destination.stat().st_size == stored_missing["bytes"] and _sha256(destination) == stored_missing["sha256"]):
+                raise RuntimeError("refusing to overwrite non-identical staged missing file")
+        else:
+            shutil.copyfile(source, destination)
+        if destination.stat().st_size != stored_missing["bytes"] or _sha256(destination) != stored_missing["sha256"]:
+            raise RuntimeError("JIT copy of campaign missing file failed byte verification")
         downloaded_files.append(
             {
+                **stored_missing,
                 "path": destination.relative_to(destination_selected).as_posix(),
-                "bytes": metadata.size,
-                "sha256": actual_sha,
-                "lfsSha256": etag,
-                "commitSha": metadata.commit_hash,
             }
         )
 
@@ -355,21 +435,24 @@ def main() -> None:
     parser.add_argument("--cache-root", required=True, type=Path)
     parser.add_argument("--audit", action="store_true")
     parser.add_argument("--stage-root", type=Path)
-    parser.add_argument("--allow-reviewed-download", action="store_true")
+    parser.add_argument("--missing-store", type=Path)
+    parser.add_argument("--download-reviewed-missing", action="store_true")
     args = parser.parse_args()
     if args.audit and args.stage_root:
         raise ValueError("--audit and --stage-root are mutually exclusive")
-    if args.allow_reviewed_download and not args.stage_root:
-        raise ValueError("--allow-reviewed-download requires --stage-root")
+    if args.download_reviewed_missing and (args.audit or args.stage_root or not args.missing_store):
+        raise ValueError("--download-reviewed-missing requires only --missing-store")
     request = parse_request(args.request.resolve())
-    if args.audit:
+    if args.download_reviewed_missing:
+        result = download_reviewed_missing(request, args.cache_root, args.missing_store)
+    elif args.audit:
         result = audit_cached_artifact(request, args.cache_root)
     elif args.stage_root:
         result = stage_artifact(
             request,
             args.cache_root,
             args.stage_root,
-            args.allow_reviewed_download,
+            args.missing_store,
         )
     else:
         result = resolve_cached_artifact(request, args.cache_root)

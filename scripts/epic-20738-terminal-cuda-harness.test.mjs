@@ -11,10 +11,12 @@ import {
   PROFILE_SCHEMA_PATH,
   RECEIPT_SCHEMA_PATH,
   CACHE_PREFLIGHT_SCHEMA_PATH,
+  authorityLifetimePlan,
   cellSemanticsSha256,
   directoryInventory,
   expectedArtifactFilesFromEvidence,
   expectedLoadSpecQuantBits,
+  estimateJitDiskPlan,
   inferencePins,
   hashedFiles,
   installSidecarObstructions,
@@ -109,6 +111,71 @@ test("download evidence freezes the exact 23-authority filename census", async (
     () => expectedArtifactFilesFromEvidence(checked, missingRow),
     /missing exact authority/,
   );
+});
+
+test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99GB floor", () => {
+  const file = (key, bytes, persistent = false) => ({ key, bytes, persistent });
+  const row = (artifactId, firstOrdinal, lastOrdinal, files) => ({
+    artifactId,
+    role: artifactId.includes("support") ? "support" : "primary",
+    firstOrdinal,
+    lastOrdinal,
+    sourceBytes: files.reduce((sum, entry) => sum + entry.bytes, 0),
+    expectedFiles: files.length,
+    physicalFiles: files,
+  });
+  const persistent = file("schnell-q8/missing", 12_637_521_668, true);
+  const lifetimes = [
+    row("flux1-dev-q8", 8, 8, [file("dev-q8", 23_371_725_325)]),
+    row("flux1-schnell-q4", 9, 9, [file("schnell-q4", 14_973_205_319)]),
+    row("flux1-schnell-q8", 10, 10, [file("schnell-q8/cache", 5_361_654_035), persistent]),
+    row("scail2-q4", 11, 12, [file("scail-q4", 29_000_000_000)]),
+    row("scail2-q8", 13, 13, [file("scail-q8", 19_429_609_601)]),
+    row("ltx23-q8", 14, 14, [file("ltx-q8", 30_000_000_000)]),
+    row("ltx23-gemma", 14, 14, [file("ltx-gemma", 13_519_093_966)]),
+    ...[0, 1, 2, 3, 4].map((index) => row(
+      `sdxl-primary-${index}`,
+      15 + index,
+      15 + index,
+      [file(`sdxl-primary-${index}`, index === 4 ? 6_047_177_674 : 6_047_177_669)],
+    )),
+    ...[0, 1, 2, 3].map((index) => row(
+      `sdxl-support-${index}`,
+      15,
+      19,
+      [file(`sdxl-support-${index}`, 125_000_000)],
+    )),
+  ];
+  const floor = 99_106_288_594;
+  const admitted = estimateJitDiskPlan(lifetimes, floor, persistent.bytes);
+  assert.equal(admitted.logicalSourceBytes, 179_028_698_264);
+  assert.equal(admitted.allAtOnceSourceBytes, 179_028_698_264);
+  assert.equal(
+    admitted.allAtOnceSourceBytes - admitted.legacyNaiveLinkLengthSourceBytes,
+    5_361_654_035,
+    "link-length accounting must never undercount followed Schnell q8 blob bytes",
+  );
+  assert.equal(admitted.cells.find((entry) => entry.ordinal === 8).modelAndSidecarBytes, 48_591_208_721);
+  assert.equal(admitted.cells.find((entry) => entry.ordinal === 9).modelAndSidecarBytes, 35_015_213_643);
+  assert.equal(admitted.cells.find((entry) => entry.ordinal === 10).modelAndSidecarBytes, 30_581_137_431);
+  assert.equal(admitted.cells.find((entry) => entry.ordinal === 13).modelAndSidecarBytes, 32_067_131_269);
+  assert.equal(admitted.peakModelAndSidecarBytes, 56_156_615_634);
+  assert.equal(admitted.peakRequiredAdditionalBytes, floor);
+  assert.equal(admitted.admitted, true);
+  assert.equal(estimateJitDiskPlan(lifetimes, floor - 1, persistent.bytes).admitted, false);
+  assert.ok(admitted.allAtOnceRequiredBytes > floor, "all-at-once staging stays rejected");
+
+  const completeCache = structuredClone(lifetimes);
+  const completeQ8 = completeCache.find((entry) => entry.artifactId === "flux1-schnell-q8");
+  completeQ8.physicalFiles = completeQ8.physicalFiles.map((entry) => ({
+    ...entry,
+    persistent: false,
+  }));
+  const completePlan = estimateJitDiskPlan(completeCache, floor, 0);
+  assert.ok(completePlan.peakModelAndSidecarBytes < admitted.peakModelAndSidecarBytes);
+  assert.equal(completePlan.peakRequiredAdditionalBytes, floor);
+  assert.equal(completePlan.admitted, true);
+  assert.equal(estimateJitDiskPlan(completeCache, floor - 1, 0).admitted, false);
 });
 
 test("profile validator rejects count, order, every semantic tuple mutation, blocked, and authority drift", async () => {
@@ -816,9 +883,21 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
       };
     },
     installSidecarObstructions: async (artifacts) => fixtureSidecarObstructions(artifacts),
+    listDerivedSidecarNamespaces: async (root) => {
+      const id = executedCells.at(-1);
+      if (!id?.startsWith("flux1-")) return [];
+      const namespace = path.join(root, "candle-device-format-v1", id);
+      await mkdir(namespace, { recursive: true });
+      return [namespace];
+    },
     directoryInventory: async (root) => ({
-      root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+      root,
+      files: root.includes("flux1-") ? 494 : 0,
+      bytes: root.includes("flux1-")
+        ? (root.endsWith("q4") ? 7_396_392_960 : 12_573_868_032) : 0,
+      sha256: createHash("sha256").digest("hex"),
     }),
+    diskFreeBytes: async () => 256 * 1024 ** 3,
     executeCell: async ({ cellDir, logFile }) => {
       await writeFile(logFile, "fixture runtime\n", "utf8");
       const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
@@ -853,16 +932,9 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
       Array.from({ length: 7 }, (_, index) => index),
       result.summary.campaignErrors.join("\n"),
     );
-    assert.equal(preflightCalls.length, 23 * 3);
-    assert.ok(preflightCalls.every((call) => call.includes(":cache-preflight:")));
-    assert.deepEqual(
-      preflightCalls.map((call) => call.split(":")[0]),
-      [
-        ...Array(23).fill("audit"),
-        ...Array(23).fill("stage"),
-        ...Array(23).fill("offline"),
-      ],
-    );
+    assert.equal(preflightCalls.filter((call) => call.startsWith("audit:")).length, 23);
+    assert.equal(preflightCalls.filter((call) => call.startsWith("stage:")).length, 3);
+    assert.equal(preflightCalls.filter((call) => call.startsWith("offline:")).length, 3);
     assert.ok(executedCells.length > 0);
     assert.ok(executedCells.every((id) => checked.cells.slice(0, 7).some((cell) => cell.id === id)));
     assert.equal(executedCells.at(-1), checked.cells[6].id);
@@ -871,7 +943,7 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
     assert.equal(result.summaryPath, "_emergency/campaign-summary-fallback.json");
     assert.match(result.summary.campaignErrors.join("\n"), /primary campaign summary write failed/);
     for (const [index, outcome] of result.summary.receipts.entries()) {
-      assert.ok(outcome.receipt, `${outcome.id} must retain a receipt path`);
+      assert.ok(outcome.receipt, `${outcome.id} must retain a receipt path: ${outcome.error}`);
       const receiptFile = path.join(output, ...outcome.receipt.split("/"));
       const receipt = JSON.parse(await readFile(receiptFile, "utf8"));
       assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt));
@@ -897,10 +969,10 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
   }
 });
 
-test("continuation freezes census, stages once, downloads only the reviewed miss, and reuses authorities", async () => {
+test("continuation freezes census, downloads once, and JIT stages exact authority lifetimes", async () => {
   async function scenario({
     missingId = null, downloadSucceeds = false, mutateCache = false, mutateSourceAtStage = false,
-    preflightFault = null, omitObstructions = false,
+    preflightFault = null, omitObstructions = false, diskFreeValues = [256 * 1024 ** 3],
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -927,6 +999,7 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
     const events = [];
     const runtimeCells = [];
     let verificationCalls = 0;
+    let diskFreeCall = 0;
     const operations = {
       auditArtifact: async ({ id, artifact }) => {
         events.push(`audit:${id}`);
@@ -946,15 +1019,28 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
           ),
         };
       },
-      stageArtifact: async ({ id, artifact, stagingRoot, allowReviewedDownload }) => {
+      downloadReviewedMissing: async ({ id, missingStore }) => {
+        events.push(`download:${id}`);
+        if (!downloadSucceeds) throw new Error("fixture exact missing-file transfer failed");
+        return {
+          id,
+          storeRoot: missingStore,
+          downloadedFiles: [{
+            path: "transformer/model.safetensors",
+            bytes: 200,
+            sha256: "b".repeat(64),
+            lfsSha256: "b".repeat(64),
+            commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          }],
+        };
+      },
+      stageArtifact: async ({ id, artifact, stagingRoot, missingStore }) => {
         events.push(`stage:${id}`);
-        if (allowReviewedDownload && !downloadSucceeds) {
-          throw new Error("fixture exact missing-file transfer failed");
-        }
+        const usesMissing = id === "flux1-schnell-q8" && missingId === id;
         return {
           id, ...artifact,
           reusedFiles: artifactExpectedFiles[id].filter((file) => !(
-            allowReviewedDownload && file === "transformer/model.safetensors"
+            usesMissing && file === "transformer/model.safetensors"
           )).map((file, index) => ({
             path: file,
             bytes: 100,
@@ -962,7 +1048,7 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
               && events.filter((event) => event.startsWith("stage:")).length === 1
               && index === 0 ? "c".repeat(64) : "a".repeat(64),
           })),
-          downloadedFiles: allowReviewedDownload ? [{
+          downloadedFiles: usesMissing && missingStore ? [{
             path: "transformer/model.safetensors",
             bytes: 200,
             sha256: "b".repeat(64),
@@ -990,13 +1076,28 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
       installSidecarObstructions: async (artifacts) => (
         omitObstructions ? [] : fixtureSidecarObstructions(artifacts)
       ),
+      listDerivedSidecarNamespaces: async (root) => {
+        const id = runtimeCells.at(-1)?.id;
+        if (!id?.startsWith("flux1-")) return [];
+        const namespace = path.join(root, "candle-device-format-v1", id);
+        await mkdir(namespace, { recursive: true });
+        return [namespace];
+      },
       directoryInventory: async (root) => ({
-        root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+        root,
+        files: root.includes("flux1-") ? 494 : 0,
+        bytes: root.includes("flux1-")
+          ? (root.endsWith("q4") ? 7_396_392_960 : 12_573_868_032) : 0,
+        sha256: createHash("sha256").digest("hex"),
       }),
+      diskFreeBytes: async () => diskFreeValues[Math.min(
+        diskFreeCall++, diskFreeValues.length - 1,
+      )],
       executeCell: async ({ cellDir, logFile }) => {
         await writeFile(logFile, "fixture runtime\n", "utf8");
         const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
         runtimeCells.push(runtimeCell);
+        events.push(`execute:${runtimeCell.id}`);
         await writeFile(path.join(cellDir, "runtime-result.json"), `${JSON.stringify({
           requestedTier: runtimeCell.requestedTier,
           resolvedTier: runtimeCell.requestedTier,
@@ -1056,7 +1157,10 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
         } : undefined,
         suppressVerdict: true,
       });
-      const cacheEvidence = JSON.parse(await readFile(path.join(output, "cache-preflight.json"), "utf8"));
+      const cacheEvidence = JSON.parse(await readFile(
+        path.join(output, ...result.summary.cachePreflight.path.split("/")),
+        "utf8",
+      ));
       return {
         result, events, runtimeCells, checked, cacheEvidence,
         cacheValidation: {
@@ -1068,6 +1172,7 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
           guard,
           stagingRoot: path.join(scratch, "authority-stage"),
           derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
+          missingStore: path.join(scratch, "persistent-missing-file"),
           profile: checked,
         },
       };
@@ -1085,7 +1190,7 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
   assert.equal(failed.result.summary.failed, 12);
   assert.match(
     failed.result.summary.campaignErrors.join("\n"),
-    /copy-once campaign staging failed[\s\S]*exact missing-file transfer failed[\s\S]*no continuation GPU cell started/,
+    /cache-only transfer\/disk preflight failed[\s\S]*exact missing-file transfer failed[\s\S]*no continuation GPU cell started/,
   );
 
   const unapproved = await scenario({ missingId: "ltx23-q8" });
@@ -1101,16 +1206,42 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
   assert.equal(sourceChanged.events.some((event) => event.startsWith("offline:")), false);
   assert.match(
     sourceChanged.result.summary.campaignErrors.join("\n"),
-    /trusted source cache changed after frozen census[\s\S]*no continuation GPU cell started/,
+    /JIT authority stage\/copy\/hash failed[\s\S]*trusted source cache changed after frozen census/,
+  );
+
+  const diskNoGo = await scenario({ diskFreeValues: [1] });
+  assert.equal(diskNoGo.runtimeCells.length, 0);
+  assert.match(
+    diskNoGo.result.summary.campaignErrors.join("\n"),
+    /JIT staging disk admission refused[\s\S]*no continuation GPU cell started/,
+  );
+
+  const diskDropsBeforeStage = await scenario({
+    diskFreeValues: [256 * 1024 ** 3, 1],
+  });
+  assert.equal(diskDropsBeforeStage.runtimeCells.length, 0);
+  assert.match(
+    diskDropsBeforeStage.result.summary.campaignErrors.join("\n"),
+    /disk capacity fell below.*before-stage:flux1-dev-q8/,
   );
 
   const passed = await scenario();
-  assert.deepEqual(passed.events, [
-    ...remainingIds.map((id) => `audit:${id}`),
-    ...remainingIds.map((id) => `stage:${id}`),
-    ...remainingIds.map((id) => `offline:${id}`),
-  ]);
+  assert.deepEqual(
+    passed.events.filter((event) => event.startsWith("audit:")),
+    remainingIds.map((id) => `audit:${id}`),
+  );
+  assert.deepEqual(
+    passed.events.filter((event) => event.startsWith("stage:")),
+    remainingIds.map((id) => `stage:${id}`),
+    passed.result.summary.campaignErrors.join("\n"),
+  );
+  assert.equal(passed.events.filter((event) => event.startsWith("offline:")).length, 16);
   assert.equal(passed.runtimeCells.length, 12, passed.result.summary.campaignErrors.join("\n"));
+  assert.ok(
+    passed.events.indexOf("execute:flux1-dev-q8")
+      < passed.events.indexOf("stage:flux1-schnell-q4"),
+    "later authorities must not be staged all at once before the first GPU cell",
+  );
   const scailRoots = passed.runtimeCells
     .filter((cell) => cell.artifacts.some((artifact) => artifact.id === "scail2-q4"))
     .map((cell) => cell.artifacts.find((artifact) => artifact.id === "scail2-q4").root);
@@ -1120,13 +1251,35 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
     .map((cell) => cell.artifacts.find((artifact) => artifact.id === "sdxl-openpose").root);
   assert.equal(controlRoots.length, 5);
   assert.equal(new Set(controlRoots).size, 1, "five SDXL cells must reuse one cached ControlNet");
+  const lifecycle = passed.result.summary.authorityLifecycle;
+  assert.deepEqual(lifecycle.find((row) => row.ordinal === 11).staged.map((row) => row.artifactId), [
+    "scail2-q4",
+  ]);
+  assert.deepEqual(lifecycle.find((row) => row.ordinal === 12).released.map((row) => row.artifactId), [
+    "scail2-q4",
+  ]);
+  assert.deepEqual(lifecycle.find((row) => row.ordinal === 14).staged.map((row) => row.artifactId), [
+    "ltx23-q8", "ltx23-gemma",
+  ]);
+  assert.deepEqual(lifecycle.find((row) => row.ordinal === 15).staged.map((row) => row.artifactId), [
+    "sdxl-base-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+  ]);
+  assert.deepEqual(lifecycle.find((row) => row.ordinal === 19).released.map((row) => row.artifactId), [
+    "illustrious-v2-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+  ]);
+  assert.equal(passed.result.summary.finalAuthorityLifecycle.stage.files, 0);
+  assert.equal(passed.result.summary.finalAuthorityLifecycle.derived.files, 0);
+  assert.equal(passed.result.summary.finalAuthorityLifecycle.missingStoreAbsent, true);
 
   const filled = await scenario({ missingId: "flux1-schnell-q8", downloadSucceeds: true });
-  assert.deepEqual(filled.events, [
-    ...remainingIds.map((id) => `audit:${id}`),
-    ...remainingIds.map((id) => `stage:${id}`),
-    ...remainingIds.map((id) => `offline:${id}`),
+  assert.deepEqual(
+    filled.events.filter((event) => event.startsWith("audit:")),
+    remainingIds.map((id) => `audit:${id}`),
+  );
+  assert.deepEqual(filled.events.filter((event) => event.startsWith("download:")), [
+    "download:flux1-schnell-q8",
   ]);
+  assert.equal(filled.events.filter((event) => event.startsWith("stage:")).length, 16);
   assert.equal(filled.runtimeCells.length, 12);
   assert.deepEqual(filled.cacheEvidence.downloadedFiles, [{
     artifactId: "flux1-schnell-q8",
@@ -1162,12 +1315,8 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
     () => validateCachePreflightEvidence(censusDrift, filled.cacheValidation),
     /authority census drifted/,
   );
-  const obstructionMissing = structuredClone(filled.cacheEvidence);
-  obstructionMissing.sidecarObstructions.pop();
-  assert.throws(
-    () => validateCachePreflightEvidence(obstructionMissing, filled.cacheValidation),
-    /did not obstruct every staged component root/,
-  );
+  assert.equal(filled.cacheEvidence.lifetimePlan.length, 16);
+  assert.equal(filled.cacheEvidence.diskPlan.admitted, true);
   const downloadDrift = structuredClone(filled.cacheEvidence);
   downloadDrift.downloadedFiles[0].commitSha = "f".repeat(40);
   assert.throws(
@@ -1203,7 +1352,7 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
   assert.equal(semanticFault.result.summary.failed, 12);
   assert.match(
     semanticFault.result.summary.campaignErrors.join("\n"),
-    /did not obstruct every staged component root/,
+    /did not obstruct model-adjacent sidecars/,
   );
   assert.doesNotThrow(() => validateDocumentWithSchema(
     CACHE_PREFLIGHT_SCHEMA_PATH,
@@ -1355,7 +1504,8 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /__version__ == '0\.36\.0'/);
   assert.match(terminalBlock, /q8\/transformer\/model\.safetensors/);
   const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
-  assert.match(controller, /HF_HUB_OFFLINE: allowReviewedDownload \? "0" : "1"/);
+  assert.match(controller, /async function downloadReviewedMissing[\s\S]*?HF_HUB_OFFLINE: "0"/);
+  assert.match(controller, /async function stageArtifact[\s\S]*?HF_HUB_OFFLINE: "1"/);
   assert.match(controller, /HF_HUB_OFFLINE: "1"[\s\S]*TRANSFORMERS_OFFLINE: "1"/);
   for (const variable of [
     "TEMP", "TMP", "TMPDIR", "HF_HOME", "HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE",

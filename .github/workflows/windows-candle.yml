@@ -1191,14 +1191,17 @@ jobs:
       # source-reviewed fixed cache root is censused from checked-in immutable download evidence
       # before transfer: there is no cache input,
       # snapshot/glob/ref-main fallback, matrix, child workflow, per-cell dispatch, or secret weight
-      # path. Each distinct valid authority is copied once into campaign-owned staging. The sole
-      # reviewed cache miss may download only flux1-schnell-mlx@bba3ae... file
-      # q8/transformer/model.safetensors into that staging tree, with exact commit/size/LFS-SHA
+      # path. The full 16-authority/199-file target-following census is hashed before GPU work. The
+      # sole reviewed cache miss may download only flux1-schnell-mlx@bba3ae... file
+      # q8/transformer/model.safetensors into an isolated persistent campaign store, with exact commit/size/LFS-SHA
       # verification; malformed cache partials are never resumed or renamed. Cells 1-7 are imported
       # from exactly one uploaded contiguous PASS prefix and rehashed; cells 8-19 run as a distinct
-      # continuation only after every staged authority passes a complete offline preflight. Exact
-      # authority files are copied without derivative extras; component roots carry regular-file
-      # sidecar obstructions and Candle writes only to a campaign-owned derived cache. The four
+      # continuation only after the full source/download/disk plan passes and network is forced
+      # offline. Authorities are copied just in time, retained only through their exact last consumer,
+      # rehashed before/after use, and durably cleaned. Exact authority files exclude derivative extras;
+      # component roots carry regular-file sidecar obstructions and Candle writes only to per-authority
+      # namespaces in a campaign-owned derived cache. A target-byte estimator and 40-GiB non-model
+      # reserve enforce the reviewed 99,106,288,594-byte free-space floor at every transition. The four
       # dismantled pin-keyed gates remain untouched.
       - name: Set up the pinned terminal Node runtime
         id: terminal_node

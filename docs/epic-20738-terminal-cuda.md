@@ -54,24 +54,40 @@ lockfile-pinned in-process Node Draft 2020-12 validator and creates a fresh `RUN
 virtual environment with `huggingface_hub==0.36.0`, then verifies and passes that exact interpreter
 to the controller. The trusted source cache is the fixed
 `E:\huggingface\hub`; it is not a dispatch input and is never used as writable runtime storage.
-Before any GPU cell, the controller freezes a census of every distinct remaining exact
+Before any GPU cell, the controller freezes and hashes the target bytes in a census of every distinct remaining exact
 repository/revision/allow-pattern authority. The exact required filenames come from the checked-in
 immutable download-pattern evidence; every listed file is required, and only those files are copied.
 Unreviewed extras such as `.incomplete` blobs and model-adjacent `.candle-device-format-v1`
 derivatives are excluded. Hugging Face snapshot file links are valid only when
 their resolved blobs remain inside that trusted root; broken, empty, or escaping links fail closed.
 
-Each valid authority is copied once into a campaign-owned shared staging tree under `RUNNER_TEMP`
-and reused by every cell that names it. Existing valid files are never overwritten or downloaded.
+The continuation census is exactly 16 logical authorities and 199 files. File sizes and hashes follow
+valid Hugging Face links to their trusted blob targets; link-entry length is never used as model-byte
+accounting. The reviewed followed-target total is 179,028,698,264 bytes (the earlier link-length
+observation undercounted 18 Schnell-q8 targets by exactly 5,361,654,035 bytes).
+
+Authorities are copied just in time into campaign-owned staging under `RUNNER_TEMP`, immediately
+before their first consumer, and are retained only through their exact last consumer. SCAIL q4 lives
+across cells 11-12; the four shared SDXL helpers live across cells 15-19 while each backbone rotates
+after one cell. The LTX q8/Gemma pair is staged together for cell 14. Existing valid files are never
+overwritten or downloaded.
 The sole reviewed network exception is
 `SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599` file
 `q8/transformer/model.safetensors`. If and only if the frozen census reports exactly that miss, the
-pinned client fetches that exact filename directly into fresh staging and proves the returned commit,
+pinned client fetches that exact filename into an isolated campaign-owned persistent store and proves the returned commit,
 metadata size, LFS SHA-256, and actual file SHA-256. It never calls a snapshot/glob/ref-main route;
 existing `.incomplete` files are untrusted and are neither renamed nor resumed. LTX q8 and Gemma use
 the complete production-approved cached parent revision
-`254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. After staging, every
-remaining authority must resolve again with offline mode forced before cell 8 may start.
+`254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. After the one possible
+fill, network mode is forced offline for every JIT stage and cell.
+
+The disk admission model binds exact source bytes, the contracted FLUX sidecar payloads (494 files;
+q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file reserve), and a
+40-GiB non-model reserve for Cargo target, output, the pinned venv, logs, and filesystem fluctuation.
+Its largest model-plus-sidecar live set is the LTX pair plus persistent Schnell miss at
+56,156,615,634 bytes, so the controller requires at least 99,106,288,594 free bytes. It checks that
+floor after the missing-file fill, before every authority stage, and before every GPU process. The
+former all-at-once plan is deterministically refused.
 
 Output and scratch must be fresh, distinct, non-nested descendants of the resolved `RUNNER_TEMP`,
 outside both repositories. Every recursive removal rechecks that confinement and rejects
@@ -84,13 +100,16 @@ tier markers must agree with the requested q4/q8 directory, and runtime results 
 tier equals resolved tier with `denseFallback: false`.
 
 All writable cache and temporary environment variables are redirected to the current cell's scratch,
-while model roots point only at the shared campaign staging tree. Every selected root and nested
+while model roots point only at the active JIT staging roots. Every selected root and nested
 top-level component root carries an ordinary-file `.candle-device-format-v1` obstruction, forcing
 Candle away from model-adjacent writes. `SCENEWORKS_CANDLE_DEVICE_CACHE_DIR` points to a separate
-campaign-owned shared derived cache under `RUNNER_TEMP`; its empty initial state and post-cell
-inventories are bound in evidence. The controller rehashes each selected staged authority file and
-every obstruction immediately before and after every cell. Any added, removed, or changed staged
-authority byte quarantines the rest of the campaign; the source cache remains untouched.
+campaign-owned derived root under `RUNNER_TEMP`; exact component-path namespaces share the authority's
+lifetime and are inventoried and removed after its last consumer. FLUX namespaces must contain the
+exact bounded 494-file sidecar set; every non-FLUX namespace must stay empty. The controller rehashes
+each selected staged authority file and every obstruction immediately before and after every cell,
+then proves exact stage/namespace absence at release and proves final staging, derived cache, and
+missing-file store emptiness. Any stage, hash, capacity, or cleanup drift quarantines later cells; the
+source cache remains untouched.
 
 ## Evidence and failure behavior
 
@@ -117,11 +136,11 @@ copied under `_imported-boundary-residue/` and excluded from the seven-PASS line
 cell-8 file or any later cell invalidates the candidate.
 
 The closed Draft 2020-12 `cache-preflight.json` binds the download-evidence SHA-256, authoritative
-filename census, copied-file and downloaded-file partition with bytes and SHA-256 values, each final
-offline staged inventory, component-root obstructions, the derived-sidecar lifecycle, and the
-no-GPU-before-validation verdict. Its own byte count and SHA-256 are bound from the campaign summary.
-An initial validated copy is published before cell 8, and the final copy binds post-cell lifecycle
-inventories.
+filename census, followed target bytes/hashes, hit/download partition, first/last-use plan, persistent
+store, exact disk plan/free floor, and the no-GPU-before-validation verdict. Its own byte count and
+SHA-256 are bound from the campaign summary. Each continuation receipt binds that cell's live-set
+transition, free-space probes, pre/post immutable verification, derived inventory, and exact releases;
+the final summary binds the complete lifecycle and empty terminal state.
 
 A cache preflight directory, write, stat, hash, schema/semantic validation, census, staging, or final
 offline-validation failure starts no continuation GPU cell. An independent emergency writer retains

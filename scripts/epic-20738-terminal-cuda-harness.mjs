@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, readFileSync } from "node:fs";
 import {
-  appendFile, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile,
+  appendFile, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, writeFile,
 } from "node:fs/promises";
 import { freemem, totalmem } from "node:os";
 import path from "node:path";
@@ -48,6 +48,14 @@ const LTX_CURRENT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_APPROVED_PARENT_REVISION = "254989c3ca7ee691187647f350b112c0c448789d";
 const IMPORTED_PREFIX_CELLS = 7;
 const PREFIX_ARTIFACT = `sc-20945-epic-20738-${LEGACY_SCENEWORKS_HEAD}-`;
+const LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES = 173_667_044_229;
+const REVIEWED_ALL_AT_ONCE_SOURCE_BYTES = 179_028_698_264;
+const REVIEWED_JIT_SOURCE_PEAK_BYTES = 56_156_615_634;
+const NON_MODEL_DISK_RESERVE_BYTES = 40 * 1024 ** 3;
+const REVIEWED_FREE_FLOOR_BYTES = 99_106_288_594;
+const FLUX_Q4_SIDECAR_BYTES = 7_396_392_960 + 494 * 16_384;
+const FLUX_Q8_SIDECAR_BYTES = 12_573_868_032 + 494 * 16_384;
+const REVIEWED_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 
 function fail(message) {
   throw new Error(message);
@@ -76,6 +84,141 @@ function canonicalize(value) {
 
 function canonicalSha256(value) {
   return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
+}
+
+export function authorityLifetimePlan(profile, startIndex, sourceAudits) {
+  const cells = profile.cells.slice(startIndex);
+  const ids = [...new Set(cells.flatMap((cell) => cell.artifactIds))];
+  return ids.map((artifactId) => {
+    const uses = [];
+    for (let index = startIndex; index < profile.cells.length; index += 1) {
+      if (profile.cells[index].artifactIds.includes(artifactId)) uses.push(index + 1);
+    }
+    const audit = sourceAudits instanceof Map ? sourceAudits.get(artifactId) : sourceAudits[artifactId];
+    if (!audit) fail(`source audit is missing lifetime authority ${artifactId}`);
+    const files = [
+      ...audit.reusedFiles.map((file) => ({ ...file, persistent: false })),
+      ...(audit.downloadedFiles ?? []).map((file) => ({ ...file, persistent: true })),
+    ];
+    const sourceBytes = files.reduce((sum, file) => sum + file.bytes, 0);
+    if (!Number.isSafeInteger(sourceBytes) || sourceBytes < 1) {
+      fail(`source byte census is invalid for lifetime authority ${artifactId}`);
+    }
+    return {
+      artifactId,
+      role: profile.artifacts[artifactId].role,
+      firstOrdinal: uses[0],
+      lastOrdinal: uses.at(-1),
+      sourceBytes,
+      expectedFiles: audit.expectedFiles?.length
+        ?? audit.reusedFiles.length + (audit.downloadedFiles ?? []).length,
+      physicalFiles: files.map((file) => ({
+        key: `${profile.artifacts[artifactId].repository}@${profile.artifacts[artifactId].revision}/${
+          profile.artifacts[artifactId].subdirectory === "."
+            ? file.path : `${profile.artifacts[artifactId].subdirectory}/${file.path}`
+        }`,
+        bytes: file.bytes,
+        persistent: file.persistent,
+      })),
+    };
+  });
+}
+
+export function estimateJitDiskPlan(
+  lifetimes,
+  freeBytes,
+  persistentMissingBytes = 0,
+  nonModelPaths = [],
+) {
+  if (!Number.isSafeInteger(freeBytes) || freeBytes < 0
+    || !Number.isSafeInteger(persistentMissingBytes) || persistentMissingBytes < 0) {
+    fail("disk estimator requires exact non-negative byte counts");
+  }
+  const ordinals = [...new Set(lifetimes.flatMap((row) => [row.firstOrdinal, row.lastOrdinal]))]
+    .sort((left, right) => left - right);
+  const cells = ordinals.map((ordinal) => {
+    const active = lifetimes.filter((row) => (
+      row.firstOrdinal <= ordinal && row.lastOrdinal >= ordinal
+    ));
+    const physical = new Map();
+    for (const file of lifetimes.flatMap((row) => row.physicalFiles).filter(
+      (file) => file.persistent,
+    )) physical.set(file.key, file.bytes);
+    for (const file of active.flatMap((row) => row.physicalFiles)) {
+      const existing = physical.get(file.key);
+      if (existing !== undefined && existing !== file.bytes) {
+        fail(`physical source identity has conflicting byte sizes: ${file.key}`);
+      }
+      physical.set(file.key, file.bytes);
+    }
+    const stagedBytes = [...physical.values()].reduce((sum, bytes) => sum + bytes, 0);
+    const sidecarReserveBytes = active.reduce((sum, row) => {
+      if (!row.artifactId.startsWith("flux1-")) return sum;
+      return sum + (row.artifactId.endsWith("-q4")
+        ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES);
+    }, 0);
+    const modelAndSidecarBytes = stagedBytes + sidecarReserveBytes;
+    return {
+      ordinal,
+      artifactIds: active.map((row) => row.artifactId),
+      stagedBytes,
+      sidecarReserveBytes,
+      modelAndSidecarBytes,
+      requiredAdditionalBytes: Math.max(
+        modelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
+        REVIEWED_FREE_FLOOR_BYTES,
+      ),
+    };
+  });
+  const peak = cells.reduce((highest, row) => (
+    row.modelAndSidecarBytes > highest.modelAndSidecarBytes ? row : highest
+  ), { ordinal: 0, artifactIds: [], stagedBytes: 0, sidecarReserveBytes: 0,
+    modelAndSidecarBytes: 0, requiredAdditionalBytes: REVIEWED_FREE_FLOOR_BYTES });
+  const allPhysical = new Map();
+  for (const file of lifetimes.flatMap((row) => row.physicalFiles)) {
+    const existing = allPhysical.get(file.key);
+    if (existing !== undefined && existing !== file.bytes) {
+      fail(`physical source identity has conflicting byte sizes: ${file.key}`);
+    }
+    allPhysical.set(file.key, file.bytes);
+  }
+  const logicalSourceBytes = lifetimes.reduce((sum, row) => sum + row.sourceBytes, 0);
+  const allAtOnceSourceBytes = [...allPhysical.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const allAtOnceSidecarReserveBytes = Math.max(FLUX_Q4_SIDECAR_BYTES, FLUX_Q8_SIDECAR_BYTES);
+  if (logicalSourceBytes === REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+    && (allAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+      || (persistentMissingBytes > 0
+        ? peak.modelAndSidecarBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
+        : peak.modelAndSidecarBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES))) {
+    fail(`reviewed disk census drifted: all=${allAtOnceSourceBytes}, peak=${peak.modelAndSidecarBytes}`);
+  }
+  return {
+    freeBytes,
+    persistentMissingBytes,
+    nonModelReserveBytes: NON_MODEL_DISK_RESERVE_BYTES,
+    nonModelPaths,
+    legacyNaiveLinkLengthSourceBytes: LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES,
+    reviewedAllAtOnceSourceBytes: REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
+    reviewedJitSourcePeakBytes: REVIEWED_JIT_SOURCE_PEAK_BYTES,
+    logicalSourceBytes,
+    allAtOnceSourceBytes,
+    allAtOnceRequiredBytes: allAtOnceSourceBytes + allAtOnceSidecarReserveBytes
+      + NON_MODEL_DISK_RESERVE_BYTES,
+    peakOrdinal: peak.ordinal,
+    peakArtifactIds: peak.artifactIds,
+    peakStagedBytes: peak.stagedBytes,
+    peakSidecarReserveBytes: peak.sidecarReserveBytes,
+    peakModelAndSidecarBytes: peak.modelAndSidecarBytes,
+    peakRequiredAdditionalBytes: Math.max(
+      peak.modelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
+      REVIEWED_FREE_FLOOR_BYTES,
+    ),
+    admitted: freeBytes >= Math.max(
+      peak.modelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
+      REVIEWED_FREE_FLOOR_BYTES,
+    ),
+    cells,
+  };
 }
 
 export function cellSemanticsSha256(cells) {
@@ -749,6 +892,20 @@ export function validateReceipt(receipt, expectedCell, profile) {
     || (receipt.cleanup.error !== null && typeof receipt.cleanup.error !== "string")) {
     fail("receipt cleanup evidence is incomplete");
   }
+  if (receipt.authorityLifecycle) {
+    const lifecycle = receipt.authorityLifecycle;
+    if (lifecycle.ordinal !== receipt.cell.ordinal || lifecycle.cellId !== receipt.cell.id
+      || JSON.stringify(lifecycle.activeArtifactIds) !== JSON.stringify(expectedCell.artifactIds)
+      || lifecycle.staged.some((entry) => !expectedCell.artifactIds.includes(entry.artifactId))
+      || lifecycle.released.some((entry) => !expectedCell.artifactIds.includes(entry.artifactId))) {
+      fail("receipt authority lifecycle identity drifted");
+    }
+    if (receipt.status === "passed" && (!lifecycle.verifiedBefore || !lifecycle.verifiedAfter
+      || lifecycle.diskProbes.length < lifecycle.staged.length + 1
+      || lifecycle.released.some((entry) => !entry.stageRemoved || !entry.derivedRemoved))) {
+      fail("passed receipt authority lifecycle is incomplete");
+    }
+  }
   if (receipt.status === "passed" && (receipt.error !== null || !receipt.cleanup.completed
     || receipt.cleanup.error !== null)) {
     fail("passed receipt contains a failure or incomplete cleanup");
@@ -1153,7 +1310,7 @@ async function auditArtifact({ id, artifact, expectedFiles, scratch, python, cac
 }
 
 async function stageArtifact({
-  id, artifact, expectedFiles, scratch, python, cacheRoot, stagingRoot, allowReviewedDownload,
+  id, artifact, expectedFiles, scratch, python, cacheRoot, stagingRoot, missingStore,
 }) {
   const requestPath = await writeArtifactRequest({
     id, artifact, expectedFiles, scratch, phase: "stage",
@@ -1163,12 +1320,12 @@ async function stageArtifact({
     "--request", requestPath,
     "--cache-root", cacheRoot,
     "--stage-root", stagingRoot,
-    ...(allowReviewedDownload ? ["--allow-reviewed-download"] : []),
+    ...(missingStore ? ["--missing-store", missingStore] : []),
   ], {
     env: {
       ...process.env,
-      HF_HUB_OFFLINE: allowReviewedDownload ? "0" : "1",
-      TRANSFORMERS_OFFLINE: allowReviewedDownload ? "0" : "1",
+      HF_HUB_OFFLINE: "1",
+      TRANSFORMERS_OFFLINE: "1",
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1",
       HF_HUB_DISABLE_PROGRESS_BARS: "1",
       HF_HUB_DISABLE_TELEMETRY: "1",
@@ -1182,6 +1339,51 @@ async function stageArtifact({
   });
   if (comparable(await realpath(result.sourceCacheRoot)) !== comparable(cacheRoot)) {
     fail(`campaign staging result drifted from trusted source cache for ${id}`);
+  }
+  return result;
+}
+
+async function downloadReviewedMissing({
+  id, artifact, expectedFiles, scratch, python, cacheRoot, missingStore,
+}) {
+  const requestPath = await writeArtifactRequest({
+    id, artifact, expectedFiles, scratch, phase: "download-missing",
+  });
+  const raw = run(python, [
+    "scripts/provision-epic-20738-terminal-artifact.py",
+    "--request", requestPath,
+    "--cache-root", cacheRoot,
+    "--missing-store", missingStore,
+    "--download-reviewed-missing",
+  ], {
+    env: {
+      ...process.env,
+      HF_HUB_OFFLINE: "0",
+      TRANSFORMERS_OFFLINE: "0",
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1",
+      HF_HUB_DISABLE_PROGRESS_BARS: "1",
+      HF_HUB_DISABLE_TELEMETRY: "1",
+      HF_HUB_VERBOSITY: "error",
+    },
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const result = parseProvisionerOutput(raw, id, "reviewed missing-file fill");
+  exactKeys(result, ["id", "storeRoot", "downloadedFiles"], `missing-file fill for ${id}`);
+  if (result.id !== id || comparable(await realpath(result.storeRoot)) !== comparable(missingStore)
+    || result.downloadedFiles.length !== 1) {
+    fail(`reviewed missing-file fill identity drifted for ${id}`);
+  }
+  const [file] = result.downloadedFiles;
+  exactKeys(
+    file,
+    ["path", "bytes", "sha256", "lfsSha256", "commitSha"],
+    `reviewed missing-file fill for ${id}`,
+  );
+  if (file.path !== "transformer/model.safetensors"
+    || file.commitSha !== "bba3ae01dfd94089f173c05edd4e1a4c551f2599"
+    || !Number.isSafeInteger(file.bytes) || file.bytes < 1
+    || !/^[0-9a-f]{64}$/.test(file.sha256) || file.sha256 !== file.lfsSha256) {
+    fail("reviewed missing-file fill did not prove exact commit/size/LFS identity");
   }
   return result;
 }
@@ -1275,6 +1477,34 @@ export async function installSidecarObstructions(sharedArtifacts) {
     }
   }
   return records.sort((left, right) => left.root.localeCompare(right.root));
+}
+
+export async function listDerivedSidecarNamespaces(derivedSidecarRoot) {
+  const namespaceRoot = path.join(derivedSidecarRoot, "candle-device-format-v1");
+  let entries;
+  try {
+    entries = await readdir(namespaceRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  const namespaces = [];
+  for (const entry of entries) {
+    const candidate = path.join(namespaceRoot, entry.name);
+    const metadata = await lstat(candidate);
+    if (!entry.isDirectory() || metadata.isSymbolicLink()) {
+      fail(`derived sidecar namespace must be an ordinary directory: ${candidate}`);
+    }
+    namespaces.push(candidate);
+  }
+  return namespaces.sort();
+}
+
+async function diskFreeBytes(directory) {
+  const filesystem = await statfs(directory);
+  const bytes = Number(filesystem.bavail) * Number(filesystem.bsize);
+  if (!Number.isSafeInteger(bytes) || bytes < 0) fail("filesystem free-byte count is invalid");
+  return bytes;
 }
 
 export async function verifyArtifactUnchanged(artifact, cacheRoot) {
@@ -1425,9 +1655,23 @@ async function writePrimaryReceipt({ file, receipt, cell, profile, fault, index 
   await writeJsonAtomically(file, receipt);
 }
 
+function emptyAuthorityLifecycle(cell, index) {
+  return {
+    ordinal: index + 1,
+    cellId: cell.id,
+    staged: [],
+    activeArtifactIds: [...cell.artifactIds],
+    verifiedBefore: false,
+    verifiedAfter: false,
+    derivedAfter: [],
+    released: [],
+    diskProbes: [],
+  };
+}
+
 async function writeEmergencyReceipt({
   profile, cell, index, ordinalName, output, cacheRoot, repositories, execution, gpuIdentity,
-  systemMemory, error, cleanup,
+  systemMemory, error, cleanup, authorityLifecycle,
 }) {
   // This path deliberately bypasses all injected/primary finalization operations. If the primary
   // log, evidence hash, semantic/schema check, or atomic writer fails, a fresh controller-owned
@@ -1445,6 +1689,7 @@ async function writeEmergencyReceipt({
     startedAt,
   });
   receipt.error = message;
+  receipt.authorityLifecycle = authorityLifecycle ?? emptyAuthorityLifecycle(cell, index);
   receipt.cleanup = cleanup ?? { attempted: false, completed: true, error: null };
   receipt.hardware.rawVramSamples = gpuIdentity.length
     ? [...gpuIdentity]
@@ -1460,7 +1705,7 @@ async function writeEmergencyReceipt({
 
 async function writeLastResortEmergencyReceipt({
   profile, cell, index, ordinalName, output, cacheRoot, repositories, execution, gpuIdentity,
-  systemMemory, errors, cleanup,
+  systemMemory, errors, cleanup, authorityLifecycle,
 }) {
   // A second implementation intentionally avoids evidenceFiles(), writeJsonAtomically(), and every
   // primary/injected callback. It hashes its one log directly and publishes under a different name.
@@ -1483,6 +1728,7 @@ async function writeLastResortEmergencyReceipt({
     startedAt,
   });
   receipt.error = errors.join("\n");
+  receipt.authorityLifecycle = authorityLifecycle ?? emptyAuthorityLifecycle(cell, index);
   receipt.cleanup = cleanup;
   receipt.hardware.rawVramSamples = gpuIdentity.length
     ? [...gpuIdentity]
@@ -1542,7 +1788,7 @@ async function writeSummaryDurably({ output, summary, fault }) {
 function cachePreflightDocument({
   status, error, downloadEvidenceSha256, remainingArtifactIds, guard, stagingRoot,
   derivedSidecarRoot, frozenMissing, sidecarObstructions, cacheProvisioning,
-  derivedSidecarLifecycle,
+  derivedSidecarLifecycle, missingStore, lifetimePlan, diskPlan, missingDownload,
 }) {
   return {
     schemaVersion: 1,
@@ -1554,15 +1800,19 @@ function cachePreflightDocument({
     sourceCacheRoot: guard.cacheRoot,
     campaignStagingRoot: stagingRoot,
     derivedSidecarRoot,
+    missingFileStore: missingStore,
     frozenMissingFiles: frozenMissing,
     sidecarObstructions,
-    reusedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.reusedFiles.map(
+    reusedFiles: cacheProvisioning.sourceCensus.flatMap((artifact) => artifact.reusedFiles.map(
       (file) => ({ artifactId: artifact.id, ...file }),
     )),
-    downloadedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.downloadedFiles.map(
-      (file) => ({ artifactId: artifact.id, ...file }),
-    )),
+    downloadedFiles: missingDownload?.downloadedFiles.map((file) => ({
+      artifactId: missingDownload.id, ...file,
+    })) ?? [],
+    networkDownloadCount: missingDownload ? 1 : 0,
     phases: cacheProvisioning,
+    lifetimePlan,
+    diskPlan,
     derivedSidecarLifecycle,
     offlineBeforeCells: status === "passed",
   };
@@ -1570,7 +1820,7 @@ function cachePreflightDocument({
 
 export function validateCachePreflightEvidence(document, {
   remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
-  derivedSidecarRoot, profile,
+  derivedSidecarRoot, missingStore, profile,
 }) {
   validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
   if (document.profile !== profile.profile
@@ -1578,6 +1828,7 @@ export function validateCachePreflightEvidence(document, {
     || document.sourceCacheRoot !== guard.cacheRoot
     || document.campaignStagingRoot !== stagingRoot
     || document.derivedSidecarRoot !== derivedSidecarRoot
+    || document.missingFileStore !== missingStore
     || JSON.stringify(document.expectedArtifactIds) !== JSON.stringify(remainingArtifactIds)) {
     fail("cache preflight identity/path binding drifted");
   }
@@ -1610,6 +1861,14 @@ export function validateCachePreflightEvidence(document, {
   if (JSON.stringify(document.frozenMissingFiles) !== JSON.stringify(frozen)) {
     fail("cache preflight frozen missing-file census drifted");
   }
+  if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256
+    && profile.cells.length === 19 && remainingArtifactIds.length === 16
+    && remainingArtifactIds.reduce(
+      (sum, id) => sum + artifactExpectedFiles[id].length,
+      0,
+    ) !== 199) {
+    fail("continuation must bind the exact logical 16-authority/199-file census");
+  }
   for (const row of document.phases.staging) {
     if (JSON.stringify([
       ...row.reusedFiles.map((file) => file.path),
@@ -1623,11 +1882,10 @@ export function validateCachePreflightEvidence(document, {
       fail(`cache preflight final inventory count drifted for ${row.id}`);
     }
   }
-  const flatten = (key) => document.phases.staging.flatMap((artifact) => artifact[key].map(
+  const sourceFiles = document.phases.sourceCensus.flatMap((artifact) => artifact.reusedFiles.map(
     (file) => ({ artifactId: artifact.id, ...file }),
   ));
-  if (JSON.stringify(document.reusedFiles) !== JSON.stringify(flatten("reusedFiles"))
-    || JSON.stringify(document.downloadedFiles) !== JSON.stringify(flatten("downloadedFiles"))) {
+  if (JSON.stringify(document.reusedFiles) !== JSON.stringify(sourceFiles)) {
     fail("cache preflight top-level hit/download partition drifted");
   }
   if (document.downloadedFiles.length > 1 || document.downloadedFiles.some((file) => (
@@ -1636,38 +1894,61 @@ export function validateCachePreflightEvidence(document, {
       || file.commitSha !== "bba3ae01dfd94089f173c05edd4e1a4c551f2599"
       || file.sha256 !== file.lfsSha256
   ))) fail("cache preflight contains an unreviewed model download");
+  if ((frozen.length === 1) !== (document.downloadedFiles.length === 1)) {
+    fail("cache preflight missing/download partition is incomplete");
+  }
+  if (document.networkDownloadCount !== document.downloadedFiles.length
+    || document.networkDownloadCount !== frozen.length) {
+    fail("cache preflight network count drifted from the frozen missing set");
+  }
   if (document.status === "passed") {
-    for (const phase of ["sourceCensus", "staging", "finalOffline"]) {
-      if (JSON.stringify(document.phases[phase].map((row) => row.id))
+    const plannedAudits = new Map(document.phases.sourceCensus.map((row) => [row.id, {
+      ...row,
+      downloadedFiles: document.downloadedFiles.filter((file) => file.artifactId === row.id),
+    }]));
+    const expectedLifetimePlan = authorityLifetimePlan(
+      profile,
+      profile.cells.length - document.diskPlan.cells.length,
+      plannedAudits,
+    );
+    if (JSON.stringify(document.lifetimePlan) !== JSON.stringify(expectedLifetimePlan)) {
+      fail("cache preflight authority lifetime plan drifted from the frozen census");
+    }
+    const expectedDiskPlan = estimateJitDiskPlan(
+      expectedLifetimePlan,
+      document.diskPlan.freeBytes,
+      document.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0),
+      document.diskPlan.nonModelPaths,
+    );
+    if (JSON.stringify(document.diskPlan) !== JSON.stringify(expectedDiskPlan)) {
+      fail("cache preflight disk plan drifted from exact target-byte census");
+    }
+    if (JSON.stringify(document.phases.sourceCensus.map((row) => row.id))
+      !== JSON.stringify(remainingArtifactIds)) {
+      fail("passed cache preflight omitted sourceCensus authorities");
+    }
+    if (document.lifetimePlan.length !== remainingArtifactIds.length
+      || JSON.stringify(document.lifetimePlan.map((row) => row.artifactId))
         !== JSON.stringify(remainingArtifactIds)) {
-        fail(`passed cache preflight omitted ${phase} authorities`);
-      }
-    }
-    const obstructed = [...new Set(document.sidecarObstructions.flatMap(
-      (entry) => entry.artifactIds,
-    ))].sort();
-    if (JSON.stringify(obstructed) !== JSON.stringify([...remainingArtifactIds].sort())) {
-      fail("passed cache preflight did not obstruct every staged component root");
-    }
-    for (const row of document.phases.finalOffline) {
-      const expectedRoots = new Set([row.inventory.root]);
-      for (const file of artifactExpectedFiles[row.id]) {
-        const [component] = file.split("/");
-        if (file.includes("/")) expectedRoots.add(path.join(row.inventory.root, component));
-      }
-      const actualRoots = document.sidecarObstructions.filter(
-        (entry) => entry.artifactIds.includes(row.id),
-      ).map((entry) => entry.root);
-      if (JSON.stringify([...new Set(actualRoots)].sort())
-        !== JSON.stringify([...expectedRoots].sort())
-        || actualRoots.some((root) => !isWithin(stagingRoot, root))) {
-        fail(`passed cache preflight did not obstruct exact component roots for ${row.id}`);
-      }
+      fail("passed cache preflight lifetime plan omitted reviewed authorities");
     }
     const initial = document.derivedSidecarLifecycle.initial;
     if (!initial || initial.root !== derivedSidecarRoot || initial.files !== 0
       || initial.bytes !== 0 || initial.sha256 !== createHash("sha256").digest("hex")) {
       fail("derived Candle cache was not proven empty before cells");
+    }
+    if (!document.diskPlan.admitted
+      || document.diskPlan.freeBytes < document.diskPlan.peakRequiredAdditionalBytes) {
+      fail("passed cache preflight did not prove sufficient JIT disk capacity");
+    }
+    if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256
+      && (document.diskPlan.logicalSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+        || document.diskPlan.allAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+        || document.diskPlan.peakRequiredAdditionalBytes !== REVIEWED_FREE_FLOOR_BYTES
+        || (frozen.length === 1
+          ? document.diskPlan.peakModelAndSidecarBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
+          : document.diskPlan.peakModelAndSidecarBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES))) {
+      fail("passed cache preflight drifted from reviewed target-byte totals and JIT floor");
     }
   }
   let previous = 0;
@@ -1795,11 +2076,16 @@ export async function runCampaign(args, options = {}) {
   const fault = options.fault;
   const operations = {
     auditArtifact: options.operations?.auditArtifact ?? auditArtifact,
+    downloadReviewedMissing:
+      options.operations?.downloadReviewedMissing ?? downloadReviewedMissing,
     stageArtifact: options.operations?.stageArtifact ?? stageArtifact,
     provisionArtifact: options.operations?.provisionArtifact ?? provisionArtifact,
     installSidecarObstructions:
       options.operations?.installSidecarObstructions ?? installSidecarObstructions,
     directoryInventory: options.operations?.directoryInventory ?? directoryInventory,
+    listDerivedSidecarNamespaces:
+      options.operations?.listDerivedSidecarNamespaces ?? listDerivedSidecarNamespaces,
+    diskFreeBytes: options.operations?.diskFreeBytes ?? diskFreeBytes,
     verifyArtifactUnchanged:
       options.operations?.verifyArtifactUnchanged ?? verifyArtifactUnchanged,
     executeCell: options.operations?.executeCell ?? executeCell,
@@ -1822,6 +2108,7 @@ export async function runCampaign(args, options = {}) {
   const preflightScratch = path.join(scratch, "cache-preflight");
   const stagingRoot = path.join(scratch, "authority-stage");
   const derivedSidecarRoot = path.join(scratch, "derived-candle-device-cache");
+  const missingStore = path.join(scratch, "persistent-missing-file");
   const remainingArtifactIds = [...new Set(
     profile.cells.slice(startIndex).flatMap((cell) => cell.artifactIds),
   )];
@@ -1833,6 +2120,7 @@ export async function runCampaign(args, options = {}) {
     await mkdir(preflightScratch);
     await mkdir(stagingRoot);
     await mkdir(derivedSidecarRoot);
+    await mkdir(missingStore);
   } catch (error) {
     quarantineReason = `cache preflight directory preparation failed: ${errorText(error)}`;
   }
@@ -1889,101 +2177,70 @@ export async function runCampaign(args, options = {}) {
     quarantineReason = `source cache census found an unapproved missing-file set: ${JSON.stringify(frozenMissing)}`;
   }
 
-  const stagingErrors = [];
+  let missingDownload = null;
+  let sidecarObstructions = [];
+  const derivedSidecarLifecycle = { initial: null, afterCells: [] };
+  let lifetimePlan = [];
+  let diskPlan = null;
   if (!quarantineReason) {
-    for (const artifactId of remainingArtifactIds) {
-      try {
-        const audit = sourceAudits.get(artifactId);
-        const allowReviewedDownload = audit.missingFiles.length === 1;
-        const staged = await operations.stageArtifact({
-          id: artifactId,
-          artifact: profile.artifacts[artifactId],
-          expectedFiles: artifactExpectedFiles[artifactId],
+    try {
+      if (frozenMissing.length === 1) {
+        missingDownload = await operations.downloadReviewedMissing({
+          id: "flux1-schnell-q8",
+          artifact: profile.artifacts["flux1-schnell-q8"],
+          expectedFiles: artifactExpectedFiles["flux1-schnell-q8"],
           scratch: preflightScratch,
           python,
           cacheRoot: guard.cacheRoot,
-          stagingRoot,
-          allowReviewedDownload,
+          missingStore,
         });
-        const downloaded = staged.downloadedFiles ?? [];
-        if (JSON.stringify(staged.reusedFiles) !== JSON.stringify(audit.reusedFiles)) {
-          fail(`trusted source cache changed after frozen census for ${artifactId}`);
-        }
-        if ((!allowReviewedDownload && downloaded.length)
-          || (allowReviewedDownload && (downloaded.length !== 1
-            || downloaded[0].path !== "transformer/model.safetensors"
-            || !/^[0-9a-f]{64}$/.test(downloaded[0].sha256)
-            || downloaded[0].sha256 !== downloaded[0].lfsSha256
-            || downloaded[0].commitSha !== reviewedMissing[0].revision
-            || !Number.isSafeInteger(downloaded[0].bytes) || downloaded[0].bytes < 1))) {
-          fail(`campaign staging download partition drifted for ${artifactId}`);
-        }
-        cacheProvisioning.staging.push({
-          id: artifactId,
-          repository: profile.artifacts[artifactId].repository,
-          revision: profile.artifacts[artifactId].revision,
-          subdirectory: profile.artifacts[artifactId].subdirectory,
-          allowPatterns: profile.artifacts[artifactId].allowPatterns,
-          expectedFiles: artifactExpectedFiles[artifactId],
-          reusedFiles: staged.reusedFiles,
-          downloadedFiles: downloaded,
-        });
-      } catch (error) {
-        stagingErrors.push(`${artifactId}: ${errorText(error)}`);
-        break;
       }
-    }
-    if (stagingErrors.length) {
-      quarantineReason = `copy-once campaign staging failed: ${stagingErrors.join(" | ")}`;
-    }
-  }
-
-  const finalErrors = [];
-  let sidecarObstructions = [];
-  const derivedSidecarLifecycle = { initial: null, afterCells: [] };
-  if (!quarantineReason) {
-    for (const artifactId of remainingArtifactIds) {
-      try {
-        const artifact = await operations.provisionArtifact({
-          id: artifactId,
-          artifact: profile.artifacts[artifactId],
-          expectedFiles: artifactExpectedFiles[artifactId],
-          scratch: preflightScratch,
-          python,
-          cacheRoot: stagingRoot,
-        });
-        sharedArtifacts.set(artifactId, artifact);
-        cacheProvisioning.finalOffline.push({
-          id: artifactId,
-          repository: artifact.repository,
-          revision: artifact.revision,
-          subdirectory: artifact.subdirectory,
-          allowPatterns: artifact.allowPatterns,
-          expectedFiles: artifactExpectedFiles[artifactId],
-          inventory: artifact.inventory,
-        });
-      } catch (error) {
-        finalErrors.push(`${artifactId}: ${errorText(error)}`);
+      for (const [artifactId, audit] of sourceAudits) {
+        audit.expectedFiles = artifactExpectedFiles[artifactId];
+        audit.downloadedFiles = missingDownload?.id === artifactId
+          ? missingDownload.downloadedFiles : [];
       }
-    }
-    if (finalErrors.length) {
-      quarantineReason = `full offline validation of campaign staging failed: ${finalErrors.join(" | ")}`;
-    } else {
-      try {
-        sidecarObstructions = await operations.installSidecarObstructions(sharedArtifacts);
-        derivedSidecarLifecycle.initial = await operations.directoryInventory(derivedSidecarRoot);
-      } catch (error) {
-        quarantineReason = `Candle derived-sidecar isolation failed: ${errorText(error)}`;
+      lifetimePlan = authorityLifetimePlan(profile, startIndex, sourceAudits);
+      const freeBytes = await operations.diskFreeBytes(scratch);
+      diskPlan = estimateJitDiskPlan(
+        lifetimePlan,
+        freeBytes,
+        missingDownload?.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0) ?? 0,
+        [
+          { kind: "cargoTarget", path: path.resolve(process.env.CARGO_TARGET_DIR ?? path.join(sceneworksRoot, "target")) },
+          { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
+          { kind: "campaignOutput", path: output },
+          { kind: "pythonVenv", path: python ? path.dirname(path.dirname(path.resolve(python))) : "fixture-unavailable" },
+        ],
+      );
+      if (!diskPlan.admitted) {
+        fail(`JIT staging disk admission refused: requires ${diskPlan.peakRequiredAdditionalBytes} bytes at cell ${diskPlan.peakOrdinal}, only ${diskPlan.freeBytes} free`);
       }
+      if (!missingDownload) {
+        await operations.cleanup(missingStore, guard, "unused missing-file store");
+        await assertPathAbsent(missingStore, "unused missing-file store");
+      }
+      derivedSidecarLifecycle.initial = await operations.directoryInventory(derivedSidecarRoot);
+    } catch (error) {
+      quarantineReason = `cache-only transfer/disk preflight failed: ${errorText(error)}`;
     }
   }
   if (quarantineReason) {
     quarantineReason = `${quarantineReason}; no continuation GPU cell started`;
     campaignErrors.push(quarantineReason);
+    try {
+      await lstat(missingStore);
+      await operations.cleanup(missingStore, guard, "failed preflight missing-file store");
+      await assertPathAbsent(missingStore, "failed preflight missing-file store");
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        campaignErrors.push(`failed preflight store cleanup failed: ${errorText(error)}`);
+      }
+    }
   }
   const cacheValidation = {
     remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
-    derivedSidecarRoot, profile,
+    derivedSidecarRoot, missingStore, profile,
   };
   let initialDocument = cachePreflightDocument({
     status: quarantineReason ? "failed" : "passed",
@@ -1997,6 +2254,10 @@ export async function runCampaign(args, options = {}) {
     sidecarObstructions,
     cacheProvisioning,
     derivedSidecarLifecycle,
+    missingStore,
+    lifetimePlan,
+    diskPlan,
+    missingDownload,
   });
   let initialWrite = await writeCachePreflightDurably({
     output, filename: "cache-preflight-initial.json", document: initialDocument,
@@ -2022,6 +2283,10 @@ export async function runCampaign(args, options = {}) {
       sidecarObstructions: [],
       cacheProvisioning: { sourceCensus: [], staging: [], finalOffline: [] },
       derivedSidecarLifecycle: { initial: null, afterCells: [] },
+      missingStore,
+      lifetimePlan: [],
+      diskPlan: null,
+      missingDownload: null,
     });
     initialWrite = {
       evidence: await writeCachePreflightFallback({
@@ -2030,7 +2295,28 @@ export async function runCampaign(args, options = {}) {
       }),
       error: null,
     };
+    try {
+      await lstat(missingStore);
+      await operations.cleanup(missingStore, guard, "failed evidence missing-file store");
+      await assertPathAbsent(missingStore, "failed evidence missing-file store");
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        campaignErrors.push(`failed evidence store cleanup failed: ${errorText(error)}`);
+      }
+    }
   }
+  const lifetimeById = new Map(lifetimePlan.map((row) => [row.artifactId, row]));
+  const authorityLifecycle = [];
+  const diskFreeProbes = [];
+  const probeDisk = async (phase, ordinal) => {
+    const freeBytes = await operations.diskFreeBytes(scratch);
+    const record = { phase, ordinal, root: scratch, freeBytes };
+    diskFreeProbes.push(record);
+    if (!diskPlan || freeBytes < diskPlan.peakRequiredAdditionalBytes) {
+      fail(`disk capacity fell below the ${diskPlan?.peakRequiredAdditionalBytes ?? "unavailable"}-byte JIT floor during ${phase}: ${freeBytes}`);
+    }
+    return record;
+  };
   for (let index = startIndex; index < profile.cells.length; index += 1) {
     const cell = profile.cells[index];
     const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
@@ -2064,6 +2350,21 @@ export async function runCampaign(args, options = {}) {
     let controllerLog = path.join(cellDir, "controller.log");
     let receiptPath = path.join(cellDir, "receipt.json");
     let activeArtifactIndex = null;
+    let authorityTransitioning = false;
+    let transitionArtifactIds = [];
+    const transitionRoots = new Map();
+    const lifecycle = {
+      ordinal: index + 1,
+      cellId: cell.id,
+      staged: [],
+      activeArtifactIds: [...cell.artifactIds],
+      verifiedBefore: false,
+      verifiedAfter: false,
+      derivedAfter: [],
+      released: [],
+      diskProbes: [],
+    };
+    receipt.authorityLifecycle = lifecycle;
 
     try {
       await mkdir(cellDir);
@@ -2075,6 +2376,88 @@ export async function runCampaign(args, options = {}) {
 
       await mkdir(cellScratch);
       scratchCreated = true;
+      const startingIds = cell.artifactIds.filter(
+        (artifactId) => lifetimeById.get(artifactId)?.firstOrdinal === index + 1,
+      );
+      const newlyStaged = new Map();
+      transitionArtifactIds = startingIds;
+      authorityTransitioning = startingIds.length > 0;
+      for (const artifactId of startingIds) {
+        await invokeFault(fault, "stage", index);
+        lifecycle.diskProbes.push(await probeDisk(`before-stage:${artifactId}`, index + 1));
+        const audit = sourceAudits.get(artifactId);
+        const artifactStageRoot = artifactId === "flux1-schnell-q8" && missingDownload
+          ? missingStore : path.join(stagingRoot, artifactId);
+        transitionRoots.set(artifactId, artifactStageRoot);
+        if (artifactStageRoot !== missingStore) await mkdir(artifactStageRoot);
+        const staged = await operations.stageArtifact({
+          id: artifactId,
+          artifact: profile.artifacts[artifactId],
+          expectedFiles: artifactExpectedFiles[artifactId],
+          scratch: preflightScratch,
+          python,
+          cacheRoot: guard.cacheRoot,
+          stagingRoot: artifactStageRoot,
+          missingStore: artifactId === "flux1-schnell-q8" && missingDownload ? missingStore : null,
+        });
+        if (JSON.stringify(staged.reusedFiles) !== JSON.stringify(audit.reusedFiles)) {
+          fail(`trusted source cache changed after frozen census for ${artifactId}`);
+        }
+        const expectedDownloaded = missingDownload?.id === artifactId
+          ? missingDownload.downloadedFiles : [];
+        if (JSON.stringify(staged.downloadedFiles ?? []) !== JSON.stringify(expectedDownloaded)) {
+          fail(`offline JIT stage changed the frozen download partition for ${artifactId}`);
+        }
+        cacheProvisioning.staging.push({
+          id: artifactId,
+          repository: profile.artifacts[artifactId].repository,
+          revision: profile.artifacts[artifactId].revision,
+          subdirectory: profile.artifacts[artifactId].subdirectory,
+          allowPatterns: profile.artifacts[artifactId].allowPatterns,
+          expectedFiles: artifactExpectedFiles[artifactId],
+          reusedFiles: staged.reusedFiles,
+          downloadedFiles: staged.downloadedFiles ?? [],
+        });
+        const artifact = await operations.provisionArtifact({
+          id: artifactId,
+          artifact: profile.artifacts[artifactId],
+          expectedFiles: artifactExpectedFiles[artifactId],
+          scratch: preflightScratch,
+          python,
+          cacheRoot: artifactStageRoot,
+        });
+        artifact.stageRoot = artifactStageRoot;
+        newlyStaged.set(artifactId, artifact);
+        sharedArtifacts.set(artifactId, artifact);
+        cacheProvisioning.finalOffline.push({
+          id: artifactId,
+          repository: artifact.repository,
+          revision: artifact.revision,
+          subdirectory: artifact.subdirectory,
+          allowPatterns: artifact.allowPatterns,
+          expectedFiles: artifactExpectedFiles[artifactId],
+          inventory: artifact.inventory,
+        });
+      }
+      if (newlyStaged.size) {
+        const obstructions = await operations.installSidecarObstructions(newlyStaged);
+        sidecarObstructions.push(...obstructions);
+        for (const [artifactId, artifact] of newlyStaged) {
+          if (!Array.isArray(artifact.sidecarObstructions)
+            || artifact.sidecarObstructions.length === 0) {
+            fail(`JIT staging did not obstruct model-adjacent sidecars for ${artifactId}`);
+          }
+          artifact.derivedNamespaces = [];
+          lifecycle.staged.push({
+            artifactId,
+            stageRoot: artifact.stageRoot,
+            inventory: artifact.inventory,
+            obstructionCount: artifact.sidecarObstructions.length,
+            derivedNamespaces: artifact.derivedNamespaces,
+          });
+        }
+      }
+      authorityTransitioning = false;
       for (const [artifactIndex, artifactId] of cell.artifactIds.entries()) {
         activeArtifactIndex = artifactIndex;
         await invokeFault(fault, "provision", index);
@@ -2101,7 +2484,7 @@ export async function runCampaign(args, options = {}) {
         for (const artifactId of cell.artifactIds) {
           await operations.verifyArtifactUnchanged(
             sharedArtifacts.get(artifactId),
-            stagingRoot,
+            sharedArtifacts.get(artifactId).stageRoot,
           );
         }
         await appendFile(
@@ -2112,12 +2495,20 @@ export async function runCampaign(args, options = {}) {
       };
       try {
         await verifyCellCache("before");
+        lifecycle.verifiedBefore = true;
       } catch (error) {
         quarantineReason = `shared cache changed before cell ${cell.id}: ${errorText(error)}`;
         campaignErrors.push(quarantineReason);
         throw error;
       }
+      const derivedBefore = await operations.directoryInventory(derivedSidecarRoot);
+      if (derivedBefore.files !== 0 || derivedBefore.bytes !== 0) {
+        quarantineReason = `derived Candle cache was not empty before cell ${cell.id}`;
+        campaignErrors.push(quarantineReason);
+        fail(quarantineReason);
+      }
       operations.sample(samples, errors, "pre-execution VRAM sample failed");
+      lifecycle.diskProbes.push(await probeDisk("before-execution", index + 1));
       await invokeFault(fault, "execute", index);
       let runtimeFailure = null;
       try {
@@ -2135,12 +2526,43 @@ export async function runCampaign(args, options = {}) {
       }
       try {
         await verifyCellCache("after");
+        lifecycle.verifiedAfter = true;
       } catch (error) {
         quarantineReason = `shared cache mutated during cell ${cell.id}: ${errorText(error)}`;
         campaignErrors.push(quarantineReason);
         throw error;
       }
       try {
+        const namespaces = await operations.listDerivedSidecarNamespaces(derivedSidecarRoot);
+        const fluxArtifacts = cell.artifactIds.filter((artifactId) => artifactId.startsWith("flux1-"));
+        if (namespaces.length && fluxArtifacts.length !== 1) {
+          fail(`derived sidecars appeared outside one exact FLUX authority for ${cell.id}`);
+        }
+        if (!namespaces.length && fluxArtifacts.length) {
+          fail(`FLUX cell did not create its exact derived-sidecar namespace: ${cell.id}`);
+        }
+        if (fluxArtifacts.length === 1) {
+          sharedArtifacts.get(fluxArtifacts[0]).derivedNamespaces.splice(0, Infinity, ...namespaces);
+        }
+        for (const artifactId of cell.artifactIds) {
+          const artifact = sharedArtifacts.get(artifactId);
+          const inventories = [];
+          for (const namespace of artifact.derivedNamespaces) {
+            inventories.push(await operations.directoryInventory(namespace));
+          }
+          const files = inventories.reduce((sum, inventory) => sum + inventory.files, 0);
+          const bytes = inventories.reduce((sum, inventory) => sum + inventory.bytes, 0);
+          if (artifactId.startsWith("flux1-") && (files !== 494
+            || bytes < (artifactId.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032)
+            || bytes > (artifactId.endsWith("-q4")
+              ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES))) {
+            fail(`FLUX derived-sidecar contract drifted for ${artifactId}: ${files} files/${bytes} bytes`);
+          }
+          if (!artifactId.startsWith("flux1-") && (files !== 0 || bytes !== 0)) {
+            fail(`non-FLUX authority unexpectedly created derived sidecars: ${artifactId}`);
+          }
+          lifecycle.derivedAfter.push({ artifactId, files, bytes, inventories });
+        }
         derivedSidecarLifecycle.afterCells.push({
           ordinal: index + 1,
           cellId: cell.id,
@@ -2159,6 +2581,10 @@ export async function runCampaign(args, options = {}) {
       executionPassed = true;
     } catch (error) {
       const message = recordError(errors, "cell lifecycle failed", error);
+      if (authorityTransitioning && !quarantineReason) {
+        quarantineReason = `JIT authority stage/copy/hash failed before cell ${cell.id}: ${errorText(error)}`;
+        campaignErrors.push(quarantineReason);
+      }
       if (activeArtifactIndex !== null && artifacts[activeArtifactIndex].inventory.complete === false) {
         artifacts[activeArtifactIndex].inventory.error = message;
       }
@@ -2169,6 +2595,70 @@ export async function runCampaign(args, options = {}) {
       }
       operations.sample(samples, [], "failure VRAM sample failed");
     } finally {
+      const releaseIds = [...new Set([
+        ...cell.artifactIds.filter((id) => lifetimeById.get(id)?.lastOrdinal === index + 1),
+        ...(authorityTransitioning ? transitionArtifactIds : []),
+      ])];
+      for (const artifactId of releaseIds) {
+        const artifact = sharedArtifacts.get(artifactId);
+        if (!artifact) {
+          const partialRoot = transitionRoots.get(artifactId);
+          if (partialRoot) {
+            const partialRelease = {
+              artifactId,
+              stageRoot: partialRoot,
+              stagedInventory: null,
+              derivedBeforeCleanup: [],
+              stageRemoved: false,
+              derivedRemoved: true,
+            };
+            try {
+              partialRelease.stagedInventory = await operations.directoryInventory(partialRoot);
+              await operations.cleanup(partialRoot, guard, `partial staged authority ${artifactId}`);
+              await assertPathAbsent(partialRoot, `partial staged authority ${artifactId}`);
+              partialRelease.stageRemoved = true;
+            } catch (error) {
+              partialRelease.error = errorText(error);
+              if (!quarantineReason) {
+                quarantineReason = `partial authority ${artifactId} cleanup failed: ${errorText(error)}`;
+                campaignErrors.push(quarantineReason);
+              }
+            }
+            lifecycle.released.push(partialRelease);
+          }
+          continue;
+        }
+        const release = {
+          artifactId,
+          stageRoot: artifact.stageRoot,
+          stagedInventory: artifact.inventory,
+          derivedBeforeCleanup: [],
+          stageRemoved: false,
+          derivedRemoved: false,
+        };
+        try {
+          await invokeFault(fault, "authorityCleanup", index);
+          await operations.verifyArtifactUnchanged(artifact, artifact.stageRoot);
+          for (const namespace of artifact.derivedNamespaces) {
+            release.derivedBeforeCleanup.push(await operations.directoryInventory(namespace));
+            await operations.cleanup(namespace, guard, `derived sidecars for ${artifactId}`);
+            await assertPathAbsent(namespace, `derived sidecars for ${artifactId}`);
+          }
+          release.derivedRemoved = true;
+          await operations.cleanup(artifact.stageRoot, guard, `staged authority ${artifactId}`);
+          await assertPathAbsent(artifact.stageRoot, `staged authority ${artifactId}`);
+          release.stageRemoved = true;
+          sharedArtifacts.delete(artifactId);
+        } catch (error) {
+          const message = recordError(errors, `authority lifecycle cleanup failed for ${artifactId}`, error);
+          release.error = message;
+          if (!quarantineReason) {
+            quarantineReason = `authority ${artifactId} cleanup isolation failed: ${errorText(error)}`;
+            campaignErrors.push(quarantineReason);
+          }
+        }
+        lifecycle.released.push(release);
+      }
       receipt.cleanup.attempted = scratchCreated;
       if (scratchCreated) {
         try {
@@ -2188,6 +2678,7 @@ export async function runCampaign(args, options = {}) {
         receipt.cleanup.completed = true;
       }
       emergencyCleanup = structuredClone(receipt.cleanup);
+      authorityLifecycle.push(structuredClone(lifecycle));
 
       try {
         if (!cellDirCreated) {
@@ -2231,12 +2722,20 @@ export async function runCampaign(args, options = {}) {
     } catch (error) {
       let receiptPath;
       let emergencyError = [...emergencyFailureMessages, errorText(error)].filter(Boolean).join("\n");
+      let emergencyAuthorityLifecycle = authorityLifecycle.find(
+        (entry) => entry.ordinal === index + 1,
+      );
+      if (!emergencyAuthorityLifecycle) {
+        emergencyAuthorityLifecycle = emptyAuthorityLifecycle(cell, index);
+        authorityLifecycle.push(emergencyAuthorityLifecycle);
+      }
       try {
         await invokeFault(fault, "emergencyReceipt", index);
         receiptPath = await writeEmergencyReceipt({
           profile, cell, index, ordinalName, output, cacheRoot: stagingRoot,
           repositories, execution, gpuIdentity,
           systemMemory, error: new Error(emergencyError), cleanup: emergencyCleanup,
+          authorityLifecycle: emergencyAuthorityLifecycle,
         });
       } catch (receiptError) {
         emergencyError += `\nemergency receipt failed: ${errorText(receiptError)}`;
@@ -2245,6 +2744,7 @@ export async function runCampaign(args, options = {}) {
             profile, cell, index, ordinalName, output, cacheRoot: stagingRoot,
             repositories, execution, gpuIdentity,
             systemMemory, errors: [emergencyError], cleanup: emergencyCleanup,
+            authorityLifecycle: emergencyAuthorityLifecycle,
           });
         } catch (lastResortError) {
           emergencyError += `\nlast-resort emergency receipt failed: ${errorText(lastResortError)}`;
@@ -2255,6 +2755,28 @@ export async function runCampaign(args, options = {}) {
         emergencyReceiptError: receiptPath ? null : emergencyError, source: "continuation",
       });
     }
+  }
+
+  let finalLifecycle = null;
+  try {
+    const stage = await operations.directoryInventory(stagingRoot);
+    const derived = await operations.directoryInventory(derivedSidecarRoot);
+    let missingStoreAbsent = false;
+    try {
+      await lstat(missingStore);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      missingStoreAbsent = true;
+    }
+    finalLifecycle = { stage, derived, missingStoreAbsent };
+    if (stage.files !== 0 || stage.bytes !== 0 || derived.files !== 0 || derived.bytes !== 0
+      || !missingStoreAbsent || sharedArtifacts.size !== 0) {
+      fail("final JIT stage/derived/missing-file lifecycle is not empty");
+    }
+  } catch (error) {
+    const message = `final authority lifecycle verification failed: ${errorText(error)}`;
+    campaignErrors.push(message);
+    if (!quarantineReason) quarantineReason = message;
   }
 
   let finalDocument = cachePreflightDocument({
@@ -2269,6 +2791,10 @@ export async function runCampaign(args, options = {}) {
     sidecarObstructions,
     cacheProvisioning,
     derivedSidecarLifecycle,
+    missingStore,
+    lifetimePlan,
+    diskPlan,
+    missingDownload,
   });
   let finalWrite = await writeCachePreflightDurably({
     output, filename: "cache-preflight.json", document: finalDocument,
@@ -2289,6 +2815,10 @@ export async function runCampaign(args, options = {}) {
       sidecarObstructions: [],
       cacheProvisioning: { sourceCensus: [], staging: [], finalOffline: [] },
       derivedSidecarLifecycle: { initial: null, afterCells: [] },
+      missingStore,
+      lifetimePlan: [],
+      diskPlan: null,
+      missingDownload: null,
     });
     finalWrite = {
       evidence: await writeCachePreflightFallback({
@@ -2322,6 +2852,9 @@ export async function runCampaign(args, options = {}) {
       },
     },
     cachePreflight: cachePreflightEvidence,
+    authorityLifecycle,
+    diskFreeProbes,
+    finalAuthorityLifecycle: finalLifecycle,
     passed: receipts.filter((receipt) => receipt.status === "passed").length,
     failed: receipts.filter((receipt) => receipt.status === "failed").length,
     campaignErrors,
@@ -2356,11 +2889,15 @@ async function main() {
       sourceCacheRoot: "fixture-cache",
       campaignStagingRoot: "fixture-staging",
       derivedSidecarRoot: "fixture-derived",
+      missingFileStore: "fixture-missing",
       frozenMissingFiles: [],
       sidecarObstructions: [],
       reusedFiles: [],
       downloadedFiles: [],
+      networkDownloadCount: 0,
       phases: { sourceCensus: [], staging: [], finalOffline: [] },
+      lifetimePlan: [],
+      diskPlan: null,
       derivedSidecarLifecycle: { initial: null, afterCells: [] },
       offlineBeforeCells: false,
     });
