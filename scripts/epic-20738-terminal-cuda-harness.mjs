@@ -15,12 +15,15 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
+import { claimKey, patternToRegExp } from "./check-download-patterns.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 export const PROFILE_NAME = "epic-20738-candle-cuda-terminal-v1";
 export const PROFILE_PATH = "config/terminal-evidence/epic-20738-cuda.json";
 export const PROFILE_SCHEMA_PATH = "config/terminal-evidence/epic-20738-profile.schema.json";
 export const RECEIPT_SCHEMA_PATH = "config/terminal-evidence/epic-20738-receipt.schema.json";
+export const CACHE_PREFLIGHT_SCHEMA_PATH = "config/terminal-evidence/epic-20738-cache-preflight.schema.json";
+const DOWNLOAD_EVIDENCE_PATH = "config/download-pattern-evidence.json";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCHEMA_VALIDATORS = new Map();
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -227,6 +230,58 @@ export function validateProfile(profile) {
     fail(`profile's exact artifact definitions drifted: ${artifactDigest}`);
   }
   return profile;
+}
+
+export function expectedArtifactFilesFromEvidence(profile, evidence) {
+  object(evidence, "download-pattern evidence");
+  exactKeys(evidence, ["repos"], "download-pattern evidence");
+  if (!Array.isArray(evidence.repos)) fail("download-pattern evidence repos must be an array");
+  const rows = new Map();
+  for (const row of evidence.repos) {
+    object(row, "download-pattern evidence row");
+    const key = claimKey(row.repo, row.revision);
+    if (row.key !== key || rows.has(key) || row.resolvedSha !== row.revision
+      || row.servedRepo !== row.repo || row.gated !== false || !SHA40.test(row.revision)
+      || !Array.isArray(row.files) || row.files.length === 0
+      || row.files.some((file) => typeof file !== "string" || !file
+        || path.isAbsolute(file) || file.split(/[\\/]/).includes(".."))
+      || new Set(row.files).size !== row.files.length
+      || JSON.stringify([...row.files].sort()) !== JSON.stringify(row.files)) {
+      fail(`download-pattern evidence row is not an exact immutable file census: ${key}`);
+    }
+    rows.set(key, row);
+  }
+  const result = {};
+  for (const [id, artifact] of Object.entries(profile.artifacts)) {
+    const key = claimKey(artifact.repository, artifact.revision);
+    const row = rows.get(key);
+    if (!row) fail(`download-pattern evidence is missing exact authority ${key}`);
+    const matches = new Set();
+    for (const pattern of artifact.allowPatterns) {
+      const regexp = patternToRegExp(pattern);
+      const patternMatches = row.files.filter((file) => regexp.test(file));
+      if (patternMatches.length === 0) {
+        fail(`download-pattern evidence pattern has no exact files for ${id}: ${pattern}`);
+      }
+      patternMatches.forEach((file) => matches.add(file));
+    }
+    const prefix = artifact.subdirectory === "." ? "" : `${artifact.subdirectory}/`;
+    const expectedFiles = [...matches].sort().map((file) => {
+      if (prefix && !file.startsWith(prefix)) {
+        fail(`download-pattern evidence file escaped selected subdirectory for ${id}: ${file}`);
+      }
+      const relative = prefix ? file.slice(prefix.length) : file;
+      if (!relative || relative.split("/").includes("..")) {
+        fail(`download-pattern evidence produced an invalid selected filename for ${id}: ${file}`);
+      }
+      return relative;
+    });
+    if (new Set(expectedFiles).size !== expectedFiles.length) {
+      fail(`download-pattern evidence produced duplicate selected filenames for ${id}`);
+    }
+    result[id] = expectedFiles;
+  }
+  return result;
 }
 
 export function validateManifestAuthorities(profile, manifest) {
@@ -523,6 +578,25 @@ export async function hashedFiles(root, { exclude = new Set() } = {}) {
   }
   await visit(absolute);
   return files;
+}
+
+export async function directoryInventory(root) {
+  const files = await hashedFiles(root);
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(file.path);
+    hash.update("\0");
+    hash.update(String(file.bytes));
+    hash.update("\0");
+    hash.update(file.sha256);
+    hash.update("\n");
+  }
+  return {
+    root: path.resolve(root),
+    files: files.length,
+    bytes: files.reduce((total, file) => total + file.bytes, 0),
+    sha256: hash.digest("hex"),
+  };
 }
 
 export function parseNvidiaSmi(raw) {
@@ -967,13 +1041,14 @@ export async function importPrefixEvidence(prefix, output) {
   };
 }
 
-async function writeArtifactRequest({ id, artifact, scratch, phase }) {
+async function writeArtifactRequest({ id, artifact, expectedFiles, scratch, phase }) {
   const requestDir = path.join(scratch, `${phase}-requests`);
   await mkdir(requestDir, { recursive: true });
   const requestPath = path.join(requestDir, `${id}.json`);
   await writeFile(requestPath, `${JSON.stringify({
     id, repository: artifact.repository, revision: artifact.revision,
     subdirectory: artifact.subdirectory, allowPatterns: artifact.allowPatterns,
+    expectedFiles,
   }, null, 2)}\n`, "utf8");
   return requestPath;
 }
@@ -1049,8 +1124,10 @@ async function validateProvisionResult({
   return result;
 }
 
-async function auditArtifact({ id, artifact, scratch, python, cacheRoot }) {
-  const requestPath = await writeArtifactRequest({ id, artifact, scratch, phase: "audit" });
+async function auditArtifact({ id, artifact, expectedFiles, scratch, python, cacheRoot }) {
+  const requestPath = await writeArtifactRequest({
+    id, artifact, expectedFiles, scratch, phase: "audit",
+  });
   const raw = run(python, [
     "scripts/provision-epic-20738-terminal-artifact.py",
     "--request", requestPath,
@@ -1076,9 +1153,11 @@ async function auditArtifact({ id, artifact, scratch, python, cacheRoot }) {
 }
 
 async function stageArtifact({
-  id, artifact, scratch, python, cacheRoot, stagingRoot, allowReviewedDownload,
+  id, artifact, expectedFiles, scratch, python, cacheRoot, stagingRoot, allowReviewedDownload,
 }) {
-  const requestPath = await writeArtifactRequest({ id, artifact, scratch, phase: "stage" });
+  const requestPath = await writeArtifactRequest({
+    id, artifact, expectedFiles, scratch, phase: "stage",
+  });
   const raw = run(python, [
     "scripts/provision-epic-20738-terminal-artifact.py",
     "--request", requestPath,
@@ -1107,8 +1186,10 @@ async function stageArtifact({
   return result;
 }
 
-async function provisionArtifact({ id, artifact, scratch, python, cacheRoot }) {
-  const requestPath = await writeArtifactRequest({ id, artifact, scratch, phase: "offline" });
+async function provisionArtifact({ id, artifact, expectedFiles, scratch, python, cacheRoot }) {
+  const requestPath = await writeArtifactRequest({
+    id, artifact, expectedFiles, scratch, phase: "offline",
+  });
   const raw = run(python, [
     "scripts/provision-epic-20738-terminal-artifact.py",
     "--request", requestPath,
@@ -1153,10 +1234,67 @@ async function provisionArtifact({ id, artifact, scratch, python, cacheRoot }) {
   };
 }
 
-async function verifyArtifactUnchanged(artifact, cacheRoot) {
+export async function installSidecarObstructions(sharedArtifacts) {
+  const roots = new Map();
+  for (const artifact of sharedArtifacts.values()) {
+    const componentRoots = new Set([artifact.selectedRoot]);
+    for (const file of artifact.matchedFiles) {
+      const [component] = file.split("/");
+      if (file.includes("/")) componentRoots.add(path.join(artifact.selectedRoot, component));
+    }
+    artifact.sidecarObstructions = [];
+    for (const root of componentRoots) {
+      const key = comparable(root);
+      const entry = roots.get(key) ?? { root, artifactIds: [] };
+      entry.artifactIds.push(artifact.id);
+      roots.set(key, entry);
+    }
+  }
+  const records = [];
+  for (const entry of roots.values()) {
+    const obstruction = path.join(entry.root, ".candle-device-format-v1");
+    await writeFile(
+      obstruction,
+      "SceneWorks terminal harness: model-adjacent Candle sidecars are forbidden.\n",
+      { encoding: "utf8", flag: "wx" },
+    );
+    const metadata = await lstat(obstruction);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      fail(`Candle sidecar obstruction is not an ordinary regular file: ${obstruction}`);
+    }
+    const record = {
+      artifactIds: entry.artifactIds.sort(),
+      root: entry.root,
+      path: ".candle-device-format-v1",
+      bytes: metadata.size,
+      sha256: await sha256File(obstruction),
+    };
+    records.push(record);
+    for (const artifactId of record.artifactIds) {
+      sharedArtifacts.get(artifactId).sidecarObstructions.push(record);
+    }
+  }
+  return records.sort((left, right) => left.root.localeCompare(right.root));
+}
+
+export async function verifyArtifactUnchanged(artifact, cacheRoot) {
   const selectedFiles = await listCachedArtifactFiles(artifact.selectedRoot, cacheRoot);
-  if (JSON.stringify(selectedFiles) !== JSON.stringify(artifact.selectedFiles)) {
-    fail(`shared cache selected-file set mutated for ${artifact.id}`);
+  const obstructionFiles = artifact.sidecarObstructions.map((entry) => path.relative(
+    artifact.selectedRoot,
+    path.join(entry.root, entry.path),
+  ).split(path.sep).join("/"));
+  const expectedSelectedFiles = [...artifact.selectedFiles, ...obstructionFiles].sort();
+  if (JSON.stringify(selectedFiles) !== JSON.stringify(expectedSelectedFiles)) {
+    fail(`staged authority selected-file set mutated for ${artifact.id}`);
+  }
+  for (const entry of artifact.sidecarObstructions) {
+    const obstruction = path.join(entry.root, entry.path);
+    const obstructionMetadata = await lstat(obstruction);
+    if (!obstructionMetadata.isFile() || obstructionMetadata.isSymbolicLink()
+      || obstructionMetadata.size !== entry.bytes
+      || await sha256File(obstruction) !== entry.sha256) {
+      fail(`Candle sidecar obstruction mutated for ${artifact.id}`);
+    }
   }
   const inventory = await hashArtifactInventory(artifact.selectedRoot, {
     includeFiles: artifact.matchedFiles,
@@ -1164,7 +1302,7 @@ async function verifyArtifactUnchanged(artifact, cacheRoot) {
   });
   if (inventory.files !== artifact.inventory.files || inventory.bytes !== artifact.inventory.bytes
     || inventory.sha256 !== artifact.inventory.sha256) {
-    fail(`shared cache selected-file bytes mutated for ${artifact.id}`);
+    fail(`staged authority bytes mutated for ${artifact.id}`);
   }
 }
 
@@ -1176,7 +1314,7 @@ function cargoCellArgs() {
 }
 
 async function executeCell({
-  sceneworks, cellFile, cellDir, logFile, samples, runtimeScratch,
+  sceneworks, cellFile, cellDir, logFile, samples, runtimeScratch, derivedSidecarRoot,
 }) {
   const writable = {
     temp: path.join(runtimeScratch, "writable", "temp"),
@@ -1205,6 +1343,7 @@ async function executeCell({
         TRANSFORMERS_CACHE: writable.transformers,
         XDG_CACHE_HOME: writable.xdg,
         TORCH_HOME: writable.torch,
+        SCENEWORKS_CANDLE_DEVICE_CACHE_DIR: derivedSidecarRoot,
         HF_HUB_OFFLINE: "1",
         TRANSFORMERS_OFFLINE: "1",
       },
@@ -1400,6 +1539,186 @@ async function writeSummaryDurably({ output, summary, fault }) {
   }
 }
 
+function cachePreflightDocument({
+  status, error, downloadEvidenceSha256, remainingArtifactIds, guard, stagingRoot,
+  derivedSidecarRoot, frozenMissing, sidecarObstructions, cacheProvisioning,
+  derivedSidecarLifecycle,
+}) {
+  return {
+    schemaVersion: 1,
+    profile: PROFILE_NAME,
+    status,
+    error,
+    downloadEvidenceSha256,
+    expectedArtifactIds: remainingArtifactIds,
+    sourceCacheRoot: guard.cacheRoot,
+    campaignStagingRoot: stagingRoot,
+    derivedSidecarRoot,
+    frozenMissingFiles: frozenMissing,
+    sidecarObstructions,
+    reusedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.reusedFiles.map(
+      (file) => ({ artifactId: artifact.id, ...file }),
+    )),
+    downloadedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.downloadedFiles.map(
+      (file) => ({ artifactId: artifact.id, ...file }),
+    )),
+    phases: cacheProvisioning,
+    derivedSidecarLifecycle,
+    offlineBeforeCells: status === "passed",
+  };
+}
+
+export function validateCachePreflightEvidence(document, {
+  remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
+  derivedSidecarRoot, profile,
+}) {
+  validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
+  if (document.profile !== profile.profile
+    || document.downloadEvidenceSha256 !== downloadEvidenceSha256
+    || document.sourceCacheRoot !== guard.cacheRoot
+    || document.campaignStagingRoot !== stagingRoot
+    || document.derivedSidecarRoot !== derivedSidecarRoot
+    || JSON.stringify(document.expectedArtifactIds) !== JSON.stringify(remainingArtifactIds)) {
+    fail("cache preflight identity/path binding drifted");
+  }
+  const ids = new Set(remainingArtifactIds);
+  for (const phase of ["sourceCensus", "staging", "finalOffline"]) {
+    const rows = document.phases[phase];
+    if (new Set(rows.map((row) => row.id)).size !== rows.length
+      || rows.some((row) => !ids.has(row.id)
+        || JSON.stringify(row.expectedFiles) !== JSON.stringify(artifactExpectedFiles[row.id])
+        || row.expectedFiles.some((file) => file.includes(".candle-device-format-v1")
+          || file.endsWith(".incomplete")))) {
+      fail(`cache preflight ${phase} authority census drifted`);
+    }
+  }
+  for (const row of document.phases.sourceCensus) {
+    const prefix = row.subdirectory === "." ? "" : `${row.subdirectory}/`;
+    const present = row.reusedFiles.map((file) => file.path);
+    const missing = row.missingFiles.map((file) => (
+      prefix && file.startsWith(prefix) ? file.slice(prefix.length) : file
+    ));
+    if (row.complete !== (row.missingFiles.length === 0)
+      || JSON.stringify([...present, ...missing].sort())
+      !== JSON.stringify([...artifactExpectedFiles[row.id]].sort())) {
+      fail(`cache preflight source census did not cover every expected file for ${row.id}`);
+    }
+  }
+  const frozen = document.phases.sourceCensus.flatMap((row) => row.missingFiles.map((file) => ({
+    artifactId: row.id, repository: row.repository, revision: row.revision, file,
+  })));
+  if (JSON.stringify(document.frozenMissingFiles) !== JSON.stringify(frozen)) {
+    fail("cache preflight frozen missing-file census drifted");
+  }
+  for (const row of document.phases.staging) {
+    if (JSON.stringify([
+      ...row.reusedFiles.map((file) => file.path),
+      ...row.downloadedFiles.map((file) => file.path),
+    ].sort()) !== JSON.stringify([...artifactExpectedFiles[row.id]].sort())) {
+      fail(`cache preflight staging did not copy the exact expected census for ${row.id}`);
+    }
+  }
+  for (const row of document.phases.finalOffline) {
+    if (row.inventory.files !== artifactExpectedFiles[row.id].length) {
+      fail(`cache preflight final inventory count drifted for ${row.id}`);
+    }
+  }
+  const flatten = (key) => document.phases.staging.flatMap((artifact) => artifact[key].map(
+    (file) => ({ artifactId: artifact.id, ...file }),
+  ));
+  if (JSON.stringify(document.reusedFiles) !== JSON.stringify(flatten("reusedFiles"))
+    || JSON.stringify(document.downloadedFiles) !== JSON.stringify(flatten("downloadedFiles"))) {
+    fail("cache preflight top-level hit/download partition drifted");
+  }
+  if (document.downloadedFiles.length > 1 || document.downloadedFiles.some((file) => (
+    file.artifactId !== "flux1-schnell-q8"
+      || file.path !== "transformer/model.safetensors"
+      || file.commitSha !== "bba3ae01dfd94089f173c05edd4e1a4c551f2599"
+      || file.sha256 !== file.lfsSha256
+  ))) fail("cache preflight contains an unreviewed model download");
+  if (document.status === "passed") {
+    for (const phase of ["sourceCensus", "staging", "finalOffline"]) {
+      if (JSON.stringify(document.phases[phase].map((row) => row.id))
+        !== JSON.stringify(remainingArtifactIds)) {
+        fail(`passed cache preflight omitted ${phase} authorities`);
+      }
+    }
+    const obstructed = [...new Set(document.sidecarObstructions.flatMap(
+      (entry) => entry.artifactIds,
+    ))].sort();
+    if (JSON.stringify(obstructed) !== JSON.stringify([...remainingArtifactIds].sort())) {
+      fail("passed cache preflight did not obstruct every staged component root");
+    }
+    for (const row of document.phases.finalOffline) {
+      const expectedRoots = new Set([row.inventory.root]);
+      for (const file of artifactExpectedFiles[row.id]) {
+        const [component] = file.split("/");
+        if (file.includes("/")) expectedRoots.add(path.join(row.inventory.root, component));
+      }
+      const actualRoots = document.sidecarObstructions.filter(
+        (entry) => entry.artifactIds.includes(row.id),
+      ).map((entry) => entry.root);
+      if (JSON.stringify([...new Set(actualRoots)].sort())
+        !== JSON.stringify([...expectedRoots].sort())
+        || actualRoots.some((root) => !isWithin(stagingRoot, root))) {
+        fail(`passed cache preflight did not obstruct exact component roots for ${row.id}`);
+      }
+    }
+    const initial = document.derivedSidecarLifecycle.initial;
+    if (!initial || initial.root !== derivedSidecarRoot || initial.files !== 0
+      || initial.bytes !== 0 || initial.sha256 !== createHash("sha256").digest("hex")) {
+      fail("derived Candle cache was not proven empty before cells");
+    }
+  }
+  let previous = 0;
+  for (const snapshot of document.derivedSidecarLifecycle.afterCells) {
+    const expected = profile.cells[snapshot.ordinal - 1];
+    if (!expected || snapshot.cellId !== expected.id || snapshot.ordinal <= previous
+      || snapshot.inventory.root !== derivedSidecarRoot) {
+      fail("derived Candle sidecar lifecycle ordering drifted");
+    }
+    previous = snapshot.ordinal;
+  }
+  return document;
+}
+
+async function writeCachePreflightDurably({
+  output, filename, document, validation, fault, injectFaults = true,
+}) {
+  const validate = () => validateCachePreflightEvidence(document, validation);
+  try {
+    if (injectFaults) await invokeFault(fault, "preflightSchema", null);
+    validate();
+    if (injectFaults) await invokeFault(fault, "preflightWrite", null);
+    const primary = path.join(output, filename);
+    await writeJsonAtomically(primary, document, { schemaPath: CACHE_PREFLIGHT_SCHEMA_PATH });
+    if (injectFaults) await invokeFault(fault, "preflightStat", null);
+    const metadata = await stat(primary);
+    if (injectFaults) await invokeFault(fault, "preflightHash", null);
+    return {
+      evidence: { path: filename, bytes: metadata.size, sha256: await sha256File(primary) },
+      error: null,
+    };
+  } catch (error) {
+    return { evidence: null, error };
+  }
+}
+
+async function writeCachePreflightFallback({ output, filename, document, validation }) {
+  validateCachePreflightEvidence(document, validation);
+  const fallbackDir = path.join(output, "_emergency");
+  await mkdir(fallbackDir, { recursive: true });
+  const basename = `${path.basename(filename, ".json")}-fallback.json`;
+  const fallback = path.join(fallbackDir, basename);
+  await writeJsonAtomically(fallback, document, { schemaPath: CACHE_PREFLIGHT_SCHEMA_PATH });
+  const metadata = await stat(fallback);
+  return {
+    path: `_emergency/${basename}`,
+    bytes: metadata.size,
+    sha256: await sha256File(fallback),
+  };
+}
+
 export async function runCampaign(args, options = {}) {
   let prepared = options.prepared;
   if (!prepared) {
@@ -1420,6 +1739,11 @@ export async function runCampaign(args, options = {}) {
       path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
     )));
     validateManifestAuthorities(profile, manifest);
+    const downloadEvidencePath = path.join(sceneworks.root, DOWNLOAD_EVIDENCE_PATH);
+    const downloadEvidenceBytes = await readFile(downloadEvidencePath, "utf8");
+    const artifactExpectedFiles = expectedArtifactFilesFromEvidence(
+      profile, JSON.parse(downloadEvidenceBytes),
+    );
 
     const repositories = {
       sceneworks: { sha: sceneworks.sha, clean: true },
@@ -1456,17 +1780,26 @@ export async function runCampaign(args, options = {}) {
       sceneworksRoot: sceneworks.root,
       prefixCandidates,
       python: args.python,
+      artifactExpectedFiles,
+      downloadEvidenceSha256: createHash("sha256").update(downloadEvidenceBytes).digest("hex"),
     };
   }
   const {
     profile, repositories, execution, guard, output, scratch, startupErrors, gpuIdentity,
     systemMemory, sceneworksRoot, prefixCandidates, python,
+    artifactExpectedFiles, downloadEvidenceSha256,
   } = prepared;
+  if (!artifactExpectedFiles || !/^[0-9a-f]{64}$/.test(downloadEvidenceSha256)) {
+    fail("terminal preparation did not bind authoritative download-pattern evidence");
+  }
   const fault = options.fault;
   const operations = {
     auditArtifact: options.operations?.auditArtifact ?? auditArtifact,
     stageArtifact: options.operations?.stageArtifact ?? stageArtifact,
     provisionArtifact: options.operations?.provisionArtifact ?? provisionArtifact,
+    installSidecarObstructions:
+      options.operations?.installSidecarObstructions ?? installSidecarObstructions,
+    directoryInventory: options.operations?.directoryInventory ?? directoryInventory,
     verifyArtifactUnchanged:
       options.operations?.verifyArtifactUnchanged ?? verifyArtifactUnchanged,
     executeCell: options.operations?.executeCell ?? executeCell,
@@ -1488,19 +1821,27 @@ export async function runCampaign(args, options = {}) {
   const sharedArtifacts = new Map();
   const preflightScratch = path.join(scratch, "cache-preflight");
   const stagingRoot = path.join(scratch, "authority-stage");
-  await mkdir(preflightScratch);
-  await mkdir(stagingRoot);
+  const derivedSidecarRoot = path.join(scratch, "derived-candle-device-cache");
   const remainingArtifactIds = [...new Set(
     profile.cells.slice(startIndex).flatMap((cell) => cell.artifactIds),
   )];
   const sourceAudits = new Map();
   const cacheProvisioning = { sourceCensus: [], staging: [], finalOffline: [] };
   const censusErrors = [];
-  for (const artifactId of remainingArtifactIds) {
+  try {
+    await invokeFault(fault, "preflightMkdir", null);
+    await mkdir(preflightScratch);
+    await mkdir(stagingRoot);
+    await mkdir(derivedSidecarRoot);
+  } catch (error) {
+    quarantineReason = `cache preflight directory preparation failed: ${errorText(error)}`;
+  }
+  for (const artifactId of quarantineReason ? [] : remainingArtifactIds) {
     try {
       const artifact = await operations.auditArtifact({
         id: artifactId,
         artifact: profile.artifacts[artifactId],
+        expectedFiles: artifactExpectedFiles[artifactId],
         scratch: preflightScratch,
         python,
         cacheRoot: guard.cacheRoot,
@@ -1512,6 +1853,7 @@ export async function runCampaign(args, options = {}) {
         revision: artifact.revision,
         subdirectory: artifact.subdirectory,
         allowPatterns: artifact.allowPatterns,
+        expectedFiles: artifactExpectedFiles[artifactId],
         complete: artifact.complete,
         missingFiles: artifact.missingFiles,
         reusedFiles: artifact.reusedFiles,
@@ -1537,7 +1879,9 @@ export async function runCampaign(args, options = {}) {
     revision: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
     file: "q8/transformer/model.safetensors",
   }];
-  if (censusErrors.length) {
+  if (quarantineReason) {
+    // Preserve the first fail-closed setup error.
+  } else if (censusErrors.length) {
     quarantineReason = `source cache census failed before transfer: ${censusErrors.join(" | ")}`;
   } else if (frozenMissing.length > 1
     || (frozenMissing.length === 1
@@ -1554,6 +1898,7 @@ export async function runCampaign(args, options = {}) {
         const staged = await operations.stageArtifact({
           id: artifactId,
           artifact: profile.artifacts[artifactId],
+          expectedFiles: artifactExpectedFiles[artifactId],
           scratch: preflightScratch,
           python,
           cacheRoot: guard.cacheRoot,
@@ -1579,6 +1924,7 @@ export async function runCampaign(args, options = {}) {
           revision: profile.artifacts[artifactId].revision,
           subdirectory: profile.artifacts[artifactId].subdirectory,
           allowPatterns: profile.artifacts[artifactId].allowPatterns,
+          expectedFiles: artifactExpectedFiles[artifactId],
           reusedFiles: staged.reusedFiles,
           downloadedFiles: downloaded,
         });
@@ -1593,12 +1939,15 @@ export async function runCampaign(args, options = {}) {
   }
 
   const finalErrors = [];
+  let sidecarObstructions = [];
+  const derivedSidecarLifecycle = { initial: null, afterCells: [] };
   if (!quarantineReason) {
     for (const artifactId of remainingArtifactIds) {
       try {
         const artifact = await operations.provisionArtifact({
           id: artifactId,
           artifact: profile.artifacts[artifactId],
+          expectedFiles: artifactExpectedFiles[artifactId],
           scratch: preflightScratch,
           python,
           cacheRoot: stagingRoot,
@@ -1610,6 +1959,7 @@ export async function runCampaign(args, options = {}) {
           revision: artifact.revision,
           subdirectory: artifact.subdirectory,
           allowPatterns: artifact.allowPatterns,
+          expectedFiles: artifactExpectedFiles[artifactId],
           inventory: artifact.inventory,
         });
       } catch (error) {
@@ -1618,36 +1968,69 @@ export async function runCampaign(args, options = {}) {
     }
     if (finalErrors.length) {
       quarantineReason = `full offline validation of campaign staging failed: ${finalErrors.join(" | ")}`;
+    } else {
+      try {
+        sidecarObstructions = await operations.installSidecarObstructions(sharedArtifacts);
+        derivedSidecarLifecycle.initial = await operations.directoryInventory(derivedSidecarRoot);
+      } catch (error) {
+        quarantineReason = `Candle derived-sidecar isolation failed: ${errorText(error)}`;
+      }
     }
   }
   if (quarantineReason) {
     quarantineReason = `${quarantineReason}; no continuation GPU cell started`;
     campaignErrors.push(quarantineReason);
   }
-  const cachePreflightPath = path.join(output, "cache-preflight.json");
-  await writeFile(
-    cachePreflightPath,
-    `${JSON.stringify({
-      sourceCacheRoot: guard.cacheRoot,
-      campaignStagingRoot: stagingRoot,
-      frozenMissingFiles: frozenMissing,
-      reusedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.reusedFiles.map(
-        (file) => ({ artifactId: artifact.id, ...file }),
-      )),
-      downloadedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.downloadedFiles.map(
-        (file) => ({ artifactId: artifact.id, ...file }),
-      )),
-      phases: cacheProvisioning,
-      offlineBeforeCells: !quarantineReason,
-    }, null, 2)}\n`,
-    { encoding: "utf8", flag: "wx" },
-  );
-  const cachePreflightMetadata = await stat(cachePreflightPath);
-  const cachePreflightEvidence = {
-    path: "cache-preflight.json",
-    bytes: cachePreflightMetadata.size,
-    sha256: await sha256File(cachePreflightPath),
+  const cacheValidation = {
+    remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
+    derivedSidecarRoot, profile,
   };
+  let initialDocument = cachePreflightDocument({
+    status: quarantineReason ? "failed" : "passed",
+    error: quarantineReason,
+    downloadEvidenceSha256,
+    remainingArtifactIds,
+    guard,
+    stagingRoot,
+    derivedSidecarRoot,
+    frozenMissing,
+    sidecarObstructions,
+    cacheProvisioning,
+    derivedSidecarLifecycle,
+  });
+  let initialWrite = await writeCachePreflightDurably({
+    output, filename: "cache-preflight-initial.json", document: initialDocument,
+    validation: cacheValidation, fault,
+  });
+  if (initialWrite.error) {
+    const evidenceError = `cache preflight schema/write/stat/hash failed: ${errorText(initialWrite.error)}`;
+    if (!quarantineReason) {
+      quarantineReason = evidenceError;
+      campaignErrors.push(`${quarantineReason}; no continuation GPU cell started`);
+    } else {
+      campaignErrors.push(evidenceError);
+    }
+    initialDocument = cachePreflightDocument({
+      status: "failed",
+      error: `${quarantineReason}; no continuation GPU cell started`,
+      downloadEvidenceSha256,
+      remainingArtifactIds,
+      guard,
+      stagingRoot,
+      derivedSidecarRoot,
+      frozenMissing: [],
+      sidecarObstructions: [],
+      cacheProvisioning: { sourceCensus: [], staging: [], finalOffline: [] },
+      derivedSidecarLifecycle: { initial: null, afterCells: [] },
+    });
+    initialWrite = {
+      evidence: await writeCachePreflightFallback({
+        output, filename: "cache-preflight-initial.json", document: initialDocument,
+        validation: cacheValidation,
+      }),
+      error: null,
+    };
+  }
   for (let index = startIndex; index < profile.cells.length; index += 1) {
     const cell = profile.cells[index];
     const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
@@ -1745,6 +2128,7 @@ export async function runCampaign(args, options = {}) {
           logFile,
           samples,
           runtimeScratch: cellScratch,
+          derivedSidecarRoot,
         });
       } catch (error) {
         runtimeFailure = error;
@@ -1753,6 +2137,17 @@ export async function runCampaign(args, options = {}) {
         await verifyCellCache("after");
       } catch (error) {
         quarantineReason = `shared cache mutated during cell ${cell.id}: ${errorText(error)}`;
+        campaignErrors.push(quarantineReason);
+        throw error;
+      }
+      try {
+        derivedSidecarLifecycle.afterCells.push({
+          ordinal: index + 1,
+          cellId: cell.id,
+          inventory: await operations.directoryInventory(derivedSidecarRoot),
+        });
+      } catch (error) {
+        quarantineReason = `derived Candle sidecar evidence failed after cell ${cell.id}: ${errorText(error)}`;
         campaignErrors.push(quarantineReason);
         throw error;
       }
@@ -1862,6 +2257,49 @@ export async function runCampaign(args, options = {}) {
     }
   }
 
+  let finalDocument = cachePreflightDocument({
+    status: quarantineReason ? "failed" : "passed",
+    error: quarantineReason,
+    downloadEvidenceSha256,
+    remainingArtifactIds,
+    guard,
+    stagingRoot,
+    derivedSidecarRoot,
+    frozenMissing,
+    sidecarObstructions,
+    cacheProvisioning,
+    derivedSidecarLifecycle,
+  });
+  let finalWrite = await writeCachePreflightDurably({
+    output, filename: "cache-preflight.json", document: finalDocument,
+    validation: cacheValidation, fault, injectFaults: false,
+  });
+  if (finalWrite.error) {
+    const evidenceError = `final cache preflight evidence failed: ${errorText(finalWrite.error)}`;
+    campaignErrors.push(evidenceError);
+    finalDocument = cachePreflightDocument({
+      status: "failed",
+      error: quarantineReason ? `${quarantineReason}; ${evidenceError}` : evidenceError,
+      downloadEvidenceSha256,
+      remainingArtifactIds,
+      guard,
+      stagingRoot,
+      derivedSidecarRoot,
+      frozenMissing: [],
+      sidecarObstructions: [],
+      cacheProvisioning: { sourceCensus: [], staging: [], finalOffline: [] },
+      derivedSidecarLifecycle: { initial: null, afterCells: [] },
+    });
+    finalWrite = {
+      evidence: await writeCachePreflightFallback({
+        output, filename: "cache-preflight.json", document: finalDocument,
+        validation: cacheValidation,
+      }),
+      error: null,
+    };
+  }
+  const cachePreflightEvidence = finalWrite.evidence;
+
   try {
     await invokeFault(fault, "campaignCleanup", null);
     await operations.cleanup(scratch, guard, "campaign scratch");
@@ -1908,9 +2346,30 @@ async function main() {
   const profilePath = argv.includes("--profile") ? value(argv, "--profile") : PROFILE_PATH;
   if (command === "check") {
     validateDocumentWithSchema(PROFILE_SCHEMA_PATH, profilePath);
+    validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, {
+      schemaVersion: 1,
+      profile: PROFILE_NAME,
+      status: "failed",
+      error: "schema self-check fixture",
+      downloadEvidenceSha256: "0".repeat(64),
+      expectedArtifactIds: ["schema-self-check"],
+      sourceCacheRoot: "fixture-cache",
+      campaignStagingRoot: "fixture-staging",
+      derivedSidecarRoot: "fixture-derived",
+      frozenMissingFiles: [],
+      sidecarObstructions: [],
+      reusedFiles: [],
+      downloadedFiles: [],
+      phases: { sourceCensus: [], staging: [], finalOffline: [] },
+      derivedSidecarLifecycle: { initial: null, afterCells: [] },
+      offlineBeforeCells: false,
+    });
     const profile = validateProfile(loadProfile(profilePath));
     const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
     validateManifestAuthorities(profile, manifest);
+    const downloadEvidence = JSON.parse(await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8"));
+    const expected = expectedArtifactFilesFromEvidence(profile, downloadEvidence);
+    if (Object.keys(expected).length !== 23) fail("terminal exact filename census is incomplete");
     process.stdout.write(`${PROFILE_NAME}: exactly 19 serialized cells and immutable authorities OK\n`);
     return;
   }

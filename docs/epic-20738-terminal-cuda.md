@@ -50,11 +50,15 @@ assigned a timeout above 360 minutes. The unrelated LTX Eros, provisioning, five
 job budgets remain 360, 240, 120, and 45 minutes respectively.
 
 The job checks out exact source revisions and requires both checkouts to be clean. It installs the
-lockfile-pinned in-process Node Draft 2020-12 validator and requires the runner's preinstalled
-`huggingface_hub` to be exact version 0.36.0. The trusted source cache is the fixed
+lockfile-pinned in-process Node Draft 2020-12 validator and creates a fresh `RUNNER_TEMP` Python
+virtual environment with `huggingface_hub==0.36.0`, then verifies and passes that exact interpreter
+to the controller. The trusted source cache is the fixed
 `E:\huggingface\hub`; it is not a dispatch input and is never used as writable runtime storage.
 Before any GPU cell, the controller freezes a census of every distinct remaining exact
-repository/revision/allow-pattern authority. Hugging Face snapshot file links are valid only when
+repository/revision/allow-pattern authority. The exact required filenames come from the checked-in
+immutable download-pattern evidence; every listed file is required, and only those files are copied.
+Unreviewed extras such as `.incomplete` blobs and model-adjacent `.candle-device-format-v1`
+derivatives are excluded. Hugging Face snapshot file links are valid only when
 their resolved blobs remain inside that trusted root; broken, empty, or escaping links fail closed.
 
 Each valid authority is copied once into a campaign-owned shared staging tree under `RUNNER_TEMP`
@@ -80,9 +84,13 @@ tier markers must agree with the requested q4/q8 directory, and runtime results 
 tier equals resolved tier with `denseFallback: false`.
 
 All writable cache and temporary environment variables are redirected to the current cell's scratch,
-while model roots point only at the shared campaign staging tree. The controller rehashes each selected
-staged file set immediately before and after every cell. Any added, removed, or changed selected byte
-quarantines the rest of the campaign; the source cache remains untouched.
+while model roots point only at the shared campaign staging tree. Every selected root and nested
+top-level component root carries an ordinary-file `.candle-device-format-v1` obstruction, forcing
+Candle away from model-adjacent writes. `SCENEWORKS_CANDLE_DEVICE_CACHE_DIR` points to a separate
+campaign-owned shared derived cache under `RUNNER_TEMP`; its empty initial state and post-cell
+inventories are bound in evidence. The controller rehashes each selected staged authority file and
+every obstruction immediately before and after every cell. Any added, removed, or changed staged
+authority byte quarantines the rest of the campaign; the source cache remains untouched.
 
 ## Evidence and failure behavior
 
@@ -108,12 +116,17 @@ receipt: no selected/model bytes, input, runtime result, output, or cleanup atte
 copied under `_imported-boundary-residue/` and excluded from the seven-PASS lineage. Any substantive
 cell-8 file or any later cell invalidates the candidate.
 
-`cache-preflight.json` binds the frozen source census, the copied-file and downloaded-file partition
-with bytes and SHA-256 values, each final offline staged inventory, and the no-GPU-before-validation
-verdict. Its own byte count and SHA-256 are bound from the campaign summary.
+The closed Draft 2020-12 `cache-preflight.json` binds the download-evidence SHA-256, authoritative
+filename census, copied-file and downloaded-file partition with bytes and SHA-256 values, each final
+offline staged inventory, component-root obstructions, the derived-sidecar lifecycle, and the
+no-GPU-before-validation verdict. Its own byte count and SHA-256 are bound from the campaign summary.
+An initial validated copy is published before cell 8, and the final copy binds post-cell lifecycle
+inventories.
 
-A cache census, staging, or final offline-validation failure starts no continuation GPU cell and
-emits durable failed outcomes for cells 8-19 while retaining the seven imported PASS receipts. A cell
+A cache preflight directory, write, stat, hash, schema/semantic validation, census, staging, or final
+offline-validation failure starts no continuation GPU cell. An independent emergency writer retains
+the failed preflight evidence, and the controller emits durable failed outcomes for cells 8-19 while
+retaining the seven imported PASS receipts. A cell
 failure anywhere in setup, provisioning, execution, hashing, schema validation, atomic
 receipt publication, or cleanup is recorded and the controller proceeds through all reviewed cells.
 If a per-cell scratch removal fails or its absence cannot be proven, the controller quarantines the

@@ -1188,14 +1188,17 @@ jobs:
       # SC-20945 terminal epic evidence. This is deliberately one opt-in profile in this existing
       # Windows CUDA job: the checked-in controller validates the exact ordered 19-cell semantic
       # digest and awaits one fresh worker process at a time in isolated per-cell scratch. A
-      # source-reviewed fixed cache root is censused before transfer: there is no cache input,
+      # source-reviewed fixed cache root is censused from checked-in immutable download evidence
+      # before transfer: there is no cache input,
       # snapshot/glob/ref-main fallback, matrix, child workflow, per-cell dispatch, or secret weight
       # path. Each distinct valid authority is copied once into campaign-owned staging. The sole
       # reviewed cache miss may download only flux1-schnell-mlx@bba3ae... file
       # q8/transformer/model.safetensors into that staging tree, with exact commit/size/LFS-SHA
       # verification; malformed cache partials are never resumed or renamed. Cells 1-7 are imported
       # from exactly one uploaded contiguous PASS prefix and rehashed; cells 8-19 run as a distinct
-      # continuation only after every staged authority passes a complete offline preflight. The four
+      # continuation only after every staged authority passes a complete offline preflight. Exact
+      # authority files are copied without derivative extras; component roots carry regular-file
+      # sidecar obstructions and Candle writes only to a campaign-owned derived cache. The four
       # dismantled pin-keyed gates remain untouched.
       - name: Set up the pinned terminal Node runtime
         id: terminal_node
@@ -1302,9 +1305,14 @@ jobs:
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
         shell: powershell
         run: |
-          $python = (Get-Command python -ErrorAction Stop).Source
-          & $python -c "import fnmatch, json, pathlib; from huggingface_hub import __version__; assert __version__ == '0.36.0', __version__; print('terminal artifact Python ready')"
-          if ($LASTEXITCODE -ne 0) { throw 'Python and preinstalled huggingface_hub 0.36.0 are required for exact missing-file staging' }
+          $venv = Join-Path $env:RUNNER_TEMP "sc-20974-python-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'Python 3 with venv support is required for terminal artifact staging' }
+          $python = Join-Path $venv 'Scripts\python.exe'
+          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install pinned huggingface_hub 0.36.0 in the isolated terminal venv' }
+          & $python -c "from huggingface_hub import __version__; assert __version__ == '0.36.0', __version__; print('terminal artifact Python ready')"
+          if ($LASTEXITCODE -ne 0) { throw 'isolated terminal Python did not retain exact huggingface_hub 0.36.0' }
           Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_TERMINAL_PYTHON=$python"
       - name: Check out the exact terminal inference source
         id: terminal_inference

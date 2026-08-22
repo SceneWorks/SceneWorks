@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/epic-20738-terminal-cache-preflight-v1.json",
+  "title": "Epic 20738 terminal cache preflight evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "profile", "status", "error", "downloadEvidenceSha256",
+    "expectedArtifactIds", "sourceCacheRoot", "campaignStagingRoot", "derivedSidecarRoot",
+    "frozenMissingFiles", "sidecarObstructions", "reusedFiles", "downloadedFiles", "phases",
+    "derivedSidecarLifecycle", "offlineBeforeCells"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "profile": { "const": "epic-20738-candle-cuda-terminal-v1" },
+    "status": { "enum": ["passed", "failed"] },
+    "error": { "type": ["string", "null"] },
+    "downloadEvidenceSha256": { "$ref": "#/$defs/sha256" },
+    "expectedArtifactIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" }
+    },
+    "sourceCacheRoot": { "type": "string", "minLength": 1 },
+    "campaignStagingRoot": { "type": "string", "minLength": 1 },
+    "derivedSidecarRoot": { "type": "string", "minLength": 1 },
+    "frozenMissingFiles": { "type": "array", "items": { "$ref": "#/$defs/missingFile" } },
+    "sidecarObstructions": { "type": "array", "items": { "$ref": "#/$defs/obstruction" } },
+    "reusedFiles": { "type": "array", "items": { "$ref": "#/$defs/artifactFile" } },
+    "downloadedFiles": { "type": "array", "items": { "$ref": "#/$defs/downloadedArtifactFile" } },
+    "phases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceCensus", "staging", "finalOffline"],
+      "properties": {
+        "sourceCensus": { "type": "array", "items": { "$ref": "#/$defs/sourceCensus" } },
+        "staging": { "type": "array", "items": { "$ref": "#/$defs/staging" } },
+        "finalOffline": { "type": "array", "items": { "$ref": "#/$defs/finalOffline" } }
+      }
+    },
+    "derivedSidecarLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initial", "afterCells"],
+      "properties": {
+        "initial": { "oneOf": [{ "$ref": "#/$defs/inventory" }, { "type": "null" }] },
+        "afterCells": { "type": "array", "items": { "$ref": "#/$defs/sidecarSnapshot" } }
+      }
+    },
+    "offlineBeforeCells": { "type": "boolean" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "passed" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "error": { "const": null },
+          "offlineBeforeCells": { "const": true }
+        }
+      },
+      "else": {
+        "properties": {
+          "error": { "type": "string", "minLength": 1 },
+          "offlineBeforeCells": { "const": false }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "relativeFile": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:)(?![/\\\\])(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)).+$"
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeFile" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "artifactFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "path", "bytes", "sha256"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/id" },
+        "path": { "$ref": "#/$defs/relativeFile" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "downloadedArtifactFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "path", "bytes", "sha256", "lfsSha256", "commitSha"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/id" },
+        "path": { "$ref": "#/$defs/relativeFile" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "lfsSha256": { "$ref": "#/$defs/sha256" },
+        "commitSha": { "$ref": "#/$defs/sha40" }
+      }
+    },
+    "missingFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "repository", "revision", "file"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/id" },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "revision": { "$ref": "#/$defs/sha40" },
+        "file": { "$ref": "#/$defs/relativeFile" }
+      }
+    },
+    "authorityBase": {
+      "type": "object",
+      "required": ["id", "repository", "revision", "subdirectory", "allowPatterns", "expectedFiles"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "revision": { "$ref": "#/$defs/sha40" },
+        "subdirectory": { "type": "string", "minLength": 1 },
+        "allowPatterns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/relativeFile" } },
+        "expectedFiles": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/relativeFile" } }
+      }
+    },
+    "sourceCensus": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/authorityBase" },
+        {
+          "type": "object",
+          "required": ["complete", "missingFiles", "reusedFiles"],
+          "properties": {
+            "complete": { "type": "boolean" },
+            "missingFiles": { "type": "array", "items": { "$ref": "#/$defs/relativeFile" } },
+            "reusedFiles": { "type": "array", "items": { "$ref": "#/$defs/file" } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "staging": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/authorityBase" },
+        {
+          "type": "object",
+          "required": ["reusedFiles", "downloadedFiles"],
+          "properties": {
+            "reusedFiles": { "type": "array", "items": { "$ref": "#/$defs/file" } },
+            "downloadedFiles": { "type": "array", "items": { "$ref": "#/$defs/downloadedFile" } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "downloadedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "lfsSha256", "commitSha"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeFile" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "lfsSha256": { "$ref": "#/$defs/sha256" },
+        "commitSha": { "$ref": "#/$defs/sha40" }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "files", "bytes", "sha256"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "finalOffline": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/authorityBase" },
+        {
+          "type": "object",
+          "required": ["inventory"],
+          "properties": { "inventory": { "$ref": "#/$defs/inventory" } }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "obstruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactIds", "root", "path", "bytes", "sha256"],
+      "properties": {
+        "artifactIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "root": { "type": "string", "minLength": 1 },
+        "path": { "const": ".candle-device-format-v1" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "sidecarSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "cellId", "inventory"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "cellId": { "$ref": "#/$defs/id" },
+        "inventory": { "$ref": "#/$defs/inventory" }
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { cp, lstat, mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,10 +10,14 @@ import {
   PROFILE_PATH,
   PROFILE_SCHEMA_PATH,
   RECEIPT_SCHEMA_PATH,
+  CACHE_PREFLIGHT_SCHEMA_PATH,
   cellSemanticsSha256,
+  directoryInventory,
+  expectedArtifactFilesFromEvidence,
   expectedLoadSpecQuantBits,
   inferencePins,
   hashedFiles,
+  installSidecarObstructions,
   importPrefixEvidence,
   loadProfile,
   parseNvidiaSmi,
@@ -21,15 +26,34 @@ import {
   safeRemoveTree,
   selectImportedPrefix,
   validateCampaignPaths,
+  validateCachePreflightEvidence,
   validateDocumentWithSchema,
   validateManifestAuthorities,
   validateProfile,
   validateReceipt,
   validateRuntimeResult,
+  verifyArtifactUnchanged,
 } from "./epic-20738-terminal-cuda-harness.mjs";
+import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const profile = () => structuredClone(loadProfile());
+
+function fixtureSidecarObstructions(sharedArtifacts) {
+  return [...sharedArtifacts.values()].flatMap((artifact) => {
+    const roots = new Set([artifact.selectedRoot]);
+    for (const file of artifact.matchedFiles ?? []) {
+      const [component] = file.split("/");
+      if (file.includes("/")) roots.add(path.join(artifact.selectedRoot, component));
+    }
+    const records = [...roots].map((root) => ({
+      artifactIds: [artifact.id], root, path: ".candle-device-format-v1",
+      bytes: 7, sha256: "e".repeat(64),
+    }));
+    artifact.sidecarObstructions = records;
+    return records;
+  });
+}
 
 test("checked-in terminal profile is the exact serialized 19-cell campaign", async () => {
   const checked = validateProfile(profile());
@@ -62,6 +86,29 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
     "config/manifests/builtin.models.jsonc", "utf8",
   )));
   assert.doesNotThrow(() => validateManifestAuthorities(checked, manifest));
+});
+
+test("download evidence freezes the exact 23-authority filename census", async () => {
+  const checked = profile();
+  const evidence = JSON.parse(await readFile("config/download-pattern-evidence.json", "utf8"));
+  const expected = expectedArtifactFilesFromEvidence(checked, evidence);
+  assert.equal(Object.keys(expected).length, 23);
+  assert.equal(Object.values(expected).flat().length, 315);
+  assert.equal(expected["flux1-schnell-q4"].length, 19);
+  assert.equal(expected["flux1-schnell-q8"].length, 19);
+  assert.equal(expected["ltx23-q8"].length, 11);
+  assert.ok(Object.values(expected).flat().every((file) => (
+    !file.includes(".candle-device-format-v1") && !file.endsWith(".incomplete")
+  )));
+
+  const missingRow = structuredClone(evidence);
+  missingRow.repos = missingRow.repos.filter((row) => row.key !== (
+    "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599"
+  ));
+  assert.throws(
+    () => expectedArtifactFilesFromEvidence(checked, missingRow),
+    /missing exact authority/,
+  );
 });
 
 test("profile validator rejects count, order, every semantic tuple mutation, blocked, and authority drift", async () => {
@@ -649,6 +696,54 @@ test("campaign paths are fresh non-nested RUNNER_TEMP descendants and cleanup re
   }
 });
 
+test("staged authorities obstruct adjacent Candle sidecars and use a separate derived cache", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-sidecar-"));
+  const staging = path.join(temporary, "stage");
+  const selected = path.join(staging, "models--fixture--model", "snapshots", "a".repeat(40), "q4");
+  const unprotected = path.join(temporary, "unprotected");
+  const derived = path.join(temporary, "derived");
+  try {
+    await Promise.all([
+      mkdir(selected, { recursive: true }), mkdir(unprotected), mkdir(derived),
+    ]);
+    await mkdir(path.join(selected, "transformer"));
+    await writeFile(path.join(selected, "transformer", "weights.bin"), "weights", "utf8");
+    const inventory = await hashArtifactInventory(selected, {
+      includeFiles: ["transformer/weights.bin"], trustedRoot: staging,
+    });
+    const artifact = {
+      id: "fixture-q4",
+      selectedRoot: selected,
+      selectedFiles: ["transformer/weights.bin"],
+      matchedFiles: ["transformer/weights.bin"],
+      inventory,
+    };
+    const artifacts = new Map([[artifact.id, artifact]]);
+    const records = await installSidecarObstructions(artifacts);
+    assert.equal(records.length, 2);
+    for (const component of [selected, path.join(selected, "transformer")]) {
+      const obstruction = path.join(component, ".candle-device-format-v1");
+      const metadata = await lstat(obstruction);
+      assert.equal(metadata.isFile(), true);
+      await assert.rejects(mkdir(obstruction), /EEXIST/);
+    }
+    await verifyArtifactUnchanged(artifact, staging);
+
+    const adjacent = path.join(unprotected, ".candle-device-format-v1");
+    await mkdir(adjacent);
+    await writeFile(path.join(adjacent, "derived.bin"), "would mutate adjacency", "utf8");
+    assert.equal((await directoryInventory(unprotected)).files, 1);
+    const initialDerived = await directoryInventory(derived);
+    assert.equal(initialDerived.files, 0);
+    assert.equal(initialDerived.bytes, 0);
+
+    const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
+    assert.match(controller, /SCENEWORKS_CANDLE_DEVICE_CACHE_DIR: derivedSidecarRoot/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("injected lifecycle faults preserve all 19 outcomes and quarantine after cleanup isolation failure", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-faults-"));
   const runnerTemp = path.join(temporary, "runner-temp");
@@ -712,14 +807,18 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
         downloadedFiles: [],
       };
     },
-    provisionArtifact: async ({ id, artifact, scratch: cellScratch }) => {
+    provisionArtifact: async ({ id, artifact, scratch: cellScratch, cacheRoot: stagedRoot }) => {
       preflightCalls.push(`offline:${path.basename(cellScratch)}:${id}`);
-      const selectedRoot = path.resolve(cellScratch, "artifacts", id, artifact.subdirectory);
+      const selectedRoot = path.resolve(stagedRoot, "artifacts", id, artifact.subdirectory);
       return {
-        id, ...artifact, selectedRoot,
+        id, ...artifact, selectedRoot, matchedFiles: ["weights.bin"], selectedFiles: ["weights.bin"],
         inventory: { root: selectedRoot, files: 1, bytes: 7, sha256: "a".repeat(64) },
       };
     },
+    installSidecarObstructions: async (artifacts) => fixtureSidecarObstructions(artifacts),
+    directoryInventory: async (root) => ({
+      root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+    }),
     executeCell: async ({ cellDir, logFile }) => {
       await writeFile(logFile, "fixture runtime\n", "utf8");
       const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
@@ -742,10 +841,18 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
         startupErrors: [], gpuIdentity,
         systemMemory: { totalBytes: 128 * 1024 ** 3, availableBytesAtStart: 100 * 1024 ** 3 },
         sceneworksRoot: sceneworks,
+        artifactExpectedFiles: Object.fromEntries(Object.keys(checked.artifacts).map(
+          (id) => [id, ["weights.bin"]],
+        )),
+        downloadEvidenceSha256: "d".repeat(64),
       },
       fault, operations, suppressVerdict: true, startIndex: 0,
     });
-    assert.deepEqual(attemptedCells, Array.from({ length: 7 }, (_, index) => index));
+    assert.deepEqual(
+      attemptedCells,
+      Array.from({ length: 7 }, (_, index) => index),
+      result.summary.campaignErrors.join("\n"),
+    );
     assert.equal(preflightCalls.length, 23 * 3);
     assert.ok(preflightCalls.every((call) => call.includes(":cache-preflight:")));
     assert.deepEqual(
@@ -793,6 +900,7 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
 test("continuation freezes census, stages once, downloads only the reviewed miss, and reuses authorities", async () => {
   async function scenario({
     missingId = null, downloadSucceeds = false, mutateCache = false, mutateSourceAtStage = false,
+    preflightFault = null, omitObstructions = false,
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -808,6 +916,14 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
     await mkdir(output);
     await mkdir(scratch);
     const checked = profile();
+    const artifactExpectedFiles = Object.fromEntries(Object.keys(checked.artifacts).map(
+      (id) => [id, id === "flux1-schnell-q8"
+        ? ["model_index.json", "transformer/model.safetensors"]
+        : ["model_index.json"]],
+    ));
+    if (missingId && missingId !== "flux1-schnell-q8") {
+      artifactExpectedFiles[missingId] = ["unreviewed-missing.safetensors"];
+    }
     const events = [];
     const runtimeCells = [];
     let verificationCalls = 0;
@@ -819,9 +935,15 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
             ? "q8/transformer/model.safetensors"
             : `${artifact.subdirectory}/unreviewed-missing.safetensors`]
           : [];
+        const missingSelected = new Set(missingFiles.map((file) => (
+          file.startsWith(`${artifact.subdirectory}/`)
+            ? file.slice(artifact.subdirectory.length + 1) : file
+        )));
         return {
           id, ...artifact, complete: missingFiles.length === 0, missingFiles,
-          reusedFiles: [{ path: "model_index.json", bytes: 100, sha256: "a".repeat(64) }],
+          reusedFiles: artifactExpectedFiles[id].filter((file) => !missingSelected.has(file)).map(
+            (file) => ({ path: file, bytes: 100, sha256: "a".repeat(64) }),
+          ),
         };
       },
       stageArtifact: async ({ id, artifact, stagingRoot, allowReviewedDownload }) => {
@@ -831,12 +953,15 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
         }
         return {
           id, ...artifact,
-          reusedFiles: [{
-            path: "model_index.json",
+          reusedFiles: artifactExpectedFiles[id].filter((file) => !(
+            allowReviewedDownload && file === "transformer/model.safetensors"
+          )).map((file, index) => ({
+            path: file,
             bytes: 100,
-            sha256: mutateSourceAtStage && events.filter((event) => event.startsWith("stage:")).length === 1
-              ? "c".repeat(64) : "a".repeat(64),
-          }],
+            sha256: mutateSourceAtStage
+              && events.filter((event) => event.startsWith("stage:")).length === 1
+              && index === 0 ? "c".repeat(64) : "a".repeat(64),
+          })),
           downloadedFiles: allowReviewedDownload ? [{
             path: "transformer/model.safetensors",
             bytes: 200,
@@ -852,9 +977,22 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
         const selectedRoot = path.join(stagedRoot, id, artifact.subdirectory);
         return {
           id, ...artifact, selectedRoot,
-          inventory: { root: selectedRoot, files: 1, bytes: 7, sha256: "a".repeat(64) },
+          matchedFiles: artifactExpectedFiles[id],
+          selectedFiles: artifactExpectedFiles[id],
+          inventory: {
+            root: selectedRoot,
+            files: artifactExpectedFiles[id].length,
+            bytes: 7,
+            sha256: "a".repeat(64),
+          },
         };
       },
+      installSidecarObstructions: async (artifacts) => (
+        omitObstructions ? [] : fixtureSidecarObstructions(artifacts)
+      ),
+      directoryInventory: async (root) => ({
+        root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+      }),
       executeCell: async ({ cellDir, logFile }) => {
         await writeFile(logFile, "fixture runtime\n", "utf8");
         const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
@@ -907,14 +1045,32 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
           systemMemory: { totalBytes: 128 * 1024 ** 3, availableBytesAtStart: 100 * 1024 ** 3 },
           sceneworksRoot: sceneworks,
           python: "python",
+          artifactExpectedFiles,
+          downloadEvidenceSha256: "d".repeat(64),
         },
         prefixSelection: {},
         importedPrefix,
         operations,
+        fault: preflightFault ? async (stage) => {
+          if (stage === preflightFault) throw new Error(`injected ${stage}`);
+        } : undefined,
         suppressVerdict: true,
       });
       const cacheEvidence = JSON.parse(await readFile(path.join(output, "cache-preflight.json"), "utf8"));
-      return { result, events, runtimeCells, checked, cacheEvidence };
+      return {
+        result, events, runtimeCells, checked, cacheEvidence,
+        cacheValidation: {
+          remainingArtifactIds: [...new Set(checked.cells.slice(7).flatMap(
+            (cell) => cell.artifactIds,
+          ))],
+          artifactExpectedFiles,
+          downloadEvidenceSha256: "d".repeat(64),
+          guard,
+          stagingRoot: path.join(scratch, "authority-stage"),
+          derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
+          profile: checked,
+        },
+      };
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
@@ -954,7 +1110,7 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
     ...remainingIds.map((id) => `stage:${id}`),
     ...remainingIds.map((id) => `offline:${id}`),
   ]);
-  assert.equal(passed.runtimeCells.length, 12);
+  assert.equal(passed.runtimeCells.length, 12, passed.result.summary.campaignErrors.join("\n"));
   const scailRoots = passed.runtimeCells
     .filter((cell) => cell.artifacts.some((artifact) => artifact.id === "scail2-q4"))
     .map((cell) => cell.artifacts.find((artifact) => artifact.id === "scail2-q4").root);
@@ -990,6 +1146,34 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
   assert.equal(filled.cacheEvidence.phases.finalOffline.length, remainingIds.length);
   assert.equal(filled.cacheEvidence.phases.sourceCensus.length, remainingIds.length);
   assert.equal(filled.cacheEvidence.phases.staging.length, remainingIds.length);
+  assert.doesNotThrow(() => validateCachePreflightEvidence(
+    filled.cacheEvidence,
+    filled.cacheValidation,
+  ));
+  const extraField = structuredClone(filled.cacheEvidence);
+  extraField.unreviewed = true;
+  assert.throws(
+    () => validateCachePreflightEvidence(extraField, filled.cacheValidation),
+    /additional properties/,
+  );
+  const censusDrift = structuredClone(filled.cacheEvidence);
+  censusDrift.phases.finalOffline[0].expectedFiles = ["other.bin"];
+  assert.throws(
+    () => validateCachePreflightEvidence(censusDrift, filled.cacheValidation),
+    /authority census drifted/,
+  );
+  const obstructionMissing = structuredClone(filled.cacheEvidence);
+  obstructionMissing.sidecarObstructions.pop();
+  assert.throws(
+    () => validateCachePreflightEvidence(obstructionMissing, filled.cacheValidation),
+    /did not obstruct every staged component root/,
+  );
+  const downloadDrift = structuredClone(filled.cacheEvidence);
+  downloadDrift.downloadedFiles[0].commitSha = "f".repeat(40);
+  assert.throws(
+    () => validateCachePreflightEvidence(downloadDrift, filled.cacheValidation),
+    /partition drifted|unreviewed model download/,
+  );
 
   const mutated = await scenario({ mutateCache: true });
   assert.equal(mutated.runtimeCells.length, 1, "the first cell runs before its after-inventory detects mutation");
@@ -998,12 +1182,40 @@ test("continuation freezes census, stages once, downloads only the reviewed miss
     /shared cache mutated during cell flux1-dev-q8/,
   );
   assert.equal(mutated.result.summary.failed, 12);
+
+  for (const stage of [
+    "preflightMkdir", "preflightSchema", "preflightWrite", "preflightStat", "preflightHash",
+  ]) {
+    const faulted = await scenario({ preflightFault: stage });
+    assert.equal(faulted.runtimeCells.length, 0, stage);
+    assert.equal(faulted.result.summary.passed, 7, stage);
+    assert.equal(faulted.result.summary.failed, 12, stage);
+    assert.match(faulted.result.summary.campaignErrors.join("\n"), new RegExp(stage));
+    assert.ok(faulted.result.summary.receipts.slice(7).every((outcome) => outcome.receipt));
+    assert.doesNotThrow(() => validateDocumentWithSchema(
+      CACHE_PREFLIGHT_SCHEMA_PATH,
+      faulted.cacheEvidence,
+    ));
+  }
+  const semanticFault = await scenario({ omitObstructions: true });
+  assert.equal(semanticFault.runtimeCells.length, 0);
+  assert.equal(semanticFault.result.summary.passed, 7);
+  assert.equal(semanticFault.result.summary.failed, 12);
+  assert.match(
+    semanticFault.result.summary.campaignErrors.join("\n"),
+    /did not obstruct every staged component root/,
+  );
+  assert.doesNotThrow(() => validateDocumentWithSchema(
+    CACHE_PREFLIGHT_SCHEMA_PATH,
+    semanticFault.cacheEvidence,
+  ));
 });
 
 test("schemas, clean Node dependencies, and workflow preserve the opt-in single-job terminal contract", async () => {
-  const [profileSchema, receiptSchema, workflow, checks, packageJson, packageLock] = await Promise.all([
+  const [profileSchema, receiptSchema, cacheSchema, workflow, checks, packageJson, packageLock] = await Promise.all([
     readFile("config/terminal-evidence/epic-20738-profile.schema.json", "utf8").then(JSON.parse),
     readFile("config/terminal-evidence/epic-20738-receipt.schema.json", "utf8").then(JSON.parse),
+    readFile(CACHE_PREFLIGHT_SCHEMA_PATH, "utf8").then(JSON.parse),
     readFile(".github/workflows/windows-candle.yml", "utf8"),
     readFile(".github/workflows/check.yml", "utf8"),
     readFile("package.json", "utf8").then(JSON.parse),
@@ -1106,6 +1318,8 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.equal(receiptSchema.$defs.inventory.additionalProperties, false);
   assert.equal(receiptSchema.$defs.gpuSample.additionalProperties, false);
   assert.equal(receiptSchema.properties.profile.const, PROFILE_NAME);
+  assert.equal(cacheSchema.additionalProperties, false);
+  assert.equal(cacheSchema.properties.profile.const, PROFILE_NAME);
   assert.match(workflow, /run_epic_20738_terminal_cuda:[\s\S]*?default: false/);
   assert.doesNotMatch(workflow, /^      sceneworks_revision:/m);
   assert.equal((workflow.match(/SCENEWORKS_REVISION: \$\{\{ github\.sha \}\}/g) ?? []).length, 2);
@@ -1132,7 +1346,11 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /gh run download \$runId --name \$artifact\.name --dir \$evidence/);
   assert.match(terminalBlock, /artifactDigest = \[string\]\$artifact\.digest/);
   assert.match(terminalBlock, /8886a9e69f26beec05688c81b414859bd102f6d0/);
-  assert.doesNotMatch(terminalBlock, /pip install|snapshot_download|huggingface_hub==/);
+  assert.doesNotMatch(terminalBlock, /snapshot_download/);
+  assert.match(terminalBlock, /python -m venv \$venv/);
+  assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);
+  assert.match(terminalBlock, /Scripts\\python\.exe/);
+  assert.match(terminalBlock, /SCENEWORKS_TERMINAL_PYTHON=\$python/);
   assert.match(terminalBlock, /from huggingface_hub import __version__/);
   assert.match(terminalBlock, /__version__ == '0\.36\.0'/);
   assert.match(terminalBlock, /q8\/transformer\/model\.safetensors/);

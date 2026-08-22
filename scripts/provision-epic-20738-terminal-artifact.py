@@ -10,7 +10,6 @@ repo/revision/filename and lands only in fresh campaign staging. Runtime resolut
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import hashlib
 import json
 import os
@@ -32,7 +31,9 @@ NETWORK_FILL_AUTHORITY = (
 
 def parse_request(path: Path) -> dict:
     request = json.loads(path.read_text(encoding="utf-8"))
-    required = {"id", "repository", "revision", "subdirectory", "allowPatterns"}
+    required = {
+        "id", "repository", "revision", "subdirectory", "allowPatterns", "expectedFiles"
+    }
     if set(request) != required:
         raise ValueError(f"artifact request fields must be exactly {sorted(required)}")
     if not REPOSITORY.fullmatch(request["repository"]):
@@ -51,6 +52,16 @@ def parse_request(path: Path) -> dict:
     subdirectory = Path(request["subdirectory"])
     if subdirectory.is_absolute() or ".." in subdirectory.parts:
         raise ValueError("subdirectory cannot escape the exact snapshot")
+    expected_files = request["expectedFiles"]
+    if (
+        not isinstance(expected_files, list)
+        or not expected_files
+        or not all(isinstance(file, str) and file for file in expected_files)
+        or len(set(expected_files)) != len(expected_files)
+        or expected_files != sorted(expected_files)
+        or any(Path(file).is_absolute() or ".." in Path(file).parts for file in expected_files)
+    ):
+        raise ValueError("expectedFiles must be a sorted unique confined non-empty file array")
     return request
 
 
@@ -130,101 +141,72 @@ def _reviewed_missing(request: dict) -> list[str]:
     return []
 
 
-def _walk_files(
+def _expected_file(
     selected: Path,
     snapshot: Path,
     trusted_root: Path,
-    allowed_broken: set[str],
-) -> tuple[list[tuple[Path, str, int]], set[str]]:
-    files: list[tuple[Path, str, int]] = []
-    broken: set[str] = set()
-    pending = [selected]
-    while pending:
-        directory = pending.pop()
-        if not _inside(snapshot, directory, allow_equal=True):
-            raise RuntimeError(f"cached artifact directory escaped the exact snapshot: {directory}")
-        for entry in sorted(os.scandir(directory), key=lambda candidate: candidate.name):
-            lexical = Path(entry.path)
-            relative_snapshot = lexical.relative_to(snapshot).as_posix()
-            if lexical.name.endswith(".incomplete"):
-                raise RuntimeError(
-                    f"cached artifact contains an untrusted incomplete file: {lexical}"
-                )
-            metadata = lexical.lstat()
-            try:
-                resolved = lexical.resolve(strict=True)
-            except FileNotFoundError as error:
-                if relative_snapshot in allowed_broken and _is_reparse(metadata):
-                    broken.add(relative_snapshot)
-                    continue
-                raise RuntimeError(
-                    f"cached artifact contains a broken symlink/reparse point: {lexical}"
-                ) from error
-            resolved_metadata = resolved.stat()
-            if stat.S_ISDIR(metadata.st_mode) and not _is_reparse(metadata):
-                if not _inside(snapshot, resolved):
-                    raise RuntimeError(
-                        f"cached artifact directory escaped the exact snapshot: {lexical}"
-                    )
-                pending.append(resolved)
-            elif stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
-                if not stat.S_ISREG(resolved_metadata.st_mode):
-                    raise RuntimeError(
-                        f"cached artifact reparse target is not a regular file: {lexical}"
-                    )
-                if not _inside(trusted_root, resolved):
-                    raise RuntimeError(
-                        f"cached artifact file escaped the trusted cache root: {lexical}"
-                    )
-                if resolved_metadata.st_size < 1:
-                    raise RuntimeError(f"cached artifact contains an empty file: {lexical}")
-                files.append((lexical, relative_snapshot, resolved_metadata.st_size))
-            else:
-                raise RuntimeError(f"cached artifact contains a non-regular entry: {lexical}")
-    return sorted(files, key=lambda item: item[1]), broken
+    relative_selected: str,
+) -> tuple[Path, str, int]:
+    lexical = selected / Path(relative_selected)
+    current = selected
+    for segment in Path(relative_selected).parts[:-1]:
+        current = current / segment
+        metadata = current.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+            raise RuntimeError(
+                f"expected artifact parent must be an ordinary directory: {current}"
+            )
+        resolved_parent = current.resolve(strict=True)
+        if not _inside(snapshot, resolved_parent, allow_equal=True):
+            raise RuntimeError(f"expected artifact parent escaped snapshot: {current}")
+    metadata = lexical.lstat()
+    resolved = lexical.resolve(strict=True)
+    resolved_metadata = resolved.stat()
+    if not (stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata)):
+        raise RuntimeError(f"expected artifact is not a regular file: {lexical}")
+    if not stat.S_ISREG(resolved_metadata.st_mode):
+        raise RuntimeError(f"expected artifact target is not a regular file: {lexical}")
+    if not _inside(trusted_root, resolved):
+        raise RuntimeError(f"expected artifact file escaped trusted cache root: {lexical}")
+    if resolved_metadata.st_size < 1:
+        raise RuntimeError(f"expected artifact contains an empty file: {lexical}")
+    return lexical, lexical.relative_to(snapshot).as_posix(), resolved_metadata.st_size
 
 
 def audit_cached_artifact(request: dict, cache_root: Path) -> dict:
     trusted_root, snapshot, selected = _context(request, cache_root)
     reviewed_missing = _reviewed_missing(request)
-    files, broken = _walk_files(
-        selected, snapshot, trusted_root, set(reviewed_missing)
-    )
-    matched_by_pattern = {
-        pattern: [
-            relative
-            for _, relative, _ in files
-            if fnmatch.fnmatchcase(relative, pattern)
-        ]
-        for pattern in request["allowPatterns"]
-    }
-    missing_patterns = [
-        pattern for pattern, matches in matched_by_pattern.items() if not matches
-    ]
-    if missing_patterns:
-        raise RuntimeError(
-            "exact cached revision is incomplete for allow-pattern(s): "
-            + ", ".join(missing_patterns)
-        )
-    present = {relative for _, relative, _ in files}
-    missing = sorted(
-        relative
-        for relative in reviewed_missing
-        if relative not in present or relative in broken
-    )
+    files = []
+    missing = []
+    for relative_selected in request["expectedFiles"]:
+        relative_snapshot = (
+            Path(request["subdirectory"]) / relative_selected
+        ).as_posix() if request["subdirectory"] != "." else relative_selected
+        try:
+            files.append(
+                _expected_file(
+                    selected, snapshot, trusted_root, relative_selected
+                )
+            )
+        except (FileNotFoundError, RuntimeError) as error:
+            if relative_snapshot in reviewed_missing and (
+                isinstance(error, FileNotFoundError)
+                or "broken" in str(error).lower()
+            ):
+                missing.append(relative_snapshot)
+                continue
+            raise RuntimeError(
+                f"authoritative expected file is missing or invalid: {relative_snapshot}: {error}"
+            ) from error
     matched_records = []
     for lexical, relative, size in files:
-        if any(
-            fnmatch.fnmatchcase(relative, pattern)
-            for pattern in request["allowPatterns"]
-        ):
-            matched_records.append(
-                {
-                    "path": lexical.relative_to(selected).as_posix(),
-                    "bytes": size,
-                    "sha256": _sha256(lexical.resolve(strict=True)),
-                }
-            )
+        matched_records.append(
+            {
+                "path": lexical.relative_to(selected).as_posix(),
+                "bytes": size,
+                "sha256": _sha256(lexical.resolve(strict=True)),
+            }
+        )
     matched_records.sort(key=lambda record: record["path"])
     return {
         "id": request["id"],
@@ -234,9 +216,7 @@ def audit_cached_artifact(request: dict, cache_root: Path) -> dict:
         "complete": not missing,
         "missingFiles": missing,
         "matchedFiles": [record["path"] for record in matched_records],
-        "selectedFiles": sorted(
-            lexical.relative_to(selected).as_posix() for lexical, _, _ in files
-        ),
+        "selectedFiles": [record["path"] for record in matched_records],
         "reusedFiles": matched_records,
         "downloadedFiles": [],
     }

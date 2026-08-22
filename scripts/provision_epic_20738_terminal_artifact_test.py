@@ -28,6 +28,7 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             "revision": self.REVISION,
             "subdirectory": "q4",
             "allowPatterns": ["q4/*"],
+            "expectedFiles": ["weights.safetensors"],
         }
 
     def parse(self, value: dict) -> dict:
@@ -53,6 +54,7 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
             "subdirectory": "q8",
             "allowPatterns": ["q8/*"],
+            "expectedFiles": ["model_index.json", "transformer/model.safetensors"],
         }
 
     def flux_snapshot(self, root: Path) -> Path:
@@ -111,17 +113,24 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                 MODULE.resolve_cached_artifact(self.request(), cache)
             (snapshot / "q4" / "weights.safetensors").write_bytes(b"weights")
             request = self.request()
-            request["allowPatterns"] = ["q4/missing.safetensors"]
-            with self.assertRaisesRegex(RuntimeError, "incomplete for allow-pattern"):
+            request["expectedFiles"] = ["missing.safetensors", "weights.safetensors"]
+            with self.assertRaisesRegex(RuntimeError, "authoritative expected file is missing"):
                 MODULE.resolve_cached_artifact(request, cache)
 
-    def test_incomplete_file_inside_selected_authority_is_never_reused(self) -> None:
+    def test_unreviewed_derivative_extras_are_ignored_and_never_reused(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory).resolve()
             snapshot = self.cache_snapshot(cache)
+            (snapshot / "q4" / "weights.safetensors").write_bytes(b"weights")
+            sidecars = snapshot / "q4" / ".candle-device-format-v1"
+            sidecars.mkdir()
+            for index in range(495):
+                (sidecars / f"derived-{index:03}.bin").write_bytes(b"derived")
             (snapshot / "q4" / "weights.safetensors.incomplete").write_bytes(b"partial")
-            with self.assertRaisesRegex(RuntimeError, "untrusted incomplete file"):
-                MODULE.audit_cached_artifact(self.request(), cache)
+            audit = MODULE.audit_cached_artifact(self.request(), cache)
+            self.assertEqual(audit["matchedFiles"], ["weights.safetensors"])
+            self.assertEqual(audit["selectedFiles"], ["weights.safetensors"])
+            self.assertEqual(len(audit["reusedFiles"]), 1)
 
     def test_reparse_entry_or_cache_root_escape_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
@@ -134,7 +143,7 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                 os.symlink(outside_file, link)
             except OSError as error:
                 self.skipTest(f"symlink/reparse fixture unavailable: {error}")
-            with self.assertRaisesRegex(RuntimeError, "escaped the trusted cache root"):
+            with self.assertRaisesRegex(RuntimeError, "escaped trusted cache root"):
                 MODULE.resolve_cached_artifact(self.request(), cache)
 
     def test_huggingface_file_link_is_allowed_only_when_blob_stays_in_trusted_cache(self) -> None:
