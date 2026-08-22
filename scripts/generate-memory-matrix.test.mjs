@@ -2263,6 +2263,45 @@ test("Mage Candle bounded decode is structurally exempt rather than advertised o
   );
 });
 
+test("Mage MLX Resident covers every exact builtin coordinate without evidence promotion", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const generation = ["mage_flow_base", "mage_flow", "mage_flow_turbo"];
+  const edit = ["mage_flow_edit_base", "mage_flow_edit", "mage_flow_edit_turbo"];
+  const tiers = ["bf16", "q4", "q8"];
+  const expected = [
+    ...generation.flatMap((model) =>
+      tiers.flatMap((tier) =>
+        ["none", "lora"].map(
+          (overlay) => `${model}:${model}:mlx:${tier}:text_to_image:${overlay}:resident`,
+        ),
+      ),
+    ),
+    ...edit.flatMap((model) =>
+      tiers.map((tier) => `${model}:${model}:mlx:${tier}:edit_image:none:resident`),
+    ),
+  ].sort();
+  const mageIds = new Set([...generation, ...edit]);
+  const cells = matrix.cells.filter(
+    (cell) =>
+      mageIds.has(cell.modelId) && cell.backend === "mlx" && cell.rung === "resident",
+  );
+
+  assert.equal(cells.length, 27, "three generation and three edit routes cover all exact tiers");
+  assert.deepEqual(
+    cells.map((cell) => cell.id).sort(),
+    expected,
+    "Resident must cover generation plain+LoRA and exact one-reference plain edit only",
+  );
+  assert.ok(
+    cells.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.evidence.currentEnvironmentVerification.length === 0,
+    ),
+    "static Resident declarations must not promote any Mage coordinate to Verified",
+  );
+});
+
 test("Candle Krea's Implemented cells report the shared backend that makes them reachable", async () => {
   const matrix = await buildMatrix({ publish: false });
   const source = await surveyFixture();

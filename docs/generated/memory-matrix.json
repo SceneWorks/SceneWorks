@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:69d5e81033ee5c5953565c30f8abb0e1dc3de58b6e19fee5ca95046d9857cc2f",
+    "sceneWorksRevision": "source-tree:05eac75fb29297cf879448f92e33391836a6bf555c1c6d11418f1584b02a6dfe",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "efa9dc884aa4b17bc5200ccd621b0dc348d319616fd5bce3d1284e1b7b387dd9"
+        "sha256": "5ed9fb3423184f93df55ac8acc90fce501442e9a71d3defd6cb0b5e86255f9d8"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -176,8 +176,8 @@
     "publishedCells": 163,
     "elidedCells": 8592,
     "elidedByState": {
-      "Implemented/unverified": 2826,
-      "Missing": 5766
+      "Implemented/unverified": 2853,
+      "Missing": 5739
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 44,
@@ -10946,9 +10946,9 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 6
       }
     },
     {
@@ -11066,9 +11066,9 @@
       "coordinates": 3,
       "published": 0,
       "elided": 3,
-      "implemented": 0,
+      "implemented": 3,
       "states": {
-        "Missing": 3
+        "Implemented/unverified": 3
       }
     },
     {
@@ -11186,9 +11186,9 @@
       "coordinates": 3,
       "published": 0,
       "elided": 3,
-      "implemented": 0,
+      "implemented": 3,
       "states": {
-        "Missing": 3
+        "Implemented/unverified": 3
       }
     },
     {
@@ -11306,9 +11306,9 @@
       "coordinates": 3,
       "published": 0,
       "elided": 3,
-      "implemented": 0,
+      "implemented": 3,
       "states": {
-        "Missing": 3
+        "Implemented/unverified": 3
       }
     },
     {
@@ -11486,9 +11486,9 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 6
       }
     },
     {
@@ -11666,9 +11666,9 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 6
       }
     },
     {
