@@ -156,7 +156,7 @@ impl QwenEditMemoryContextCompat for QwenEdit {
         spec: &gen_core::LoadSpec,
         _context: &gen_core::MemoryRunContext,
     ) -> gen_core::Result<Self> {
-        Self::load_with_spec(paths, spec)
+        Ok(Self::load_with_spec(paths, spec)?)
     }
 
     fn generate_with_memory_context(
@@ -166,7 +166,7 @@ impl QwenEditMemoryContextCompat for QwenEdit {
         references: &[Image],
         on_progress: &mut dyn FnMut(gen_core::Progress),
     ) -> gen_core::Result<Image> {
-        self.generate(request, references, on_progress)
+        Ok(self.generate(request, references, on_progress)?)
     }
 }
 
@@ -850,10 +850,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     // warm-swap false-reject / needless sequential downtier; base.rs already gets it for free via the
     // evicting cache. Same treatment as `krea_control_candle.rs` (the other `start_gen_stream` lane).
     // The reclaimable high-water is still recorded after an admit (`note_loaded_peak` below).
-    let mut generation_memory: Option<gen_core::GenerationMemory> = None;
-    let mut memory_context: Option<gen_core::MemoryRunContext> = None;
-    let mut provider_load_spec: Option<gen_core::LoadSpec> = None;
-    let use_sequential = {
+    let (use_sequential, mut generation_memory, memory_context, provider_load_spec) = {
         // sc-13534: key the budget off the tier `resolve_qwen_edit_candle_base` ACTUALLY landed on, not
         // the bits the request asked for — this lane now grows the tier layout the old `nvfp4 = false`
         // note said to wire when it did. `gate_tier_key` is the shared txt2img helper (sc-12090 /
@@ -989,9 +986,9 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 "Qwen shared memory selection changed between fit and execution".to_owned(),
             ));
         };
-        generation_memory = evaluation.memory;
-        memory_context = Some(evaluation.context.clone());
-        provider_load_spec = Some(strategy_spec.clone());
+        let generation_memory = evaluation.memory;
+        let memory_context = evaluation.context.clone();
+        let provider_load_spec = strategy_spec.clone();
         raw_settings.insert(
             "memoryStrategy".to_owned(),
             Value::String(format!("{:?}", evaluation.context.selection.strategy)),
@@ -1026,7 +1023,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         // sc-13619: the quant picker is hidden when no alternative tier is installed. Derive advice
         // from the same forced-tier probes as the main candle lane so both reject arms name only
         // smaller tiers this installation can really load.
-        match plan {
+        let use_sequential = match plan {
             crate::vram_gate::LoadPlan::Sequential => {
                 tracing::info!(
                     model = %request.model,
@@ -1056,11 +1053,15 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 }
                 false
             }
-        }
+        };
+        (
+            use_sequential,
+            generation_memory,
+            memory_context,
+            provider_load_spec,
+        )
     };
     apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
-    let memory_context = memory_context.expect("selected Qwen strategy has a run context");
-    let provider_load_spec = provider_load_spec.expect("selected Qwen strategy has a load spec");
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
