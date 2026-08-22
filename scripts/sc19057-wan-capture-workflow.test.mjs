@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const WORKFLOW_URL = new URL("../.github/workflows/windows-candle.yml", import.meta.url);
+const INVENTORY_URL = new URL("./inventory-sc19057-wan-artifact.mjs", import.meta.url);
 
 function stepBody(workflow, name) {
   const start = workflow.indexOf(`      - name: ${name}\n`);
@@ -21,6 +22,43 @@ function dispatchInputNames(workflow) {
 
 function escaped(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function assertInventorySourceContract(source) {
+  assert.match(source, /export const SC19057_WAN_TOTAL_BYTES = 17_338_835_457/);
+  assert.match(source, /export const SC19057_WAN_FILES = Object\.freeze\(\{/);
+  assert.match(source, /path\.posix\.isAbsolute\(target\)/);
+  assert.match(source, /path\.win32\.isAbsolute\(target\)/);
+  assert.match(source, /\/\^\[A-Za-z\]\:\/\.test\(target\)/);
+  assert.match(source, /const metadata = await lstat\(entryPath\)/);
+  assert.match(source, /const rawTarget = await readlink\(logicalPath\)/);
+  assert.match(source, /const lexicalTarget = validateRawLinkTarget\(\{ logicalPath, rawTarget, repositoryRoot, expectedObject \}\)/);
+  assert.match(source, /path\.join\(repositoryRoot, "blobs", expectedObject\)/);
+  assert.match(source, /samePath\(actualLexicalTarget, expectedLexicalTarget\)/);
+  assert.match(source, /const targetMetadata = await lstat\(lexicalTarget\)/);
+  assert.match(source, /!targetMetadata\.isFile\(\) \|\| targetMetadata\.isSymbolicLink\(\)/);
+  assert.match(source, /const physicalPath = await realpath\(logicalPath\)/);
+  assert.match(source, /if \(logicalMetadata\.isSymbolicLink\(\)\)/);
+  assert.match(source, /!isInside\(canonicalBlobsRoot, physicalPath\)/);
+  assert.match(source, /!samePath\(path\.dirname\(physicalPath\), canonicalBlobsRoot\)/);
+  assert.match(source, /path\.basename\(physicalPath\)\.toLowerCase\(\) !== expectedObject/);
+  assert.match(source, /seenPhysicalPaths\.has\(pathKey\(physicalPath\)\)/);
+  assert.match(source, /seenPhysicalPaths\.add\(pathKey\(physicalPath\)\)/);
+  assert.match(source, /const handle = await open\(file, "r"\)/);
+  assert.match(source, /const metadata = await handle\.stat\(\)/);
+  assert.match(source, /const \{ bytesRead \} = await handle\.read\(buffer, 0, buffer\.length, streamedBytes\)/);
+  assert.match(source, /await handle\.close\(\)/);
+  assert.match(source, /inspected\.streamedBytes !== inspected\.metadata\.size/);
+  assert.match(source, /inspected\.streamedBytes !== expectedBytes/);
+  assert.match(source, /expectedObject\.length === 64 \? inspected\.sha256 : inspected\.gitBlob/);
+  assert.doesNotMatch(source, /createReadStream|await stat\(physicalPath\)/);
+  const readlinkAt = source.indexOf("await readlink(logicalPath)");
+  const targetLstatAt = source.indexOf("await lstat(lexicalTarget)");
+  const realpathAt = source.indexOf("await realpath(logicalPath)");
+  assert.ok(readlinkAt >= 0 && readlinkAt < targetLstatAt && targetLstatAt < realpathAt, "raw link authentication must precede dereference");
+  assert.match(source, /status: "STARTED"/);
+  assert.match(source, /status: "PASS"/);
+  assert.match(source, /status: "FAIL"/);
 }
 
 function assertWorkflowContract(workflow) {
@@ -73,10 +111,17 @@ function assertWorkflowContract(workflow) {
   ]) assert.match(stepBody(workflow, name), exactGate, `${name} must remain dispatch-only`);
 
   const inventory = stepBody(workflow, "Inventory the exact SC-19057 Wan q4 artifact");
-  assert.match(inventory, /\$files\.Count -ne 25/);
-  assert.match(inventory, /\$total -ne 17338835457/);
-  assert.match(inventory, /Get-FileHash -Algorithm SHA256/);
-  assert.match(inventory, /wan-q4-artifact-inventory\.json/);
+  assert.match(inventory, /New-Item -ItemType Directory -Force -Path \$evidence/);
+  assert.match(inventory, /wan-q4-inventory-preflight\.json/);
+  assert.match(inventory, /SC19057_EVIDENCE_DIR=\$evidence/);
+  assert.match(inventory, /node scripts\\inventory-sc19057-wan-artifact\.mjs --root "\$env:SCENEWORKS_PROVISIONED_ROOT" --evidence "\$evidence"/);
+  const directoryAt = inventory.indexOf("New-Item -ItemType Directory -Force -Path $evidence");
+  const preflightAt = inventory.indexOf("wan-q4-inventory-preflight.json");
+  const exportAt = inventory.indexOf("SC19057_EVIDENCE_DIR=$evidence");
+  const inventoryAt = inventory.indexOf("node scripts\\inventory-sc19057-wan-artifact.mjs");
+  assert.ok(directoryAt >= 0 && directoryAt < preflightAt, "evidence directory must precede the initial receipt");
+  assert.ok(preflightAt < inventoryAt, "initial receipt must precede every artifact inventory gate");
+  assert.ok(exportAt < inventoryAt, "always-upload evidence path must be exported before inventory can fail");
 
   const checkout = stepBody(workflow, "Check out the exact inference reference source");
   assert.match(checkout, /inputs\.run_five_rung_reference \|\| inputs\.run_sc19057_wan_capture/);
@@ -134,6 +179,7 @@ function assertWorkflowContract(workflow) {
 
 test("windows-candle exposes one exact mutually-exclusive manual SC-19057 mode", async () => {
   assertWorkflowContract(await readFile(WORKFLOW_URL, "utf8"));
+  assertInventorySourceContract(await readFile(INVENTORY_URL, "utf8"));
 });
 
 test("the workflow contract kills routing artifact capture and cleanup disconnects", async () => {
@@ -146,8 +192,9 @@ test("the workflow contract kills routing artifact capture and cleanup disconnec
     ["wrong inference pin", (text) => text.replaceAll("4013049764172ee7dc707101c7da8c83c1483f2d", "a".repeat(40))],
     ["wrong artifact repo", (text) => text.replaceAll("SceneWorks/wan2.2-ti2v-5b-candle", "SceneWorks/lookalike")],
     ["wrong artifact revision", (text) => text.replaceAll("9b173dc8660334a87a11e67de58939afe68f8cb2", "b".repeat(40))],
-    ["wrong artifact count", (text) => text.replace("$files.Count -ne 25", "$files.Count -ne 24")],
-    ["wrong artifact bytes", (text) => text.replace("$total -ne 17338835457", "$total -ne 1")],
+    ["missing early inventory receipt", (text) => text.replace("wan-q4-inventory-preflight.json", "late-only.json")],
+    ["missing early evidence export", (text) => text.replace("SC19057_EVIDENCE_DIR=$evidence", "SC19057_EVIDENCE_DIR=late")],
+    ["disconnected resolved inventory", (text) => text.replace("node scripts\\inventory-sc19057-wan-artifact.mjs", "node scripts\\unsafe-link-length.mjs")],
     ["non-release adapter", (text) => text.replaceAll("cargo build --release --locked", "cargo build --locked")],
     ["missing fresh isolation", (text) => text.replace("            --fresh-per-case `\n", "")],
     ["missing 6/6 validator", (text) => text.replace("validate-sc19057-wan-capture.mjs", "accept-any-capture.mjs")],
@@ -157,5 +204,36 @@ test("the workflow contract kills routing artifact capture and cleanup disconnec
   ];
   for (const [label, mutate] of mutations) {
     assert.throws(() => assertWorkflowContract(mutate(workflow)), undefined, label);
+  }
+});
+
+test("the source contract kills link-metadata, escape, duplicate, hash, and early-receipt mutations", async () => {
+  const source = await readFile(INVENTORY_URL, "utf8");
+  const mutations = [
+    ["POSIX absolute target", (text) => text.replace("path.posix.isAbsolute(target)", "false")],
+    ["Windows absolute target", (text) => text.replace("path.win32.isAbsolute(target)", "false")],
+    ["drive-qualified relative target", (text) => text.replace("/^[A-Za-z]:/.test(target)", "false")],
+    ["followed enumeration metadata", (text) => text.replace("await lstat(entryPath)", "await realpath(entryPath)")],
+    ["unread raw link", (text) => text.replace("await readlink(logicalPath)", '"unchecked"')],
+    ["wrong lexical target", (text) => text.replace('path.join(repositoryRoot, "blobs", expectedObject)', "logicalPath")],
+    ["lexical equality bypass", (text) => text.replace("samePath(actualLexicalTarget, expectedLexicalTarget)", "true")],
+    ["followed target metadata", (text) => text.replace("await lstat(lexicalTarget)", "await stat(lexicalTarget)")],
+    ["directory target", (text) => text.replace("!targetMetadata.isFile() || targetMetadata.isSymbolicLink()", "false")],
+    ["outside blob root", (text) => text.replace("!isInside(canonicalBlobsRoot, physicalPath)", "false")],
+    ["nested lookalike blob root", (text) => text.replace("!samePath(path.dirname(physicalPath), canonicalBlobsRoot)", "false")],
+    ["wrong content object", (text) => text.replace("path.basename(physicalPath).toLowerCase() !== expectedObject", "false")],
+    ["duplicate resolved file", (text) => text.replace("seenPhysicalPaths.has(pathKey(physicalPath))", "false")],
+    ["split path stat", (text) => text.replace("await handle.stat()", "await stat(file)")],
+    ["split path stream", (text) => text.replace("await handle.read(buffer, 0, buffer.length, streamedBytes)", "await createReadStream(file)")],
+    ["unclosed payload", (text) => text.replace("await handle.close()", "return")],
+    ["no stream-fstat parity", (text) => text.replace("inspected.streamedBytes !== inspected.metadata.size", "false")],
+    ["link metadata bytes", (text) => text.replace("inspected.streamedBytes !== expectedBytes", "logicalMetadata.size !== expectedBytes")],
+    ["no content hash authority", (text) => text.replace("expectedObject.length === 64 ? inspected.sha256 : inspected.gitBlob", "expectedObject")],
+    ["added split path stream", (text) => `${text}\ncreateReadStream(physicalPath);\n`],
+    ["no started receipt", (text) => text.replace('status: "STARTED"', 'status: "UNKNOWN"')],
+    ["no failure receipt", (text) => text.replace('status: "FAIL"', 'status: "UNKNOWN"')],
+  ];
+  for (const [label, mutate] of mutations) {
+    assert.throws(() => assertInventorySourceContract(mutate(source)), undefined, label);
   }
 });
