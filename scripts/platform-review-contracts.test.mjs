@@ -1026,23 +1026,69 @@ function assertSc19054ResidueCleanupContract(workflow, context = "SC-19054 resid
   assert.match(inspect, /cleanup_sc19054_completed_residue is mutually exclusive with/);
   assert.match(inspect, /Get-Item -LiteralPath \$LiteralPath -Force -ErrorAction Stop/);
   assert.match(inspect, /catch \[System\.Management\.Automation\.ItemNotFoundException\]/);
+  assert.match(
+    inspect,
+    /\$allowedRunners = @\('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4'\)/,
+  );
+  assert.match(inspect, /if \(\$allowedRunners -notcontains \$env:RUNNER_NAME\)/);
+  assert.match(inspect, /\$literalParent = 'D:\\actions-runner-2\\_work\\_temp'/);
+  assert.match(inspect, /\$parent = Get-Item -LiteralPath \$literalParent -Force -ErrorAction Stop/);
+  assert.match(inspect, /-not \$parent\.PSIsContainer/);
+  assert.match(
+    inspect,
+    /\$parent\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/,
+  );
   assert.match(inspect, /\[string\]::Equals\(\$targetParent, \$literalParent, \[StringComparison\]::OrdinalIgnoreCase\)/);
   assert.doesNotMatch(inspect, /\[string\]::Equals\(\$runnerTemp, \$literalParent/);
-  assert.match(inspect, /\$rootFiles = @\('identity\.json', 'model-files\.json', 'acceptance\.log', 'SHA256SUMS\.txt'\)/);
+  const expectedFiles = new Map([
+    ["acceptance.log", "9d4d19d054ba14145b3dd763d56a920beac28e8b125fa9d83441fe197cbd89c1"],
+    ["identity.json", "c90ffcc57588a282c2eab446dc094d775b658bb9fac0510446b5b9da1923201c"],
+    ["model-files.json", "1c1c78f8809d7b47484df8b095851473153b40a9b4ebf03c9452eae230e64be6"],
+    [
+      "output/sc19054-flux-acceptance.json",
+      "32fe5e0d826055bacb0134da007ff8c3b13f837fb45168c85470833409474c63",
+    ],
+    [
+      "output/sc19054-flux-schnell-q4-1024.png",
+      "e20f14aabb66e3f07bdee5f4eee1c183eaaebe91eff39fd4b57d19508473fc62",
+    ],
+  ]);
+  for (const [path, digest] of expectedFiles) {
+    assert.ok(
+      inspect.includes(`'${path}' = '${digest}'`),
+      `${context}: authoritative artifact digest drifted for ${path}`,
+    );
+  }
+  assert.match(inspect, /\$rootFiles = @\('acceptance\.log', 'identity\.json', 'model-files\.json'\)/);
   assert.match(inspect, /\$outputFiles = @\('sc19054-flux-acceptance\.json', 'sc19054-flux-schnell-q4-1024\.png'\)/);
+  assert.doesNotMatch(inspect, /SHA256SUMS\.txt/);
+  assert.match(inspect, /if \(\$rootEntries\.Count -ne 4\)/);
+  assert.match(inspect, /if \(\$outputEntries\.Count -ne 2\)/);
+  assert.match(inspect, /if \(\$actualFiles\.Count -ne \$expectedFiles\.Count\)/);
+  assert.match(inspect, /foreach \(\$expectedPath in \$expectedFiles\.Keys\)/);
+  assert.match(inspect, /if \(\$actualFiles -notcontains \$expectedPath\)/);
   assert.ok(
-    (inspect.match(/\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/g) ?? []).length >= 3,
-    `${context}: root, direct-child, and output-child reparse points must all be rejected`,
+    (inspect.match(/\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/g) ?? []).length >= 4,
+    `${context}: parent, root, direct-child, and output-child reparse points must all be rejected`,
   );
   assert.match(inspect, /\$child\.PSIsContainer -or \$outputFiles -notcontains \$child\.Name/);
   assert.match(inspect, /Get-FileHash -LiteralPath \$child\.FullName -Algorithm SHA256/);
   assert.match(inspect, /Get-FileHash -LiteralPath \$item\.FullName -Algorithm SHA256/);
-  assert.match(inspect, /path = "output\/\$\(\$child\.Name\)"/);
+  assert.match(inspect, /\$relative = "output\/\$\(\$child\.Name\)"/);
+  assert.match(inspect, /path = \$relative/);
   assert.match(inspect, /bytes = \$child\.Length/);
   assert.match(inspect, /sha256 = \(Get-FileHash/);
   assert.ok(
     inspect.indexOf("Get-FileHash") < inspect.indexOf("Remove-Item"),
     `${context}: inventory hashes must be sealed before deletion begins`,
+  );
+  assert.ok(
+    inspect.indexOf("$allowedRunners") < inspect.indexOf("$root = Get-Sc19054ResidueRoot"),
+    `${context}: runner authentication must precede both deletion and an absent-target PASS`,
+  );
+  assert.ok(
+    inspect.indexOf("$parent = Get-Item") < inspect.indexOf("$root = Get-Sc19054ResidueRoot"),
+    `${context}: literal-parent authentication must precede both deletion and an absent-target PASS`,
   );
   assert.doesNotMatch(inspect, /Remove-Item[^\n]*-Recurse/);
   assert.match(inspect, /foreach \(\$child in \$outputEntries\) \{\s*Remove-Item -LiteralPath \$child\.FullName -Force/);
@@ -1103,10 +1149,19 @@ test("SC-19054 cleanup-only recovery contract kills unsafe routing, inventory, a
     ["build job also runs", "!(github.event_name == 'workflow_dispatch' && inputs.cleanup_sc19054_completed_residue)", "true"],
     ["provisioning conflict omitted", "if ($env:PROVISION_SNAPSHOT -eq 'true')", "if ($false)"],
     ["real capture conflict omitted", "if ($env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true')", "if ($false)"],
+    ["runner allowlist widened", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4')", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4', '*')"],
+    ["runner allowlist incomplete", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4')", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3')"],
+    ["literal parent lookup omitted", "$parent = Get-Item -LiteralPath $literalParent -Force -ErrorAction Stop", "$parent = [pscustomobject]@{ PSIsContainer = $true; Attributes = [System.IO.FileAttributes]::Normal }"],
+    ["literal parent reparse accepted", "$parent.Attributes -band [System.IO.FileAttributes]::ReparsePoint", "$parent.Attributes -band [System.IO.FileAttributes]::Normal"],
     ["root-parent binding removed", "[string]::Equals($targetParent, $literalParent, [StringComparison]::OrdinalIgnoreCase)", "$true"],
     ["filesystem errors treated as absence", "Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop", "Get-Item -LiteralPath $LiteralPath -Force -ErrorAction SilentlyContinue"],
     ["reparse checks disabled", ".Attributes -band [System.IO.FileAttributes]::ReparsePoint", ".Attributes -band [System.IO.FileAttributes]::Normal"],
     ["nested output directory accepted", "$child.PSIsContainer -or $outputFiles -notcontains $child.Name", "$false -or $outputFiles -notcontains $child.Name"],
+    ["root inventory incomplete", "$rootEntries.Count -ne 4", "$rootEntries.Count -ne 3"],
+    ["output inventory incomplete", "$outputEntries.Count -ne 2", "$outputEntries.Count -ne 1"],
+    ["extra checksum inventory accepted", "$rootFiles = @('acceptance.log', 'identity.json', 'model-files.json')", "$rootFiles = @('acceptance.log', 'identity.json', 'model-files.json', 'SHA256SUMS.txt')"],
+    ["authoritative hash changed", "9d4d19d054ba14145b3dd763d56a920beac28e8b125fa9d83441fe197cbd89c1", "0000000000000000000000000000000000000000000000000000000000000000"],
+    ["authoritative hash missing", "                'model-files.json' = '1c1c78f8809d7b47484df8b095851473153b40a9b4ebf03c9452eae230e64be6'\n", ""],
     ["recursive residue deletion", "Remove-Item -LiteralPath $target -Force", "Remove-Item -LiteralPath $target -Recurse -Force"],
     ["file hashes omitted", "Get-FileHash -LiteralPath $child.FullName -Algorithm SHA256", "Write-Output $child.FullName"],
     ["post-absence not checked", "$targetReceipt.postAbsent = $null -eq (Get-Sc19054ResidueRoot $target)", "$targetReceipt.postAbsent = $true"],

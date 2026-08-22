@@ -397,8 +397,17 @@ jobs:
               throw "cleanup_sc19054_completed_residue is mutually exclusive with: $($conflicts -join ', ')"
             }
 
+            $allowedRunners = @('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4')
+            if ($allowedRunners -notcontains $env:RUNNER_NAME) {
+              throw "refusing SC-19054 cleanup on an undocumented listener: $env:RUNNER_NAME"
+            }
+            $literalParent = 'D:\actions-runner-2\_work\_temp'
+            $parent = Get-Item -LiteralPath $literalParent -Force -ErrorAction Stop
+            if (-not $parent.PSIsContainer -or
+                ($parent.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+              throw "refusing an invalid SC-19054 literal parent: $literalParent"
+            }
             $target = [System.IO.Path]::GetFullPath($literalTarget)
-            $literalParent = [System.IO.Path]::GetDirectoryName($literalTarget)
             $targetParent = [System.IO.Path]::GetDirectoryName($target)
             if (-not [string]::Equals($target, $literalTarget, [StringComparison]::OrdinalIgnoreCase) -or
                 -not [string]::Equals($targetParent, $literalParent, [StringComparison]::OrdinalIgnoreCase)) {
@@ -412,9 +421,21 @@ jobs:
                   ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
                 throw "refusing an invalid SC-19054 residue root: $target"
               }
-              $rootFiles = @('identity.json', 'model-files.json', 'acceptance.log', 'SHA256SUMS.txt')
+              # These five digests are the immutable files uploaded as artifact 9470472931. Shape
+              # alone is insufficient: deletion is authorized only for that exact completed proof.
+              $expectedFiles = [ordered]@{
+                'acceptance.log' = '9d4d19d054ba14145b3dd763d56a920beac28e8b125fa9d83441fe197cbd89c1'
+                'identity.json' = 'c90ffcc57588a282c2eab446dc094d775b658bb9fac0510446b5b9da1923201c'
+                'model-files.json' = '1c1c78f8809d7b47484df8b095851473153b40a9b4ebf03c9452eae230e64be6'
+                'output/sc19054-flux-acceptance.json' = '32fe5e0d826055bacb0134da007ff8c3b13f837fb45168c85470833409474c63'
+                'output/sc19054-flux-schnell-q4-1024.png' = 'e20f14aabb66e3f07bdee5f4eee1c183eaaebe91eff39fd4b57d19508473fc62'
+              }
+              $rootFiles = @('acceptance.log', 'identity.json', 'model-files.json')
               $outputFiles = @('sc19054-flux-acceptance.json', 'sc19054-flux-schnell-q4-1024.png')
               $rootEntries = @(Get-ChildItem -LiteralPath $target -Force | Sort-Object Name)
+              if ($rootEntries.Count -ne 4) {
+                throw "SC-19054 residue root must contain exactly three files and output/: $($rootEntries.Count) entries"
+              }
               $outputEntries = @()
               $outputEntry = $null
               foreach ($item in $rootEntries) {
@@ -428,6 +449,9 @@ jobs:
                   $outputEntry = $item
                   $inventory += [ordered]@{ path = 'output'; kind = 'directory'; bytes = $null; sha256 = $null }
                   $outputEntries = @(Get-ChildItem -LiteralPath $item.FullName -Force | Sort-Object Name)
+                  if ($outputEntries.Count -ne 2) {
+                    throw "SC-19054 residue output/ must contain exactly two files: $($outputEntries.Count) entries"
+                  }
                   foreach ($child in $outputEntries) {
                     if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                       throw "refusing an SC-19054 output reparse point: $($child.FullName)"
@@ -435,23 +459,41 @@ jobs:
                     if ($child.PSIsContainer -or $outputFiles -notcontains $child.Name) {
                       throw "refusing an unexpected SC-19054 output entry: $($child.FullName)"
                     }
+                    $relative = "output/$($child.Name)"
+                    $sha256 = (Get-FileHash -LiteralPath $child.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($sha256 -ne $expectedFiles[$relative]) {
+                      throw "SC-19054 residue hash mismatch for ${relative}: $sha256"
+                    }
                     $inventory += [ordered]@{
-                      path = "output/$($child.Name)"
+                      path = $relative
                       kind = 'file'
                       bytes = $child.Length
-                      sha256 = (Get-FileHash -LiteralPath $child.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                      sha256 = $sha256
                     }
                   }
                 } else {
                   if ($rootFiles -notcontains $item.Name) {
                     throw "refusing an unexpected SC-19054 residue file: $($item.FullName)"
                   }
+                  $sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  if ($sha256 -ne $expectedFiles[$item.Name]) {
+                    throw "SC-19054 residue hash mismatch for $($item.Name): $sha256"
+                  }
                   $inventory += [ordered]@{
                     path = $item.Name
                     kind = 'file'
                     bytes = $item.Length
-                    sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    sha256 = $sha256
                   }
+                }
+              }
+              $actualFiles = @($inventory | Where-Object { $_.kind -eq 'file' } | ForEach-Object { $_.path })
+              if ($actualFiles.Count -ne $expectedFiles.Count) {
+                throw "SC-19054 residue authenticated file count drifted: $($actualFiles.Count)"
+              }
+              foreach ($expectedPath in $expectedFiles.Keys) {
+                if ($actualFiles -notcontains $expectedPath) {
+                  throw "SC-19054 residue is missing authenticated file: $expectedPath"
                 }
               }
               # The closed inventory is complete and contains no nested directory or reparse point.
