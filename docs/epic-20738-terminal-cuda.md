@@ -35,6 +35,11 @@ Leave `run_five_rung_reference`, `provision_krea_snapshot`, and `run_ltx_eros_ac
 workflow rejects a combined dispatch. Its fixed terminal concurrency key admits only one campaign at
 a time across the Windows CUDA pool.
 
+The terminal dispatch arm gives this one strictly serial job a 720-minute hard timeout. That is a
+job-level budget below GitHub's five-day self-hosted execution limit, not a step timeout; no step is
+assigned a timeout above 360 minutes. The unrelated LTX Eros, provisioning, five-rung, and ordinary
+job budgets remain 360, 240, 120, and 45 minutes respectively.
+
 The job checks out exact source revisions and requires both checkouts to be clean. It installs the
 lockfile-pinned in-process Node Draft 2020-12 validator and creates a fresh Python environment only
 for the pinned anonymous artifact client, then downloads
