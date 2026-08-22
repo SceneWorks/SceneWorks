@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, readFileSync } from "node:fs";
 import {
-  appendFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile,
+  appendFile, cp, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile,
 } from "node:fs/promises";
 import { freemem, totalmem } from "node:os";
 import path from "node:path";
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
-import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 export const PROFILE_NAME = "epic-20738-candle-cuda-terminal-v1";
@@ -37,7 +37,14 @@ const SDXL_POSE_MODELS = [
   "sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2",
 ];
 const EXPECTED_CELL_SEMANTICS_SHA256 = "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879";
-const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e";
+const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932";
+const LEGACY_ARTIFACT_SEMANTICS_SHA256 = "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e";
+const LEGACY_SCENEWORKS_HEAD = "8886a9e69f26beec05688c81b414859bd102f6d0";
+const FROZEN_INFERENCE_PIN = "b646a6f89ba9f6b07efe53dd583d8a42e21e9871";
+const LTX_CURRENT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
+const LTX_APPROVED_PARENT_REVISION = "254989c3ca7ee691187647f350b112c0c448789d";
+const IMPORTED_PREFIX_CELLS = 7;
+const PREFIX_ARTIFACT = `sc-20945-epic-20738-${LEGACY_SCENEWORKS_HEAD}-`;
 
 function fail(message) {
   throw new Error(message);
@@ -237,7 +244,12 @@ export function validateManifestAuthorities(profile, manifest) {
         return false;
       });
       if (!row) fail(`artifact ${id} has no matching manifest authority row`);
-      if (row.repo !== artifact.repository || row.revision !== artifact.revision) {
+      const approvedLtxParent = new Set(["ltx23-q8", "ltx23-gemma"]).has(id)
+        && artifact.repository === "SceneWorks/ltx-2.3-mlx"
+        && artifact.revision === LTX_APPROVED_PARENT_REVISION
+        && row.revision === LTX_CURRENT_REVISION;
+      if (row.repo !== artifact.repository
+        || (row.revision !== artifact.revision && !approvedLtxParent)) {
         fail(`artifact ${id} identity disagrees with manifest authority`);
       }
       if (JSON.stringify(artifact.allowPatterns) !== JSON.stringify(row.files ?? [])) {
@@ -402,12 +414,37 @@ async function assertNewConfinedDirectory(candidate, runnerTemp, repositories, l
   return target;
 }
 
-export async function validateCampaignPaths({ runnerTemp, output, scratch, repositories }) {
+export async function validateTrustedCacheRoot(candidate, repositories, runnerTemp) {
+  if (!candidate || !path.isAbsolute(candidate)) {
+    fail("trusted cache root must be an explicit absolute path");
+  }
+  const target = assertOutsideRepository(candidate, repositories, "trusted cache root");
+  const metadata = await lstat(target);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    fail("trusted cache root must be an existing ordinary directory, not a symlink/reparse point");
+  }
+  const resolved = await realpath(target);
+  if (comparable(resolved) !== comparable(target)) {
+    fail("trusted cache root traverses a symlink or reparse point");
+  }
+  if (isWithin(resolved, runnerTemp, { allowEqual: true })
+    || isWithin(runnerTemp, resolved, { allowEqual: true })) {
+    fail("trusted cache root and RUNNER_TEMP must be separate trees");
+  }
+  return resolved;
+}
+
+export async function validateCampaignPaths({
+  runnerTemp, output, scratch, cacheRoot, repositories,
+}) {
   if (!runnerTemp) fail("RUNNER_TEMP is required for terminal evidence confinement");
   const runnerMetadata = await stat(runnerTemp);
   if (!runnerMetadata.isDirectory()) fail("RUNNER_TEMP must be an existing directory");
   const resolvedRunnerTemp = await realpath(runnerTemp);
   const resolvedRepositories = await Promise.all(repositories.map((repository) => realpath(repository)));
+  const resolvedCacheRoot = await validateTrustedCacheRoot(
+    cacheRoot, resolvedRepositories, resolvedRunnerTemp,
+  );
   const resolvedOutput = await assertNewConfinedDirectory(
     output, resolvedRunnerTemp, resolvedRepositories, "output",
   );
@@ -422,6 +459,7 @@ export async function validateCampaignPaths({ runnerTemp, output, scratch, repos
     runnerTemp: resolvedRunnerTemp,
     output: resolvedOutput,
     scratch: resolvedScratch,
+    cacheRoot: resolvedCacheRoot,
     repositories: resolvedRepositories,
   };
 }
@@ -647,8 +685,17 @@ export function validateReceipt(receipt, expectedCell, profile) {
   return receipt;
 }
 
-function pendingArtifact(id, artifact, scratch) {
-  const inventoryRoot = path.resolve(scratch, "artifacts", id, artifact.subdirectory);
+function cachedArtifactRoots(cacheRoot, artifact) {
+  const repository = `models--${artifact.repository.replace("/", "--")}`;
+  const snapshotRoot = path.join(cacheRoot, repository, "snapshots", artifact.revision);
+  return {
+    snapshotRoot,
+    selectedRoot: path.resolve(snapshotRoot, artifact.subdirectory),
+  };
+}
+
+function pendingArtifact(id, artifact, cacheRoot) {
+  const inventoryRoot = cachedArtifactRoots(cacheRoot, artifact).selectedRoot;
   return {
     id,
     role: artifact.role,
@@ -675,33 +722,450 @@ async function evidenceFiles(cellDir) {
   };
 }
 
-async function provisionArtifact({ id, artifact, scratch, python }) {
-  const destination = path.join(scratch, "artifacts", id);
-  const requestDir = path.join(scratch, "provision-requests");
+function legacyPrefixProfile(currentProfile) {
+  const legacy = structuredClone(currentProfile);
+  legacy.artifacts["ltx23-q8"].revision = LTX_CURRENT_REVISION;
+  legacy.artifacts["ltx23-gemma"].revision = LTX_CURRENT_REVISION;
+  if (cellSemanticsSha256(legacy.cells) !== EXPECTED_CELL_SEMANTICS_SHA256
+    || canonicalSha256(legacy.artifacts) !== LEGACY_ARTIFACT_SEMANTICS_SHA256) {
+    fail("legacy prefix compatibility profile drifted");
+  }
+  return legacy;
+}
+
+async function ordinaryTreeFiles(root) {
+  const absolute = path.resolve(root);
+  const metadata = await lstat(absolute);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()
+    || comparable(await realpath(absolute)) !== comparable(absolute)) {
+    fail(`imported prefix root must be an ordinary confined directory: ${absolute}`);
+  }
+  const files = [];
+  async function visit(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      const entryMetadata = await lstat(candidate);
+      if (entry.isSymbolicLink() || entryMetadata.isSymbolicLink()) {
+        fail(`imported prefix contains a symlink/reparse point: ${candidate}`);
+      }
+      const resolved = await realpath(candidate);
+      if (!isWithin(absolute, resolved)) {
+        fail(`imported prefix entry escaped its candidate root: ${candidate}`);
+      }
+      if (entry.isDirectory()) await visit(resolved);
+      else if (entry.isFile()) files.push(resolved);
+      else fail(`imported prefix contains a non-regular entry: ${candidate}`);
+    }
+  }
+  await visit(absolute);
+  return files;
+}
+
+async function validatePrefixCandidate(candidate, currentProfile) {
+  const metadataPath = path.join(candidate, "artifact-metadata.json");
+  const evidenceRoot = path.join(candidate, "evidence");
+  const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+  exactKeys(metadata, [
+    "artifactId", "artifactName", "artifactDigest", "runId", "runAttempt", "headSha", "inferenceSha",
+    "profile", "cellSemanticsSha256", "artifactSemanticsSha256",
+  ], "imported prefix artifact metadata");
+  const runIdentity = /^[1-9][0-9]*$/;
+  if (!runIdentity.test(metadata.artifactId) || !runIdentity.test(metadata.runId)
+    || !runIdentity.test(metadata.runAttempt)
+    || metadata.artifactName !== `${PREFIX_ARTIFACT}${metadata.runId}-${metadata.runAttempt}`
+    || !/^sha256:[0-9a-f]{64}$/.test(metadata.artifactDigest)
+    || metadata.headSha !== LEGACY_SCENEWORKS_HEAD
+    || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    || metadata.profile !== PROFILE_NAME
+    || metadata.cellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || metadata.artifactSemanticsSha256 !== LEGACY_ARTIFACT_SEMANTICS_SHA256) {
+    fail("imported prefix artifact metadata does not bind the reviewed old run/profile");
+  }
+  const files = await ordinaryTreeFiles(evidenceRoot);
+  const receiptFiles = files.filter((file) => path.basename(file) === "receipt.json");
+  if (receiptFiles.length !== IMPORTED_PREFIX_CELLS + 1) {
+    fail(`imported artifact must contain exactly ${IMPORTED_PREFIX_CELLS} PASS receipts plus one boundary skeleton`);
+  }
+  const legacyProfile = legacyPrefixProfile(currentProfile);
+  const receipts = [];
+  for (let index = 0; index < IMPORTED_PREFIX_CELLS; index += 1) {
+    const cell = legacyProfile.cells[index];
+    const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    const cellDir = path.join(evidenceRoot, ordinalName);
+    const receiptPath = path.join(cellDir, "receipt.json");
+    if (!receiptFiles.some((file) => comparable(file) === comparable(receiptPath))) {
+      fail(`imported prefix is missing the exact primary receipt for ${ordinalName}`);
+    }
+    const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+    validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+    validateReceipt(receipt, cell, legacyProfile);
+    if (receipt.status !== "passed"
+      || receipt.repositories.sceneworks.sha !== LEGACY_SCENEWORKS_HEAD
+      || receipt.repositories.inference.sha !== FROZEN_INFERENCE_PIN
+      || receipt.execution.headSha !== LEGACY_SCENEWORKS_HEAD
+      || receipt.execution.runId !== metadata.runId
+      || receipt.execution.runAttempt !== metadata.runAttempt) {
+      fail(`imported prefix receipt ${ordinalName} is not an exact PASS from the bound old run`);
+    }
+    const rehashed = await evidenceFiles(cellDir);
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`imported prefix receipt ${ordinalName} failed ${field} rehash`);
+      }
+    }
+    receipts.push({ cell, ordinalName, receipt });
+  }
+
+  // The timeout raced with cell 8 setup: preserve the two-file initial receipt as quarantined
+  // boundary residue, but never promote it into either PASS or failure evidence. Any model input,
+  // runtime result, output, later cell, cleanup attempt, or nonzero model inventory means work had
+  // progressed past the reviewed continuation boundary and invalidates the whole candidate.
+  const boundaryIndex = IMPORTED_PREFIX_CELLS;
+  const boundaryCell = legacyProfile.cells[boundaryIndex];
+  const boundaryOrdinalName = `${String(boundaryIndex + 1).padStart(2, "0")}-${boundaryCell.id}`;
+  const boundaryDir = path.join(evidenceRoot, boundaryOrdinalName);
+  const boundaryFiles = files.filter((file) => isWithin(boundaryDir, file, { allowEqual: true }));
+  const expectedBoundaryFiles = [
+    path.join(boundaryDir, "controller.log"),
+    path.join(boundaryDir, "receipt.json"),
+  ].map(comparable).sort();
+  if (JSON.stringify(boundaryFiles.map(comparable).sort()) !== JSON.stringify(expectedBoundaryFiles)) {
+    fail("imported boundary residue must contain only the initial controller log and receipt");
+  }
+  const allowedRoots = [
+    ...receipts.map(({ ordinalName }) => path.join(evidenceRoot, ordinalName)),
+    boundaryDir,
+  ];
+  if (files.some((file) => !allowedRoots.some((root) => isWithin(root, file, { allowEqual: true })))) {
+    fail("imported artifact contains evidence outside the seven PASS cells and cell-8 boundary residue");
+  }
+  const boundaryReceipt = JSON.parse(await readFile(path.join(boundaryDir, "receipt.json"), "utf8"));
+  validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, boundaryReceipt);
+  validateReceipt(boundaryReceipt, boundaryCell, legacyProfile);
+  const boundaryLog = (await hashedFiles(boundaryDir, { exclude: new Set(["receipt.json"]) }));
+  if (boundaryReceipt.status !== "failed"
+    || boundaryReceipt.error !== "cell has not completed"
+    || boundaryReceipt.repositories.sceneworks.sha !== LEGACY_SCENEWORKS_HEAD
+    || boundaryReceipt.repositories.inference.sha !== FROZEN_INFERENCE_PIN
+    || boundaryReceipt.execution.headSha !== LEGACY_SCENEWORKS_HEAD
+    || boundaryReceipt.execution.runId !== metadata.runId
+    || boundaryReceipt.execution.runAttempt !== metadata.runAttempt
+    || boundaryReceipt.startedAt !== boundaryReceipt.completedAt
+    || boundaryReceipt.cleanup.attempted !== false
+    || boundaryReceipt.cleanup.completed !== false
+    || boundaryReceipt.cleanup.error !== null
+    || boundaryReceipt.inputs.length !== 0 || boundaryReceipt.outputs.length !== 0
+    || JSON.stringify(boundaryReceipt.logs) !== JSON.stringify(boundaryLog)
+    || boundaryLog.length !== 1 || boundaryLog[0].path !== "controller.log"
+    || boundaryReceipt.artifacts.some((artifact) => artifact.selectedRoot !== null
+      || artifact.inventory.complete !== false || artifact.inventory.sha256 !== null
+      || artifact.inventory.files !== 0 || artifact.inventory.bytes !== 0
+      || artifact.inventory.error !== "provisioning has not completed")) {
+    fail("imported cell-8 residue is not the exact non-executed pre-provision boundary skeleton");
+  }
+  return {
+    candidate, evidenceRoot, metadata, receipts,
+    boundaryResidue: {
+      cell: boundaryCell,
+      ordinalName: boundaryOrdinalName,
+      files: boundaryLog,
+      receipt: boundaryReceipt,
+    },
+  };
+}
+
+export async function selectImportedPrefix(prefixCandidates, currentProfile) {
+  const root = path.resolve(prefixCandidates);
+  const entries = await readdir(root, { withFileTypes: true });
+  const valid = [];
+  const rejected = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      rejected.push(`${entry.name}: candidate is not an ordinary directory`);
+      continue;
+    }
+    try {
+      valid.push(await validatePrefixCandidate(path.join(root, entry.name), currentProfile));
+    } catch (error) {
+      rejected.push(`${entry.name}: ${errorText(error)}`);
+    }
+  }
+  if (valid.length !== 1) {
+    fail(`expected exactly one valid uploaded contiguous PASS prefix; found ${valid.length}; ${rejected.join(" | ")}`);
+  }
+  return valid[0];
+}
+
+export async function importPrefixEvidence(prefix, output) {
+  const destination = path.join(output, "_imported-prefix");
+  await mkdir(destination);
+  for (const { ordinalName } of prefix.receipts) {
+    await cp(path.join(prefix.evidenceRoot, ordinalName), path.join(destination, ordinalName), {
+      recursive: true, errorOnExist: true, force: false, dereference: false,
+    });
+  }
+  await ordinaryTreeFiles(destination);
+  for (const { ordinalName, receipt } of prefix.receipts) {
+    const rehashed = await evidenceFiles(path.join(destination, ordinalName));
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`copied imported prefix ${ordinalName} failed ${field} rehash`);
+      }
+    }
+  }
+  const boundaryDestination = path.join(output, "_imported-boundary-residue");
+  await mkdir(boundaryDestination);
+  await cp(
+    path.join(prefix.evidenceRoot, prefix.boundaryResidue.ordinalName),
+    path.join(boundaryDestination, prefix.boundaryResidue.ordinalName),
+    { recursive: true, errorOnExist: true, force: false, dereference: false },
+  );
+  await ordinaryTreeFiles(boundaryDestination);
+  const copiedBoundaryFiles = await hashedFiles(
+    path.join(boundaryDestination, prefix.boundaryResidue.ordinalName),
+    { exclude: new Set(["receipt.json"]) },
+  );
+  if (JSON.stringify(copiedBoundaryFiles) !== JSON.stringify(prefix.boundaryResidue.files)) {
+    fail("copied imported boundary residue failed exact log rehash");
+  }
+  const lineage = {
+    kind: "contiguous-pass-prefix",
+    sourceArtifactId: prefix.metadata.artifactId,
+    sourceArtifactName: prefix.metadata.artifactName,
+    sourceArtifactDigest: prefix.metadata.artifactDigest,
+    sourceRunId: prefix.metadata.runId,
+    sourceRunAttempt: prefix.metadata.runAttempt,
+    sourceHeadSha: prefix.metadata.headSha,
+    sourceInferenceSha: prefix.metadata.inferenceSha,
+    sourceProfile: prefix.metadata.profile,
+    sourceCellSemanticsSha256: prefix.metadata.cellSemanticsSha256,
+    sourceArtifactSemanticsSha256: prefix.metadata.artifactSemanticsSha256,
+    importedOrdinals: Array.from({ length: IMPORTED_PREFIX_CELLS }, (_, index) => index + 1),
+    quarantinedBoundaryResidue: {
+      ordinal: IMPORTED_PREFIX_CELLS + 1,
+      cellId: prefix.boundaryResidue.cell.id,
+      path: `_imported-boundary-residue/${prefix.boundaryResidue.ordinalName}`,
+      disposition: "non-executed-pre-provision-skeleton-excluded-from-prefix",
+      files: prefix.boundaryResidue.files,
+    },
+  };
+  await writeFile(
+    path.join(destination, "lineage.json"),
+    `${JSON.stringify(lineage, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx" },
+  );
+  return {
+    lineage,
+    outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
+      id: cell.id,
+      status: "passed",
+      receipt: `_imported-prefix/${ordinalName}/receipt.json`,
+      error: null,
+      emergencyReceiptError: null,
+      source: "imported",
+    })),
+  };
+}
+
+async function writeArtifactRequest({ id, artifact, scratch, phase }) {
+  const requestDir = path.join(scratch, `${phase}-requests`);
   await mkdir(requestDir, { recursive: true });
   const requestPath = path.join(requestDir, `${id}.json`);
   await writeFile(requestPath, `${JSON.stringify({
     id, repository: artifact.repository, revision: artifact.revision,
-    subdirectory: artifact.subdirectory, allowPatterns: artifact.allowPatterns, destination,
+    subdirectory: artifact.subdirectory, allowPatterns: artifact.allowPatterns,
   }, null, 2)}\n`, "utf8");
-  const raw = run(python, ["scripts/provision-epic-20738-terminal-artifact.py", "--request", requestPath], {
+  return requestPath;
+}
+
+function parseProvisionerOutput(raw, id, phase) {
+  const lines = raw.trim().split(/\r?\n/);
+  if (!lines.at(-1)) fail(`${phase} produced no structured result for ${id}`);
+  try {
+    return JSON.parse(lines.at(-1));
+  } catch (error) {
+    fail(`${phase} produced invalid structured result for ${id}: ${errorText(error)}`);
+  }
+}
+
+async function validateProvisionResult({
+  result, id, artifact, cacheRoot, phase, allowIncomplete = false, staged = false,
+}) {
+  exactKeys(
+    result,
+    [
+      "id", "cacheRoot", "snapshotRoot", "selectedRoot", "complete", "missingFiles",
+      "matchedFiles", "selectedFiles", "reusedFiles", "downloadedFiles",
+      ...(staged ? ["sourceCacheRoot"] : []),
+    ],
+    `${phase} result for ${id}`,
+  );
+  const expected = cachedArtifactRoots(cacheRoot, artifact);
+  if (result.id !== id || comparable(await realpath(result.cacheRoot)) !== comparable(cacheRoot)
+    || comparable(await realpath(result.snapshotRoot)) !== comparable(expected.snapshotRoot)
+    || comparable(await realpath(result.selectedRoot)) !== comparable(expected.selectedRoot)
+    || (staged && typeof result.sourceCacheRoot !== "string")) {
+    fail(`${phase} result drifted from exact authority ${id}`);
+  }
+  if (typeof result.complete !== "boolean" || !Array.isArray(result.missingFiles)
+    || result.missingFiles.some((file) => typeof file !== "string" || !file)
+    || result.complete !== (result.missingFiles.length === 0)
+    || (!allowIncomplete && !result.complete)
+    || !Array.isArray(result.matchedFiles) || result.matchedFiles.length === 0
+    || result.matchedFiles.some((file) => typeof file !== "string" || !file)
+    || !Array.isArray(result.selectedFiles)
+    || result.selectedFiles.some((file) => typeof file !== "string" || !file)
+    || !Array.isArray(result.reusedFiles) || !Array.isArray(result.downloadedFiles)) {
+    fail(`${phase} result has incomplete exact-file evidence for ${id}`);
+  }
+  const validateFiles = (files, keys, label) => {
+    for (const file of files) {
+      exactKeys(file, keys, `${phase} ${label} for ${id}`);
+      if (typeof file.path !== "string" || !file.path
+        || path.isAbsolute(file.path) || file.path.split(/[\\/]/).includes("..")
+        || !Number.isSafeInteger(file.bytes) || file.bytes < 1
+        || !/^[0-9a-f]{64}$/.test(file.sha256)) {
+        fail(`${phase} ${label} has an invalid confined byte identity for ${id}`);
+      }
+    }
+  };
+  validateFiles(result.reusedFiles, ["path", "bytes", "sha256"], "reused file");
+  validateFiles(
+    result.downloadedFiles,
+    ["path", "bytes", "sha256", "lfsSha256", "commitSha"],
+    "downloaded file",
+  );
+  if (result.downloadedFiles.some((file) => !/^[0-9a-f]{64}$/.test(file.lfsSha256)
+    || !SHA40.test(file.commitSha) || file.sha256 !== file.lfsSha256)
+    || new Set(result.matchedFiles).size !== result.matchedFiles.length
+    || new Set(result.selectedFiles).size !== result.selectedFiles.length
+    || new Set(result.missingFiles).size !== result.missingFiles.length
+    || JSON.stringify([...result.matchedFiles].sort()) !== JSON.stringify([
+      ...result.reusedFiles.map((file) => file.path),
+      ...result.downloadedFiles.map((file) => file.path),
+    ].sort())) {
+    fail(`${phase} file partition drifted for ${id}`);
+  }
+  return result;
+}
+
+async function auditArtifact({ id, artifact, scratch, python, cacheRoot }) {
+  const requestPath = await writeArtifactRequest({ id, artifact, scratch, phase: "audit" });
+  const raw = run(python, [
+    "scripts/provision-epic-20738-terminal-artifact.py",
+    "--request", requestPath,
+    "--cache-root", cacheRoot,
+    "--audit",
+  ], {
     env: {
       ...process.env,
+      HF_HUB_OFFLINE: "1",
+      TRANSFORMERS_OFFLINE: "1",
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1",
       HF_HUB_DISABLE_PROGRESS_BARS: "1",
       HF_HUB_DISABLE_TELEMETRY: "1",
       HF_HUB_VERBOSITY: "error",
-      HF_HOME: path.join(scratch, "hf-home"),
     },
     maxBuffer: 8 * 1024 * 1024,
   });
-  const result = JSON.parse(raw.split(/\r?\n/).at(-1));
+  const result = await validateProvisionResult({
+    result: parseProvisionerOutput(raw, id, "source cache census"),
+    id, artifact, cacheRoot, phase: "source cache census", allowIncomplete: true,
+  });
+  return { ...artifact, ...result };
+}
+
+async function stageArtifact({
+  id, artifact, scratch, python, cacheRoot, stagingRoot, allowReviewedDownload,
+}) {
+  const requestPath = await writeArtifactRequest({ id, artifact, scratch, phase: "stage" });
+  const raw = run(python, [
+    "scripts/provision-epic-20738-terminal-artifact.py",
+    "--request", requestPath,
+    "--cache-root", cacheRoot,
+    "--stage-root", stagingRoot,
+    ...(allowReviewedDownload ? ["--allow-reviewed-download"] : []),
+  ], {
+    env: {
+      ...process.env,
+      HF_HUB_OFFLINE: allowReviewedDownload ? "0" : "1",
+      TRANSFORMERS_OFFLINE: allowReviewedDownload ? "0" : "1",
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1",
+      HF_HUB_DISABLE_PROGRESS_BARS: "1",
+      HF_HUB_DISABLE_TELEMETRY: "1",
+      HF_HUB_VERBOSITY: "error",
+    },
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const result = await validateProvisionResult({
+    result: parseProvisionerOutput(raw, id, "campaign staging"),
+    id, artifact, cacheRoot: stagingRoot, phase: "campaign staging", staged: true,
+  });
+  if (comparable(await realpath(result.sourceCacheRoot)) !== comparable(cacheRoot)) {
+    fail(`campaign staging result drifted from trusted source cache for ${id}`);
+  }
+  return result;
+}
+
+async function provisionArtifact({ id, artifact, scratch, python, cacheRoot }) {
+  const requestPath = await writeArtifactRequest({ id, artifact, scratch, phase: "offline" });
+  const raw = run(python, [
+    "scripts/provision-epic-20738-terminal-artifact.py",
+    "--request", requestPath,
+    "--cache-root", cacheRoot,
+  ], {
+    env: {
+      ...process.env,
+      HF_HUB_OFFLINE: "1",
+      TRANSFORMERS_OFFLINE: "1",
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1",
+      HF_HUB_DISABLE_PROGRESS_BARS: "1",
+      HF_HUB_DISABLE_TELEMETRY: "1",
+      HF_HUB_VERBOSITY: "error",
+    },
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const result = await validateProvisionResult({
+    result: parseProvisionerOutput(raw, id, "final offline staging validation"),
+    id, artifact, cacheRoot, phase: "final offline staging validation",
+  });
   const selectedRoot = await realpath(result.selectedRoot);
-  // huggingface_hub's local-dir transport metadata is not part of the reviewed artifact surface.
-  // Keep it available for the downloader, but exclude the root-local .cache directory from the
-  // byte inventory when subdirectory "." selects the snapshot root.
-  const inventory = await hashArtifactInventory(selectedRoot, { excludeDirectories: [".cache"] });
-  return { id, ...artifact, snapshotRoot: result.snapshotRoot, selectedRoot, inventory };
+  const selectedFiles = await listCachedArtifactFiles(selectedRoot, cacheRoot);
+  if (JSON.stringify(selectedFiles) !== JSON.stringify(result.selectedFiles)) {
+    fail(`cache-only provision result selected-file inventory drifted for ${id}`);
+  }
+  const inventory = await hashArtifactInventory(
+    selectedRoot,
+    { includeFiles: result.matchedFiles, trustedRoot: cacheRoot },
+  );
+  return {
+    id,
+    ...artifact,
+    snapshotRoot: result.snapshotRoot,
+    selectedRoot,
+    matchedFiles: result.matchedFiles,
+    selectedFiles,
+    inventory,
+    cacheEvidence: {
+      reusedFiles: result.reusedFiles,
+      downloadedFiles: result.downloadedFiles,
+    },
+  };
+}
+
+async function verifyArtifactUnchanged(artifact, cacheRoot) {
+  const selectedFiles = await listCachedArtifactFiles(artifact.selectedRoot, cacheRoot);
+  if (JSON.stringify(selectedFiles) !== JSON.stringify(artifact.selectedFiles)) {
+    fail(`shared cache selected-file set mutated for ${artifact.id}`);
+  }
+  const inventory = await hashArtifactInventory(artifact.selectedRoot, {
+    includeFiles: artifact.matchedFiles,
+    trustedRoot: cacheRoot,
+  });
+  if (inventory.files !== artifact.inventory.files || inventory.bytes !== artifact.inventory.bytes
+    || inventory.sha256 !== artifact.inventory.sha256) {
+    fail(`shared cache selected-file bytes mutated for ${artifact.id}`);
+  }
 }
 
 function cargoCellArgs() {
@@ -711,7 +1175,17 @@ function cargoCellArgs() {
   ];
 }
 
-async function executeCell({ sceneworks, cellFile, cellDir, logFile, samples }) {
+async function executeCell({
+  sceneworks, cellFile, cellDir, logFile, samples, runtimeScratch,
+}) {
+  const writable = {
+    temp: path.join(runtimeScratch, "writable", "temp"),
+    hf: path.join(runtimeScratch, "writable", "huggingface"),
+    transformers: path.join(runtimeScratch, "writable", "transformers"),
+    xdg: path.join(runtimeScratch, "writable", "xdg"),
+    torch: path.join(runtimeScratch, "writable", "torch"),
+  };
+  await Promise.all(Object.values(writable).map((directory) => mkdir(directory, { recursive: true })));
   await new Promise((resolve, reject) => {
     const log = createWriteStream(logFile, { flags: "wx" });
     const child = spawn("cargo", cargoCellArgs(), {
@@ -722,6 +1196,17 @@ async function executeCell({ sceneworks, cellFile, cellDir, logFile, samples }) 
         SCENEWORKS_EPIC_20738_CELL_FILE: cellFile,
         SCENEWORKS_EPIC_20738_OUTPUT_DIR: cellDir,
         SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA: "1",
+        TEMP: writable.temp,
+        TMP: writable.temp,
+        TMPDIR: writable.temp,
+        HF_HOME: writable.hf,
+        HUGGINGFACE_HUB_CACHE: writable.hf,
+        HF_HUB_CACHE: writable.hf,
+        TRANSFORMERS_CACHE: writable.transformers,
+        XDG_CACHE_HOME: writable.xdg,
+        TORCH_HOME: writable.torch,
+        HF_HUB_OFFLINE: "1",
+        TRANSFORMERS_OFFLINE: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -802,7 +1287,7 @@ async function writePrimaryReceipt({ file, receipt, cell, profile, fault, index 
 }
 
 async function writeEmergencyReceipt({
-  profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+  profile, cell, index, ordinalName, output, cacheRoot, repositories, execution, gpuIdentity,
   systemMemory, error, cleanup,
 }) {
   // This path deliberately bypasses all injected/primary finalization operations. If the primary
@@ -814,7 +1299,7 @@ async function writeEmergencyReceipt({
   const message = `unhandled cell setup/finalization failure: ${errorText(error)}`;
   await writeFile(path.join(cellDir, "controller.log"), `${startedAt} ${message}\n`, "utf8");
   const artifacts = cell.artifactIds.map((id) => pendingArtifact(
-    id, profile.artifacts[id], path.join(scratch, ordinalName),
+    id, profile.artifacts[id], cacheRoot,
   ));
   const receipt = receiptSkeleton({
     cell, ordinal: index + 1, repositories, artifacts, execution, gpuIdentity, systemMemory,
@@ -835,7 +1320,7 @@ async function writeEmergencyReceipt({
 }
 
 async function writeLastResortEmergencyReceipt({
-  profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+  profile, cell, index, ordinalName, output, cacheRoot, repositories, execution, gpuIdentity,
   systemMemory, errors, cleanup,
 }) {
   // A second implementation intentionally avoids evidenceFiles(), writeJsonAtomically(), and every
@@ -851,7 +1336,7 @@ async function writeLastResortEmergencyReceipt({
     ordinal: index + 1,
     repositories,
     artifacts: cell.artifactIds.map((id) => pendingArtifact(
-      id, profile.artifacts[id], path.join(scratch, ordinalName),
+      id, profile.artifacts[id], cacheRoot,
     )),
     execution,
     gpuIdentity,
@@ -945,8 +1430,16 @@ export async function runCampaign(args, options = {}) {
       runnerTemp: process.env.RUNNER_TEMP,
       output: args.output,
       scratch: args.scratch,
+      cacheRoot: args.cacheRoot,
       repositories: [sceneworks.root, inference.root],
     });
+    const prefixCandidates = await realpath(args.prefixCandidates);
+    const prefixMetadata = await lstat(prefixCandidates);
+    if (!prefixMetadata.isDirectory() || prefixMetadata.isSymbolicLink()
+      || !isWithin(guard.runnerTemp, prefixCandidates)
+      || guard.repositories.some((repository) => isWithin(repository, prefixCandidates, { allowEqual: true }))) {
+      fail("prefix candidates must be an ordinary RUNNER_TEMP directory outside both repositories");
+    }
     const { output, scratch } = guard;
     await mkdir(output, { recursive: false });
     await mkdir(scratch, { recursive: false });
@@ -961,23 +1454,202 @@ export async function runCampaign(args, options = {}) {
       profile, repositories, execution, guard, output, scratch, startupErrors, gpuIdentity,
       systemMemory: { totalBytes: totalmem(), availableBytesAtStart: freemem() },
       sceneworksRoot: sceneworks.root,
+      prefixCandidates,
+      python: args.python,
     };
   }
   const {
     profile, repositories, execution, guard, output, scratch, startupErrors, gpuIdentity,
-    systemMemory, sceneworksRoot,
+    systemMemory, sceneworksRoot, prefixCandidates, python,
   } = prepared;
   const fault = options.fault;
   const operations = {
+    auditArtifact: options.operations?.auditArtifact ?? auditArtifact,
+    stageArtifact: options.operations?.stageArtifact ?? stageArtifact,
     provisionArtifact: options.operations?.provisionArtifact ?? provisionArtifact,
+    verifyArtifactUnchanged:
+      options.operations?.verifyArtifactUnchanged ?? verifyArtifactUnchanged,
     executeCell: options.operations?.executeCell ?? executeCell,
     cleanup: options.operations?.cleanup ?? safeRemoveTree,
     sample: options.operations?.sample ?? sampleGpuBestEffort,
   };
-  const receipts = [];
+  const startIndex = options.startIndex ?? IMPORTED_PREFIX_CELLS;
+  let imported = { lineage: null, outcomes: [] };
+  if (startIndex === IMPORTED_PREFIX_CELLS) {
+    const selected = options.prefixSelection
+      ?? await selectImportedPrefix(prefixCandidates, profile);
+    imported = options.importedPrefix ?? await importPrefixEvidence(selected, output);
+  } else if (startIndex !== 0) {
+    fail(`unreviewed terminal continuation start index ${startIndex}`);
+  }
+  const receipts = [...imported.outcomes];
   const campaignErrors = [];
   let quarantineReason = null;
-  for (const [index, cell] of profile.cells.entries()) {
+  const sharedArtifacts = new Map();
+  const preflightScratch = path.join(scratch, "cache-preflight");
+  const stagingRoot = path.join(scratch, "authority-stage");
+  await mkdir(preflightScratch);
+  await mkdir(stagingRoot);
+  const remainingArtifactIds = [...new Set(
+    profile.cells.slice(startIndex).flatMap((cell) => cell.artifactIds),
+  )];
+  const sourceAudits = new Map();
+  const cacheProvisioning = { sourceCensus: [], staging: [], finalOffline: [] };
+  const censusErrors = [];
+  for (const artifactId of remainingArtifactIds) {
+    try {
+      const artifact = await operations.auditArtifact({
+        id: artifactId,
+        artifact: profile.artifacts[artifactId],
+        scratch: preflightScratch,
+        python,
+        cacheRoot: guard.cacheRoot,
+      });
+      sourceAudits.set(artifactId, artifact);
+      cacheProvisioning.sourceCensus.push({
+        id: artifactId,
+        repository: artifact.repository,
+        revision: artifact.revision,
+        subdirectory: artifact.subdirectory,
+        allowPatterns: artifact.allowPatterns,
+        complete: artifact.complete,
+        missingFiles: artifact.missingFiles,
+        reusedFiles: artifact.reusedFiles,
+      });
+    } catch (error) {
+      censusErrors.push(`${artifactId}: ${errorText(error)}`);
+    }
+  }
+
+  // The source census is frozen before transfer. A complete cache uses no network; the only
+  // incomplete census allowed is this one exact file, never a snapshot/glob/ref-main fallback.
+  const frozenMissing = cacheProvisioning.sourceCensus.flatMap((artifact) => (
+    artifact.missingFiles.map((file) => ({
+      artifactId: artifact.id,
+      repository: artifact.repository,
+      revision: artifact.revision,
+      file,
+    }))
+  ));
+  const reviewedMissing = [{
+    artifactId: "flux1-schnell-q8",
+    repository: "SceneWorks/flux1-schnell-mlx",
+    revision: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+    file: "q8/transformer/model.safetensors",
+  }];
+  if (censusErrors.length) {
+    quarantineReason = `source cache census failed before transfer: ${censusErrors.join(" | ")}`;
+  } else if (frozenMissing.length > 1
+    || (frozenMissing.length === 1
+      && JSON.stringify(frozenMissing) !== JSON.stringify(reviewedMissing))) {
+    quarantineReason = `source cache census found an unapproved missing-file set: ${JSON.stringify(frozenMissing)}`;
+  }
+
+  const stagingErrors = [];
+  if (!quarantineReason) {
+    for (const artifactId of remainingArtifactIds) {
+      try {
+        const audit = sourceAudits.get(artifactId);
+        const allowReviewedDownload = audit.missingFiles.length === 1;
+        const staged = await operations.stageArtifact({
+          id: artifactId,
+          artifact: profile.artifacts[artifactId],
+          scratch: preflightScratch,
+          python,
+          cacheRoot: guard.cacheRoot,
+          stagingRoot,
+          allowReviewedDownload,
+        });
+        const downloaded = staged.downloadedFiles ?? [];
+        if (JSON.stringify(staged.reusedFiles) !== JSON.stringify(audit.reusedFiles)) {
+          fail(`trusted source cache changed after frozen census for ${artifactId}`);
+        }
+        if ((!allowReviewedDownload && downloaded.length)
+          || (allowReviewedDownload && (downloaded.length !== 1
+            || downloaded[0].path !== "transformer/model.safetensors"
+            || !/^[0-9a-f]{64}$/.test(downloaded[0].sha256)
+            || downloaded[0].sha256 !== downloaded[0].lfsSha256
+            || downloaded[0].commitSha !== reviewedMissing[0].revision
+            || !Number.isSafeInteger(downloaded[0].bytes) || downloaded[0].bytes < 1))) {
+          fail(`campaign staging download partition drifted for ${artifactId}`);
+        }
+        cacheProvisioning.staging.push({
+          id: artifactId,
+          repository: profile.artifacts[artifactId].repository,
+          revision: profile.artifacts[artifactId].revision,
+          subdirectory: profile.artifacts[artifactId].subdirectory,
+          allowPatterns: profile.artifacts[artifactId].allowPatterns,
+          reusedFiles: staged.reusedFiles,
+          downloadedFiles: downloaded,
+        });
+      } catch (error) {
+        stagingErrors.push(`${artifactId}: ${errorText(error)}`);
+        break;
+      }
+    }
+    if (stagingErrors.length) {
+      quarantineReason = `copy-once campaign staging failed: ${stagingErrors.join(" | ")}`;
+    }
+  }
+
+  const finalErrors = [];
+  if (!quarantineReason) {
+    for (const artifactId of remainingArtifactIds) {
+      try {
+        const artifact = await operations.provisionArtifact({
+          id: artifactId,
+          artifact: profile.artifacts[artifactId],
+          scratch: preflightScratch,
+          python,
+          cacheRoot: stagingRoot,
+        });
+        sharedArtifacts.set(artifactId, artifact);
+        cacheProvisioning.finalOffline.push({
+          id: artifactId,
+          repository: artifact.repository,
+          revision: artifact.revision,
+          subdirectory: artifact.subdirectory,
+          allowPatterns: artifact.allowPatterns,
+          inventory: artifact.inventory,
+        });
+      } catch (error) {
+        finalErrors.push(`${artifactId}: ${errorText(error)}`);
+      }
+    }
+    if (finalErrors.length) {
+      quarantineReason = `full offline validation of campaign staging failed: ${finalErrors.join(" | ")}`;
+    }
+  }
+  if (quarantineReason) {
+    quarantineReason = `${quarantineReason}; no continuation GPU cell started`;
+    campaignErrors.push(quarantineReason);
+  }
+  const cachePreflightPath = path.join(output, "cache-preflight.json");
+  await writeFile(
+    cachePreflightPath,
+    `${JSON.stringify({
+      sourceCacheRoot: guard.cacheRoot,
+      campaignStagingRoot: stagingRoot,
+      frozenMissingFiles: frozenMissing,
+      reusedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.reusedFiles.map(
+        (file) => ({ artifactId: artifact.id, ...file }),
+      )),
+      downloadedFiles: cacheProvisioning.staging.flatMap((artifact) => artifact.downloadedFiles.map(
+        (file) => ({ artifactId: artifact.id, ...file }),
+      )),
+      phases: cacheProvisioning,
+      offlineBeforeCells: !quarantineReason,
+    }, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx" },
+  );
+  const cachePreflightMetadata = await stat(cachePreflightPath);
+  const cachePreflightEvidence = {
+    path: "cache-preflight.json",
+    bytes: cachePreflightMetadata.size,
+    sha256: await sha256File(cachePreflightPath),
+  };
+  for (let index = startIndex; index < profile.cells.length; index += 1) {
+    const cell = profile.cells[index];
     const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
     let emergencyCleanup = { attempted: false, completed: true, error: null };
     const errors = [...startupErrors];
@@ -992,7 +1664,9 @@ export async function runCampaign(args, options = {}) {
     let cellDir = path.join(output, ordinalName);
     const cellScratch = path.join(scratch, ordinalName);
     const startedAt = new Date().toISOString();
-    const artifacts = cell.artifactIds.map((id) => pendingArtifact(id, profile.artifacts[id], cellScratch));
+    const artifacts = cell.artifactIds.map((id) => pendingArtifact(
+      id, profile.artifacts[id], stagingRoot,
+    ));
     const samples = gpuIdentity.length
       ? [...gpuIdentity]
       : [{ timestamp: startedAt, raw: startupErrors.join("\n") || "GPU identity unavailable" }];
@@ -1021,9 +1695,8 @@ export async function runCampaign(args, options = {}) {
       for (const [artifactIndex, artifactId] of cell.artifactIds.entries()) {
         activeArtifactIndex = artifactIndex;
         await invokeFault(fault, "provision", index);
-        const artifact = await operations.provisionArtifact({
-          id: artifactId, artifact: profile.artifacts[artifactId], scratch: cellScratch, python: args.python,
-        });
+        const artifact = sharedArtifacts.get(artifactId);
+        if (!artifact) fail(`artifact ${artifactId} was not admitted by cache-only preflight`);
         artifacts[artifactIndex] = {
           id: artifact.id, role: artifact.role, repository: artifact.repository,
           revision: artifact.revision, subdirectory: artifact.subdirectory,
@@ -1041,9 +1714,49 @@ export async function runCampaign(args, options = {}) {
       };
       const cellFile = path.join(cellDir, "cell.json");
       await writeFile(cellFile, `${JSON.stringify(runtimeCell, null, 2)}\n`, "utf8");
+      const verifyCellCache = async (phase) => {
+        for (const artifactId of cell.artifactIds) {
+          await operations.verifyArtifactUnchanged(
+            sharedArtifacts.get(artifactId),
+            stagingRoot,
+          );
+        }
+        await appendFile(
+          controllerLog,
+          `${new Date().toISOString()} shared cache ${phase} inventory verified for ${cell.id}\n`,
+          "utf8",
+        );
+      };
+      try {
+        await verifyCellCache("before");
+      } catch (error) {
+        quarantineReason = `shared cache changed before cell ${cell.id}: ${errorText(error)}`;
+        campaignErrors.push(quarantineReason);
+        throw error;
+      }
       operations.sample(samples, errors, "pre-execution VRAM sample failed");
       await invokeFault(fault, "execute", index);
-      await operations.executeCell({ sceneworks: sceneworksRoot, cellFile, cellDir, logFile, samples });
+      let runtimeFailure = null;
+      try {
+        await operations.executeCell({
+          sceneworks: sceneworksRoot,
+          cellFile,
+          cellDir,
+          logFile,
+          samples,
+          runtimeScratch: cellScratch,
+        });
+      } catch (error) {
+        runtimeFailure = error;
+      }
+      try {
+        await verifyCellCache("after");
+      } catch (error) {
+        quarantineReason = `shared cache mutated during cell ${cell.id}: ${errorText(error)}`;
+        campaignErrors.push(quarantineReason);
+        throw error;
+      }
+      if (runtimeFailure) throw runtimeFailure;
       operations.sample(samples, errors, "post-execution VRAM sample failed");
       const runtimeResult = JSON.parse(await readFile(path.join(cellDir, "runtime-result.json"), "utf8"));
       validateRuntimeResult(runtimeResult, cell);
@@ -1112,6 +1825,7 @@ export async function runCampaign(args, options = {}) {
         receipts.push({
           id: cell.id, status: receipt.status,
           receipt: `${path.basename(cellDir)}/receipt.json`, error: receipt.error,
+          source: "continuation",
         });
       } catch (error) {
         throw new Error(recordError(errors, "best-effort receipt finalization failed", error), {
@@ -1125,14 +1839,16 @@ export async function runCampaign(args, options = {}) {
       try {
         await invokeFault(fault, "emergencyReceipt", index);
         receiptPath = await writeEmergencyReceipt({
-          profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+          profile, cell, index, ordinalName, output, cacheRoot: stagingRoot,
+          repositories, execution, gpuIdentity,
           systemMemory, error: new Error(emergencyError), cleanup: emergencyCleanup,
         });
       } catch (receiptError) {
         emergencyError += `\nemergency receipt failed: ${errorText(receiptError)}`;
         try {
           receiptPath = await writeLastResortEmergencyReceipt({
-            profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+            profile, cell, index, ordinalName, output, cacheRoot: stagingRoot,
+            repositories, execution, gpuIdentity,
             systemMemory, errors: [emergencyError], cleanup: emergencyCleanup,
           });
         } catch (lastResortError) {
@@ -1141,7 +1857,7 @@ export async function runCampaign(args, options = {}) {
       }
       receipts.push({
         id: cell.id, status: "failed", receipt: receiptPath, error: emergencyError,
-        emergencyReceiptError: receiptPath ? null : emergencyError,
+        emergencyReceiptError: receiptPath ? null : emergencyError, source: "continuation",
       });
     }
   }
@@ -1155,6 +1871,19 @@ export async function runCampaign(args, options = {}) {
 
   const summary = {
     schemaVersion: 1, profile: PROFILE_NAME, repositories, execution, receipts,
+    lineage: {
+      imported: imported.lineage,
+      continuation: {
+        runId: execution.runId,
+        runAttempt: execution.runAttempt,
+        headSha: execution.headSha,
+        inferenceSha: repositories.inference.sha,
+        profileCellSemanticsSha256: EXPECTED_CELL_SEMANTICS_SHA256,
+        profileArtifactSemanticsSha256: EXPECTED_ARTIFACT_SEMANTICS_SHA256,
+        startOrdinal: startIndex + 1,
+      },
+    },
+    cachePreflight: cachePreflightEvidence,
     passed: receipts.filter((receipt) => receipt.status === "passed").length,
     failed: receipts.filter((receipt) => receipt.status === "failed").length,
     campaignErrors,
@@ -1193,10 +1922,12 @@ async function main() {
       sceneworksRevision: value(argv, "--sceneworks-revision"),
       inferenceRevision: value(argv, "--inference-revision"),
       output: value(argv, "--output"), scratch: value(argv, "--scratch"), python: value(argv, "--python"),
+      cacheRoot: value(argv, "--cache-root"),
+      prefixCandidates: value(argv, "--prefix-candidates"),
     });
     return;
   }
-  fail("usage: epic-20738-terminal-cuda-harness.mjs check [--profile path] | run --profile path --sceneworks-repo path --inference-repo path --sceneworks-revision sha40 --inference-revision sha40 --output path --scratch path --python path");
+  fail("usage: epic-20738-terminal-cuda-harness.mjs check [--profile path] | run --profile path --sceneworks-repo path --inference-repo path --sceneworks-revision sha40 --inference-revision sha40 --output path --scratch path --python path --cache-root path --prefix-candidates path");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
