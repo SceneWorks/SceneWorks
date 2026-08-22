@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d0069d165a384b8eee7c6daf354fac1b464a39a9eca06863a2f0a919ec4723c6",
+    "sceneWorksRevision": "source-tree:4e92931e820df4b5c8bde93302c139c7662305f453d5ba4326a2d359bd7fe555",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -30,7 +30,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "d85247b5b6013164cbc078a4e076132d27f51d026008ec8f35c89d64018cfd74"
+        "sha256": "fcd454f97d6ba5a43f5caad19576b8cc19ab4c1586ed98dd52aebc30c5809ab9"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
