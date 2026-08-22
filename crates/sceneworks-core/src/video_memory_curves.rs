@@ -20,12 +20,12 @@ use sha2::{Digest, Sha256};
 
 use crate::memory_calibration::StrategyRung;
 
-pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 2;
+pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 3;
 pub const PACKAGED_VIDEO_MEMORY_CURVES: &str =
     include_str!("../../../docs/generated/video-memory-curves.json");
-/// Every immutable evidence source compiled alongside the promoted curve bundle. The loader treats
-/// this as one catalog: paths and record ids must be globally unique, every byte digest must agree,
-/// and every source record must be consumed by exactly one complete-selector curve.
+/// Immutable evidence sources compiled alongside the promoted curve bundle. Paths and record ids
+/// are globally unique and bytes/digests must agree. A source record may remain unmodeled (such as
+/// an under-sampled FPS), but every curve source record must match one complete selector exactly.
 const PACKAGED_VIDEO_MEMORY_CURVE_SOURCES: &[(&str, &str)] = &[(
     "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
     include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
@@ -62,10 +62,21 @@ pub struct VideoMemoryCurve {
     pub id: String,
     pub model_id: String,
     pub model_family: String,
+    /// Resolved engine route. Catalog model ids and providers are independently keyed, so neither
+    /// may stand in for the route selected for this request.
+    pub route: String,
     pub provider: String,
     pub backend: VideoCurveBackend,
     pub tier: String,
     pub mode: String,
+    /// Exact reference carrier and count measured by this curve. Future I2V/reference stories add
+    /// their own rows; this prevents the reference-free surface lending its fitted peak to them.
+    pub reference_shape: String,
+    pub reference_count: u32,
+    /// Enumerated output rates present in sealed source receipts. An unmeasured interior rate is
+    /// not evidence merely because two endpoints exist.
+    pub frames_per_second: Vec<u32>,
+    pub overlay: Option<String>,
     pub rung: StrategyRung,
     pub load_shape: VideoCurveLoadShape,
     pub batch: u32,
@@ -168,10 +179,15 @@ pub struct VideoCurveGeometry {
 pub struct VideoCurveQuery<'a> {
     pub model_id: &'a str,
     pub model_family: &'a str,
+    pub route: &'a str,
     pub provider: &'a str,
     pub backend: VideoCurveBackend,
     pub tier: &'a str,
     pub mode: &'a str,
+    pub reference_shape: &'a str,
+    pub reference_count: u32,
+    pub frames_per_second: u32,
+    pub overlay: Option<&'a str>,
     pub rung: StrategyRung,
     pub load_shape: VideoCurveLoadShape,
     pub closure_digest: &'a str,
@@ -224,10 +240,15 @@ impl VideoMemoryCurveBundle {
         let mut matches = self.curves.iter().filter(|curve| {
             curve.model_id == query.model_id
                 && curve.model_family == query.model_family
+                && curve.route == query.route
                 && curve.provider == query.provider
                 && curve.backend == query.backend
                 && curve.tier == query.tier
                 && curve.mode == query.mode
+                && curve.reference_shape == query.reference_shape
+                && curve.reference_count == query.reference_count
+                && curve.frames_per_second.contains(&query.frames_per_second)
+                && curve.overlay.as_deref() == query.overlay
                 && curve.rung == query.rung
                 && curve.load_shape == query.load_shape
                 && curve.batch == query.geometry.batch
@@ -347,13 +368,18 @@ fn validate_video_memory_curve_bundle_ref(
             return Err(format!("duplicate video-memory curve id {:?}", curve.id));
         }
         let selector = format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{}",
             curve.model_id,
             curve.model_family,
+            curve.route,
             curve.provider,
             curve.backend.as_key(),
             curve.tier,
             curve.mode,
+            curve.reference_shape,
+            curve.reference_count,
+            curve.frames_per_second,
+            curve.overlay,
             curve.rung,
             curve.load_shape,
             curve.closure_digest,
@@ -378,23 +404,6 @@ fn validate_video_memory_curve_bundle_ref(
                 }
             }
         }
-    }
-    let expected_records = sources
-        .iter()
-        .flat_map(|(path, source)| {
-            source.records.iter().filter_map(move |record| {
-                record
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(|id| (path.clone(), id.to_owned()))
-            })
-        })
-        .collect::<BTreeSet<_>>();
-    if referenced_records != expected_records {
-        return Err(
-            "video-memory curves do not consume the exact compiled source-record catalog"
-                .to_owned(),
-        );
     }
     Ok(())
 }
@@ -601,18 +610,68 @@ fn curve_decode_pass_key(pass: VideoCurveDecodePass) -> &'static str {
     }
 }
 
+fn source_reference_count(record: &Value) -> Option<u32> {
+    value_at_u64(record, &["target", "referenceCount"])
+        .and_then(|count| u32::try_from(count).ok())
+        // Schema-v2 T2V receipts predate an explicit reference count. They are unambiguous only
+        // because the sealed mode is reference-free; do not extend that compatibility to any
+        // other mode.
+        .or_else(|| {
+            (value_at_str(record, &["target", "mode"]) == Some("text_to_video")).then_some(0)
+        })
+}
+
+fn source_route(record: &Value) -> Option<&str> {
+    value_at_str(record, &["target", "route"])
+        .or_else(|| value_at_str(record, &["target", "provider"]))
+}
+
+fn source_reference_shape(record: &Value, reference_count: u32) -> Option<&str> {
+    value_at_str(record, &["target", "referenceShape"])
+        .or_else(|| (reference_count == 0).then_some("none"))
+}
+
+fn source_output_fps(record: &Value) -> Option<u32> {
+    record
+        .get("diagnostics")?
+        .get("measurements")?
+        .as_array()?
+        .iter()
+        .find(|measurement| measurement.get("name").and_then(Value::as_str) == Some("outputFps"))?
+        .get("value")?
+        .as_u64()
+        .and_then(|fps| u32::try_from(fps).ok())
+}
+
+fn source_overlay(record: &Value) -> Option<&str> {
+    match value_at_str(record, &["target", "overlay"]) {
+        Some("none") => None,
+        overlay => overlay,
+    }
+}
+
 fn source_record_matches_curve(
     record: &Value,
     curve: &VideoMemoryCurve,
     model_families: &BTreeMap<String, String>,
 ) -> bool {
+    let Some(reference_count) = source_reference_count(record) else {
+        return false;
+    };
     value_at_str(record, &["target", "modelId"]) == Some(curve.model_id.as_str())
         && model_families.get(&curve.model_id).map(String::as_str)
             == Some(curve.model_family.as_str())
+        && source_route(record) == Some(curve.route.as_str())
         && value_at_str(record, &["target", "provider"]) == Some(curve.provider.as_str())
         && value_at_str(record, &["backend"]) == Some(curve.backend.as_key())
         && value_at_str(record, &["target", "tier"]) == Some(curve.tier.as_str())
         && value_at_str(record, &["target", "mode"]) == Some(curve.mode.as_str())
+        && source_reference_shape(record, reference_count) == Some(curve.reference_shape.as_str())
+        && reference_count == curve.reference_count
+        && source_output_fps(record)
+            .map(|fps| curve.frames_per_second.binary_search(&fps).is_ok())
+            .unwrap_or(false)
+        && source_overlay(record) == curve.overlay.as_deref()
         && value_at_str(record, &["strategy", "rung"]) == Some(rung_key(curve.rung))
         && value_at_str(record, &["loadShape"]) == Some(load_shape_key(curve.load_shape))
         && value_at_u64(record, &["target", "geometry", "batch"]) == Some(u64::from(curve.batch))
@@ -695,9 +754,18 @@ fn curve_is_valid(curve: &VideoMemoryCurve) -> bool {
     !curve.id.is_empty()
         && !curve.model_id.is_empty()
         && !curve.model_family.is_empty()
+        && !curve.route.is_empty()
         && !curve.provider.is_empty()
         && !curve.tier.is_empty()
         && !curve.mode.is_empty()
+        && !curve.reference_shape.trim().is_empty()
+        && (curve.reference_shape == "none") == (curve.reference_count == 0)
+        && !curve.frames_per_second.is_empty()
+        && curve.frames_per_second.iter().all(|fps| *fps > 0)
+        && curve
+            .frames_per_second
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
         && !curve.calibration_fingerprint.is_empty()
         && curve.batch > 0
         && is_sha256(&curve.closure_digest)
@@ -841,10 +909,15 @@ mod tests {
         VideoCurveQuery {
             model_id: "ltx_2_3",
             model_family: "ltx-video",
+            route: "ltx_2_3",
             provider: "ltx_2_3",
             backend: VideoCurveBackend::Mlx,
             tier: "q8",
             mode: "text_to_video",
+            reference_shape: "none",
+            reference_count: 0,
+            frames_per_second: 30,
+            overlay: None,
             rung: StrategyRung::StagedResidency,
             load_shape: VideoCurveLoadShape::EagerMaterialization,
             closure_digest: "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
@@ -870,7 +943,7 @@ mod tests {
             .expect("q8 LTX curve matches");
         assert_eq!(
             evaluation.curve_id,
-            "ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+            "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
         );
         assert!(evaluation.phases.conditioning > evaluation.phases.denoise);
         assert!(evaluation.phases.denoise > evaluation.phases.decode);
@@ -934,12 +1007,45 @@ mod tests {
         assert!(bundle.evaluate(query).is_none(), "unsupported family");
 
         let mut query = packaged_query();
+        query.route = "ltx_2_3_alias";
+        assert!(bundle.evaluate(query).is_none(), "crossed resolved route");
+
+        let mut query = packaged_query();
         query.calibration_abi += 1;
         assert!(bundle.evaluate(query).is_none(), "foreign calibration ABI");
 
         let mut query = packaged_query();
         query.mode = "image_to_video";
         assert!(bundle.evaluate(query).is_none(), "unsupported mode");
+
+        let mut query = packaged_query();
+        query.reference_shape = "image";
+        query.reference_count = 1;
+        assert!(
+            bundle.evaluate(query).is_none(),
+            "crossed reference shape/count"
+        );
+
+        let mut query = packaged_query();
+        query.frames_per_second = 24;
+        query.geometry = VideoCurveGeometry {
+            width: 768,
+            height: 512,
+            frames: 241,
+            batch: 1,
+        };
+        assert!(
+            bundle.evaluate(query).is_none(),
+            "crossed FPS cannot borrow its geometry hull"
+        );
+
+        let mut query = packaged_query();
+        query.frames_per_second = 25;
+        assert!(bundle.evaluate(query).is_none(), "unmeasured frame rate");
+
+        let mut query = packaged_query();
+        query.overlay = Some("adapter:1");
+        assert!(bundle.evaluate(query).is_none(), "crossed overlay");
 
         let mut query = packaged_query();
         query.decode_pass = VideoCurveDecodePass::Tiled;

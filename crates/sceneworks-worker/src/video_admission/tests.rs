@@ -433,6 +433,8 @@ fn select_once(
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -490,6 +492,8 @@ fn selector_with_curves<'a>(
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -629,6 +633,7 @@ fn inputs<'a>(
         route: "ltx_2_3",
         mode: "text_to_video",
         reference_count: 0,
+        reference_shape: "none",
         overlay: None,
         lane: VideoLane::Mlx,
         tier: tier(),
@@ -724,6 +729,7 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
         inputs(241, budget(host_gb), 18 * GIB),
         None,
         tiered_decode_profile,
+        false,
     );
     let memory = outcome
         .memory
@@ -754,6 +760,7 @@ fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
         inputs(241, budget(39.0), 18 * GIB),
         None,
         tiered_decode_profile,
+        false,
     );
     let refusal = outcome
         .refusal
@@ -790,6 +797,7 @@ fn provider_profile_composition_and_warm_residency_are_each_accounted_once() {
         request,
         None,
         decoder_substitution_profile,
+        false,
     );
     let context = outcome.context.expect("the 6 GiB incremental peak fits");
     // 20 GiB contract composition + (10 GiB decode profile - 4 GiB decoder already included)
@@ -915,6 +923,12 @@ fn unsupported_video_surfaces_fail_open_before_contract_selection() {
     request.overlay = Some("enhancer");
     assert_open("enhancer", request);
 
+    let mut request = inputs(121, budget(128.0), 18 * GIB);
+    request.fps = 30;
+    request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    request.overlay = Some("provider_video_mode:no_audio");
+    assert_open("provider no-audio mode", request);
+
     for fps in [0, 1, 23, 31, 60] {
         let mut request = inputs(121, budget(128.0), 18 * GIB);
         request.fps = fps;
@@ -924,6 +938,99 @@ fn unsupported_video_surfaces_fail_open_before_contract_selection() {
     let mut request = inputs(121, budget(128.0), 18 * GIB);
     request.runtime = None;
     assert_open("missing canonical post-load budget", request);
+}
+
+#[test]
+fn request_scoped_selection_refuses_crossed_identity_stale_and_out_of_envelope_evidence() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    let curves = fixture_curve_bundle();
+    let admitted = |request| {
+        admit_video_generation_with_curves_and_profiles(
+            &generator,
+            request,
+            Some(&curves),
+            no_video_decode_profile,
+            true,
+        )
+    };
+    let mut exact = inputs(121, budget(128.0), 18 * GIB);
+    exact.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    exact.fps = 30;
+    assert!(
+        admitted(exact).context.is_some(),
+        "exact sealed cell is selectable"
+    );
+
+    let mut crossed_family = inputs(121, budget(128.0), 18 * GIB);
+    crossed_family.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    crossed_family.fps = 30;
+    crossed_family.model_family = "ltx-alias";
+
+    let mut crossed_route = inputs(121, budget(128.0), 18 * GIB);
+    crossed_route.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    crossed_route.fps = 30;
+    crossed_route.route = "ltx_2_3_alias";
+
+    let mut crossed_mode = inputs(121, budget(128.0), 18 * GIB);
+    crossed_mode.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    crossed_mode.fps = 30;
+    crossed_mode.mode = "image_to_video";
+    crossed_mode.reference_count = 1;
+    crossed_mode.reference_shape = "image";
+
+    let mut stale = inputs(121, budget(128.0), 18 * GIB);
+    stale.expected_closure_digest = "stale-closure";
+    stale.fps = 30;
+
+    let mut outside_fps = inputs(121, budget(128.0), 18 * GIB);
+    outside_fps.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    outside_fps.fps = 24;
+
+    for (label, request) in [
+        ("crossed family", crossed_family),
+        ("crossed route", crossed_route),
+        ("crossed mode/reference", crossed_mode),
+        ("stale closure", stale),
+        ("out-of-envelope FPS", outside_fps),
+    ] {
+        assert_eq!(
+            admitted(request),
+            VideoAdmissionOutcome::default(),
+            "{label} must not borrow a different request-scoped curve"
+        );
+    }
+}
+
+#[test]
+fn evidence_preflight_needs_no_runtime_and_skips_unsupported_requests() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    let mut exact = inputs(121, None, 18 * GIB);
+    exact.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    exact.fps = 30;
+    assert!(packaged_video_evidence_covers_request(&generator, &exact));
+
+    exact.overlay = Some("provider_video_mode:no_audio");
+    assert!(
+        !packaged_video_evidence_covers_request(&generator, &exact),
+        "no-audio must be rejected before a live runtime probe until separately evidenced"
+    );
+
+    exact.overlay = None;
+    exact.mode = "image_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "image";
+    assert!(
+        !packaged_video_evidence_covers_request(&generator, &exact),
+        "unsupported requests must be rejected before a live runtime probe"
+    );
 }
 
 #[test]
@@ -1012,6 +1119,8 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -1247,6 +1356,8 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1364,6 +1475,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1399,6 +1512,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
                 route: "ltx_2_3",
                 mode: "text_to_video",
                 reference_count: 0,
+                reference_shape: "none",
+                fps: 30,
                 overlay: None,
                 lane: VideoLane::Candle,
                 tier: tier(),
@@ -1425,6 +1540,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1465,6 +1582,8 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
                 route: "ltx_2_3",
                 mode: "text_to_video",
                 reference_count: 0,
+                reference_shape: "none",
+                fps: 30,
                 overlay: None,
                 lane,
                 tier: tier(),
@@ -1709,7 +1828,7 @@ fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
     assert_eq!(closure, FITTED_CURVE_CLOSURE);
     assert_eq!(
         curve_id,
-        Some("ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
+        Some("ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
     );
     assert_eq!(small_peaks.binding_phase(), VideoBindingPhase::Conditioning);
     assert_eq!(small_peaks.peak_bytes(), small_peaks.conditioning_bytes);
@@ -1813,6 +1932,7 @@ fn historical_q8_curve_fixture_is_tier_exact_while_q4_and_bf16_keep_an_honest_fl
     for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
         for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
             let mut request = inputs(121, budget(host_gb), 18 * GIB);
+            request.fps = 30;
             request.tier.quant = quant;
             request.expected_closure_digest = FITTED_CURVE_CLOSURE;
             request.runtime.as_mut().unwrap().cache_state = cache_state;
@@ -1874,6 +1994,7 @@ fn checkpoint_bound_ltx_tiers_drive_curve_or_floor_safety_on_cold_and_warm_reque
             // Same staged-rung window as the historical-q8 test: admits the q8 fitted f121 peak
             // and the q4/bf16 staged floor under MLX_ESTIMATE_MARGIN, refuses resident.
             let mut request = inputs(121, budget(mlx_widened_gb(38, -1.0)), 18 * GIB);
+            request.fps = 30;
             request.tier = resolved;
             request.expected_closure_digest = FITTED_CURVE_CLOSURE;
             request.runtime.as_mut().unwrap().cache_state = cache_state;
@@ -2166,6 +2287,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     );
 
     let mut request = inputs(305, budget(host_gb), 0);
+    request.fps = 30;
     request.expected_closure_digest = FITTED_CURVE_CLOSURE;
     let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
     let context = outcome
@@ -2184,7 +2306,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     assert_eq!(context.geometry.height, 704);
     assert_eq!(
         context.evidence_revision,
-        "ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+        "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
     );
     assert!(outcome.refusal.is_none());
 }

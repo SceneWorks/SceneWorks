@@ -1479,6 +1479,31 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     spec
 }
 
+/// Provider-only request modifiers share the overlay evidence axis with adapters and enhancers.
+/// A catalog `text_to_video` request can still select a different provider workload (LTX's
+/// `no_audio` is the live case), so the resolved provider mode must not borrow the ordinary
+/// no-overlay curve until a receipt names this exact carrier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
+    let mut overlays = Vec::new();
+    if !input.adapters.is_empty() {
+        overlays.push(format!("adapters:{}", input.adapters.len()));
+    }
+    if input.enhance_prompt
+        || input.use_uncensored_enhancer
+        || input.uncensored_enhancer_dir.is_some()
+    {
+        overlays.push("enhancer".to_owned());
+    }
+    if let Some(video_mode) = input.video_mode.as_deref() {
+        overlays.push(format!("provider_video_mode:{video_mode}"));
+    }
+    (!overlays.is_empty()).then(|| overlays.join("+"))
+}
+
 /// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
 /// This check runs before the live-budget probe and before contract selection, so unsupported
 /// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
@@ -1487,17 +1512,6 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) fn calibrated_video_memory_surface(input: &VideoGenInput, mode: &str) -> bool {
-    mode == "text_to_video"
-        && input.conditioning.is_empty()
-        && input.adapters.is_empty()
-        && !input.enhance_prompt
-        && !input.use_uncensored_enhancer
-        && input.uncensored_enhancer_dir.is_none()
-        && input.video_mode.is_none()
-        && (24..=30).contains(&input.fps)
-}
-
 /// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
 /// lifecycle context in one operation makes it impossible for the generation request to carry an
 /// optimized rung while silently bypassing its safety/begin/configure/finish contract.
@@ -2030,24 +2044,46 @@ pub(super) async fn generate_video_using(
                 let spec_headroom_bytes =
                     crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
                 let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
-                let mut overlays = Vec::new();
-                if !input.adapters.is_empty() {
-                    overlays.push(format!("adapters:{}", input.adapters.len()));
-                }
-                if input.enhance_prompt
-                    || input.use_uncensored_enhancer
-                    || input.uncensored_enhancer_dir.is_some()
-                {
-                    overlays.push("enhancer".to_owned());
-                }
-                let admission_overlay = (!overlays.is_empty()).then(|| overlays.join("+"));
-                let exact_promoted_surface =
-                    calibrated_video_memory_surface(&input, &admission_mode);
-                // No contract means no declared lifecycle/selection seam. Preserve direct
-                // generation without even asking for a live budget; a budget-probe failure must
-                // not turn contract absence into a new refusal.
+                // This is the provider-facing carrier, not a synonym for the user-visible mode:
+                // Wan turns clip extension/bridging into pinned keyframes, while I2V reaches the
+                // reference-image encoder. A future measured row must name that real residency
+                // surface before request-scoped selection can use it.
+                let admission_reference_shape = if reference_count == 0 {
+                    "none"
+                } else {
+                    match admission_mode.as_str() {
+                        "image_to_video" => "image",
+                        "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
+                        _ => "other",
+                    }
+                };
+                let admission_overlay = video_admission_overlay(&input);
+                let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
+                    model_id: &admission_model_id,
+                    model_family: &admission_model_family,
+                    route: engine_id,
+                    mode: &admission_mode,
+                    reference_count,
+                    reference_shape: admission_reference_shape,
+                    overlay: admission_overlay.as_deref(),
+                    lane: crate::video_admission::LANE,
+                    tier: admission_tier,
+                    width: admission_geometry.0,
+                    height: admission_geometry.1,
+                    frames: admission_geometry.2,
+                    decode_chunk_size: admission_geometry.3,
+                    fps: input.fps,
+                    runtime: None,
+                    headroom_bytes: spec_headroom_bytes,
+                    expected_closure_digest: &admission_closure_digest,
+                };
+                // Evidence is the preflight: an unsupported request stays direct generation without
+                // attempting a platform memory probe that could fail independently of admission.
                 let admission_runtime =
-                    if exact_promoted_surface && generator.memory_strategy_contract().is_some() {
+                    if crate::video_admission::packaged_video_evidence_covers_request(
+                        generator,
+                        &admission_inputs,
+                    ) {
                         crate::video_admission::live_video_runtime_state(
                             engine_id,
                             cache_state,
@@ -2071,27 +2107,10 @@ pub(super) async fn generate_video_using(
                     // open before selection, so this value is observationally inert there.
                     None => spec_headroom_bytes,
                 };
-                let outcome = crate::video_admission::admit_video_generation(
-                    generator,
-                    crate::video_admission::VideoAdmissionInputs {
-                        model_id: &admission_model_id,
-                        model_family: &admission_model_family,
-                        route: engine_id,
-                        mode: &admission_mode,
-                        reference_count,
-                        overlay: admission_overlay.as_deref(),
-                        lane: crate::video_admission::LANE,
-                        tier: admission_tier,
-                        width: admission_geometry.0,
-                        height: admission_geometry.1,
-                        frames: admission_geometry.2,
-                        decode_chunk_size: admission_geometry.3,
-                        fps: input.fps,
-                        runtime: admission_runtime,
-                        headroom_bytes: admission_headroom_bytes,
-                        expected_closure_digest: &admission_closure_digest,
-                    },
-                );
+                admission_inputs.runtime = admission_runtime;
+                admission_inputs.headroom_bytes = admission_headroom_bytes;
+                let outcome =
+                    crate::video_admission::admit_video_generation(generator, admission_inputs);
                 apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
