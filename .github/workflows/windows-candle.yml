@@ -966,11 +966,48 @@ jobs:
                 $leaf -notmatch '^sc19054-flux-acceptance-[0-9]+-[0-9]+$') {
               throw "refusing an untrusted SC-19054 scratch path: $resolved"
             }
-            if ((Test-Path -LiteralPath $resolved) -and
-                ((Get-Item -LiteralPath $resolved -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-              throw "refusing an SC-19054 scratch reparse point: $resolved"
-            }
             return $resolved
+          }
+          function Remove-Sc19054ScratchTree([string]$ScratchPath) {
+            if (-not (Test-Path -LiteralPath $ScratchPath)) { return }
+            $root = Get-Item -LiteralPath $ScratchPath -Force
+            if (-not $root.PSIsContainer -or
+                ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+              throw "refusing an invalid SC-19054 scratch root: $ScratchPath"
+            }
+            $rootFiles = @('identity.json', 'model-files.json', 'acceptance.log', 'SHA256SUMS.txt')
+            $outputFiles = @('sc19054-flux-acceptance.json', 'sc19054-flux-schnell-q4-1024.png')
+            $output = Join-Path $ScratchPath 'output'
+            foreach ($item in @(Get-ChildItem -LiteralPath $ScratchPath -Force)) {
+              if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "refusing an SC-19054 scratch reparse point: $($item.FullName)"
+              }
+              if ($item.PSIsContainer) {
+                if ($item.Name -ne 'output') {
+                  throw "refusing an unexpected SC-19054 scratch directory: $($item.FullName)"
+                }
+                foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)) {
+                  if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    throw "refusing an SC-19054 output reparse point: $($child.FullName)"
+                  }
+                  if ($child.PSIsContainer -or $outputFiles -notcontains $child.Name) {
+                    throw "refusing an unexpected SC-19054 output entry: $($child.FullName)"
+                  }
+                }
+              } elseif ($rootFiles -notcontains $item.Name) {
+                throw "refusing an unexpected SC-19054 scratch file: $($item.FullName)"
+              }
+            }
+            # The complete inventory above is closed and contains no links or nested directories.
+            # Delete only inventoried leaves, then their empty parents; never recursively delete.
+            if (Test-Path -LiteralPath $output) {
+              Get-ChildItem -LiteralPath $output -File -Force |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+              Remove-Item -LiteralPath $output -Force
+            }
+            Get-ChildItem -LiteralPath $ScratchPath -File -Force |
+              ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+            Remove-Item -LiteralPath $ScratchPath -Force
           }
           $evidence = Resolve-Sc19054ScratchPath $evidence $env:RUNNER_TEMP
           $expectedEvidence = [System.IO.Path]::GetFullPath(
@@ -979,16 +1016,16 @@ jobs:
           if (-not [string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)) {
             throw "SC-19054 evidence path does not match this exact run attempt: $evidence"
           }
-          # A failed always-cleanup used to strand one exact attempt directory. Reclaim only direct
-          # RUNNER_TEMP children with the complete SC-19054 run/attempt shape; model and Cargo
-          # caches cannot match this namespace or parent constraint.
-          Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Directory -Force |
-            Where-Object { $_.Name -match '^sc19054-flux-acceptance-[0-9]+-[0-9]+$' } |
-            ForEach-Object {
-              $stale = Resolve-Sc19054ScratchPath $_.FullName $env:RUNNER_TEMP
-              Write-Host "Removing stale SC-19054 scratch: $stale"
-              Remove-Item -LiteralPath $stale -Recurse -Force
-            }
+          # Run 32551460830 attempt 1 completed and uploaded artifact 9470472931 before its broken
+          # cleanup rejected this exact path. Reclaim that one known residue only. Other SC-19054
+          # directories may belong to concurrent SHA-keyed listeners sharing the physical host.
+          $completedResidue = Resolve-Sc19054ScratchPath (
+            (Join-Path $env:RUNNER_TEMP 'sc19054-flux-acceptance-32551460830-1')
+          ) $env:RUNNER_TEMP
+          if (Test-Path -LiteralPath $completedResidue) {
+            Write-Host "Removing completed SC-19054 residue: $completedResidue"
+            Remove-Sc19054ScratchTree $completedResidue
+          }
           if (Test-Path -LiteralPath $evidence) {
             throw "refusing stale SC-19054 evidence directory: $evidence"
           }
@@ -1131,11 +1168,46 @@ jobs:
                 $leaf -notmatch '^sc19054-flux-acceptance-[0-9]+-[0-9]+$') {
               throw "refusing to clean an untrusted SC-19054 path: $resolved"
             }
-            if ((Test-Path -LiteralPath $resolved) -and
-                ((Get-Item -LiteralPath $resolved -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-              throw "refusing to clean an SC-19054 reparse point: $resolved"
-            }
             return $resolved
+          }
+          function Remove-Sc19054ScratchTree([string]$ScratchPath) {
+            if (-not (Test-Path -LiteralPath $ScratchPath)) { return }
+            $root = Get-Item -LiteralPath $ScratchPath -Force
+            if (-not $root.PSIsContainer -or
+                ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+              throw "refusing an invalid SC-19054 scratch root: $ScratchPath"
+            }
+            $rootFiles = @('identity.json', 'model-files.json', 'acceptance.log', 'SHA256SUMS.txt')
+            $outputFiles = @('sc19054-flux-acceptance.json', 'sc19054-flux-schnell-q4-1024.png')
+            $output = Join-Path $ScratchPath 'output'
+            foreach ($item in @(Get-ChildItem -LiteralPath $ScratchPath -Force)) {
+              if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "refusing an SC-19054 scratch reparse point: $($item.FullName)"
+              }
+              if ($item.PSIsContainer) {
+                if ($item.Name -ne 'output') {
+                  throw "refusing an unexpected SC-19054 scratch directory: $($item.FullName)"
+                }
+                foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)) {
+                  if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    throw "refusing an SC-19054 output reparse point: $($child.FullName)"
+                  }
+                  if ($child.PSIsContainer -or $outputFiles -notcontains $child.Name) {
+                    throw "refusing an unexpected SC-19054 output entry: $($child.FullName)"
+                  }
+                }
+              } elseif ($rootFiles -notcontains $item.Name) {
+                throw "refusing an unexpected SC-19054 scratch file: $($item.FullName)"
+              }
+            }
+            if (Test-Path -LiteralPath $output) {
+              Get-ChildItem -LiteralPath $output -File -Force |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+              Remove-Item -LiteralPath $output -Force
+            }
+            Get-ChildItem -LiteralPath $ScratchPath -File -Force |
+              ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+            Remove-Item -LiteralPath $ScratchPath -Force
           }
           $evidence = Resolve-Sc19054ScratchPath $env:SC19054_EVIDENCE_DIR $env:RUNNER_TEMP
           $expectedEvidence = [System.IO.Path]::GetFullPath(
@@ -1144,7 +1216,7 @@ jobs:
           if (-not [string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)) {
             throw "refusing to clean an SC-19054 path from another run attempt: $evidence"
           }
-          if (Test-Path -LiteralPath $evidence) { Remove-Item -LiteralPath $evidence -Recurse -Force }
+          Remove-Sc19054ScratchTree $evidence
       # sc-17592, the off-Mac mirror of macos-mlx.yml's MLX step. THE ONLY PR LANE THAT CAN PRODUCE
       # capabilities.candle.json, so it is the only place the checked-in file can be checked against
       # a real registry rather than taken on trust. (desktop-windows.yml builds the candle sidecar on

@@ -777,7 +777,14 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
   for (const body of [seal, cleanup]) {
     assert.match(body, /\[string\]::Equals\(\$parent, \$tempRoot, \[StringComparison\]::OrdinalIgnoreCase\)/);
     assert.match(body, /\^sc19054-flux-acceptance-\[0-9\]\+-\[0-9\]\+\$/);
-    assert.match(body, /\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/);
+    assert.ok(
+      (body.match(/\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/g) ?? []).length >= 3,
+      `${context}: cleanup must reject root, direct-child, and output-child reparse points`,
+    );
+    assert.match(body, /\$child\.PSIsContainer -or \$outputFiles -notcontains \$child\.Name/);
+    assert.match(body, /\$rootFiles = @\('identity\.json', 'model-files\.json', 'acceptance\.log', 'SHA256SUMS\.txt'\)/);
+    assert.match(body, /\$outputFiles = @\('sc19054-flux-acceptance\.json', 'sc19054-flux-schnell-q4-1024\.png'\)/);
+    assert.doesNotMatch(body, /Remove-Item[^\n]*-Recurse/, `${context}: deletion must be inventoried and non-recursive`);
     assert.match(
       body,
       /Join-Path \$env:RUNNER_TEMP "sc19054-flux-acceptance-\$env:GITHUB_RUN_ID-\$env:GITHUB_RUN_ATTEMPT"/,
@@ -787,9 +794,16 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
   }
   assert.match(
     seal,
-    /Get-ChildItem -LiteralPath \$env:RUNNER_TEMP -Directory -Force[\s\S]*Where-Object \{ \$_.Name -match '\^sc19054-flux-acceptance-\[0-9\]\+-\[0-9\]\+\$' \}[\s\S]*Remove-Item -LiteralPath \$stale -Recurse -Force/,
-    `${context}: the next exact dispatch must reclaim only bounded prior SC-19054 scratch`,
+    /Join-Path \$env:RUNNER_TEMP 'sc19054-flux-acceptance-32551460830-1'/,
+    `${context}: the next dispatch must reclaim only the one uploaded completed residue`,
   );
+  assert.match(seal, /Remove-Sc19054ScratchTree \$completedResidue/);
+  assert.doesNotMatch(
+    seal,
+    /Get-ChildItem -LiteralPath \$env:RUNNER_TEMP/,
+    `${context}: cleanup must never enumerate concurrent SC-19054 sibling attempts`,
+  );
+  assert.match(cleanup, /Remove-Sc19054ScratchTree \$evidence/);
 
   for (const exact of [
     'const MODEL_ID: &str = "flux_schnell";',
@@ -854,6 +868,9 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
     ["cleanup admits nested paths", "workflow", "-not [string]::Equals($parent, $tempRoot, [StringComparison]::OrdinalIgnoreCase) -or", "$false -or"],
     ["cleanup admits near-name paths", "workflow", "^sc19054-flux-acceptance-[0-9]+-[0-9]+$", "^sc19054-flux-acceptance-"],
     ["cleanup follows reparse points", "workflow", ".Attributes -band [System.IO.FileAttributes]::ReparsePoint", ".Attributes -band [System.IO.FileAttributes]::Normal"],
+    ["cleanup admits a nested output directory", "workflow", "$child.PSIsContainer -or $outputFiles -notcontains $child.Name", "$false -or $outputFiles -notcontains $child.Name"],
+    ["cleanup deletes recursively", "workflow", "Remove-Item -LiteralPath $ScratchPath -Force", "Remove-Item -LiteralPath $ScratchPath -Recurse -Force"],
+    ["cleanup sweeps another completed attempt", "workflow", "sc19054-flux-acceptance-32551460830-1", "sc19054-flux-acceptance-32551460831-1"],
     ["cleanup accepts a wrong attempt", "workflow", "[string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)", "$true"],
   ];
   for (const [name, key, from, to] of mutations) {
@@ -894,7 +911,7 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
   assert.equal(withinPeakTolerance(24.2320000011, 24.232), false);
   assert.equal(withinPeakTolerance(Number.NaN, 24.232), false);
 
-  // Independent Windows-path model of the production guard: canonical prefix plus exact parent
+  // Independent Windows-path model of the production guard: exact canonical parent equality
   // prevents both prefix siblings and nested deletions; the closed leaf grammar excludes caches
   // and lookalikes. The first case is the exact path the failed always-cleanup rejected.
   const isBoundedScratch = (candidate, runnerTemp) => {
@@ -920,6 +937,42 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
     windowsPath.resolve(runnerTemp, `sc19054-flux-acceptance-${runId}-${attempt}`).toLowerCase();
   assert.equal(isExactAttempt(failedAttempt, "32551460830", "1"), true);
   assert.equal(isExactAttempt(failedAttempt, "32551460830", "2"), false);
+  const knownResidue = windowsPath.resolve(runnerTemp, "sc19054-flux-acceptance-32551460830-1");
+  assert.equal(windowsPath.resolve(failedAttempt), knownResidue);
+  assert.notEqual(
+    windowsPath.resolve(runnerTemp, "sc19054-flux-acceptance-32551460831-1"),
+    knownResidue,
+    "a concurrent sibling attempt must never be swept with the one known completed residue",
+  );
+  const closedInventoryAccepts = (rootEntries, outputEntries) =>
+    rootEntries.every(
+      ({ name, directory, reparse }) =>
+        !reparse &&
+        (directory
+          ? name === "output"
+          : ["identity.json", "model-files.json", "acceptance.log", "SHA256SUMS.txt"].includes(name)),
+    ) &&
+    outputEntries.every(
+      ({ name, directory, reparse }) =>
+        !reparse &&
+        !directory &&
+        ["sc19054-flux-acceptance.json", "sc19054-flux-schnell-q4-1024.png"].includes(name),
+    );
+  assert.equal(
+    closedInventoryAccepts(
+      [{ name: "output", directory: true, reparse: false }],
+      [{ name: "sc19054-flux-acceptance.json", directory: false, reparse: false }],
+    ),
+    true,
+  );
+  assert.equal(
+    closedInventoryAccepts(
+      [{ name: "output", directory: true, reparse: false }],
+      [{ name: "escape", directory: true, reparse: true }],
+    ),
+    false,
+    "a nested reparse escape must fail the complete inventory before any deletion",
+  );
 });
 
 // sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With
