@@ -4,6 +4,7 @@ import test from "node:test";
 
 const WORKFLOW_URL = new URL("../.github/workflows/windows-candle.yml", import.meta.url);
 const INVENTORY_URL = new URL("./inventory-sc19057-wan-artifact.mjs", import.meta.url);
+const PROVIDER_HARNESS_URL = new URL("./memory-calibration-harness.mjs", import.meta.url);
 
 function stepBody(workflow, name) {
   const start = workflow.indexOf(`      - name: ${name}\n`);
@@ -59,6 +60,29 @@ function assertInventorySourceContract(source) {
   assert.match(source, /status: "STARTED"/);
   assert.match(source, /status: "PASS"/);
   assert.match(source, /status: "FAIL"/);
+}
+
+function assertProviderTransportSourceContract(source) {
+  assert.match(source, /export async function readExactProviderCommandFile/);
+  assert.match(source, /if \(!file \|\| !path\.isAbsolute\(file\)\)/);
+  assert.match(source, /--provider-cmd-json-file must be an absolute path/);
+  assert.match(source, /--provider-executable must be an absolute path with --provider-cmd-json-file/);
+  assert.match(source, /lstat\(commandFile\)/);
+  assert.match(source, /!metadata\.isFile\(\) \|\| metadata\.isSymbolicLink\(\)/);
+  assert.match(source, /canonicalCommandFile.*realpath\(commandFile\)/s);
+  assert.match(source, /sameFilesystemPath\(canonicalCommandFile, commandFile\)/);
+  assert.match(source, /canonicalRoot = await realpath\(root\)/);
+  assert.match(source, /isWithin\(canonicalRoot, canonicalCommandFile\)/);
+  assert.match(source, /!Array\.isArray\(parsed\) \|\| parsed\.length !== 1/);
+  assert.match(source, /path\.isAbsolute\(parsed\[0\]\)/);
+  assert.match(source, /lstat\(commandPath\)/);
+  assert.match(source, /realpath\(commandPath\)/);
+  assert.match(source, /sameFilesystemPath\(commandPath, expectedPath\)/);
+  assert.match(source, /sameFilesystemPath\(canonicalCommand, canonicalExpected\)/);
+  assert.match(source, /forbiddenRoots: \[sceneWorksRepo, inferenceRepo, path\.dirname\(path\.resolve\(outputPath\)\)\]/);
+  assert.match(source, /indexes\.length > 1/);
+  assert.match(source, /candidate\.startsWith\("--"\)/);
+  assert.match(source, /Boolean\(inline\) === Boolean\(file\)/);
 }
 
 function assertWorkflowContract(workflow) {
@@ -143,10 +167,22 @@ function assertWorkflowContract(workflow) {
   assert.match(capture, /SCENEWORKS_WAN_REPOSITORY: \$\{\{ inputs\.provision_repository \}\}/);
   assert.match(capture, /SCENEWORKS_WAN_REVISION: \$\{\{ inputs\.provision_revision \}\}/);
   assert.match(capture, /\$env:SCENEWORKS_WAN_ROOT = \$env:SCENEWORKS_PROVISIONED_ROOT/);
-  assert.match(capture, /ConvertTo-Json -Compress -InputObject @\(\$adapter\)/);
+  assert.match(capture, /\$providerCommandFile = Join-Path \$env:RUNNER_TEMP "sc-19057-provider-command-\$\(\$env:GITHUB_RUN_ID\)-\$\(\$env:GITHUB_RUN_ATTEMPT\)\.json"/);
+  assert.match(capture, /\$providerCommandTemporary = "\$providerCommandFile\.tmp"/);
+  assert.match(capture, /provider-command-transport\.json/);
+  assert.match(capture, /status = 'STARTED'/);
+  assert.match(capture, /ConvertTo-Json -Compress -InputObject @\(\[string\]\$adapter\)/);
+  assert.match(capture, /New-Object System\.Text\.UTF8Encoding\(\$false\)/);
+  assert.match(capture, /\[System\.IO\.File\]::WriteAllText\(\$providerCommandTemporary, "\$providerJson`n", \$utf8WithoutBom\)/);
+  assert.match(capture, /Move-Item -LiteralPath \$providerCommandTemporary -Destination \$providerCommandFile/);
+  assert.match(capture, /providerCommandFileSha256 = \(Get-FileHash -Algorithm SHA256 -LiteralPath \$providerCommandFile\)/);
+  assert.match(capture, /status = 'FAIL'/);
   assert.match(capture, /--config docs\\calibration\\sc-19057\\wan-candle-video-capture-plan\.json/);
   assert.match(capture, /--backend candle/);
   assert.match(capture, /--fresh-per-case/);
+  assert.match(capture, /--provider-cmd-json-file \$providerCommandFile/);
+  assert.match(capture, /--provider-executable \$adapter/);
+  assert.doesNotMatch(capture, /--provider-command(?:\s|$)/);
   assert.match(capture, /memory-calibration-harness\.mjs check --input \$capture/);
   assert.match(capture, /validate-sc19057-wan-capture\.mjs/);
   assert.match(capture, /--sceneworks-revision \$env:GITHUB_SHA/);
@@ -170,7 +206,17 @@ function assertWorkflowContract(workflow) {
   assert.match(cleanup, /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_sc19057_wan_capture \}\}/);
   assert.match(cleanup, /refusing cleanup outside bounded job scratch/);
   assert.match(cleanup, /Remove-Item -LiteralPath \$full -Recurse -Force/);
+  assert.match(cleanup, /sc-19057-provider-command-\$\(\$env:GITHUB_RUN_ID\)-\$\(\$env:GITHUB_RUN_ATTEMPT\)\.json/);
+  assert.match(cleanup, /sc-19057-provider-command-\$\(\$env:GITHUB_RUN_ID\)-\$\(\$env:GITHUB_RUN_ATTEMPT\)\.json\.tmp/);
   assert.doesNotMatch(cleanup, /SCENEWORKS_PROVISIONED_ROOT|PROVISION_CACHE_DIR/);
+
+  const receiptAt = capture.indexOf("$transport | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $providerTransportReceipt -Encoding utf8");
+  const adapterResolveAt = capture.indexOf("$adapter = (Resolve-Path -LiteralPath $expectedAdapter).Path");
+  const transportWriteAt = capture.indexOf("[System.IO.File]::WriteAllText");
+  const harnessAt = capture.indexOf("node scripts\\memory-calibration-harness.mjs run");
+  assert.ok(receiptAt >= 0 && receiptAt < adapterResolveAt, "transport failure receipt must precede adapter resolution");
+  assert.ok(adapterResolveAt < transportWriteAt, "adapter identity must be resolved before the atomic write");
+  assert.ok(transportWriteAt < harnessAt, "atomic provider transport must be complete before capture starts");
 
   const acceptAt = workflow.indexOf("validate-sc19057-wan-capture.mjs");
   const uploadAt = workflow.indexOf("name: Upload the sealed SC-19057 capture attempt");
@@ -180,6 +226,7 @@ function assertWorkflowContract(workflow) {
 test("windows-candle exposes one exact mutually-exclusive manual SC-19057 mode", async () => {
   assertWorkflowContract(await readFile(WORKFLOW_URL, "utf8"));
   assertInventorySourceContract(await readFile(INVENTORY_URL, "utf8"));
+  assertProviderTransportSourceContract(await readFile(PROVIDER_HARNESS_URL, "utf8"));
 });
 
 test("the workflow contract kills routing artifact capture and cleanup disconnects", async () => {
@@ -197,6 +244,13 @@ test("the workflow contract kills routing artifact capture and cleanup disconnec
     ["disconnected resolved inventory", (text) => text.replace("node scripts\\inventory-sc19057-wan-artifact.mjs", "node scripts\\unsafe-link-length.mjs")],
     ["non-release adapter", (text) => text.replaceAll("cargo build --release --locked", "cargo build --locked")],
     ["missing fresh isolation", (text) => text.replace("            --fresh-per-case `\n", "")],
+    ["inline JSON native argv", (text) => text.replace("            --provider-cmd-json-file $providerCommandFile `", "            --provider-command $providerJson `")],
+    ["multiple provider argv", (text) => text.replace("@([string]$adapter)", "@([string]$adapter, '--unexpected')")],
+    ["BOM provider JSON", (text) => text.replace("System.Text.UTF8Encoding($false)", "System.Text.UTF8Encoding($true)")],
+    ["provider path substitution", (text) => text.replace("--provider-executable $adapter", "--provider-executable 'lookalike.exe'")],
+    ["non-atomic provider transport", (text) => text.replace("Move-Item -LiteralPath $providerCommandTemporary -Destination $providerCommandFile", "Copy-Item -LiteralPath $providerCommandTemporary -Destination $providerCommandFile")],
+    ["late provider failure evidence", (text) => text.replace("$transport | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $providerTransportReceipt -Encoding utf8\n          try {", "try {")],
+    ["transport cleanup disconnected", (text) => text.replace("sc-19057-provider-command-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).json.tmp", "disconnected-provider-command.tmp")],
     ["missing 6/6 validator", (text) => text.replace("validate-sc19057-wan-capture.mjs", "accept-any-capture.mjs")],
     ["unsafe raw-log arm", (text) => text.replace("            --fresh-per-case `\n", "            --fresh-per-case --raw-log-dir logs `\n")],
     ["automatic capture", (text) => text.replace("github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture", "github.event_name == 'push'")],
@@ -204,6 +258,28 @@ test("the workflow contract kills routing artifact capture and cleanup disconnec
   ];
   for (const [label, mutate] of mutations) {
     assert.throws(() => assertWorkflowContract(mutate(workflow)), undefined, label);
+  }
+});
+
+test("the harness source contract kills provider schema path and identity bypasses", async () => {
+  const source = await readFile(PROVIDER_HARNESS_URL, "utf8");
+  const mutations = [
+    ["relative command file", (text) => text.replace("!file || !path.isAbsolute(file)", "!file")],
+    ["linked command file", (text) => text.replace("!metadata.isFile() || metadata.isSymbolicLink()", "!metadata.isFile()")],
+    ["linked command parent", (text) => text.replace("!sameFilesystemPath(canonicalCommandFile, commandFile)", "false")],
+    ["lexical forbidden root", (text) => text.replace("isWithin(canonicalRoot, canonicalCommandFile)", "isWithin(root, commandFile)")],
+    ["multiple argv", (text) => text.replace("parsed.length !== 1", "parsed.length === 0")],
+    ["relative executable", (text) => text.replace("!path.isAbsolute(parsed[0])", "false")],
+    ["unresolved identity", (text) => text.replace("realpath(commandPath)", "commandPath")],
+    ["lexical identity alias", (text) => text.replace("!sameFilesystemPath(commandPath, expectedPath)", "false")],
+    ["identity mismatch", (text) => text.replace("!sameFilesystemPath(canonicalCommand, canonicalExpected)", "false")],
+    ["checkout transport", (text) => text.replace("forbiddenRoots: [sceneWorksRepo, inferenceRepo, path.dirname(path.resolve(outputPath))]", "forbiddenRoots: []")],
+    ["duplicate flags", (text) => text.replace("indexes.length > 1", "false")],
+    ["missing flag value", (text) => text.replace('candidate.startsWith("--")', "false")],
+    ["ambiguous provider modes", (text) => text.replace("Boolean(inline) === Boolean(file)", "false")],
+  ];
+  for (const [label, mutate] of mutations) {
+    assert.throws(() => assertProviderTransportSourceContract(mutate(source)), undefined, label);
   }
 });
 

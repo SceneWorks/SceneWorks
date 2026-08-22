@@ -1751,9 +1751,12 @@ set to an absolute runner-local cache path. It does not change the sealed artifa
 Do not dispatch while another CUDA/real-weight workflow occupies the shared physical lane. The job
 checks out both exact sources, verifies the closure ledger before capture, anonymously provisions
 and hashes the 25-file/17,338,835,457-byte q4 artifact, maps all three `SCENEWORKS_WAN_*` variables,
+atomically writes the exact one-element provider argv to bounded runner scratch (PowerShell native
+argv does not preserve inline JSON quotes), authenticates it against the resolved release adapter,
 captures outside the checkout, validates exact 6/6 acceptance, and uploads the raw bundle plus plan,
-artifact inventory, acceptance receipt, run identity, and SHA-256 manifest. Its bounded cleanup
-removes only job scratch and the nested inference checkout; the exact q4 hub cache is retained.
+artifact inventory, provider-transport preflight, acceptance receipt, run identity, and SHA-256
+manifest. Its bounded cleanup removes the exact transport file, job scratch, and nested inference
+checkout; the exact q4 hub cache is retained.
 
 ### 12f. Verify the receipt before believing it
 

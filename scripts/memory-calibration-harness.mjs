@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -1808,6 +1808,120 @@ export async function atomicWrite(file, value) {
   await rename(temporary, destination);
 }
 
+function sameFilesystemPath(left, right) {
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function isWithin(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+export async function readExactProviderCommandFile(
+  file,
+  { expectedExecutable, forbiddenRoots = [] } = {},
+) {
+  if (!file || !path.isAbsolute(file)) {
+    fail("--provider-cmd-json-file must be an absolute path");
+  }
+  if (!expectedExecutable || !path.isAbsolute(expectedExecutable)) {
+    fail("--provider-executable must be an absolute path with --provider-cmd-json-file");
+  }
+  const commandFile = path.resolve(file);
+  let metadata;
+  let canonicalCommandFile;
+  try {
+    [metadata, canonicalCommandFile] = await Promise.all([lstat(commandFile), realpath(commandFile)]);
+  } catch (error) {
+    fail(`could not inspect provider command file ${commandFile}: ${error.message}`);
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    fail("provider command file must be a regular non-symlink file");
+  }
+  if (!sameFilesystemPath(canonicalCommandFile, commandFile)) {
+    fail("provider command file path must not traverse a symlink or reparse point");
+  }
+  for (const root of forbiddenRoots.filter(Boolean).map((candidate) => path.resolve(candidate))) {
+    let canonicalRoot;
+    try {
+      canonicalRoot = await realpath(root);
+    } catch (error) {
+      fail(`could not authenticate forbidden provider-command root ${root}: ${error.message}`);
+    }
+    if (isWithin(canonicalRoot, canonicalCommandFile)) {
+      fail(`provider command file must be outside ${canonicalRoot}`);
+    }
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(commandFile, "utf8"));
+  } catch (error) {
+    fail(`provider command file must contain valid JSON: ${error.message}`);
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 1) {
+    fail("provider command file must contain exactly one argv string");
+  }
+  text(parsed[0], "provider command file argv[0]");
+  if (!path.isAbsolute(parsed[0])) {
+    fail("provider command file argv[0] must be an absolute executable path");
+  }
+  const commandPath = path.resolve(parsed[0]);
+  const expectedPath = path.resolve(expectedExecutable);
+  let commandMetadata;
+  let expectedMetadata;
+  let canonicalCommand;
+  let canonicalExpected;
+  try {
+    [commandMetadata, expectedMetadata, canonicalCommand, canonicalExpected] = await Promise.all([
+      lstat(commandPath),
+      lstat(expectedPath),
+      realpath(commandPath),
+      realpath(expectedPath),
+    ]);
+  } catch (error) {
+    fail(`could not authenticate provider executable identity: ${error.message}`);
+  }
+  if (!commandMetadata.isFile() || commandMetadata.isSymbolicLink()
+      || !expectedMetadata.isFile() || expectedMetadata.isSymbolicLink()) {
+    fail("provider executable identity must name a regular non-symlink file");
+  }
+  if (!sameFilesystemPath(commandPath, expectedPath)
+      || !sameFilesystemPath(canonicalCommand, canonicalExpected)) {
+    fail("provider command file argv[0] does not match --provider-executable");
+  }
+  return [canonicalExpected];
+}
+
+async function providerCommandFromArgs({ args, forbiddenRoots = [] }) {
+  const exactValue = (flag) => {
+    const indexes = args.flatMap((candidate, index) => candidate === flag ? [index] : []);
+    if (indexes.length > 1) fail(`${flag} may be supplied only once`);
+    if (!indexes.length) return undefined;
+    const candidate = args[indexes[0] + 1];
+    if (!candidate || candidate.startsWith("--")) fail(`${flag} requires one value`);
+    return candidate;
+  };
+  const inline = exactValue("--provider-command");
+  const file = exactValue("--provider-cmd-json-file");
+  const expectedExecutable = exactValue("--provider-executable");
+  if (Boolean(inline) === Boolean(file)) {
+    fail("supply exactly one of --provider-command or --provider-cmd-json-file");
+  }
+  if (file) {
+    return readExactProviderCommandFile(file, { expectedExecutable, forbiddenRoots });
+  }
+  if (expectedExecutable || args.includes("--provider-cmd-json-file")) {
+    fail("--provider-executable is valid only with --provider-cmd-json-file");
+  }
+  try {
+    return JSON.parse(inline);
+  } catch (error) {
+    fail(`--provider-command must be valid JSON: ${error.message}`);
+  }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   const value = (flag) => {
@@ -1858,11 +1972,17 @@ async function main() {
   }
   if (command === "run") {
     const outputPath = value("--output");
+    const sceneWorksRepo = path.resolve(value("--sceneworks-repo"));
+    const inferenceRepo = path.resolve(value("--inference-repo"));
+    const providerCommand = await providerCommandFromArgs({
+      args,
+      forbiddenRoots: [sceneWorksRepo, inferenceRepo, path.dirname(path.resolve(outputPath))],
+    });
     const output = await runProviderPlan({
       config: await readJson(value("--config")),
-      providerCommand: JSON.parse(value("--provider-command")),
-      sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
-      inferenceRepo: path.resolve(value("--inference-repo")),
+      providerCommand,
+      sceneWorksRepo,
+      inferenceRepo,
       resume: value("--resume") ? await readJson(value("--resume")) : undefined,
       backend: value("--backend"),
       providerName: value("--provider"),

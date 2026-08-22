@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,7 +12,8 @@ import {
   HARNESS_VERSION, RUNG_REUSE_TOLERANCE, SCHEMA_VERSION, assessProviderReuse, atomicWrite, canonicalJson,
   projectPhaseMetricsToSchemaV5,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
-  physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
+  physicalMlxSessionId, readExactProviderCommandFile, runProviderPlan, validateBundle, validateRecord,
+  validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import {
   calibrationBinding,
@@ -28,6 +29,100 @@ const stubClosureDigest = async (provider) =>
 
 
 const execFileAsync = promisify(execFile);
+
+const HARNESS_PATH = fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url));
+
+async function assertProviderFileCliRejects({ commandFile, expectedExecutable, message }) {
+  const evidence = path.join(path.dirname(commandFile), "evidence");
+  await mkdir(evidence, { recursive: true });
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      HARNESS_PATH,
+      "run",
+      "--provider-cmd-json-file", commandFile,
+      "--provider-executable", expectedExecutable,
+      "--sceneworks-repo", fileURLToPath(new URL("..", import.meta.url)),
+      "--inference-repo", fileURLToPath(new URL("..", import.meta.url)),
+      "--output", path.join(evidence, "capture.json"),
+      "--config", path.join(path.dirname(commandFile), "must-not-be-read.json"),
+    ]),
+    message,
+  );
+}
+
+test("file-backed provider argv preserves one exact executable without native-shell JSON quoting", async () => {
+  const scratch = await realpath(await mkdtemp(path.join(tmpdir(), "memory-provider-command-")));
+  const commandFile = path.join(scratch, "provider command.json");
+  await writeFile(commandFile, `${JSON.stringify([process.execPath])}\n`);
+  assert.deepEqual(
+    await readExactProviderCommandFile(commandFile, { expectedExecutable: process.execPath }),
+    [await realpath(process.execPath)],
+  );
+});
+
+test("spawned provider transport parsing rejects PowerShell quote loss and every in-file substitution", async () => {
+  const scratch = await realpath(await mkdtemp(path.join(tmpdir(), "memory-provider-command-cli-")));
+  const evidence = path.join(scratch, "evidence");
+  await mkdir(evidence, { recursive: true });
+  const spawnHarness = (providerArgs) => execFileAsync(process.execPath, [
+    HARNESS_PATH,
+    "run",
+    ...providerArgs,
+    "--sceneworks-repo", fileURLToPath(new URL("..", import.meta.url)),
+    "--inference-repo", fileURLToPath(new URL("..", import.meta.url)),
+    "--output", path.join(evidence, "capture.json"),
+    "--config", path.join(scratch, "must-not-be-read.json"),
+  ]);
+  const cases = [
+    ["malformed", "{not-json", /must contain valid JSON/],
+    ["non-array", JSON.stringify(process.execPath), /exactly one argv string/],
+    ["multiple", JSON.stringify([process.execPath, "--unexpected"]), /exactly one argv string/],
+  ];
+  for (const [name, body, message] of cases) {
+    const commandFile = path.join(scratch, `${name}.json`);
+    await writeFile(commandFile, body);
+    await assertProviderFileCliRejects({ commandFile, expectedExecutable: process.execPath, message });
+  }
+
+  const substitutedExecutable = path.join(scratch, "memory-candle-adapter-lookalike.exe");
+  await writeFile(substitutedExecutable, "not the authenticated executable");
+  const substituted = path.join(scratch, "substituted.json");
+  await writeFile(substituted, JSON.stringify([substitutedExecutable]));
+  await assertProviderFileCliRejects({
+    commandFile: substituted,
+    expectedExecutable: process.execPath,
+    message: /does not match --provider-executable/,
+  });
+
+  await assert.rejects(
+    spawnHarness([
+      "--provider-command", String.raw`[D:\actions-runner-2\_work\SceneWorks\target\release\memory-candle-adapter.exe]`,
+    ]),
+    /--provider-command must be valid JSON/,
+  );
+
+  const valid = path.join(scratch, "valid.json");
+  await writeFile(valid, JSON.stringify([process.execPath]));
+  for (const [label, providerArgs, message] of [
+    ["both transports", [
+      "--provider-command", JSON.stringify([process.execPath]),
+      "--provider-cmd-json-file", valid,
+      "--provider-executable", process.execPath,
+    ], /supply exactly one/],
+    ["neither transport", [], /supply exactly one/],
+    ["duplicate file flag", [
+      "--provider-cmd-json-file", valid,
+      "--provider-cmd-json-file", valid,
+      "--provider-executable", process.execPath,
+    ], /--provider-cmd-json-file may be supplied only once/],
+    ["missing file value", [
+      "--provider-cmd-json-file",
+      "--provider-executable", process.execPath,
+    ], /--provider-cmd-json-file requires one value/],
+  ]) {
+    await assert.rejects(spawnHarness(providerArgs), message, label);
+  }
+});
 
 test("diagnostic LTX safety canary output is structurally non-ingestible", () => {
   for (const [id, status] of [
