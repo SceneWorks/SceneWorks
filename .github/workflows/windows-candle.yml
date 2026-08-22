@@ -1288,15 +1288,49 @@ jobs:
           INFERENCE_REVISION: ${{ inputs.inference_revision }}
         run: |
           $env:SCENEWORKS_WAN_ROOT = $env:SCENEWORKS_PROVISIONED_ROOT
-          $adapter = (Resolve-Path -LiteralPath 'target\release\memory-candle-adapter.exe').Path
-          $provider = ConvertTo-Json -Compress -InputObject @($adapter)
+          $providerCommandFile = Join-Path $env:RUNNER_TEMP "sc-19057-provider-command-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).json"
+          $providerCommandTemporary = "$providerCommandFile.tmp"
+          $providerTransportReceipt = Join-Path $env:SC19057_EVIDENCE_DIR 'provider-command-transport.json'
+          $expectedAdapter = Join-Path $env:GITHUB_WORKSPACE 'target\release\memory-candle-adapter.exe'
+          $transport = [ordered]@{
+            schemaVersion = 1
+            story = 'SC-19057'
+            status = 'STARTED'
+            runnerName = $env:RUNNER_NAME
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            head = $env:GITHUB_SHA
+            providerExecutable = $expectedAdapter
+            providerCommandFile = $providerCommandFile
+          }
+          $transport | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $providerTransportReceipt -Encoding utf8
+          try {
+            $adapter = (Resolve-Path -LiteralPath $expectedAdapter).Path
+            $transport.providerExecutable = $adapter
+            if ((Test-Path -LiteralPath $providerCommandFile) -or (Test-Path -LiteralPath $providerCommandTemporary)) {
+              throw "SC-19057 provider command transport already exists for this exact attempt"
+            }
+            $providerJson = ConvertTo-Json -Compress -InputObject @([string]$adapter)
+            $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($providerCommandTemporary, "$providerJson`n", $utf8WithoutBom)
+            Move-Item -LiteralPath $providerCommandTemporary -Destination $providerCommandFile
+            $transport.status = 'READY'
+            $transport.providerCommandFileSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $providerCommandFile).Hash.ToLowerInvariant()
+            $transport | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $providerTransportReceipt -Encoding utf8
+          } catch {
+            $transport.status = 'FAIL'
+            $transport.error = $_.Exception.Message
+            $transport | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $providerTransportReceipt -Encoding utf8
+            throw
+          }
           $capture = Join-Path $env:SC19057_EVIDENCE_DIR 'wan-candle-video-sc-19057.json'
           $receipt = Join-Path $env:SC19057_EVIDENCE_DIR 'wan-candle-video-sc-19057.acceptance.json'
           node scripts\memory-calibration-harness.mjs run `
             --config docs\calibration\sc-19057\wan-candle-video-capture-plan.json `
             --backend candle `
             --fresh-per-case `
-            --provider-command $provider `
+            --provider-cmd-json-file $providerCommandFile `
+            --provider-executable $adapter `
             --sceneworks-repo $env:GITHUB_WORKSPACE `
             --inference-repo "$env:GITHUB_WORKSPACE\.calibration\inference" `
             --output $capture
@@ -1593,7 +1627,9 @@ jobs:
           $allowedRoot = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
           $targets = @(
             (Join-Path $env:GITHUB_WORKSPACE '.calibration'),
-            (Join-Path $env:RUNNER_TEMP "sc-19057-wan-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)")
+            (Join-Path $env:RUNNER_TEMP "sc-19057-wan-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"),
+            (Join-Path $env:RUNNER_TEMP "sc-19057-provider-command-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).json"),
+            (Join-Path $env:RUNNER_TEMP "sc-19057-provider-command-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT).json.tmp")
           )
           foreach ($target in $targets) {
             if (-not $target) { continue }

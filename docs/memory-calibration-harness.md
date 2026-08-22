@@ -94,6 +94,14 @@ stdin and expects one JSON response on stdout:
 3. `{ "action": "run_batch", "planned": [...], ... }` → `{ "modelLoads": 1, "fragments": [...] }`
 4. `{ "action": "assess_batch", "planned": [...] }` → an explicit reuse-eligibility verdict
 
+On a native shell that does not preserve JSON quotes across its process boundary, write the argv
+array atomically to an absolute file outside both repository checkouts and the capture-output
+directory, then use `--provider-cmd-json-file <file> --provider-executable <absolute executable>`.
+The file form is deliberately narrower than inline `--provider-command`: it accepts exactly one
+non-empty absolute argv string, rejects symlink/reparse aliases and repository/evidence paths, and
+requires that string to resolve to the independently supplied executable identity. Supplying both
+forms, neither form, extra argv entries, or a substituted executable fails before provider startup.
+
 `modelLoadPolicy: "batch_rungs"` plus a shared `modelLoadGroup` schedules pending cases for one
 target, backend, and fixture in canonical rung order. When multiple parameter points are pending for
 one rung, the runner selects one for the batch; a returned complete sweep can then retire the others.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,7 +12,8 @@ import {
   HARNESS_VERSION, RUNG_REUSE_TOLERANCE, SCHEMA_VERSION, assessProviderReuse, atomicWrite, canonicalJson,
   projectPhaseMetricsToSchemaV5,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
-  physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
+  physicalMlxSessionId, readExactProviderCommandFile, runProviderPlan, validateBundle, validateRecord,
+  validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import {
   calibrationBinding,
@@ -28,6 +29,350 @@ const stubClosureDigest = async (provider) =>
 
 
 const execFileAsync = promisify(execFile);
+
+const HARNESS_PATH = fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url));
+
+async function assertProviderFileCliRejects({
+  commandFile,
+  expectedExecutable,
+  message,
+  evidence = path.join(path.dirname(commandFile), "evidence"),
+  sceneWorksRepo = fileURLToPath(new URL("..", import.meta.url)),
+  inferenceRepo = sceneWorksRepo,
+  env = process.env,
+  marker,
+}) {
+  await mkdir(evidence, { recursive: true });
+  if (marker) await rm(marker, { force: true });
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      HARNESS_PATH,
+      "run",
+      "--provider-cmd-json-file", commandFile,
+      "--provider-executable", expectedExecutable,
+      "--sceneworks-repo", sceneWorksRepo,
+      "--inference-repo", inferenceRepo,
+      "--output", path.join(evidence, "capture.json"),
+      "--config", path.join(path.dirname(commandFile), "must-not-be-read.json"),
+    ], { env }),
+    message,
+  );
+  if (marker) {
+    await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" });
+  }
+}
+
+async function createProviderCliFixture() {
+  const scratch = await realpath(await mkdtemp(path.join(tmpdir(), "memory-provider-cli-e2e-")));
+  const sceneWorksRepo = path.join(scratch, "SceneWorks");
+  const inferenceRepo = path.join(scratch, "inference");
+  const evidence = path.join(scratch, "evidence");
+  await mkdir(path.join(sceneWorksRepo, "docs/generated"), { recursive: true });
+  await mkdir(path.join(sceneWorksRepo, "config"), { recursive: true });
+  await mkdir(path.join(inferenceRepo, "crates/fixture/src"), { recursive: true });
+  await mkdir(evidence, { recursive: true });
+  await writeFile(
+    path.join(sceneWorksRepo, "docs/generated/memory-matrix.json"),
+    JSON.stringify({ generatedFrom: { sceneWorksRevision: `source-tree:${"1".repeat(64)}` } }),
+  );
+  await writeFile(
+    path.join(sceneWorksRepo, "config/inference-provider-closures.json"),
+    JSON.stringify({
+      providers: {
+        "candle:fixture": { crate: "crates/fixture", digest: "2".repeat(64) },
+      },
+    }),
+  );
+  await writeFile(
+    path.join(inferenceRepo, "Cargo.toml"),
+    '[workspace]\nmembers = ["crates/fixture"]\nresolver = "2"\n',
+  );
+  await writeFile(
+    path.join(inferenceRepo, "Cargo.lock"),
+    'version = 3\n\n[[package]]\nname = "fixture"\nversion = "0.1.0"\n',
+  );
+  await writeFile(
+    path.join(inferenceRepo, "crates/fixture/Cargo.toml"),
+    '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
+  );
+  await writeFile(
+    path.join(inferenceRepo, "crates/fixture/src/lib.rs"),
+    'pub const PROVIDER: &str = "fixture";\n',
+  );
+  for (const repo of [sceneWorksRepo, inferenceRepo]) {
+    await execFileAsync("git", ["init", repo]);
+    await execFileAsync("git", ["-C", repo, "config", "user.email", "fixture@example.invalid"]);
+    await execFileAsync("git", ["-C", repo, "config", "user.name", "Fixture"]);
+    await execFileAsync("git", ["-C", repo, "add", "."]);
+    await execFileAsync("git", ["-C", repo, "commit", "-m", "fixture"]);
+  }
+  const config = path.join(scratch, "plan.json");
+  await writeFile(config, JSON.stringify({
+    providers: [{
+      evidenceScope: "fixture",
+      backend: "candle",
+      loadShape: "eager_materialization",
+      target: {
+        modelId: "fixture",
+        provider: "fixture",
+        tier: "q4",
+        mode: "text_to_image",
+        overlay: "none",
+        geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
+      },
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
+      calibrationFingerprint: "provider-command-file-e2e-v1",
+      fixture: "provider-command-file-e2e",
+      cases: [{
+        parameters: { decodeTileEdge: 512, decodeOverlap: 128 },
+        expectedResult: "passed",
+      }],
+    }],
+  }));
+  const marker = path.join(scratch, "provider-invocations.txt");
+  const preload = path.join(scratch, "provider-preload.cjs");
+  await writeFile(preload, String.raw`
+if (process.argv.length === 1 && process.env.MEMORY_PROVIDER_MARKER) {
+  const fs = require("node:fs");
+  const request = JSON.parse(fs.readFileSync(0, "utf8"));
+  fs.appendFileSync(process.env.MEMORY_PROVIDER_MARKER, request.action + "\n");
+  if (request.action === "probe") {
+    process.stdout.write(JSON.stringify({ hardware: {
+      probe: "spawned provider-command transport fixture",
+      memoryBytes: 51539607552,
+      deviceId: "fixture:0",
+      name: "Fixture CUDA",
+      computeCapability: "9.0",
+      driverVersion: "999.1",
+      runtimeVersion: "12.8"
+    } }));
+    process.exit(0);
+  }
+  const planned = request.planned;
+  const parameters = planned.strategy.parameters;
+  const phase = (value) => ({ activeBytes: value, allocatorBytes: value + 10, reclaimableBytes: 10 });
+  process.stdout.write(JSON.stringify({
+    status: "complete",
+    strategy: planned.strategy,
+    loadShape: planned.loadShape,
+    artifact: { repository: "SceneWorks/fixture", resolvedRevision: "cccccccccccccccccccccccccccccccccccccccc", variant: "q4" },
+    sweep: {
+      axes: [{ parameter: "decodeTileEdge", testedValues: [384, 512] }],
+      cases: [
+        { parameters: { ...parameters, decodeTileEdge: 384 }, result: "passed" },
+        { parameters: { ...parameters, decodeTileEdge: 512 }, result: "passed" }
+      ],
+      rangeVerified: true
+    },
+    scenarios: [
+      { name: "exact_fit", result: "passed", predictedBytes: 200, effectiveBudgetBytes: 200 },
+      { name: "unknown_budget", result: "passed" },
+      { name: "stale_evidence", result: "passed" },
+      { name: "warm_repeat", result: "passed" },
+      { name: "cancel", result: "passed", cleanupVerified: true, warmFollowUpPassed: true },
+      { name: "error", result: "passed", cleanupVerified: true, warmFollowUpPassed: true },
+      { name: "loadability", result: "passed" },
+      { name: "overlay", result: "not_applicable", reason: "fixture has no overlay" }
+    ],
+    predictedPeakBytes: { conditioning: 100, denoise: 200, decode: 150, overall: 200 },
+    observedMemory: { conditioning: phase(100), denoise: phase(200), decode: phase(150), overall: phase(200) },
+    quality: {
+      contract: "tolerance", identicalLatents: true, result: "passed",
+      maximumError: 0.01, meanError: 0.001,
+      maximumErrorThreshold: 0.08, meanErrorThreshold: 0.01
+    },
+    negativeMutation: {
+      parameters: { decodeTileEdge: 256, decodeOverlap: 32 }, measured: true,
+      result: "failed_as_expected", maximumError: 0.09, meanError: 0.02
+    },
+    loadability: { result: "passed", resolvedPathFingerprint: "fixture@resolved:q4" },
+    capturedAt: "2026-08-22T12:00:00Z"
+  }));
+  process.exit(0);
+}
+`);
+  return {
+    scratch,
+    sceneWorksRepo,
+    inferenceRepo,
+    evidence,
+    config,
+    marker,
+    env: {
+      ...process.env,
+      NODE_OPTIONS: `--require=${preload}`,
+      MEMORY_PROVIDER_MARKER: marker,
+    },
+  };
+}
+
+async function runProviderCliFixture(fixture, providerArgs, outputName) {
+  await rm(fixture.marker, { force: true });
+  const output = path.join(fixture.evidence, outputName);
+  await execFileAsync(process.execPath, [
+    HARNESS_PATH,
+    "run",
+    ...providerArgs,
+    "--config", fixture.config,
+    "--backend", "candle",
+    "--fresh-per-case",
+    "--sceneworks-repo", fixture.sceneWorksRepo,
+    "--inference-repo", fixture.inferenceRepo,
+    "--output", output,
+  ], { env: fixture.env });
+  return {
+    bundle: JSON.parse(await readFile(output, "utf8")),
+    invocations: (await readFile(fixture.marker, "utf8")).trim().split("\n"),
+  };
+}
+
+test("file-backed provider argv preserves one exact executable without native-shell JSON quoting", async () => {
+  const scratch = await realpath(await mkdtemp(path.join(tmpdir(), "memory-provider-command-")));
+  const commandFile = path.join(scratch, "provider command.json");
+  await writeFile(commandFile, `${JSON.stringify([process.execPath])}\n`);
+  assert.deepEqual(
+    await readExactProviderCommandFile(commandFile, { expectedExecutable: process.execPath }),
+    [await realpath(process.execPath)],
+  );
+});
+
+test("spawned CLI connects both file-backed and legacy inline provider commands to a complete record", async () => {
+  const fixture = await createProviderCliFixture();
+  const commandFile = path.join(fixture.scratch, "provider-command.json");
+  await writeFile(commandFile, `${JSON.stringify([process.execPath])}\n`);
+  const fileBacked = await runProviderCliFixture(fixture, [
+    "--provider-cmd-json-file", commandFile,
+    "--provider-executable", process.execPath,
+  ], "file-backed.json");
+  assert.deepEqual(fileBacked.invocations, ["probe", "run"]);
+  assert.equal(fileBacked.bundle.records.length, 1);
+  assert.equal(fileBacked.bundle.records[0].status, "complete");
+
+  const inline = await runProviderCliFixture(fixture, [
+    "--provider-command", JSON.stringify([process.execPath]),
+  ], "inline.json");
+  assert.deepEqual(inline.invocations, ["probe", "run"]);
+  assert.equal(inline.bundle.records.length, 1);
+  assert.equal(inline.bundle.records[0].status, "complete");
+});
+
+test("spawned provider transport parsing rejects PowerShell quote loss and every in-file substitution", async () => {
+  const fixture = await createProviderCliFixture();
+  const { scratch, evidence, sceneWorksRepo, inferenceRepo, env, marker } = fixture;
+  const spawnHarness = (providerArgs) => execFileAsync(process.execPath, [
+    HARNESS_PATH,
+    "run",
+    ...providerArgs,
+    "--sceneworks-repo", sceneWorksRepo,
+    "--inference-repo", inferenceRepo,
+    "--output", path.join(evidence, "capture.json"),
+    "--config", path.join(scratch, "must-not-be-read.json"),
+  ], { env });
+  const assertZeroSpawnRejects = async (providerArgs, message, label) => {
+    await rm(marker, { force: true });
+    await assert.rejects(spawnHarness(providerArgs), message, label);
+    await assert.rejects(readFile(marker, "utf8"), { code: "ENOENT" });
+  };
+  const cases = [
+    ["malformed", "{not-json", /must contain valid JSON/],
+    ["non-array", JSON.stringify(process.execPath), /exactly one argv string/],
+    ["empty", "[]", /exactly one argv string/],
+    ["non-string", JSON.stringify([42]), /argv\[0\] must be a non-empty string/],
+    ["multiple", JSON.stringify([process.execPath, "--unexpected"]), /exactly one argv string/],
+    ["nul", JSON.stringify([`${process.execPath}\0suffix`]), /must not contain NUL bytes/],
+  ];
+  for (const [name, body, message] of cases) {
+    const commandFile = path.join(scratch, `${name}.json`);
+    await writeFile(commandFile, body);
+    await assertProviderFileCliRejects({
+      commandFile,
+      expectedExecutable: process.execPath,
+      message,
+      evidence,
+      sceneWorksRepo,
+      inferenceRepo,
+      env,
+      marker,
+    });
+  }
+
+  const substitutedExecutable = path.join(scratch, "memory-candle-adapter-lookalike.exe");
+  await writeFile(substitutedExecutable, "not the authenticated executable");
+  const substituted = path.join(scratch, "substituted.json");
+  await writeFile(substituted, JSON.stringify([substitutedExecutable]));
+  await assertProviderFileCliRejects({
+    commandFile: substituted,
+    expectedExecutable: process.execPath,
+    message: /does not match --provider-executable/,
+    evidence,
+    sceneWorksRepo,
+    inferenceRepo,
+    env,
+    marker,
+  });
+
+  const symlinkTarget = path.join(scratch, "symlink-target.json");
+  const symlinked = path.join(scratch, "symlinked.json");
+  await writeFile(symlinkTarget, JSON.stringify([process.execPath]));
+  await symlink(symlinkTarget, symlinked);
+  await assertProviderFileCliRejects({
+    commandFile: symlinked,
+    expectedExecutable: process.execPath,
+    message: /regular non-symlink file/,
+    evidence,
+    sceneWorksRepo,
+    inferenceRepo,
+    env,
+    marker,
+  });
+
+  for (const [label, commandFile, message] of [
+    ["checkout command file", path.join(sceneWorksRepo, "provider-command.json"), /must be outside/],
+    ["evidence command file", path.join(evidence, "provider-command.json"), /must be outside/],
+  ]) {
+    await writeFile(commandFile, JSON.stringify([process.execPath]));
+    await assertProviderFileCliRejects({
+      commandFile,
+      expectedExecutable: process.execPath,
+      message,
+      evidence,
+      sceneWorksRepo,
+      inferenceRepo,
+      env,
+      marker,
+    });
+  }
+
+  await assertZeroSpawnRejects([
+    "--provider-command", String.raw`[D:\actions-runner-2\_work\SceneWorks\target\release\memory-candle-adapter.exe]`,
+  ],
+    /--provider-command must be valid JSON/,
+    "PowerShell quote stripping",
+  );
+
+  const valid = path.join(scratch, "valid.json");
+  await writeFile(valid, JSON.stringify([process.execPath]));
+  for (const [label, providerArgs, message] of [
+    ["both transports", [
+      "--provider-command", JSON.stringify([process.execPath]),
+      "--provider-cmd-json-file", valid,
+      "--provider-executable", process.execPath,
+    ], /supply exactly one/],
+    ["neither transport", [], /supply exactly one/],
+    ["duplicate file flag", [
+      "--provider-cmd-json-file", valid,
+      "--provider-cmd-json-file", valid,
+      "--provider-executable", process.execPath,
+    ], /--provider-cmd-json-file may be supplied only once/],
+    ["missing file value", [
+      "--provider-cmd-json-file",
+      "--provider-executable", process.execPath,
+    ], /--provider-cmd-json-file requires one value/],
+  ]) {
+    await assertZeroSpawnRejects(providerArgs, message, label);
+  }
+});
 
 test("diagnostic LTX safety canary output is structurally non-ingestible", () => {
   for (const [id, status] of [
