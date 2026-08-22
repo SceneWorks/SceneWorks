@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:75ff1594cebcfb84ac9d23ab9e252e26d5ac04f7dd7f25e7f971f806d7b11dab",
+    "sceneWorksRevision": "source-tree:258ba46778666ebdd8087f7b0551ce51fd28cdd8c5d7e2bcd5886eee59761692",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -86,7 +86,7 @@
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
-        "sha256": "1f27e51386f4de6031ea6d453cc59be5977d984dea8bea8ddc16801f5f4eda48"
+        "sha256": "6a9db7f71cc79de58bfba7809708980115c8ec1dc4a4465a79f1f730a6b4cbc5"
       },
       "payload": {
         "path": "crates/sceneworks-worker/src/payload.rs",

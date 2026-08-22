@@ -95,6 +95,7 @@ COPY config ./config
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
 COPY docs/generated/ltx-mlx-*.json ./docs/generated/
+COPY docs/generated/wan-candle-video-sc-19057.json ./docs/generated/
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -222,6 +223,7 @@ COPY config ./config
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/
 COPY docs/generated/video-memory-curves.json ./docs/generated/
 COPY docs/generated/ltx-mlx-*.json ./docs/generated/
+COPY docs/generated/wan-candle-video-sc-19057.json ./docs/generated/
 
 # nvcc compiles every candle provider's CUDA kernels here (compiling needs no GPU).
 # The general Candle kernels retain compute_80 PTX, but the GGUF/MoE kernels in

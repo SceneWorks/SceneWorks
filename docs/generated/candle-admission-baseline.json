@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9296cdd2ad7f1937b26749f30f204d43585815b4b116e15a24e3cda8dc3fc955",
+    "sceneWorksRevision": "source-tree:32178747a062b34baa0c9fb4ba92e37d864a5cb73129d143aed3250bbdb18bcd",
     "decisions": {
       "path": "docs/generated/candle-admission-decisions.json",
       "digest": "sha256:03fe68dc3dc37ee7c2e15aaa061ca23f2e4766cb149fc4845e7fba3a372c36f3",
@@ -75223,7 +75223,8 @@
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "mechanisms": [
         "flat_video_fit_error",
-        "shared_selector_legacy_video_compatibility"
+        "shared_selector_legacy_video_compatibility",
+        "video_memory_curve_bundle"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
       "geometrySensitive": true,
@@ -75245,7 +75246,8 @@
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "mechanisms": [
         "flat_video_fit_error",
-        "shared_selector_legacy_video_compatibility"
+        "shared_selector_legacy_video_compatibility",
+        "video_memory_curve_bundle"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
       "geometrySensitive": true,
@@ -75267,7 +75269,8 @@
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "mechanisms": [
         "flat_video_fit_error",
-        "shared_selector_legacy_video_compatibility"
+        "shared_selector_legacy_video_compatibility",
+        "video_memory_curve_bundle"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
       "geometrySensitive": true,
@@ -75289,7 +75292,8 @@
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "mechanisms": [
         "flat_video_fit_error",
-        "shared_selector_legacy_video_compatibility"
+        "shared_selector_legacy_video_compatibility",
+        "video_memory_curve_bundle"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
       "geometrySensitive": true,

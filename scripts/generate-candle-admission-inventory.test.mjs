@@ -1152,15 +1152,40 @@ test("the manifest carries a bare `measured` boolean and no evidence-class enum"
   assert.ok(measuredCount > 0);
 });
 
-test("the packaged video curves are MLX-only, which is why no candle route reaches the bundle", () => {
+test("the exact packaged Candle video curve retires only the zero-curve gap", () => {
   const lanes = artifacts.inventory.summary.packagedVideoCurveLanes;
-  assert.ok(Object.keys(lanes).length > 0, "no packaged curve lanes at all");
-  assert.equal(lanes.candle ?? 0, 0, "a candle curve now exists — update the recorded gap");
-  assert.equal(artifacts.inventory.summary.byMechanism.video_memory_curve_bundle, 0);
+  assert.deepEqual(lanes, { candle: 1, mlx: 1 });
+  assert.equal(artifacts.inventory.summary.byMechanism.video_memory_curve_bundle, 1);
+  const wan = artifacts.inventory.routes.find((route) => route.modelId === "wan_2_2");
+  assert.ok(wan?.mechanisms.includes("video_memory_curve_bundle"));
   assert.ok(
-    artifacts.inventory.knownGaps.some(
+    !artifacts.inventory.knownGaps.some(
       (gap) => gap.id === "zero-candle-video-memory-curves-packaged",
     ),
+  );
+
+  const withoutCandle = structuredClone(bodies);
+  const curves = JSON.parse(withoutCandle.videoMemoryCurvesData);
+  curves.curves = curves.curves.filter((curve) => curve.backend !== "candle");
+  curves.sourceCatalog = curves.sourceCatalog.filter(
+    (source) => source.path !== "docs/generated/wan-candle-video-sc-19057.json",
+  );
+  withoutCandle.videoMemoryCurvesData = `${JSON.stringify(curves, null, 2)}\n`;
+  const reverted = buildInventory(withoutCandle);
+  assert.equal(reverted.summary.byMechanism.video_memory_curve_bundle, 0);
+  assert.ok(
+    reverted.knownGaps.some((gap) => gap.id === "zero-candle-video-memory-curves-packaged"),
+    "removing the exact Candle curve must restore the recorded gap",
+  );
+
+  const wrongProvider = structuredClone(bodies);
+  const detached = JSON.parse(wrongProvider.videoMemoryCurvesData);
+  detached.curves.find((curve) => curve.backend === "candle").provider = "foreign_provider";
+  wrongProvider.videoMemoryCurvesData = `${JSON.stringify(detached, null, 2)}\n`;
+  assert.equal(
+    buildInventory(wrongProvider).summary.byMechanism.video_memory_curve_bundle,
+    0,
+    "a lane tag alone is insufficient; the curve must match the routed model/provider identity",
   );
 });
 

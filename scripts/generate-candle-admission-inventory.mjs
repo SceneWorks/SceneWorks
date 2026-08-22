@@ -1370,6 +1370,22 @@ export function parseVideoCurveLanes(videoMemoryCurvesData) {
   return lanes;
 }
 
+/** Exact Candle route identities backed by a packaged video curve. */
+export function parseCandleVideoCurveRoutes(videoMemoryCurvesData) {
+  const parsed = JSON.parse(videoMemoryCurvesData);
+  const curves = Array.isArray(parsed) ? parsed : (parsed.curves ?? parsed.bundles ?? []);
+  if (!Array.isArray(curves)) throw new Error("video-memory curve container has no curve array");
+  const routes = new Set();
+  for (const curve of curves) {
+    if (curve?.backend !== "candle") continue;
+    if (typeof curve.modelId !== "string" || typeof curve.provider !== "string") {
+      throw new Error("a packaged Candle video curve has no exact model/provider identity");
+    }
+    routes.add(`${curve.modelId}\0${curve.provider}`);
+  }
+  return routes;
+}
+
 // -------------------------------------------------------------------------------------------------
 // The candle legacy scalar gate, MIRRORED. Every branch below is a line-for-line reading of
 // `crates/sceneworks-worker/src/candle_scalar_gate.rs`.
@@ -1557,6 +1573,7 @@ function classifyRoute({
   lanes,
   conditionedLanes,
   videoBinding,
+  packagedCandleVideoRoutes,
   registryProviders,
   compatibility,
 }) {
@@ -1615,6 +1632,13 @@ function classifyRoute({
   if (evidence.declaresTurboFit) mechanisms.push("krea_turbo_fit");
   if (evidence.declaresControlFit) mechanisms.push("krea_control_fit");
   if (videoBinding) mechanisms.push("flat_video_fit_error");
+  if (
+    modality === "video" &&
+    engineId &&
+    packagedCandleVideoRoutes.has(`${modelId}\0${engineId}`)
+  ) {
+    mechanisms.push("video_memory_curve_bundle");
+  }
   // The scalar gate is live for any image route whose manifest supplies a number for it to read.
   if (
     modality === "image" &&
@@ -1698,6 +1722,7 @@ export function buildInventory(bodies) {
   const videoBindings = deriveVideoBindings({ bodies, videoEngines });
   const headroomGb = parseHeadroomGb(bodies.fitGate);
   const curveLanes = parseVideoCurveLanes(bodies.videoMemoryCurvesData);
+  const packagedCandleVideoRoutes = parseCandleVideoCurveRoutes(bodies.videoMemoryCurvesData);
   const mechanismFacts = deriveMechanismFacts(bodies);
   const imageLanes = parseCandleImageLanes(bodies.routingCandle);
   const { bindings: laneBindings, unbound: unboundLanes } = deriveLaneBindings({
@@ -1768,6 +1793,7 @@ export function buildInventory(bodies) {
       lanes: contribution?.lanes ?? new Set(),
       conditionedLanes: conditionedLanesByModel.get(modelId) ?? new Set(),
       videoBinding,
+      packagedCandleVideoRoutes,
       registryProviders,
       compatibility,
     });
@@ -1978,19 +2004,23 @@ function knownGaps({ curveLanes }) {
         "boolean cannot distinguish a fitted curve from a single measured point from a declared floor.",
       paths: ["config/manifests/builtin.models.jsonc"],
     },
-    {
-      id: "zero-candle-video-memory-curves-packaged",
-      owner: "sc-19057",
-      severity: "high",
-      detail:
-        "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign " +
-        `lane, but the packaged curve data covers ${JSON.stringify(
-          Object.fromEntries([...curveLanes.entries()].sort()),
-        )} â€” there are no candle curves at all. Optimized Candle candidates are therefore ` +
-        "Unverified; the seven legacy ceilings and Bernini's T2V structural pre-load floor remain " +
-        "the only source-backed resident admission inputs.",
-      paths: ["docs/generated/video-memory-curves.json"],
-    },
+    ...(curveLanes.has("candle")
+      ? []
+      : [
+          {
+            id: "zero-candle-video-memory-curves-packaged",
+            owner: "sc-19057",
+            severity: "high",
+            detail:
+              "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign " +
+              `lane, but the packaged curve data covers ${JSON.stringify(
+                Object.fromEntries([...curveLanes.entries()].sort()),
+              )} â€” there are no candle curves at all. Optimized Candle candidates are therefore ` +
+              "Unverified; the seven legacy ceilings and Bernini's T2V structural pre-load floor remain " +
+              "the only source-backed resident admission inputs.",
+            paths: ["docs/generated/video-memory-curves.json"],
+          },
+        ]),
     {
       id: "candle-sequential-capability-needs-the-linked-candle-bundle",
       owner: "sc-19050",

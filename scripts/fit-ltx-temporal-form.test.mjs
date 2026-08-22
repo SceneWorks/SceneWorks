@@ -20,6 +20,7 @@ import {
   latentTokens,
   leastSquares,
   mergeVideoMemoryCurveLane,
+  nonNegativeLeastSquares,
   noiseFloor,
   phaseFlipVerdict,
   pointsFrom,
@@ -475,6 +476,62 @@ test("the committed report and curve pass the producer's --check round trip", ()
   );
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /video-memory-curves\.json are current/);
+});
+
+test("the immutable SC-19057 records promote the constrained cross fit and preserve MLX", () => {
+  const args = [
+    path.join(ROOT, "scripts/fit-ltx-temporal-form.mjs"),
+    "--story", "sc-19057",
+    "--dataset", "docs/generated/wan-candle-video-sc-19057.json",
+    "--plan", "docs/calibration/sc-19057/wan-candle-video-capture-plan.json",
+    "--record-terminals",
+    "--write", "docs/generated/wan-temporal-form-fit-sc-19057.json",
+    "--source-fit", "docs/generated/wan-temporal-form-fit-sc-19057.json",
+    "--check",
+  ];
+  const run = spawnSync(process.execPath, args, { cwd: ROOT, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+
+  const report = JSON.parse(
+    readFileSync(path.join(ROOT, "docs/generated/wan-temporal-form-fit-sc-19057.json"), "utf8"),
+  );
+  assert.deepEqual(report.terminalProvenance, {
+    mode: "record_terminals",
+    authority: "runtime_complete_records_from_clean_repositories",
+  });
+  assert.deepEqual(
+    [report.capturedRecords, report.coverage.plannedEntries, report.coverage.capturedFixtures],
+    [6, 6, 6],
+  );
+  assert.deepEqual(report.fits.denoise.q4.candidates.cross.coefficients, {
+    fixedGb: 11.207667472795762,
+    perMpxGb: 0,
+    perMpxFrameGb: 0.00025117197517360795,
+  });
+  assert.equal(report.fits.denoise.q4.candidates.cross.heldOut.maxAbsGib, 0.013348825976386536);
+  assert.deepEqual(report.fits.decode.q4.candidates.cross.coefficients, {
+    fixedGb: 7.6801715507055235,
+    perMpxGb: 0,
+    perMpxFrameGb: 0.06946188490884356,
+  });
+  assert.equal(report.fits.decode.q4.candidates.cross.fit.maxAbsGib, 2.057363514575272);
+  assert.equal(report.fits.decode.q4.candidates.cross.heldOut.maxAbsGib, 1.9182051277155239);
+
+  const bundle = JSON.parse(
+    readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
+  );
+  const mlx = bundle.curves.find((curve) => curve.backend === "mlx");
+  const candle = bundle.curves.find((curve) => curve.backend === "candle");
+  assert.equal(
+    createHash("sha256").update(`${JSON.stringify(mlx)}\n`).digest("hex"),
+    "6f0c94b8fa3a5bb6b1fb6df964d5a23171a8ff50ee231e8e1084c55c3e32fd93",
+    "the SC-19057 promotion may not rewrite the independently fitted MLX lane",
+  );
+  assert.equal(candle.evidence.sources[0].sha256, "1eb425b3bb795a6b1b5408be6888e9f20f94b7de7a8821209b70779286ef8909");
+  assert.deepEqual(candle.phases.denoise, {
+    ...report.fits.denoise.q4.candidates.cross.coefficients,
+    maxResidualGb: 0.013348825976386536,
+  });
 });
 
 const geometry = (width, height, frames, fps = 30) => ({
@@ -1005,6 +1062,53 @@ test("least squares recovers an exactly-linear generator on every candidate form
       );
     }
   }
+});
+
+test("cross NNLS preserves valid OLS bytes and refits the active boundary instead of clamping", () => {
+  const increasingRows = [[1, 0], [1, 1], [1, 2]];
+  const increasingTargets = [1, 2, 3];
+  assert.deepEqual(
+    nonNegativeLeastSquares(increasingRows, increasingTargets),
+    leastSquares(increasingRows, increasingTargets),
+    "a historical positive fit must retain the exact ordinary-least-squares doubles",
+  );
+
+  const decreasingTargets = [3, 2, 1];
+  const unconstrained = leastSquares(increasingRows, decreasingTargets);
+  assert.deepEqual(unconstrained, [3, -1], "the fixture must actually leave the monotone domain");
+  const constrained = nonNegativeLeastSquares(increasingRows, decreasingTargets);
+  assert.deepEqual(
+    constrained,
+    [2, 0],
+    "the active intercept must be refit at the non-negative boundary; [3, 0] would be a clamp",
+  );
+  assert.ok(constrained.every((coefficient) => coefficient >= 0));
+});
+
+test("cross NNLS searches every active set and breaks exact ties by stable mask order", () => {
+  const rows = [
+    [1, 0, 0],
+    [1, 1, 0],
+    [1, 0, 1],
+    [1, 1, 1],
+  ];
+  const targets = [4, 2, 7, 5];
+  assert.deepEqual(
+    nonNegativeLeastSquares(rows, targets),
+    [3, 0, 3],
+    "the optimum is the intercept+third-column face, not the first non-negative partial fit",
+  );
+
+  assert.deepEqual(
+    nonNegativeLeastSquares([[1, 1]], [1]),
+    [1, 0],
+    "equal single-column faces choose the lower active-set mask deterministically",
+  );
+  assert.equal(
+    nonNegativeLeastSquares([[1, Number.NaN]], [1]),
+    null,
+    "non-finite regressors must not yield a fabricated boundary solution",
+  );
 });
 
 test("the committed sweep design is not collinear — every candidate is solvable on it", () => {

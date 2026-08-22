@@ -1,8 +1,8 @@
 # Epic 19048 terminal acceptance record (SC-19059)
 
 This is the source-level and decision-diff record for the integrated feature head. It is deliberately
-not a claim that SC-19059 is complete. The CPU-only acceptance pass can close generator provenance,
-exercise the promotion plumbing, and enumerate what the repository proves. Real Candle capture,
+not a claim that SC-19059 is complete. The CPU-only acceptance pass closes generator provenance,
+promotes the completed SC-19057 Candle capture, and enumerates what the repository proves.
 CUDA-linked capability resolution, privileged workflows, and the remaining D3/C3 decisions below
 remain terminal gates.
 
@@ -12,7 +12,9 @@ remain terminal gates.
 - Reviewed main-to-feature sync head: `ed60f55e0483bf44d7bd1b797bcd31cde4f08b07`.
 - Synced SceneWorks main: `a74ba399923aeb52c5fff5ad5d1887ca9ea32813`.
 - Inference pin: `4013049764172ee7dc707101c7da8c83c1483f2d`.
-- SC-19049 Rust-produced decision baseline: `760e69b6b375cee417df7bfcc0f63f69b93e623a`.
+- SC-19057 capture head: `1ea0cc2d1365b7e7f691b9331346cd0a329c900e`.
+- SC-19049 Rust-produced decision artifact:
+  `sha256:03fe68dc3dc37ee7c2e15aaa061ca23f2e4766cb149fc4845e7fba3a372c36f3`.
 
 The final acceptance must repeat this reconciliation at the eventual feature head. These identifiers
 are the starting point for the terminal campaign, not permission to accept a stale head.
@@ -49,7 +51,7 @@ conditioned image-lane binding gaps remain explicitly reported and must not be c
 route-level selector census.
 
 The non-circular Rust decision producer remains byte-identical at digest
-`sha256:2aecbc27a99e467d78488df09441452434d72ddcf0cb432613fb611581125bc9`.
+`sha256:03fe68dc3dc37ee7c2e15aaa061ca23f2e4766cb149fc4845e7fba3a372c36f3`.
 Comparing all 2,540 generated Candle coordinates across prediction, fit decision, and load-plan
 fields reports **zero decision changes**. Inventory mechanism/provenance fields change as expected;
 user-visible availability does not.
@@ -201,21 +203,56 @@ or capable/incapable load plans. Exactly 676 rows change only the `mechanisms` a
 `sharedSelectorVia` provenance fields as evidence-free routes become explicitly Unverified; row
 order and all 272 MLX rows are unchanged.
 
-After the real Candle curve is promoted, this ledger is necessarily provisional. A correctly bound
-curve is expected to move the captured route from `EstimateFloor` to `EstimateFittedCurve`. Zero
-movement is suspicious and requires checking the inference closure handshake. The Rust producer and
-the full ledger must be rerun at the final head.
+## SC-19057 real Candle promotion and final CPU decision ledger
+
+The only promoted source is GitHub Actions artifact `9474424146` from successful run
+`32564176646`, job `97010255064`, at exact SceneWorks head
+`1ea0cc2d1365b7e7f691b9331346cd0a329c900e`. The downloaded archive digest is
+`sha256:5d0947f97675bb13e130e99380c4a782abf0c58be4be8be0ab095aa3e08b1690`;
+its standalone capture member is
+`sha256:1eb425b3bb795a6b1b5408be6888e9f20f94b7de7a8821209b70779286ef8909`.
+Every manifested member verifies. The captured plan is byte-identical to the committed plan and the
+strict pre-promotion validator reports exactly six unique `runtime_complete` records, four fit plus
+two held out, clean paired repositories, inference pin
+`4013049764172ee7dc707101c7da8c83c1483f2d`, and closure
+`7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520`.
+
+The real records expose a producer defect that synthetic rehearsal did not: ordinary cross-form
+least squares yields negative `perMpxGb` for denoise and decode, while the runtime schema correctly
+requires monotone non-negative coefficients. The producer now solves the same squared-residual
+objective by deterministic active-set non-negative least squares for SC-19057's promoted cross
+form. It returns the exact ordinary solution when already non-negative and refits every active face
+rather than clamping a coefficient. The independently fitted MLX curve remains byte-identical at
+`sha256:6f0c94b8fa3a5bb6b1fb6df964d5a23171a8ff50ee231e8e1084c55c3e32fd93`.
+The promoted Candle phase laws are:
+
+| phase | fixed GiB | GiB/Mpx | GiB/(Mpx*frame) | fit max abs GiB | held-out max abs GiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| conditioning | 11.196807238520421 | 0.06228077168360994 | 3.263558323750635e-16 | 1.7763568394002505e-14 | 1.2434497875801753e-14 |
+| denoise | 11.207667472795762 | 0 | 0.00025117197517360795 | 0.007037041690727719 | 0.013348825976386536 |
+| decode | 7.6801715507055235 | 0 | 0.06946188490884356 | 2.057363514575272 | 1.9182051277155239 |
+
+The non-circular regeneration order was Rust decisions, Candle inventory, then memory matrix. The
+Rust decision artifact is byte-identical. Across all 2,540 Candle and 272 MLX baseline rows there
+are **zero** changes to predicted resident/sequential peaks, selector decisions, or load plans. The
+four route-level Wan rows (`bf16`, `q8`, `q4`, `nvfp4`) add only the
+`video_memory_curve_bundle` mechanism; the exact q4 post-load selector now chooses
+`EstimateFittedCurve` inside the measured hull, while foreign tiers, identities, geometries, and
+lanes remain fail-closed. The inventory therefore moves the bundle mechanism from 0 to 1, records
+one Candle plus one MLX curve, and retires only
+`zero-candle-video-memory-curves-packaged`. No other video route changes. D1's approved evaluator
+residual, D3's Krea hull decision, and C3's bare evidence-class boolean are unchanged.
 
 ## Cross-epic merge and regeneration order
 
 1. Epic 18803 established the two-axis video ladder and the existing MLX curve.
 2. Epic 18472 added Candle capability routes and provider contracts while this feature branch was
    open. MiniMax/main changes were merged and reviewed into the frozen head above.
-3. SC-19057 runs once at the frozen final paired SceneWorks/inference head. The capture artifacts
-   must carry the real Candle lane and live inference closure; synthetic rehearsals are discarded.
-4. Promote the real curve through the documented source-catalog entry and both Docker copies, then
-   run both lane-specific curve checks. Regenerate the Rust decision surface, Candle inventory, and
-   memory matrix in that order.
+3. SC-19057 ran once at the frozen paired SceneWorks/inference head. The retained capture carries
+   the real Candle lane and live inference closure; no synthetic rehearsal data is retained.
+4. The real curve is promoted through the documented source-catalog entry and both Docker copies.
+   Both lane-specific curve checks and the Rust decision, Candle inventory, memory-matrix order are
+   load-bearing acceptance gates.
 5. Run the privileged `windows-candle` and `macos-mlx` workflows at the exact final feature head and
    retain their URLs and terminal conclusions.
 6. Merge inference first if its final head moved, update the exact SceneWorks pin, then merge the
@@ -228,9 +265,7 @@ the full ledger must be rerun at the final head.
   Bernini C2 are resolved by the approved policy; the truthful divergence inventory remains
   non-empty because 17 conditioned image-lane bindings and the explicitly retained residuals are
   still reported.
-- Real SC-19057 Candle capture and promotion, with no synthetic curve or fabricated closure retained.
 - CUDA-linked sequential-capability resolution and Candle acceptance.
 - Final-head macOS MLX and Windows Candle workflow URLs with terminal required CI.
-- Non-circular decision regeneration and a final post-capture decision-diff review.
 - Reconciliation and regeneration at the eventual merge head, followed by post-merge `main`
   verification.
