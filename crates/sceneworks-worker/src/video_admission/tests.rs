@@ -670,6 +670,59 @@ fn a_generator_with_no_contract_leaves_the_request_untouched() {
 }
 
 #[test]
+fn bernini_v2v_is_refused_for_missing_or_crossed_evidence() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[MemoryStrategy::Resident])));
+    let mut exact = inputs(45, budget(128.0), 0);
+    exact.model_id = "bernini";
+    exact.model_family = "bernini";
+    exact.route = "bernini";
+    exact.mode = "video_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "video";
+    exact.width = 848;
+    exact.height = 480;
+    exact.fps = 16;
+    exact.overlay = Some("provider_video_mode:no_audio");
+    let outcome = admit_video_generation(&generator, exact);
+    assert!(outcome
+        .refusal
+        .as_deref()
+        .is_some_and(|message| message.contains("exact surface")));
+
+    let mut exact = inputs(45, budget(128.0), 0);
+    exact.model_id = "bernini";
+    exact.model_family = "bernini";
+    exact.route = "bernini";
+    exact.mode = "video_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "video";
+    exact.width = 848;
+    exact.height = 480;
+    exact.fps = 16;
+    let outcome = admit_video_generation(&generator, exact);
+    assert!(outcome
+        .refusal
+        .as_deref()
+        .is_some_and(|message| message.contains("no current calibrated evidence")));
+
+    let mut crossed = inputs(45, budget(128.0), 0);
+    crossed.model_id = "bernini";
+    crossed.model_family = "bernini";
+    crossed.route = "bernini";
+    crossed.mode = "video_to_video";
+    crossed.reference_count = 1;
+    crossed.reference_shape = "image";
+    crossed.width = 640;
+    crossed.height = 640;
+    crossed.fps = 24;
+    let outcome = admit_video_generation(&generator, crossed);
+    assert!(outcome
+        .refusal
+        .as_deref()
+        .is_some_and(|message| message.contains("exact surface")));
+}
+
+#[test]
 fn a_selected_resident_rung_leaves_the_request_byte_identical() {
     let generator = fixture_generator(Some(fixture_contract(
         20,

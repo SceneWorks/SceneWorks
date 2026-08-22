@@ -841,6 +841,12 @@ fn admit_video_generation_with_curves_and_profiles(
         return VideoAdmissionOutcome::default();
     }
     if require_request_evidence && !packaged_video_evidence_covers_request(generator, &request) {
+        if bernini_v2v_attempt(&request) {
+            return VideoAdmissionOutcome {
+                refusal: Some(bernini_v2v_evidence_refusal(&request)),
+                ..VideoAdmissionOutcome::default()
+            };
+        }
         return VideoAdmissionOutcome::default();
     }
     // Provider safety requires a same-moment post-load budget snapshot. A pre-load total-only probe
@@ -1034,6 +1040,54 @@ fn admit_video_generation_with_curves_and_profiles(
             }
         }
     }
+}
+
+fn bernini_v2v_attempt(request: &VideoAdmissionInputs<'_>) -> bool {
+    request.model_id == "bernini"
+        && (request.mode == "video_to_video" || request.reference_count > 0)
+}
+
+fn bernini_v2v_surface_is_exact(request: &VideoAdmissionInputs<'_>) -> bool {
+    request.model_id == "bernini"
+        && request.mode == "video_to_video"
+        && request.reference_count == 1
+        && request.reference_shape == "video"
+        && request.fps == 16
+        && matches!(
+            (request.width, request.height),
+            (848, 480) | (480, 848) | (1280, 720) | (720, 1280)
+        )
+        && matches!(request.frames, 45 | 61 | 77)
+        && request.tier.precision == gen_core::Precision::Bf16
+        && matches!(
+            request.tier.quant,
+            None | Some(gen_core::Quant::Q4) | Some(gen_core::Quant::Q8)
+        )
+        && request.overlay.is_none_or(|overlay| {
+            !overlay.is_empty()
+                && overlay.split('+').all(|axis| {
+                    axis == "provider_video_mode:v2v"
+                        || (axis.starts_with("adapters:[") && axis.contains("digest=sha256:"))
+                })
+        })
+}
+
+fn bernini_v2v_evidence_refusal(request: &VideoAdmissionInputs<'_>) -> String {
+    if !bernini_v2v_surface_is_exact(request) {
+        return format!(
+            "Bernini V2V memory admission refused: exact surface requires one VideoClip, FPS16, frames 45/61/77, geometries 848x480/480x848/1280x720/720x1280, supported tier, and exact adapter identity"
+        );
+    }
+    format!(
+        "Bernini V2V memory admission refused: no current calibrated evidence matches route={}, lane={}, tier={:?}, geometry={}x{} frames={} overlay={:?}",
+        request.route,
+        request.lane.as_key(),
+        request.tier.quant,
+        request.width,
+        request.height,
+        request.frames,
+        request.overlay
+    )
 }
 
 fn curve_evidence_covers_request(
