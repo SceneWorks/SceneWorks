@@ -840,10 +840,11 @@ fn admit_video_generation_with_curves_and_profiles(
     {
         return VideoAdmissionOutcome::default();
     }
+    let contract = generator.memory_strategy_contract();
     if require_request_evidence && !packaged_video_evidence_covers_request(generator, &request) {
         if bernini_v2v_attempt(&request) {
             return VideoAdmissionOutcome {
-                refusal: Some(bernini_v2v_evidence_refusal(&request)),
+                refusal: Some(bernini_v2v_evidence_refusal(&request, contract)),
                 ..VideoAdmissionOutcome::default()
             };
         }
@@ -857,7 +858,7 @@ fn admit_video_generation_with_curves_and_profiles(
     };
     // No provider contract ⇒ no declared rungs ⇒ nothing for the ladder to select between. Fail
     // open, exactly as `mlx_fit_gate` does when a generator publishes no contract.
-    let Some(contract) = generator.memory_strategy_contract() else {
+    let Some(contract) = contract else {
         return VideoAdmissionOutcome::default();
     };
     // The request must have one fully matching fitted curve before any estimate/floor candidate is
@@ -1047,7 +1048,30 @@ fn bernini_v2v_attempt(request: &VideoAdmissionInputs<'_>) -> bool {
         && (request.mode == "video_to_video" || request.reference_count > 0)
 }
 
-fn bernini_v2v_surface_is_exact(request: &VideoAdmissionInputs<'_>) -> bool {
+fn bernini_v2v_surface_is_exact(
+    request: &VideoAdmissionInputs<'_>,
+    contract: Option<&MemoryProviderContract>,
+) -> bool {
+    let Some(contract) = contract else {
+        return false;
+    };
+    let expected_adapter = contract
+        .resident_components()
+        .iter()
+        .find(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack)
+        .map(|component| component.id.as_str());
+    let adapter_axis = request.overlay.and_then(|overlay| {
+        overlay
+            .split('+')
+            .find(|axis| axis.starts_with("adapters:["))
+    });
+    let overlay_is_exact = adapter_axis == expected_adapter
+        && request.overlay.map_or(true, |overlay| {
+            !overlay.is_empty()
+                && overlay
+                    .split('+')
+                    .all(|axis| axis == "provider_video_mode:v2v" || Some(axis) == expected_adapter)
+        });
     request.model_id == "bernini"
         && request.mode == "video_to_video"
         && request.reference_count == 1
@@ -1063,20 +1087,15 @@ fn bernini_v2v_surface_is_exact(request: &VideoAdmissionInputs<'_>) -> bool {
             request.tier.quant,
             None | Some(gen_core::Quant::Q4) | Some(gen_core::Quant::Q8)
         )
-        && request.overlay.is_none_or(|overlay| {
-            !overlay.is_empty()
-                && overlay.split('+').all(|axis| {
-                    axis == "provider_video_mode:v2v"
-                        || (axis.starts_with("adapters:[") && axis.contains("digest=sha256:"))
-                })
-        })
+        && overlay_is_exact
 }
 
-fn bernini_v2v_evidence_refusal(request: &VideoAdmissionInputs<'_>) -> String {
-    if !bernini_v2v_surface_is_exact(request) {
-        return format!(
-            "Bernini V2V memory admission refused: exact surface requires one VideoClip, FPS16, frames 45/61/77, geometries 848x480/480x848/1280x720/720x1280, supported tier, and exact adapter identity"
-        );
+fn bernini_v2v_evidence_refusal(
+    request: &VideoAdmissionInputs<'_>,
+    contract: Option<&MemoryProviderContract>,
+) -> String {
+    if !bernini_v2v_surface_is_exact(request, contract) {
+        return "Bernini V2V memory admission refused: exact surface requires one VideoClip, FPS16, frames 45/61/77, geometries 848x480/480x848/1280x720/720x1280, supported tier, and the exact loaded adapter receipt".to_owned();
     }
     format!(
         "Bernini V2V memory admission refused: no current calibrated evidence matches route={}, lane={}, tier={:?}, geometry={}x{} frames={} overlay={:?}",

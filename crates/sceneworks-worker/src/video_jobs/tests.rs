@@ -60,11 +60,11 @@ fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
 #[test]
 fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     let mut input = VideoGenInput::default();
-    assert_eq!(video_admission_overlay(&input), None);
+    assert_eq!(video_admission_overlay(&input, None), None);
 
     input.video_mode = Some("no_audio".to_owned());
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).as_deref(),
         Some("provider_video_mode:no_audio"),
         "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
     );
@@ -87,12 +87,38 @@ fn bernini_adapter_overlay_records_exact_artifact_identity() {
         gen_core::AdapterKind::Lora,
     )];
 
-    let overlay = video_admission_overlay(&input).expect("adapter overlay");
-    assert!(overlay.contains(&format!("artifact={}", adapter_path.display())));
-    assert!(overlay.contains("digest=sha256:"));
-    assert!(overlay.contains("kind=Lora"));
-    assert!(overlay.contains("scale=0.750000000"));
-    assert!(overlay.contains("expert=None"));
+    const RECEIPT: &str = "adapters:[artifact=safetensors;path_hex=2f746d702f7374796c652e7361666574656e736f7273;digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;kind=Lora;scale_bits=3f400000;pass_scale_bits=none;expert=None;verified_bytes=20;stable=true]";
+    let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+        "bernini",
+        gen_core::MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: false,
+            block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+        phases: vec![gen_core::MemoryPhase::Denoise],
+        variables: vec![gen_core::MemoryFormulaVariable::OverlayBytes],
+        resident_components: vec![gen_core::MemoryResidentComponent {
+            id: RECEIPT.to_owned(),
+            kind: gen_core::MemoryComponentKind::AdapterStack,
+            resident_bytes: 20,
+            bounded_by: None,
+            residency: gen_core::MemoryComponentResidency::WholeRender,
+        }],
+    };
+
+    assert_eq!(
+        video_admission_overlay(&input, Some(&contract)).as_deref(),
+        Some(RECEIPT),
+        "the worker must consume the provider's one load-exact receipt byte-for-byte"
+    );
+    assert_eq!(
+        video_admission_overlay(&input, None).as_deref(),
+        Some("adapters:unverified"),
+        "missing provider receipt must fail closed, never trigger a second filesystem reconstruction"
+    );
 }
 
 #[cfg(any(

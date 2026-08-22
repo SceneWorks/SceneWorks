@@ -16,7 +16,6 @@ use super::{
 };
 #[cfg(target_os = "macos")]
 use super::{ltx::resolve_clip_media_path, vace::FRAME_PAD_COLOR};
-use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Real MLX Wan2.2 generation (macOS, via mlx-gen-wan, sc-3034): T2V/TI2V (5B
@@ -1488,28 +1487,24 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
+pub(super) fn video_admission_overlay(
+    input: &VideoGenInput,
+    contract: Option<&gen_core::MemoryProviderContract>,
+) -> Option<String> {
     let mut overlays = Vec::new();
     if !input.adapters.is_empty() {
         if input.engine_id == "bernini" {
-            let adapters = input
-                .adapters
-                .iter()
-                .map(|adapter| {
-                    let digest = std::fs::read(&adapter.path)
-                        .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
-                        .unwrap_or_else(|_| "unverified".to_owned());
-                    format!(
-                        "artifact={};digest={digest};kind={:?};scale={:.9};expert={:?}",
-                        adapter.path.display(),
-                        adapter.kind,
-                        adapter.scale,
-                        adapter.moe_expert
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            overlays.push(format!("adapters:[{adapters}]"));
+            // The provider contract seals the exact files the loader opened, after its stability
+            // read, and prices them according to dense-folded versus packed-additive residency.
+            // Re-reading paths or formatting f32s here would create a second, weaker receipt.
+            let loaded_receipt = contract.and_then(|contract| {
+                contract
+                    .resident_components()
+                    .iter()
+                    .find(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack)
+                    .map(|component| component.id.clone())
+            });
+            overlays.push(loaded_receipt.unwrap_or_else(|| "adapters:unverified".to_owned()));
         } else {
             overlays.push(format!("adapters:{}", input.adapters.len()));
         }
@@ -2099,7 +2094,8 @@ pub(super) async fn generate_video_using(
                     &admission_mode,
                     &input.conditioning,
                 );
-                let admission_overlay = video_admission_overlay(&input);
+                let admission_overlay =
+                    video_admission_overlay(&input, generator.memory_strategy_contract());
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,

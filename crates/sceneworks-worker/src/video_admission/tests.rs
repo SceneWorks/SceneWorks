@@ -2,9 +2,11 @@
 //! `sceneworks-core` transcribed from gen-core still match the pinned bundle.
 
 use gen_core::{
-    LoadShape, LoadSpec, MemoryBackendRealization, MemoryCalibrationIdentity,
-    MemoryLifecycleCapabilities, MemoryParameterRanges, MemoryPhase, MemoryStrategyCapability,
-    MemoryStrategySupport, MemoryWindowMaterialization, Precision, Quant, VaeTiling, WeightsSource,
+    LoadShape, LoadSpec, MemoryBackendRealization, MemoryCalibrationIdentity, MemoryComponentKind,
+    MemoryComponentResidency, MemoryFormulaKind, MemoryFormulaVariable,
+    MemoryLifecycleCapabilities, MemoryParameterRanges, MemoryPhase, MemoryResidentComponent,
+    MemoryStrategyCapability, MemoryStrategySupport, MemoryWindowMaterialization, Precision, Quant,
+    VaeTiling, WeightsSource,
 };
 use sceneworks_core::video_memory_curves::VideoCurveHullPoint;
 use sceneworks_core::video_request::{
@@ -659,6 +661,21 @@ fn inputs<'a>(
     }
 }
 
+fn bernini_inputs<'a>(overlay: Option<&'a str>) -> VideoAdmissionInputs<'a> {
+    let mut request = inputs(45, budget(128.0), 0);
+    request.model_id = "bernini";
+    request.model_family = "bernini";
+    request.route = "bernini";
+    request.mode = "video_to_video";
+    request.reference_count = 1;
+    request.reference_shape = "video";
+    request.width = 848;
+    request.height = 480;
+    request.fps = 16;
+    request.overlay = overlay;
+    request
+}
+
 #[test]
 fn a_generator_with_no_contract_leaves_the_request_untouched() {
     let generator = fixture_generator(None);
@@ -720,6 +737,55 @@ fn bernini_v2v_is_refused_for_missing_or_crossed_evidence() {
         .refusal
         .as_deref()
         .is_some_and(|message| message.contains("exact surface")));
+}
+
+#[test]
+fn bernini_v2v_consumes_the_loaded_adapter_receipt_without_reconstructing_it() {
+    const RECEIPT: &str = "adapters:[artifact=safetensors;path_hex=2f746d702f612e7361666574656e736f7273;digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;kind=Lora;scale_bits=3f000001;pass_scale_bits=3e800000/3f400000;expert=Some(High);verified_bytes=12345;stable=true]";
+    let contract_with_receipt = |resident_bytes| {
+        let mut contract = fixture_contract(20, 4, &[MemoryStrategy::Resident]);
+        contract.asset_facts.overlay_bytes = resident_bytes;
+        contract.formula = MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![MemoryFormulaVariable::OverlayBytes],
+            resident_components: vec![MemoryResidentComponent {
+                id: RECEIPT.to_owned(),
+                kind: MemoryComponentKind::AdapterStack,
+                resident_bytes,
+                bounded_by: None,
+                residency: MemoryComponentResidency::WholeRender,
+            }],
+        };
+        contract
+    };
+    let exact = bernini_inputs(Some(RECEIPT));
+
+    for resident_bytes in [0, 12_345] {
+        let contract = contract_with_receipt(resident_bytes);
+        assert!(
+            bernini_v2v_surface_is_exact(&exact, Some(&contract)),
+            "dense-folded zero-byte and packed-additive receipts are both identity-bearing"
+        );
+    }
+
+    // These mutations cover every receipt axis the provider sealed. The worker does not parse or
+    // round any of them; it compares the complete typed provider receipt carried by the contract.
+    for crossed in [
+        RECEIPT.replace("scale_bits=3f000001", "scale_bits=3f000000"),
+        RECEIPT.replace("pass_scale_bits=3e800000/3f400000", "pass_scale_bits=none"),
+        RECEIPT.replace("kind=Lora", "kind=Lokr"),
+        RECEIPT.replace("expert=Some(High)", "expert=Some(Low)"),
+        RECEIPT.replace("verified_bytes=12345", "verified_bytes=12346"),
+        RECEIPT.replace("digest=sha256:aa", "digest=sha256:ba"),
+    ] {
+        let contract = contract_with_receipt(12_345);
+        let crossed_request = bernini_inputs(Some(&crossed));
+        assert!(
+            !bernini_v2v_surface_is_exact(&crossed_request, Some(&contract)),
+            "crossed receipt was accepted: {crossed}"
+        );
+    }
+    assert!(!bernini_v2v_surface_is_exact(&exact, None));
 }
 
 #[test]
