@@ -1249,7 +1249,10 @@ export function buildReport(
       selector,
       recordIds: scopedPoints.map((point) => point.recordId).sort(compareText),
       points: scopedPoints,
-      fits: selectorFitReport(scopedPoints, { nonNegativeCross: story === "sc-19057" }),
+      // SC-19057 is the first real Candle promotion and exposes the constrained optimum. Bind the
+      // repair to the lane semantics rather than a story id; the historical MLX report remains an
+      // immutable provenance record while every present and future Candle cross fit uses NNLS.
+      fits: selectorFitReport(scopedPoints, { nonNegativeCross: selector.backend === "candle" }),
     }))
     .sort((left, right) => compareText(left.key, right.key));
 

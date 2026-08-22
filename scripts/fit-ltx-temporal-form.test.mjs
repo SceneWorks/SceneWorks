@@ -149,6 +149,24 @@ const promoteCandleOnto = (existing) => {
   return buildVideoMemoryCurveBundle(report, records, MANIFEST, sources, sourceFit, existing);
 };
 
+test("the Candle lane, not one story id, owns the non-negative cross-fit contract", () => {
+  const { report } = candleLaneInputs();
+  assert.equal(report.story, "sc-18810", "the fixture must not borrow SC-19057's story id");
+  assert.equal(
+    report.fits.maxPhaseActivePlusCache.q8.candidates.cross.coefficients.perMpxGb,
+    0,
+    "the known negative unconstrained MLX slope must be refit on the Candle boundary",
+  );
+  for (const byTier of Object.values(report.fits)) {
+    for (const slice of Object.values(byTier)) {
+      assert.ok(
+        Object.values(slice.candidates.cross.coefficients).every((value) => value >= 0),
+        "every Candle cross candidate must be non-negative by construction",
+      );
+    }
+  }
+});
+
 test("promoting the candle lane preserves the committed MLX curve exactly", () => {
   // Lane-scoped: this test is about the MLX lane surviving a candle promotion, not about the
   // container holding nothing else. Once sc-19057 commits its candle curve the bundle holds two
