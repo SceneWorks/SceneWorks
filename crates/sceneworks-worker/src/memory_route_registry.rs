@@ -499,6 +499,65 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
+    // SC-20795: the six built-in Mage routes share one provider implementation, but their public
+    // request identities do not. Generation admits plain or LoRA loads with no references; edit
+    // admits only the manifest's plain, single-reference instruction-edit shape. These are new
+    // declaration-owned coordinates so a missing or crossed manifest row cannot fall through to
+    // the historical provider-id shaper.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "mage_flow_base",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "mage_flow",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "mage_flow_turbo",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "mage_flow_edit_base",
+        tiers: BF16_Q4_Q8,
+        modes: &[MemoryRouteMode::EditImage],
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "mage_flow_edit",
+        tiers: BF16_Q4_Q8,
+        modes: &[MemoryRouteMode::EditImage],
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "mage_flow_edit_turbo",
+        tiers: BF16_Q4_Q8,
+        modes: &[MemoryRouteMode::EditImage],
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "krea_2_turbo",
@@ -5591,6 +5650,215 @@ mod tests {
             load_profile: MemoryRouteLoadProfile::Plain,
         };
         assert!(!manifest_declares_selector(&edit, edit_text));
+    }
+
+    #[test]
+    fn shipped_mage_mlx_declarations_bind_routes_modes_references_tiers_and_overlays() {
+        let provider_implements = |candidate: &LoadSpec, strategy: MemoryStrategy| {
+            strategy != MemoryStrategy::BoundedTransformerResidency
+                || (candidate.load_shape == LoadShape::DeferredMaterialization
+                    && candidate.adapters.is_empty()
+                    && matches!(candidate.weights, WeightsSource::Dir(_)))
+        };
+        let context = |mode, reference_count| MemoryRouteRequestContext {
+            mode,
+            reference_count,
+            use_pid: false,
+            has_phases: false,
+        };
+        let evaluate = |provider: &'static str,
+                        model: &'static str,
+                        tier: &'static str,
+                        candidate: LoadSpec,
+                        request_context: MemoryRouteRequestContext| {
+            evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                provider,
+                Some(tier),
+                Some(request_context.mode),
+                &shipped_model(model),
+                candidate.with_resolved_route(model),
+                request_context,
+                provider_implements,
+            )
+        };
+
+        for provider in ["mage_flow_base", "mage_flow", "mage_flow_turbo"] {
+            for (tier, numeric) in [
+                ("bf16", MemoryRouteTier::Bf16),
+                ("q4", MemoryRouteTier::Q4),
+                ("q8", MemoryRouteTier::Q8),
+            ] {
+                let plain = evaluate(
+                    provider,
+                    provider,
+                    tier,
+                    spec(numeric, MemoryRouteLoadProfile::Plain),
+                    context(MemoryRouteMode::TextToImage, 0),
+                );
+                assert_eq!(
+                    plain.load_shape,
+                    LoadShape::DeferredMaterialization,
+                    "{provider}:{tier}"
+                );
+                assert_eq!(
+                    plain.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Applied,
+                    "{provider}:{tier}",
+                );
+
+                let lora = evaluate(
+                    provider,
+                    provider,
+                    tier,
+                    spec(numeric, MemoryRouteLoadProfile::Lora),
+                    context(MemoryRouteMode::TextToImage, 0),
+                );
+                assert_eq!(
+                    lora.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{provider}:{tier}:lora"
+                );
+                assert_eq!(
+                    lora.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Eligible,
+                    "LoRA keeps lower optimized rungs but cannot borrow Transformer",
+                );
+                assert_eq!(lora.offload_policy, OffloadPolicy::Sequential);
+            }
+        }
+
+        for provider in [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ] {
+            let exact = evaluate(
+                provider,
+                provider,
+                "q4",
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
+                context(MemoryRouteMode::EditImage, 1),
+            );
+            assert_eq!(
+                exact.load_shape,
+                LoadShape::DeferredMaterialization,
+                "{provider}"
+            );
+            assert_eq!(
+                exact.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Applied
+            );
+
+            for crossed in [
+                context(MemoryRouteMode::EditImage, 0),
+                context(MemoryRouteMode::EditImage, 2),
+                context(MemoryRouteMode::TextToImage, 0),
+            ] {
+                let refused = evaluate(
+                    provider,
+                    provider,
+                    "q4",
+                    spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
+                    crossed,
+                );
+                assert_eq!(
+                    refused.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "{provider} must refuse crossed public request identity",
+                );
+            }
+            let adapter = evaluate(
+                provider,
+                provider,
+                "q4",
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Lora),
+                context(MemoryRouteMode::EditImage, 1),
+            );
+            assert_eq!(
+                adapter.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+
+        let crossed_route = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+            "mage_flow_base",
+            Some("q4"),
+            Some(MemoryRouteMode::TextToImage),
+            &shipped_model("mage_flow_base"),
+            spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain)
+                .with_resolved_route("mage_flow"),
+            context(MemoryRouteMode::TextToImage, 0),
+            provider_implements,
+        );
+        assert_eq!(
+            crossed_route.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+        );
+
+        let generation_manifest = shipped_model("mage_flow_base");
+        let implementations = generation_manifest["mlx"]["memoryStrategyContract"]
+            ["implementations"]
+            .as_array()
+            .expect("Mage generation implementations");
+        let transformer = implementations
+            .iter()
+            .find(|row| row["rung"] == "bounded_transformer_residency")
+            .expect("Mage Transformer row");
+        assert_eq!(transformer["overlays"], serde_json::json!(["none"]));
+        assert_eq!(transformer["loadProfiles"], serde_json::json!(["plain"]));
+
+        let exact_context = context(MemoryRouteMode::TextToImage, 0);
+        let crossed_specs = [
+            LoadSpec::new(WeightsSource::File("snapshot.safetensors".into())),
+            spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Pid),
+            spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl),
+        ];
+        for crossed in crossed_specs {
+            let refused = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                "mage_flow_base",
+                Some("q4"),
+                Some(MemoryRouteMode::TextToImage),
+                &generation_manifest,
+                crossed.with_resolved_route("mage_flow_base"),
+                exact_context,
+                provider_implements,
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "file/PiD/control evidence cannot cross into the Mage generation declaration",
+            );
+        }
+        for (provider, tier, request_context) in [
+            ("mage_flow", "q4", exact_context),
+            ("mage_flow_base", "nvfp4", exact_context),
+            (
+                "mage_flow_base",
+                "q4",
+                context(MemoryRouteMode::TextToImage, 1),
+            ),
+            (
+                "mage_flow_base",
+                "q4",
+                context(MemoryRouteMode::EditImage, 1),
+            ),
+        ] {
+            let refused = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                provider,
+                Some(tier),
+                Some(request_context.mode),
+                &generation_manifest,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain)
+                    .with_resolved_route("mage_flow_base"),
+                request_context,
+                provider_implements,
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused,
+                "provider/tier/reference/mode evidence cannot cross Mage routes",
+            );
+        }
     }
 
     #[test]

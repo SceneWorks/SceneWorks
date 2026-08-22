@@ -2263,6 +2263,45 @@ test("Mage Candle bounded decode is structurally exempt rather than advertised o
   );
 });
 
+test("Mage MLX Resident covers every exact builtin coordinate without evidence promotion", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const generation = ["mage_flow_base", "mage_flow", "mage_flow_turbo"];
+  const edit = ["mage_flow_edit_base", "mage_flow_edit", "mage_flow_edit_turbo"];
+  const tiers = ["bf16", "q4", "q8"];
+  const expected = [
+    ...generation.flatMap((model) =>
+      tiers.flatMap((tier) =>
+        ["none", "lora"].map(
+          (overlay) => `${model}:${model}:mlx:${tier}:text_to_image:${overlay}:resident`,
+        ),
+      ),
+    ),
+    ...edit.flatMap((model) =>
+      tiers.map((tier) => `${model}:${model}:mlx:${tier}:edit_image:none:resident`),
+    ),
+  ].sort();
+  const mageIds = new Set([...generation, ...edit]);
+  const cells = matrix.cells.filter(
+    (cell) =>
+      mageIds.has(cell.modelId) && cell.backend === "mlx" && cell.rung === "resident",
+  );
+
+  assert.equal(cells.length, 27, "three generation and three edit routes cover all exact tiers");
+  assert.deepEqual(
+    cells.map((cell) => cell.id).sort(),
+    expected,
+    "Resident must cover generation plain+LoRA and exact one-reference plain edit only",
+  );
+  assert.ok(
+    cells.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.evidence.currentEnvironmentVerification.length === 0,
+    ),
+    "static Resident declarations must not promote any Mage coordinate to Verified",
+  );
+});
+
 test("Candle Krea's Implemented cells report the shared backend that makes them reachable", async () => {
   const matrix = await buildMatrix({ publish: false });
   const source = await surveyFixture();
@@ -2420,19 +2459,31 @@ test("a rung-4 implementation claim survives an absent rung 1 exactly when the p
   // The same property end to end, through the real generator. Three lanes, each claiming a rung-4
   // implementation the real provider does not have:
   //
-  //   Mage-Flow MLX     appends the rung-1 edge, cannot stage  -> refused
+  //   Mage-Flow MLX     appends the rung-1 edge; this fixture removes its declared rung 1 and 4
+  //                     while retaining the survey claim                 -> refused
   //   SenseNova U1 MLX  appends none,             cannot stage  -> HONOURED (this is the arm that
   //                                                               reds if the blanket proxy returns)
   //   SANA MLX          appends the rung-1 edge,  can stage     -> honoured (so the refusal above is
   //                                                               about the prerequisite, not about
   //                                                               the claim being ignored)
-  const claimImplemented = async (group, entry) => {
+  const claimImplemented = async (group, entry, { removeDeclaredRungs = [] } = {}) => {
     const survey = await surveyFixture();
     const verdict = survey.families[group].backends.mlx;
     verdict.implementation = "shared-primitive";
     verdict.implementedEntries = [entry];
     verdict.strategyParameters = { transformerWindowSize: 1 };
     const sourceOverrides = { rung4Survey: JSON.stringify(survey) };
+    if (removeDeclaredRungs.length > 0) {
+      const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+      const manifest = JSON.parse(stripJsoncComments(await readFile(manifestUrl, "utf8")));
+      const model = manifest.models.find((candidate) => candidate.id === entry);
+      assert.ok(model?.mlx?.memoryStrategyContract, `${entry}: fixture needs an MLX contract`);
+      model.mlx.memoryStrategyContract.implementations =
+        model.mlx.memoryStrategyContract.implementations.filter(
+          (implementation) => !removeDeclaredRungs.includes(implementation.rung),
+        );
+      sourceOverrides.manifest = JSON.stringify(manifest);
+    }
     const matrix = await buildMatrix({
       publish: false,
       sourceOverrides,
@@ -2446,11 +2497,13 @@ test("a rung-4 implementation claim survives an absent rung 1 exactly when the p
   const declares = await declaredRung1Edges();
 
   assert.equal(declares.get("15509:mlx"), true, "fixture assumes Mage-Flow MLX appends the edge");
-  const heldBack = await claimImplemented("15509", "mage_flow");
+  const heldBack = await claimImplemented("15509", "mage_flow", {
+    removeDeclaredRungs: ["staged_residency", "bounded_transformer_residency"],
+  });
   assert.ok(heldBack.rung1.length > 0 && heldBack.rung4.length > 0);
   assert.ok(
     heldBack.rung1.every((cell) => cell.state === "Missing"),
-    "fixture assumes Mage-Flow advertises no MLX rung 1",
+    "fixture removes Mage-Flow's MLX rung 1 declaration",
   );
   assert.ok(
     heldBack.rung4.every((cell) => cell.state === "Missing"),
@@ -3560,7 +3613,7 @@ test("a survey that contradicts itself or misses a family fails generation", asy
   );
 
   const contradictory = await surveyFixture();
-  contradictory.families["15509"].backends.mlx.implementedEntries = ["mage_flow"];
+  contradictory.families["15513"].backends.mlx.implementedEntries = ["sensenova_u1_8b"];
   await assert.rejects(
     buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(contradictory) } }),
     /the two must agree/,

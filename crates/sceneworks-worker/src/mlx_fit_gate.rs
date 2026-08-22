@@ -62,7 +62,10 @@ use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
-const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+// Must remain identical to mlx-gen-mage's loaded provider contract. The prior generation-peak
+// token predated the shared ladder and caused every exact Mage request to fail the provider/gate
+// handshake before selection.
+const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-mlx-shared-ladder-2026-08-03-v1";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -15092,6 +15095,16 @@ mod tests {
         assert!(
             error.contains(MAGE_CALIBRATION_FINGERPRINT),
             "the production Resident path must compare the loaded provider fingerprint: {error}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
+        assert_eq!(
+            MAGE_CALIBRATION_FINGERPRINT,
+            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
+            "the worker's Mage peak estimator must fail at compile/test time when the linked provider identity moves",
         );
     }
 

@@ -703,9 +703,9 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
         // Each file compiles one shared sink-bearing request closure around backend-specific MLX
         // and Candle loader arms. Ordered, comment-stripped fragments keep an unrelated helper or
         // comment from preserving this claim after the production request drops its sink.
-        // Imported Krea builds its request in helper functions that sit ABOVE the per-item driver
-        // and generates through the memory-scoped seam rather than calling `model.generate`
-        // directly, so both the fragments and their order differ from the SDXL lane. The claim
+        // Imported Krea builds its request in helper functions that sit ABOVE the per-item driver;
+        // Krea and Mage generate through the memory-scoped seam rather than calling
+        // `model.generate` directly, so their fragments and order differ from the SDXL lane. The claim
         // being proven is unchanged: the production request literal carries `preview`, that request
         // is what actually generates, and the per-item driver is what supplies the live sink.
         // The chain is required TWICE because this lane has two production request builders — the
@@ -737,11 +737,11 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
             source,
             &[
                 "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
-                "let request = mage_finetuned_generation_request(",
+                "let mut request = mage_finetuned_generation_request(",
                 "guidance,",
                 "preview,",
                 "&cancel,",
-                "model.generate(&request",
+                "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
             ],
         ),
         _ => false,
@@ -4061,6 +4061,28 @@ mod tests {
         );
         assert_ne!(without_mage_sink, normalized_mage);
         assert!(!imported_preview_sink("mage-flow", &without_mage_sink));
+
+        let without_mage_scope = normalized_mage.replacen(
+            "crate::memory_strategy::generate_with_scope(",
+            "removed_memory_scope(",
+            1,
+        );
+        assert_ne!(without_mage_scope, normalized_mage);
+        assert!(
+            !imported_preview_sink("mage-flow", &without_mage_scope),
+            "Mage preview support must remain bound to the request-scoped production generator",
+        );
+
+        let crossed_mage_request = normalized_mage.replacen(
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut unrelated_request,",
+            1,
+        );
+        assert_ne!(crossed_mage_request, normalized_mage);
+        assert!(
+            !imported_preview_sink("mage-flow", &crossed_mage_request),
+            "Mage preview support must not borrow a scope that generates another request",
+        );
     }
 
     #[test]
