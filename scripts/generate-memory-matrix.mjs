@@ -1579,7 +1579,20 @@ function matrixOverlayFor(recordOverlay) {
 }
 
 function overlaysFor(model, backend) {
-  const overlays = ["none"];
+  // Some public variants always provision a built-in LoRA. When the backend's exact contract
+  // declares only the LoRA load profile, publishing `none` creates plain cells that cannot reach
+  // the provider and lets their staged/decode/attention/resident rows look applicable by accident.
+  const implementations = model[backend]?.memoryStrategyContract?.implementations ?? [];
+  const loraOnlyContract =
+    model.id === "qwen_image_edit_2511_lightning" &&
+    implementations.length > 0 &&
+    implementations.every(
+      (implementation) =>
+        Array.isArray(implementation.overlays) &&
+        implementation.overlays.length === 1 &&
+        implementation.overlays[0] === "lora",
+    );
+  const overlays = loraOnlyContract ? ["lora"] : ["none"];
   if (model.loraCompatibility) overlays.push("lora");
   // A DECLARED lane, not a measured one — see CONTROL_LANE_MODELS.
   if (CONTROL_LANE_MODELS.includes(model.id)) overlays.push("control");

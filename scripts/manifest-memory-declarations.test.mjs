@@ -260,6 +260,19 @@ test("an entry outside the wired pose families has no control overlay to declare
   assert.ok(!axes.overlays.has("control"));
 });
 
+test("a LoRA-only backend contract removes the unreachable plain overlay", () => {
+  const model = parse(FIXTURE_MANIFEST).models[0];
+  model.id = "qwen_image_edit_2511_lightning";
+  model.candle = {
+    memoryStrategyContract: {
+      implementations: [{ overlays: ["lora"] }],
+    },
+  };
+  model.loraCompatibility = { families: ["widget"] };
+  const axes = catalogAxes(model, "candle", { mlx: new Set(), candle: new Set() });
+  assert.deepEqual([...axes.overlays], ["lora"]);
+});
+
 // --- source-of-truth parsers ---------------------------------------------------------------------
 
 test("the model table and strict-control table parse from their Rust sources", () => {

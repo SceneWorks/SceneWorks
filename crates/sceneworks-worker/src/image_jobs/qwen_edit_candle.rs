@@ -69,6 +69,21 @@ fn qwen_user_adapter_resident_bytes(adapters: &[AdapterSpec], tier: &str) -> Wor
     })
 }
 
+/// Preserve the provider's load order: the built-in Lightning receipt is first, followed by the
+/// caller's ordered LoRA/LoKr stack. The singleton built-in form is the only optimized Lightning
+/// recipe; adding user adapters deliberately remains a valid resident/direct composition.
+fn qwen_edit_adapter_stack(
+    lightning_lora: Option<PathBuf>,
+    user_adapters: Vec<AdapterSpec>,
+) -> Vec<AdapterSpec> {
+    let mut adapters = lightning_lora
+        .into_iter()
+        .map(|path| AdapterSpec::new(path, 1.0, AdapterKind::Lora))
+        .collect::<Vec<_>>();
+    adapters.extend(user_adapters);
+    adapters
+}
+
 // Candle (Windows/CUDA) Qwen-Image-Edit route (sc-5487, epic 5480) — reference-conditioned image
 // editing on the Qwen-Image-Edit family off-Mac via `runtime_cuda::providers::qwen_image::QwenEdit`. The reference
 // + edit prompt go through the Qwen2.5-VL vision-language encoder, the reference is VAE-encoded into
@@ -772,22 +787,11 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     } else {
         None
     };
-    let mut adapters: Vec<AdapterSpec> = lightning_lora
-        .iter()
-        .cloned()
-        .map(|path| AdapterSpec::new(path, 1.0, AdapterKind::Lora))
-        .collect();
-    // User LoRA/LoKr-family adapters (sc-10271/sc-18477) remain available on the plain 2511 route.
-    // Lightning is a sealed one-adapter recipe: stacking a user adapter would create a distinct
-    // artifact that cannot borrow the built-in distill's memory evidence.
     let user_adapters = resolve_adapters(request, settings)?;
-    if lightning && !user_adapters.is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Qwen Edit Lightning accepts only its pinned built-in 4-step distillation LoRA; user adapters require the plain qwen_image_edit_2511 route."
-                .to_owned(),
-        ));
-    }
-    adapters.extend(user_adapters.iter().cloned());
+    let adapters = qwen_edit_adapter_stack(lightning_lora.clone(), user_adapters.clone());
+    // User LoRA/LoKr-family adapters (sc-10271/sc-18477) remain available on both routes. Lightning
+    // keeps the exact ordered stack [built-in distill, user...] for resident/direct execution; the
+    // shared selector certifies optimized Lightning evidence only for the singleton built-in stack.
     let adapter_count = adapters.len();
     let pose_inputs = qwen_edit_candle_pose_count(request)
         .filter(|count| *count > 0)
@@ -1355,6 +1359,25 @@ mod qwen_edit_tier_reconcile_tests {
             AdapterKind::Lora,
         );
         assert!(qwen_user_adapter_resident_bytes(&[missing], "q4").is_err());
+    }
+
+    #[test]
+    fn lightning_builtin_plus_user_stack_stays_ordered_and_resident_only() {
+        let root = tempfile::tempdir().unwrap();
+        let builtin = root.path().join("builtin-lightning.safetensors");
+        let user = root.path().join("user-lokr.safetensors");
+        std::fs::write(&builtin, b"builtin").unwrap();
+        std::fs::write(&user, b"user").unwrap();
+        let user_adapter = AdapterSpec::new(user.clone(), 0.75, AdapterKind::Lokr);
+        let stack = qwen_edit_adapter_stack(Some(builtin.clone()), vec![user_adapter]);
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack[0].path, builtin);
+        assert_eq!(stack[1].path, user);
+        assert_eq!(stack[1].scale, 0.75);
+        assert_eq!(
+            qwen_shared_load_plan(Some(gen_core::MemoryStrategy::Resident)),
+            crate::vram_gate::LoadPlan::Resident
+        );
     }
 
     #[test]

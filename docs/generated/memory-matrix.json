@@ -172,12 +172,12 @@
       "image": 53,
       "video": 10
     },
-    "cells": 8785,
+    "cells": 8755,
     "publishedCells": 163,
-    "elidedCells": 8622,
+    "elidedCells": 8592,
     "elidedByState": {
-      "Implemented/unverified": 2778,
-      "Missing": 5844
+      "Implemented/unverified": 2754,
+      "Missing": 5838
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -3001,8 +3001,7 @@
           ],
           "overlays": [
             "identity",
-            "lora",
-            "none"
+            "lora"
           ],
           "rungs": [
             "resident",
@@ -11910,28 +11909,27 @@
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 12,
+      "elided": 11,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
+        "Implemented/unverified": 6,
         "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "character_image": 6,
-          "edit_image": 6
+          "character_image": 3,
+          "edit_image": 3
         },
         "overlay": {
           "identity": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 6
         }
       }
     },
@@ -11939,28 +11937,27 @@
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 12,
+      "elided": 11,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
+        "Implemented/unverified": 6,
         "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "character_image": 6,
-          "edit_image": 6
+          "character_image": 3,
+          "edit_image": 3
         },
         "overlay": {
           "identity": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 6
         }
       }
     },
@@ -11968,52 +11965,51 @@
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 0,
-      "elided": 18,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 18
+        "Missing": 12
       }
     },
     {
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 11,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 12
       }
     },
     {
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 12,
+      "elided": 11,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
+        "Implemented/unverified": 6,
         "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "character_image": 6,
-          "edit_image": 6
+          "character_image": 3,
+          "edit_image": 3
         },
         "overlay": {
           "identity": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 6
         }
       }
     },

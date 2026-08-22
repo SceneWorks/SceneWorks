@@ -5015,6 +5015,26 @@ test("the published axes are the cross-product, so no lane can be invisible (sc-
     ).length,
     0,
   );
+
+  const lightning = matrix.models.find((model) => model.id === "qwen_image_edit_2511_lightning");
+  assert.deepEqual(
+    lightning.axes.candle.overlays,
+    ["identity", "lora"],
+    "Qwen Lightning Candle has no plain route; built-in-LoRA and character overlays remain",
+  );
+  assert.equal(
+    matrix.cells.some(
+      (cell) =>
+        cell.modelId === "qwen_image_edit_2511_lightning" &&
+        cell.backend === "candle" &&
+        cell.overlay === "none" &&
+        ["resident", "staged_residency", "bounded_decode", "bounded_attention"].includes(
+          cell.rung,
+        ),
+    ),
+    false,
+    "plain Lightning cells must not claim any Candle rung",
+  );
 });
 
 test("a calibration-plan entry that addresses no coordinate fails generation (sc-18099)", async () => {

@@ -266,7 +266,19 @@ export function catalogAxes(model, backend, poseFamilies) {
     model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
   const advertised =
     backend === "candle" && measured.length ? measured : [...measured, ...downloads, ...dense];
-  const overlays = ["none"];
+  // Mirror the matrix generator: a backend whose exact contract names only the LoRA load profile
+  // cannot serve a plain public coordinate (Qwen Edit Lightning is the current case).
+  const implementations = model[backend]?.memoryStrategyContract?.implementations ?? [];
+  const loraOnlyContract =
+    model.id === "qwen_image_edit_2511_lightning" &&
+    implementations.length > 0 &&
+    implementations.every(
+      (implementation) =>
+        Array.isArray(implementation.overlays) &&
+        implementation.overlays.length === 1 &&
+        implementation.overlays[0] === "lora",
+    );
+  const overlays = loraOnlyContract ? ["lora"] : ["none"];
   if (model.loraCompatibility) overlays.push("lora");
   if (poseFamilies[backend]?.has(model.id)) overlays.push("control");
   if ((model.capabilities ?? []).includes("character_image")) overlays.push("identity");
