@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9296cdd2ad7f1937b26749f30f204d43585815b4b116e15a24e3cda8dc3fc955",
+    "sceneWorksRevision": "source-tree:32178747a062b34baa0c9fb4ba92e37d864a5cb73129d143aed3250bbdb18bcd",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -59,11 +59,11 @@
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
-        "sha256": "1f27e51386f4de6031ea6d453cc59be5977d984dea8bea8ddc16801f5f4eda48"
+        "sha256": "6a9db7f71cc79de58bfba7809708980115c8ec1dc4a4465a79f1f730a6b4cbc5"
       },
       "videoMemoryCurvesData": {
         "path": "docs/generated/video-memory-curves.json",
-        "sha256": "c36aa75c98d5bb5e1f813bcf44fa704b326a94f0af41c85e9dea8291d026b2af"
+        "sha256": "6a39a76f4c322b013cfdd91f2b13fb60848da0048608ddeaaeba4ba89ebe0b0c"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
@@ -3773,7 +3773,8 @@
       "videoFitSymbol": "wan_video_fit_error_with_adapter_bytes",
       "mechanisms": [
         "flat_video_fit_error",
-        "shared_selector_legacy_video_compatibility"
+        "shared_selector_legacy_video_compatibility",
+        "video_memory_curve_bundle"
       ],
       "evidence": {
         "hasCandleBlock": true,
@@ -4030,7 +4031,7 @@
       "krea_control_fit": 1,
       "conditioning_fit": 8,
       "flat_video_fit_error": 7,
-      "video_memory_curve_bundle": 0,
+      "video_memory_curve_bundle": 1,
       "unreached": 0
     },
     "sharedSelector": {
@@ -4058,6 +4059,7 @@
       "video_memory_curve_bundle"
     ],
     "packagedVideoCurveLanes": {
+      "candle": 1,
       "mlx": 1
     },
     "advisoryCandleBlocksWithoutRoute": [
@@ -4223,15 +4225,6 @@
       "detail": "The manifest carries `measured: true|false` at <model>.candle, .candle.turboFit and .candle.control. There is no evidenceClass/evidence_class field anywhere in the tree, so epic 19048 R3's 'adopt epic 18472's evidence-class flag' has no producer to adopt yet; a boolean cannot distinguish a fitted curve from a single measured point from a declared floor.",
       "paths": [
         "config/manifests/builtin.models.jsonc"
-      ]
-    },
-    {
-      "id": "zero-candle-video-memory-curves-packaged",
-      "owner": "sc-19057",
-      "severity": "high",
-      "detail": "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign lane, but the packaged curve data covers {\"mlx\":1} â€” there are no candle curves at all. Optimized Candle candidates are therefore Unverified; the seven legacy ceilings and Bernini's T2V structural pre-load floor remain the only source-backed resident admission inputs.",
-      "paths": [
-        "docs/generated/video-memory-curves.json"
       ]
     },
     {

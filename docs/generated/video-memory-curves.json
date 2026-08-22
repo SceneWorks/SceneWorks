@@ -5,6 +5,10 @@
     {
       "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
       "sha256": "1d8ebc3048b42f5f0d325fff5ec9a3e6db422b6d181790528ac68a9fdad7f0da"
+    },
+    {
+      "path": "docs/generated/wan-candle-video-sc-19057.json",
+      "sha256": "1eb425b3bb795a6b1b5408be6888e9f20f94b7de7a8821209b70779286ef8909"
     }
   ],
   "curves": [
@@ -84,6 +88,80 @@
               "imc-ed4386179ee8edd3776b",
               "imc-f3ef6ea4a4033293f99f",
               "imc-f6e97ce0817a6f697d1d"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2:wan-video:wan2_2_ti2v_5b:candle:q4:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:7f6a68640407:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+      "calibrationAbi": 3,
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "decodePass": "single_pass",
+      "sourceFit": "docs/generated/wan-temporal-form-fit-sc-19057.json",
+      "measuredGeometryHull": [
+        {
+          "pixels": 399360,
+          "voxels": 37140480
+        },
+        {
+          "pixels": 901120,
+          "voxels": 83804160
+        },
+        {
+          "pixels": 901120,
+          "voxels": 170311680
+        },
+        {
+          "pixels": 399360,
+          "voxels": 75479040
+        }
+      ],
+      "phases": {
+        "conditioning": {
+          "fixedGb": 11.196807238520421,
+          "perMpxGb": 0.06228077168360994,
+          "perMpxFrameGb": 3.263558323750635e-16,
+          "maxResidualGb": 1.7763568394002505e-14
+        },
+        "denoise": {
+          "fixedGb": 11.207667472795762,
+          "perMpxGb": 0,
+          "perMpxFrameGb": 0.00025117197517360795,
+          "maxResidualGb": 0.013348825976386536
+        },
+        "decode": {
+          "fixedGb": 7.6801715507055235,
+          "perMpxGb": 0,
+          "perMpxFrameGb": 0.06946188490884356,
+          "maxResidualGb": 2.057363514575272
+        }
+      },
+      "evidence": {
+        "records": 6,
+        "fitPoints": 4,
+        "heldOutPoints": 2,
+        "sources": [
+          {
+            "path": "docs/generated/wan-candle-video-sc-19057.json",
+            "sha256": "1eb425b3bb795a6b1b5408be6888e9f20f94b7de7a8821209b70779286ef8909",
+            "recordIds": [
+              "imc-02c2427d469afa5f8ca6",
+              "imc-4dc38b27f1992610db63",
+              "imc-585755c59b5ee50c1a4f",
+              "imc-a907a91ed8c8c7695fe2",
+              "imc-be4eacd27e7280a14422",
+              "imc-de8796b44888dcd60f2f"
             ]
           }
         ]

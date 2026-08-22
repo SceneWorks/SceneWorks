@@ -41,10 +41,16 @@ pub const PACKAGED_VIDEO_MEMORY_CURVES: &str =
 /// Every immutable evidence source compiled alongside the promoted curve bundle. The loader treats
 /// this as one catalog: paths and record ids must be globally unique, every byte digest must agree,
 /// and every source record must be consumed by exactly one complete-selector curve.
-const PACKAGED_VIDEO_MEMORY_CURVE_SOURCES: &[(&str, &str)] = &[(
-    "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
-    include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
-)];
+const PACKAGED_VIDEO_MEMORY_CURVE_SOURCES: &[(&str, &str)] = &[
+    (
+        "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+        include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
+    ),
+    (
+        "docs/generated/wan-candle-video-sc-19057.json",
+        include_str!("../../../docs/generated/wan-candle-video-sc-19057.json"),
+    ),
+];
 #[cfg(test)]
 const HISTORICAL_VIDEO_MEMORY_CURVE_FIT_PATH: &str =
     "docs/generated/ltx-temporal-form-fit-sc-18810.json";

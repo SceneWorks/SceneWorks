@@ -1,0 +1,1477 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/wan2.2-ti2v-5b-candle",
+        "resolvedRevision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "capturedAt": "2026-08-22T09:45:50Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan2-2-ti2v-5b-video",
+        "blockers": [
+          "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 11816402944
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "warmRepeatOverallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12051283968
+          },
+          {
+            "name": "postRenderDeviceUsed",
+            "unit": "bytes",
+            "value": 1146093568
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 189
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 48
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "firstFrameNondegenerate",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 64
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-02c2427d469afa5f8ca6",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/wan2.2-ti2v-5b-candle@9b173dc8660334a87a11e67de58939afe68f8cb2:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-1fb63575df99f5b679d8",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 11816402944,
+          "allocatorBytes": 11816402944,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 12049186816,
+        "decode": 11816402944,
+        "denoise": 12049186816,
+        "overall": 12049186816
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+          "dirty": false,
+          "revision": "4013049764172ee7dc707101c7da8c83c1483f2d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:75ff1594cebcfb84ac9d23ab9e252e26d5ac04f7dd7f25e7f971f806d7b11dab",
+          "revision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 12049186816,
+          "name": "exact_fit",
+          "predictedBytes": 12049186816,
+          "reason": "the loaded provider contract admitted a budget exactly equal to the measured ceiling",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 TI2V-5B base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 189,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/wan2.2-ti2v-5b-candle",
+        "resolvedRevision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "capturedAt": "2026-08-22T09:48:15Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan2-2-ti2v-5b-video",
+        "blockers": [
+          "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 13225689088
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 13225689088
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 13225689088
+          },
+          {
+            "name": "warmRepeatOverallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 13225689088
+          },
+          {
+            "name": "postRenderDeviceUsed",
+            "unit": "bytes",
+            "value": 1146093568
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 93
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "firstFrameNondegenerate",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 64
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-4dc38b27f1992610db63",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/wan2.2-ti2v-5b-candle@9b173dc8660334a87a11e67de58939afe68f8cb2:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-3f36c5e5718cc4d15ccc",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 13225689088,
+          "allocatorBytes": 13225689088,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 13225689088,
+          "allocatorBytes": 13225689088,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 12049186816,
+        "decode": 13225689088,
+        "denoise": 12049186816,
+        "overall": 13225689088
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+          "dirty": false,
+          "revision": "4013049764172ee7dc707101c7da8c83c1483f2d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:75ff1594cebcfb84ac9d23ab9e252e26d5ac04f7dd7f25e7f971f806d7b11dab",
+          "revision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 13225689088,
+          "name": "exact_fit",
+          "predictedBytes": 13225689088,
+          "reason": "the loaded provider contract admitted a budget exactly equal to the measured ceiling",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 TI2V-5B base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 93,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/wan2.2-ti2v-5b-candle",
+        "resolvedRevision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "capturedAt": "2026-08-22T09:40:00Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan2-2-ti2v-5b-video",
+        "blockers": [
+          "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12082741248
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12722372608
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12722372608
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 12722372608
+          },
+          {
+            "name": "warmRepeatOverallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12722372608
+          },
+          {
+            "name": "postRenderDeviceUsed",
+            "unit": "bytes",
+            "value": 1146093568
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 93
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "firstFrameNondegenerate",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 64
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-585755c59b5ee50c1a4f",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/wan2.2-ti2v-5b-candle@9b173dc8660334a87a11e67de58939afe68f8cb2:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-192e33a34a60c97adffc",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12082741248,
+          "allocatorBytes": 12082741248,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 12722372608,
+          "allocatorBytes": 12722372608,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 12722372608,
+          "allocatorBytes": 12722372608,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 12082741248,
+        "decode": 12722372608,
+        "denoise": 12049186816,
+        "overall": 12722372608
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+          "dirty": false,
+          "revision": "4013049764172ee7dc707101c7da8c83c1483f2d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:75ff1594cebcfb84ac9d23ab9e252e26d5ac04f7dd7f25e7f971f806d7b11dab",
+          "revision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 12722372608,
+          "name": "exact_fit",
+          "predictedBytes": 12722372608,
+          "reason": "the loaded provider contract admitted a budget exactly equal to the measured ceiling",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 TI2V-5B base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 93,
+          "height": 704,
+          "width": 1280
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/wan2.2-ti2v-5b-candle",
+        "resolvedRevision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "capturedAt": "2026-08-22T10:15:57Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan2-2-ti2v-5b-video",
+        "blockers": [
+          "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12082741248
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12082741248
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 17654874112
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 17654874112
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 17654874112
+          },
+          {
+            "name": "warmRepeatOverallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 15272509440
+          },
+          {
+            "name": "postRenderDeviceUsed",
+            "unit": "bytes",
+            "value": 1146093568
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 141
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 36
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "firstFrameNondegenerate",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 64
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-a907a91ed8c8c7695fe2",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/wan2.2-ti2v-5b-candle@9b173dc8660334a87a11e67de58939afe68f8cb2:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-a110087b5dc40d0eef16",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12082741248,
+          "allocatorBytes": 12082741248,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 17654874112,
+          "allocatorBytes": 17654874112,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 12082741248,
+          "allocatorBytes": 12082741248,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 17654874112,
+          "allocatorBytes": 17654874112,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 12082741248,
+        "decode": 17654874112,
+        "denoise": 12082741248,
+        "overall": 17654874112
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+          "dirty": false,
+          "revision": "4013049764172ee7dc707101c7da8c83c1483f2d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:75ff1594cebcfb84ac9d23ab9e252e26d5ac04f7dd7f25e7f971f806d7b11dab",
+          "revision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 17654874112,
+          "name": "exact_fit",
+          "predictedBytes": 17654874112,
+          "reason": "the loaded provider contract admitted a budget exactly equal to the measured ceiling",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 TI2V-5B base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 141,
+          "height": 704,
+          "width": 1280
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/wan2.2-ti2v-5b-candle",
+        "resolvedRevision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "capturedAt": "2026-08-22T10:20:01Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan2-2-ti2v-5b-video",
+        "blockers": [
+          "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 11212423168
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 12049186816
+          },
+          {
+            "name": "warmRepeatOverallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12051283968
+          },
+          {
+            "name": "postRenderDeviceUsed",
+            "unit": "bytes",
+            "value": 1146093568
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 141
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 36
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "firstFrameNondegenerate",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 64
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-be4eacd27e7280a14422",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/wan2.2-ti2v-5b-candle@9b173dc8660334a87a11e67de58939afe68f8cb2:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-f12d53f7b8ff6503aa79",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 11212423168,
+          "allocatorBytes": 11212423168,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 12049186816,
+          "allocatorBytes": 12049186816,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 12049186816,
+        "decode": 11212423168,
+        "denoise": 12049186816,
+        "overall": 12049186816
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+          "dirty": false,
+          "revision": "4013049764172ee7dc707101c7da8c83c1483f2d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:75ff1594cebcfb84ac9d23ab9e252e26d5ac04f7dd7f25e7f971f806d7b11dab",
+          "revision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 12049186816,
+          "name": "exact_fit",
+          "predictedBytes": 12049186816,
+          "reason": "the loaded provider contract admitted a budget exactly equal to the measured ceiling",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 TI2V-5B base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 141,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/wan2.2-ti2v-5b-candle",
+        "resolvedRevision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "capturedAt": "2026-08-22T10:04:58Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan2-2-ti2v-5b-video",
+        "blockers": [
+          "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12082741248
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12082741248
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 21748514816
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 21748514816
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 21748514816
+          },
+          {
+            "name": "warmRepeatOverallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 21647851520
+          },
+          {
+            "name": "postRenderDeviceUsed",
+            "unit": "bytes",
+            "value": 1146093568
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 189
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 48
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "firstFrameNondegenerate",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 65
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-de8796b44888dcd60f2f",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/wan2.2-ti2v-5b-candle@9b173dc8660334a87a11e67de58939afe68f8cb2:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-79546fc34b4f79cb17e0",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12082741248,
+          "allocatorBytes": 12082741248,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 21748514816,
+          "allocatorBytes": 21748514816,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 12082741248,
+          "allocatorBytes": 12082741248,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 21748514816,
+          "allocatorBytes": 21748514816,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 12082741248,
+        "decode": 21748514816,
+        "denoise": 12082741248,
+        "overall": 21748514816
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+          "dirty": false,
+          "revision": "4013049764172ee7dc707101c7da8c83c1483f2d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:75ff1594cebcfb84ac9d23ab9e252e26d5ac04f7dd7f25e7f971f806d7b11dab",
+          "revision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 21748514816,
+          "name": "exact_fit",
+          "predictedBytes": 21748514816,
+          "reason": "the loaded provider contract admitted a budget exactly equal to the measured ceiling",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-19057 executes the loaded-contract admission scenarios plus a clean warm repeat; typed cancellation, authorized-error injection, and their recovery renders are additional full-clip video renders this arm does not perform, so they have no measurement behind them here",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 TI2V-5B base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 189,
+          "height": 1280,
+          "width": 704
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2",
+        "overlay": "none",
+        "provider": "wan2_2_ti2v_5b",
+        "tier": "q4"
+      }
+    }
+  ],
+  "schemaVersion": 5,
+  "sourceSessions": []
+}

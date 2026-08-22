@@ -573,6 +573,65 @@ fn exact_candle_contract_and_curve_select_fitted_without_a_fallback_allowance() 
     );
 }
 
+#[test]
+fn packaged_sc19057_candle_curve_selects_on_its_exact_production_identity() {
+    let mut contract = fixture_contract_with_realization(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+        MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: true,
+            block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    contract.provider_id = "wan2_2_ti2v_5b".to_owned();
+    contract.calibration = Some(MemoryCalibrationIdentity {
+        abi: gen_core::MEMORY_CALIBRATION_ABI,
+        fingerprint: "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1".to_owned(),
+        load_shape: LoadShape::EagerMaterialization,
+    });
+    let mut selector = LadderVideoSelector::new(
+        VideoRequestIdentity {
+            model_id: "wan_2_2",
+            model_family: "wan-video",
+            route: "wan2_2_ti2v_5b",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
+            lane: VideoLane::Candle,
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Q4),
+                component_precision_floors: &[],
+            },
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            expected_closure_digest:
+                "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+        },
+        &contract,
+        budget(128.0),
+        None,
+        0,
+    );
+    assert!(matches!(
+        selector.select(geometry(93, VideoGeometryRole::Requested)),
+        VideoRungSelection::Selected {
+            rung: StrategyRung::StagedResidency,
+            ..
+        }
+    ));
+    assert_eq!(selector.selections.len(), 1);
+    assert_eq!(
+        selector.selections[0].basis,
+        CandidateBasis::EstimateFittedCurve
+    );
+    assert!(selector.selections[0]
+        .evidence_revision
+        .starts_with("wan_2_2:wan-video:wan2_2_ti2v_5b:candle:q4:"));
+}
+
 /// The promoted sc-18810 curve used as a historical, structurally valid fixture. The fixture
 /// contract above adopts the artifact's exact provider/fingerprint identity; mutating the bundle's
 /// identity would correctly sever its immutable source-record handshake and make `evaluate` fail

@@ -226,6 +226,74 @@ export function leastSquares(rows, targets) {
   return normal.map((row) => row[width]);
 }
 
+/**
+ * Non-negative least squares for the tiny cross-form design matrix.
+ *
+ * The runtime schema requires every promoted cross coefficient to be non-negative so evaluation
+ * stays monotone in area and frames. Ordinary least squares remains the byte-preserving fast path:
+ * every already-valid historical fit returns the exact same doubles. When a measured slice puts
+ * the unconstrained optimum outside that domain, enumerate every active set (including the all-zero
+ * boundary), refit the active columns, and choose the valid candidate with the smallest value of
+ * the same sum-of-squared-residuals objective. Mask order is the deterministic exact-tie breaker.
+ * This is not coefficient clamping: the coefficients that remain active are refit on their face.
+ */
+export function nonNegativeLeastSquares(rows, targets) {
+  if (
+    rows.length === 0 ||
+    rows.length !== targets.length ||
+    !rows.every(
+      (row) =>
+        Array.isArray(row) &&
+        row.length === rows[0].length &&
+        row.every(Number.isFinite),
+    ) ||
+    !targets.every(Number.isFinite)
+  ) {
+    return null;
+  }
+  const width = rows[0].length;
+  if (width === 0 || width > 30) return null;
+  // Identifiability belongs to the complete declared form. A singular full design cannot be
+  // laundered into an apparently valid lower-dimensional boundary fit by the active-set search.
+  const unconstrained = leastSquares(rows, targets);
+  if (!unconstrained || unconstrained.some((value) => !Number.isFinite(value))) return null;
+  if (unconstrained.every((value) => value >= 0)) return unconstrained;
+  let best = null;
+  for (let mask = 0; mask < 2 ** width; mask += 1) {
+    const active = Array.from({ length: width }, (_, index) => index).filter(
+      (index) => (mask & (1 << index)) !== 0,
+    );
+    const fitted =
+      active.length === 0
+        ? []
+        : leastSquares(
+            rows.map((row) => active.map((index) => row[index])),
+            targets,
+          );
+    if (!fitted || fitted.some((value) => !Number.isFinite(value) || value < 0)) continue;
+    const coefficients = Array(width).fill(0);
+    active.forEach((index, offset) => {
+      coefficients[index] = fitted[offset];
+    });
+    const squaredResidual = rows.reduce((sum, row, rowIndex) => {
+      const predicted = row.reduce(
+        (value, regressor, column) => value + regressor * coefficients[column],
+        0,
+      );
+      return sum + (predicted - targets[rowIndex]) ** 2;
+    }, 0);
+    if (!Number.isFinite(squaredResidual)) continue;
+    if (
+      best === null ||
+      squaredResidual < best.squaredResidual ||
+      (squaredResidual === best.squaredResidual && mask < best.mask)
+    ) {
+      best = { coefficients, squaredResidual, mask };
+    }
+  }
+  return best?.coefficients ?? null;
+}
+
 function residuals(points, form, coefficients) {
   return points.map((point) => {
     const predicted = FORMS[form]
@@ -252,13 +320,17 @@ function summarise(entries) {
 }
 
 /** Fit every candidate for one (tier, series) slice and score it on the held-out points. */
-export function fitSlice(fitPoints, heldOutPoints) {
+export function fitSlice(fitPoints, heldOutPoints, { nonNegativeCross = false } = {}) {
   const candidates = {};
   for (const [name, form] of Object.entries(FORMS)) {
-    const coefficients = leastSquares(
-      fitPoints.map((point) => form.row(point.geometry)),
-      fitPoints.map((point) => point.value),
-    );
+    const rows = fitPoints.map((point) => form.row(point.geometry));
+    const targets = fitPoints.map((point) => point.value);
+    // Only `cross` is promoted into the runtime curve container. Its non-negative schema is a
+    // load-bearing monotonicity contract; diagnostic candidate forms retain their historical OLS.
+    const coefficients =
+      name === "cross" && nonNegativeCross
+        ? nonNegativeLeastSquares(rows, targets)
+        : leastSquares(rows, targets);
     if (!coefficients) {
       candidates[name] = { singular: true };
       continue;
@@ -851,7 +923,7 @@ function completeSelectorOfPoint(point) {
   return selector;
 }
 
-function selectorFitReport(scopedPoints) {
+function selectorFitReport(scopedPoints, { nonNegativeCross = false } = {}) {
   const fits = {};
   for (const series of Object.keys(SERIES)) {
     const valued = scopedPoints.map((point) => ({ ...point, value: point.series[series] }));
@@ -866,7 +938,7 @@ function selectorFitReport(scopedPoints) {
       (point) => point.role !== "fit" && !point.role.startsWith("held_out"),
     );
     if (fitPoints.length === 0) continue;
-    const slice = fitSlice(fitPoints, heldOutPoints);
+    const slice = fitSlice(fitPoints, heldOutPoints, { nonNegativeCross });
     fits[series] = {
       fitPoints: fitPoints.length,
       heldOutPoints: heldOutPoints.length,
@@ -1178,7 +1250,10 @@ export function buildReport(
       selector,
       recordIds: scopedPoints.map((point) => point.recordId).sort(compareText),
       points: scopedPoints,
-      fits: selectorFitReport(scopedPoints),
+      // SC-19057 is the first real Candle promotion and exposes the constrained optimum. Bind the
+      // repair to the lane semantics rather than a story id; the historical MLX report remains an
+      // immutable provenance record while every present and future Candle cross fit uses NNLS.
+      fits: selectorFitReport(scopedPoints, { nonNegativeCross: selector.backend === "candle" }),
     }))
     .sort((left, right) => compareText(left.key, right.key));
 

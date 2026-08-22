@@ -1115,18 +1115,18 @@ snapshots pinned the churn. Check `df -h /System/Volumes/Data` before AND during
 single-pass decode above ~150M output voxels as needing tens of GiB of headroom. This is a HOST
 verdict, not a model verdict.
 
-**Candle adoption/measurement state (explicitly not a fitted-curve claim).** No Candle LTX or Wan
-geometry sweep has been promoted into `video-memory-curves.json`; the only fitted curve in this
-section remains historical MLX LTX q8. SceneWorks now has the synchronous post-load CUDA
+**Candle adoption/measurement state.** No Candle LTX geometry sweep has been promoted. Wan q4 now
+has the closure-bound six-record SC-19057 curve from artifact `9474424146` beside the historical MLX
+LTX q8 curve in `video-memory-curves.json`. SceneWorks also has the synchronous post-load CUDA
 `mem_get_info` snapshot and fixed cold-load provider attribution needed for a truthful live budget.
 At the historical `b965641e` capture pin the provider-owned geometry/frames decode profile and the
 loaded Candle generator contract were absent, so Candle failed open before selection. The frozen
 preparation pin `b4a29108` includes the reviewed SC-19117 profile and SC-19223 contract: unmeasured
 Candle routes now use the provider-owned decode working set plus each contract component exactly
-once and the ordinary 4% estimate margin. This is schema-capable estimate fallback, **not** a fitted
-curve, an optimization claim, or Candle calibration; the permanent inference-`main` pin must still
-consume the same APIs. A fitted Candle curve remains blocked on a real GPU sweep with the same
-fit/held-out, per-phase, closure-bound evidence discipline above.
+once and the ordinary 4% estimate margin. That estimate fallback remains distinct from the promoted
+Wan q4 fitted curve; routes outside its exact selector are Unverified, and the curve is not
+cross-lane or cross-tier evidence. The permanent inference-`main` pin must still consume the same
+provider APIs.
 
 **Coverage is derived, not asserted.** `scripts/fit-ltx-temporal-form.mjs` buckets every planned entry
 from two artifacts — the dataset (was a record captured?) and the driver logs (was it ever begun, and
@@ -1564,11 +1564,12 @@ that asks what would have failed if your change were wrong, and answer it in the
 ## 12. The candle VIDEO lane — `candle:wan2_2_ti2v_5b` (sc-19057)
 
 > Provenance: the arm, its guards, its plan and this section were written and unit-tested off-GPU.
-> **The capture itself has NOT been run.** Per epic 18093's posture, measurement is a runbook rather
-> than a per-model story: this section is the runbook, and the capture is a terminal-phase dispatch
-> the epic coordinator performs once every code story has merged. A capture taken mid-epic
-> fingerprints source paths later stories change, and the harness aborts if the repository moves
-> under it (§5), so running it early wastes the lane rather than saving time.
+> The terminal capture then completed at SceneWorks head
+> `1ea0cc2d1365b7e7f691b9331346cd0a329c900e` in run `32564176646`, job `97010255064`; immutable
+> artifact `9474424146` supplied the exact six `runtime_complete` records now promoted below. Its
+> downloaded archive is `sha256:5d0947f97675bb13e130e99380c4a782abf0c58be4be8be0ab095aa3e08b1690`
+> and the committed capture member is
+> `sha256:1eb425b3bb795a6b1b5408be6888e9f20f94b7de7a8821209b70779286ef8909`.
 
 ### 12a. What this lane is, and why it is Wan and not LTX
 
@@ -1715,12 +1716,13 @@ inputs for its older modes, but its SC-19057 mode rejects every repository, revi
 subdirectory other than the immutable q4 identity below. q8 and bf16 are outside the accepted
 terminal campaign; do not create an external plan copy to route around that decision.
 
-**Cost is unmeasured on this lane — measure yours and report it, do not promise a number.** What is
-known: the shipped `candle.vramGbByTier` for this model was measured on an idle RTX PRO 6000 at
+**The six-row campaign measures this exact q4 lane; do not generalize it to another tier, route, or
+card.** The older shipped `candle.vramGbByTier` for this model was measured on an idle RTX PRO 6000 at
 `832x480 x 121` frames, 20 steps, CFG on (sc-13175), and the peak is the denoise attention transient
 rather than the decode. This arm renders at **2 steps** — the peak is per-step, so the ceiling is the
-same, but the wall clock is not comparable to that measurement. Each row is a cold model load plus
-two full clips (the measured render and its warm repeat).
+same, but the wall clock is not comparable to that earlier measurement. Each promoted row is a cold
+model load plus two full clips (the measured render and its warm repeat); the retained fit and
+held-out residuals, rather than a promised campaign duration, are the acceptance evidence.
 
 ### 12e. Through the guarded dispatch
 
@@ -1807,8 +1809,7 @@ wired into `npm run check` so it stays schema-valid:
    — it reads `record.backend`, `record.target.modelId` (→ `modelFamily` from the manifest),
    `record.repositories.inference.closureDigest`, and the `_role` labels from the committed plan —
    so it emits a `backend: "candle"` curve into `docs/generated/video-memory-curves.json` beside the
-   existing MLX LTX one. That bundle currently contains exactly one curve and it is MLX; this is the
-   producer gap this lane closes.
+   existing MLX LTX one. The promoted bundle now contains exactly two curves: one MLX and one Candle.
 
    The container is **multi-lane** as of schema v3 (epic 19048): fit provenance lives on the CURVE
    (`sourceFit`), not on the bundle, so the two lanes each name their own report. The fitter reads
@@ -1857,8 +1858,8 @@ wired into `npm run check` so it stays schema-valid:
    exact sorted packaged catalog"*, which is the length check in `validate_source_catalog` firing
    before the later record-consumption check.
 
-   🔴 **Three gates fire deliberately when the candle curve lands. All three are correct; clear
-   them, do not weaken them.** The list was derived by promoting a synthetic candle lane end to end
+   🔴 **Three gates fired deliberately when the candle curve landed. All three were correct and were
+   cleared without weakening them.** The list was derived by promoting a synthetic candle lane end to end
    and diffing the whole `npm run check` failure set against a clean-head baseline (41 clean, 44
    with two lanes); no fourth gate appeared by that method:
 
@@ -1867,11 +1868,11 @@ wired into `npm run check` so it stays schema-valid:
      `COPY docs/generated/wan-candle-video-sc-19057.json ./docs/generated/` in **both** Rust builder
      stages of `docker/rust.Dockerfile`. Without it the crate compiles locally and fails in Docker,
      which is the standing `include_str!`-outside-the-build-context trap.
-   * `generate-candle-admission-inventory.test.mjs` — *"the packaged video curves are MLX-only,
-     which is why no candle route reaches the bundle"*. This is the recorded-gap tripwire; its own
-     assertion says *"a candle curve now exists — update the recorded gap"*. Retire the
-     `zero-candle-video-memory-curves-packaged` known gap and let
-     `summary.byMechanism.video_memory_curve_bundle` reflect the route that now reaches the bundle.
+   * `generate-candle-admission-inventory.test.mjs` — *"the exact packaged Candle video curve retires
+     only the zero-curve gap"*. This is the recorded-gap tripwire: the gap retires only when a
+     packaged Candle curve intersects the exact routed model/provider identity, and a foreign
+     provider restores both zero mechanisms and the gap. The promoted Wan route is that exact
+     intersection, so `summary.byMechanism.video_memory_curve_bundle` is one.
    * `generate-candle-admission-inventory.test.mjs` — *"the committed artifacts match a fresh
      build"*. The candle-admission inventory hashes both
      `crates/sceneworks-core/src/video_memory_curves.rs` and

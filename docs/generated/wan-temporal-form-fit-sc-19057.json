@@ -1,0 +1,2212 @@
+{
+  "schemaVersion": 1,
+  "story": "sc-19057",
+  "generatedBy": "scripts/fit-ltx-temporal-form.mjs",
+  "capturedRecords": 6,
+  "tiers": [
+    "q4"
+  ],
+  "sourceSessions": [],
+  "terminalProvenance": {
+    "mode": "record_terminals",
+    "authority": "runtime_complete_records_from_clean_repositories"
+  },
+  "coverage": {
+    "plannedEntries": 6,
+    "capturedFixtures": 6,
+    "capturedGeometries": 6,
+    "byState": {
+      "captured": {
+        "total": 6,
+        "byTier": {
+          "q4": 6
+        }
+      }
+    },
+    "entries": [
+      {
+        "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 37140480,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 56309760,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+        "role": "held_out",
+        "tier": "q4",
+        "outputVoxels": 75479040,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 83804160,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+        "role": "held_out",
+        "tier": "q4",
+        "outputVoxels": 127057920,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 170311680,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      }
+    ]
+  },
+  "noiseFloors": {
+    "text": {
+      "replicatedGeometries": 0,
+      "maxSpreadGib": null,
+      "maxSpreadFraction": null,
+      "crossRevision": false,
+      "spreads": []
+    },
+    "denoise": {
+      "replicatedGeometries": 0,
+      "maxSpreadGib": null,
+      "maxSpreadFraction": null,
+      "crossRevision": false,
+      "spreads": []
+    },
+    "decode": {
+      "replicatedGeometries": 0,
+      "maxSpreadGib": null,
+      "maxSpreadFraction": null,
+      "crossRevision": false,
+      "spreads": []
+    },
+    "overallActive": {
+      "replicatedGeometries": 0,
+      "maxSpreadGib": null,
+      "maxSpreadFraction": null,
+      "crossRevision": false,
+      "spreads": []
+    },
+    "maxPhaseActivePlusCache": {
+      "replicatedGeometries": 0,
+      "maxSpreadGib": null,
+      "maxSpreadFraction": null,
+      "crossRevision": false,
+      "spreads": []
+    }
+  },
+  "selectorFits": [
+    {
+      "key": "[\"wan_2_2\",\"wan-video\",\"wan2_2_ti2v_5b\",\"candle\",\"q4\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520\",3,\"sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1\",\"single_pass\"]",
+      "selector": {
+        "modelId": "wan_2_2",
+        "modelFamily": "wan-video",
+        "provider": "wan2_2_ti2v_5b",
+        "backend": "candle",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "rung": "staged_residency",
+        "loadShape": "eager_materialization",
+        "batch": 1,
+        "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+        "calibrationAbi": 3,
+        "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+        "decodePass": "single_pass"
+      },
+      "recordIds": [
+        "imc-02c2427d469afa5f8ca6",
+        "imc-4dc38b27f1992610db63",
+        "imc-585755c59b5ee50c1a4f",
+        "imc-a907a91ed8c8c7695fe2",
+        "imc-be4eacd27e7280a14422",
+        "imc-de8796b44888dcd60f2f"
+      ],
+      "legacyFitTier": "q4"
+    }
+  ],
+  "coefficientTransfer": {
+    "status": "insufficient_data",
+    "referenceTier": "q8",
+    "targetTiers": [
+      "q4",
+      "bf16"
+    ],
+    "missingTiers": [
+      "q8",
+      "bf16"
+    ],
+    "verdict": "open",
+    "reason": "one unambiguous staged-residency single-pass selector is required for q8, q4 and bf16",
+    "phases": {}
+  },
+  "phaseFlip": {
+    "status": "insufficient_data",
+    "distinction": "cross-tier binding differences and within-tier geometry flips are reported separately",
+    "tierPhaseFlip": {
+      "status": "insufficient_data",
+      "tiers": [
+        "q4",
+        "bf16"
+      ],
+      "verdict": "open",
+      "reason": "measured q4 and bf16 staged-residency single-pass selectors are required",
+      "matchedGeometries": []
+    },
+    "tiers": {
+      "q4": {
+        "status": "measured",
+        "selector": {
+          "modelId": "wan_2_2",
+          "modelFamily": "wan-video",
+          "provider": "wan2_2_ti2v_5b",
+          "backend": "candle",
+          "tier": "q4",
+          "mode": "text_to_video",
+          "rung": "staged_residency",
+          "loadShape": "eager_materialization",
+          "batch": 1,
+          "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+          "calibrationAbi": 3,
+          "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+          "decodePass": "single_pass"
+        },
+        "bindingCounts": {
+          "text": 0,
+          "denoise": 0,
+          "decode": 4,
+          "ambiguous": 2
+        },
+        "verdict": "ambiguous_binding_at_captured_geometry",
+        "bindings": [
+          {
+            "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+            "geometry": {
+              "width": 832,
+              "height": 480,
+              "frames": 189,
+              "fps": 24,
+              "mpx": 0.39936,
+              "tLat": 24.5,
+              "tokens": 9555
+            },
+            "activeGib": {
+              "text": 11.2216796875,
+              "denoise": 11.2216796875,
+              "decode": 11.0048828125
+            },
+            "bindingPhase": null,
+            "bindingPhases": [
+              "text",
+              "denoise"
+            ]
+          },
+          {
+            "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+            "geometry": {
+              "width": 832,
+              "height": 480,
+              "frames": 93,
+              "fps": 24,
+              "mpx": 0.39936,
+              "tLat": 12.5,
+              "tokens": 4875
+            },
+            "activeGib": {
+              "text": 11.2216796875,
+              "denoise": 11.2216796875,
+              "decode": 12.3173828125
+            },
+            "bindingPhase": "decode"
+          },
+          {
+            "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+            "geometry": {
+              "width": 1280,
+              "height": 704,
+              "frames": 93,
+              "fps": 24,
+              "mpx": 0.90112,
+              "tLat": 12.5,
+              "tokens": 11000
+            },
+            "activeGib": {
+              "text": 11.2529296875,
+              "denoise": 11.2216796875,
+              "decode": 11.8486328125
+            },
+            "bindingPhase": "decode"
+          },
+          {
+            "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+            "geometry": {
+              "width": 1280,
+              "height": 704,
+              "frames": 141,
+              "fps": 24,
+              "mpx": 0.90112,
+              "tLat": 18.5,
+              "tokens": 16280
+            },
+            "activeGib": {
+              "text": 11.2529296875,
+              "denoise": 11.2529296875,
+              "decode": 16.4423828125
+            },
+            "bindingPhase": "decode"
+          },
+          {
+            "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+            "geometry": {
+              "width": 832,
+              "height": 480,
+              "frames": 141,
+              "fps": 24,
+              "mpx": 0.39936,
+              "tLat": 18.5,
+              "tokens": 7215
+            },
+            "activeGib": {
+              "text": 11.2216796875,
+              "denoise": 11.2216796875,
+              "decode": 10.4423828125
+            },
+            "bindingPhase": null,
+            "bindingPhases": [
+              "text",
+              "denoise"
+            ]
+          },
+          {
+            "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+            "geometry": {
+              "width": 704,
+              "height": 1280,
+              "frames": 189,
+              "fps": 24,
+              "mpx": 0.90112,
+              "tLat": 24.5,
+              "tokens": 21560
+            },
+            "activeGib": {
+              "text": 11.2529296875,
+              "denoise": 11.2529296875,
+              "decode": 20.2548828125
+            },
+            "bindingPhase": "decode"
+          }
+        ],
+        "curvePhaseFlipSurfaces": [
+          {
+            "phases": [
+              "text",
+              "denoise"
+            ],
+            "byArea": [
+              {
+                "mpx": 0.39936,
+                "frames": 139.69184029015406
+              },
+              {
+                "mpx": 0.90112,
+                "frames": 199.9778941598292
+              }
+            ]
+          },
+          {
+            "phases": [
+              "text",
+              "decode"
+            ],
+            "byArea": [
+              {
+                "mpx": 0.39936,
+                "frames": 127.66654818172937
+              },
+              {
+                "mpx": 0.90112,
+                "frames": 57.07874611152925
+              }
+            ]
+          },
+          {
+            "phases": [
+              "denoise",
+              "decode"
+            ],
+            "byArea": [
+              {
+                "mpx": 0.39936,
+                "frames": 127.62290730240763
+              },
+              {
+                "mpx": 0.90112,
+                "frames": 56.56015209993065
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "observations": [
+    {
+      "recordId": "imc-a907a91ed8c8c7695fe2",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "role": "held_out",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e",
+      "geometry": {
+        "width": 1280,
+        "height": 704,
+        "frames": 141,
+        "fps": 24,
+        "mpx": 0.90112,
+        "tLat": 18.5,
+        "tokens": 16280
+      },
+      "activeGib": {
+        "text": 11.2529296875,
+        "denoise": 11.2529296875,
+        "decode": 16.4423828125,
+        "overallActive": 16.4423828125,
+        "maxPhaseActivePlusCache": 16.4423828125
+      },
+      "cacheGib": {
+        "text": 0,
+        "denoise": 0,
+        "decode": 0
+      }
+    },
+    {
+      "recordId": "imc-585755c59b5ee50c1a4f",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e",
+      "geometry": {
+        "width": 1280,
+        "height": 704,
+        "frames": 93,
+        "fps": 24,
+        "mpx": 0.90112,
+        "tLat": 12.5,
+        "tokens": 11000
+      },
+      "activeGib": {
+        "text": 11.2529296875,
+        "denoise": 11.2216796875,
+        "decode": 11.8486328125,
+        "overallActive": 11.8486328125,
+        "maxPhaseActivePlusCache": 11.8486328125
+      },
+      "cacheGib": {
+        "text": 0,
+        "denoise": 0,
+        "decode": 0
+      }
+    },
+    {
+      "recordId": "imc-de8796b44888dcd60f2f",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e",
+      "geometry": {
+        "width": 704,
+        "height": 1280,
+        "frames": 189,
+        "fps": 24,
+        "mpx": 0.90112,
+        "tLat": 24.5,
+        "tokens": 21560
+      },
+      "activeGib": {
+        "text": 11.2529296875,
+        "denoise": 11.2529296875,
+        "decode": 20.2548828125,
+        "overallActive": 20.2548828125,
+        "maxPhaseActivePlusCache": 20.2548828125
+      },
+      "cacheGib": {
+        "text": 0,
+        "denoise": 0,
+        "decode": 0
+      }
+    },
+    {
+      "recordId": "imc-be4eacd27e7280a14422",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 141,
+        "fps": 24,
+        "mpx": 0.39936,
+        "tLat": 18.5,
+        "tokens": 7215
+      },
+      "activeGib": {
+        "text": 11.2216796875,
+        "denoise": 11.2216796875,
+        "decode": 10.4423828125,
+        "overallActive": 11.2216796875,
+        "maxPhaseActivePlusCache": 11.2216796875
+      },
+      "cacheGib": {
+        "text": 0,
+        "denoise": 0,
+        "decode": 0
+      }
+    },
+    {
+      "recordId": "imc-02c2427d469afa5f8ca6",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "role": "held_out",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 189,
+        "fps": 24,
+        "mpx": 0.39936,
+        "tLat": 24.5,
+        "tokens": 9555
+      },
+      "activeGib": {
+        "text": 11.2216796875,
+        "denoise": 11.2216796875,
+        "decode": 11.0048828125,
+        "overallActive": 11.2216796875,
+        "maxPhaseActivePlusCache": 11.2216796875
+      },
+      "cacheGib": {
+        "text": 0,
+        "denoise": 0,
+        "decode": 0
+      }
+    },
+    {
+      "recordId": "imc-4dc38b27f1992610db63",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+      "modelId": "wan_2_2",
+      "modelFamily": "wan-video",
+      "provider": "wan2_2_ti2v_5b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "7f6a6864040718ec01c9de41db34fc627c22265c6b79babf6c6e7490db2bf520",
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "1ea0cc2d1365b7e7f691b9331346cd0a329c900e",
+      "geometry": {
+        "width": 832,
+        "height": 480,
+        "frames": 93,
+        "fps": 24,
+        "mpx": 0.39936,
+        "tLat": 12.5,
+        "tokens": 4875
+      },
+      "activeGib": {
+        "text": 11.2216796875,
+        "denoise": 11.2216796875,
+        "decode": 12.3173828125,
+        "overallActive": 12.3173828125,
+        "maxPhaseActivePlusCache": 12.3173828125
+      },
+      "cacheGib": {
+        "text": 0,
+        "denoise": 0,
+        "decode": 0
+      }
+    }
+  ],
+  "fits": {
+    "text": {
+      "q4": {
+        "fitPoints": 4,
+        "heldOutPoints": 2,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 11.196807238520417,
+              "perMpxGb": 0.062280771683658136
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 4.5288390936029406e-15,
+              "maxAbsGib": 5.329070518200751e-15
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 4.5288390936029406e-15,
+              "maxAbsGib": 5.329070518200751e-15
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500004,
+                "residualGib": 3.552713678800501e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499995,
+                "residualGib": -5.329070518200751e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500004,
+                "residualGib": 3.552713678800501e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499995,
+                "residualGib": -5.329070518200751e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500004,
+                "residualGib": 3.552713678800501e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499995,
+                "residualGib": -5.329070518200751e-15
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 11.19680723852042,
+              "perMpxGb": 0.06228077168365572,
+              "perFrameGb": 7.79842836600755e-18
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 4.5288390936029406e-15,
+              "maxAbsGib": 5.329070518200751e-15
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 4.5288390936029406e-15,
+              "maxAbsGib": 5.329070518200751e-15
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500004,
+                "residualGib": 3.552713678800501e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499995,
+                "residualGib": -5.329070518200751e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500005,
+                "residualGib": 5.329070518200751e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499996,
+                "residualGib": -3.552713678800501e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500005,
+                "residualGib": 5.329070518200751e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499996,
+                "residualGib": -3.552713678800501e-15
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 11.196807238520421,
+              "perMpxGb": 0.06228077168360994,
+              "perMpxFrameGb": 3.263558323750635e-16
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.0695084443661336e-14,
+              "maxAbsGib": 1.7763568394002505e-14
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 9.144356508438812e-15,
+              "maxAbsGib": 1.2434497875801753e-14
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.2216796875,
+                "residualGib": 0
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499982,
+                "residualGib": -1.7763568394002505e-14
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500005,
+                "residualGib": 5.329070518200751e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.25292968750001,
+                "residualGib": 1.0658141036401503e-14
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500012,
+                "residualGib": 1.2434497875801753e-14
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.252929687499996,
+                "residualGib": -3.552713678800501e-15
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 11.21543479661727,
+              "perLatentTokenGb": 0.000001959228746493203
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 0.009353013292701707,
+              "maxAbsGib": 0.015943374671305577
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.00966912457384519,
+              "maxAbsGib": 0.012475539790012036
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.224986036756425,
+                "residualGib": 0.003306349256424923
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.236986312828694,
+                "residualGib": -0.015943374671305577
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.229570632023218,
+                "residualGib": 0.00789094452321848
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.257675768391664,
+                "residualGib": 0.004746080891663951
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.234155227290012,
+                "residualGib": 0.012475539790012036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.24733104061018,
+                "residualGib": -0.005598646889820813
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 11.216287700222672,
+              "perMpxFrameGb": 0.0002418761609571105
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 0.009609326010879429,
+              "maxAbsGib": 0.016371758784291757
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.010010553792706793,
+              "maxAbsGib": 0.012864593150601067
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.225271096941176,
+                "residualGib": 0.0035914094411761965
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.236557928715708,
+                "residualGib": -0.016371758784291757
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.229907688795889,
+                "residualGib": 0.008228001295888632
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.257482035547229,
+                "residualGib": 0.004552348047228705
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.234544280650601,
+                "residualGib": 0.012864593150601067
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.247019982131468,
+                "residualGib": -0.005909705368532414
+              }
+            ]
+          }
+        },
+        "chosen": "area_only",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "denoise": {
+      "q4": {
+        "fitPoints": 4,
+        "heldOutPoints": 2,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 11.209243463010209,
+              "perMpxGb": 0.031140385841829068
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 0.011048543456039806,
+              "maxAbsGib": 0.015625000000001776
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.011048543456041062,
+              "maxAbsGib": 0.015625000000001776
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500002,
+                "residualGib": 1.7763568394002505e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.237304687499998,
+                "residualGib": 0.015624999999998224
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500002,
+                "residualGib": 1.7763568394002505e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.237304687499998,
+                "residualGib": -0.015625000000001776
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221679687500002,
+                "residualGib": 1.7763568394002505e-15
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.237304687499998,
+                "residualGib": -0.015625000000001776
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 11.183749202806135,
+              "perMpxGb": 0.018684231505091645,
+              "perFrameGb": 0.00026041666666661955
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 0.004941058844013093,
+              "maxAbsGib": 0.006250000000001421
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.017258376589356122,
+              "maxAbsGib": 0.018749999999998934
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.215429687500004,
+                "residualGib": -0.006249999999996092
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.224804687499999,
+                "residualGib": 0.003124999999998934
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.227929687500001,
+                "residualGib": 0.006250000000001421
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.249804687499994,
+                "residualGib": -0.0031250000000060396
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.240429687499999,
+                "residualGib": 0.018749999999998934
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.237304687499996,
+                "residualGib": -0.015625000000003553
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 11.207667472795762,
+              "perMpxGb": 0,
+              "perMpxFrameGb": 0.00025117197517360795
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 0.0044058675751660345,
+              "maxAbsGib": 0.007037041690727719
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.010066134287576337,
+              "maxAbsGib": 0.013348825976386536
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.216996120516258,
+                "residualGib": -0.004683566983741727
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.228716729190728,
+                "residualGib": 0.007037041690727719
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221810906436515,
+                "residualGib": 0.00013121893651479866
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.250444993856497,
+                "residualGib": -0.002484693643502567
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.22662569235677,
+                "residualGib": 0.004946004856769548
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.239580861523613,
+                "residualGib": -0.013348825976386536
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 11.20727507069949,
+              "perLatentTokenGb": 0.0000019903352116917665
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 0.004629212301748,
+              "maxAbsGib": 0.0074890705280985514
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.00992205962793832,
+              "maxAbsGib": 0.013251959554168025
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.216977954856487,
+                "residualGib": -0.004701732643512813
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.229168758028099,
+                "residualGib": 0.0074890705280985514
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221635339251845,
+                "residualGib": -0.00004434824815469085
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.250186697863564,
+                "residualGib": -0.002742989636436377
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.226292723647205,
+                "residualGib": 0.004613036147205207
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.239677727945832,
+                "residualGib": -0.013251959554168025
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 11.207667472795762,
+              "perMpxFrameGb": 0.00025117197517360795
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 0.0044058675751660345,
+              "maxAbsGib": 0.007037041690727719
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.010066134287576337,
+              "maxAbsGib": 0.013348825976386536
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.216996120516258,
+                "residualGib": -0.004683566983741727
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.228716729190728,
+                "residualGib": 0.007037041690727719
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.221810906436515,
+                "residualGib": 0.00013121893651479866
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.250444993856497,
+                "residualGib": -0.002484693643502567
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.22662569235677,
+                "residualGib": 0.004946004856769548
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2529296875,
+                "predictedGib": 11.239580861523613,
+                "residualGib": -0.013348825976386536
+              }
+            ]
+          }
+        },
+        "chosen": "latent_tokens",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "decode": {
+      "q4": {
+        "fitPoints": 4,
+        "heldOutPoints": 2,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 7.661451690051033,
+              "perMpxGb": 9.310975366709163
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 3.0450916255200764,
+              "maxAbsGib": 4.203125000000007
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.3828922110888443,
+              "maxAbsGib": 0.3906250000000071
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 11.379882812500004,
+                "residualGib": -0.9374999999999964
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 16.051757812499993,
+                "residualGib": 4.203124999999993
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 10.4423828125,
+                "predictedGib": 11.379882812500004,
+                "residualGib": 0.9375000000000036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 16.051757812499993,
+                "residualGib": -4.203125000000007
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.0048828125,
+                "predictedGib": 11.379882812500004,
+                "residualGib": 0.37500000000000355
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.051757812499993,
+                "residualGib": -0.3906250000000071
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 1.5683235012754917,
+              "perMpxGb": 6.3339544802295835,
+              "perFrameGb": 0.06223958333333352
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.9220718903210932,
+              "maxAbsGib": 2.4312500000000057
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 3.444978370986176,
+              "maxAbsGib": 4.8562500000000135
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 9.886132812499994,
+                "residualGib": -2.4312500000000057
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.064257812499992,
+                "residualGib": 1.2156249999999922
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 10.4423828125,
+                "predictedGib": 12.873632812500004,
+                "residualGib": 2.431250000000004
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.03925781250001,
+                "residualGib": -1.2156249999999886
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.0048828125,
+                "predictedGib": 15.861132812500014,
+                "residualGib": 4.8562500000000135
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.0517578125,
+                "residualGib": -0.390625
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 7.6801715507055235,
+              "perMpxGb": 0,
+              "perMpxFrameGb": 0.06946188490884356
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.4865402727421948,
+              "maxAbsGib": 2.057363514575272
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3571181829105838,
+              "maxAbsGib": 1.9182051277155239
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.260019297924728,
+                "residualGib": -2.057363514575272
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.501366467507834,
+                "residualGib": 1.6527336550078342
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 10.4423828125,
+                "predictedGib": 11.591553619070126,
+                "residualGib": 1.149170806570126
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.510341865497317,
+                "residualGib": -0.7445409470026831
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.0048828125,
+                "predictedGib": 12.923087940215524,
+                "residualGib": 1.9182051277155239
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.505854166502576,
+                "residualGib": 0.06347135400257642
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 7.561369126401866,
+              "perLatentTokenGb": 0.0005513506101767645
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.524044178334226,
+              "maxAbsGib": 2.068179461486407
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.2919629106355142,
+              "maxAbsGib": 1.8246413941408512
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.249203351013593,
+                "residualGib": -2.068179461486407
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.626225838346276,
+                "residualGib": 1.7775930258462758
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 10.4423828125,
+                "predictedGib": 11.539363778827221,
+                "residualGib": 1.0969809663272212
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.448488281812907,
+                "residualGib": -0.8063945306870934
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.0048828125,
+                "predictedGib": 12.829524206640851,
+                "residualGib": 1.8246413941408512
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.537357060079593,
+                "residualGib": 0.09497424757959294
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 7.6801715507055235,
+              "perMpxFrameGb": 0.06946188490884356
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.4865402727421948,
+              "maxAbsGib": 2.057363514575272
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3571181829105838,
+              "maxAbsGib": 1.9182051277155239
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.260019297924728,
+                "residualGib": -2.057363514575272
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.501366467507834,
+                "residualGib": 1.6527336550078342
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 10.4423828125,
+                "predictedGib": 11.591553619070126,
+                "residualGib": 1.149170806570126
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.510341865497317,
+                "residualGib": -0.7445409470026831
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.0048828125,
+                "predictedGib": 12.923087940215524,
+                "residualGib": 1.9182051277155239
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.505854166502576,
+                "residualGib": 0.06347135400257642
+              }
+            ]
+          }
+        },
+        "chosen": "area_only",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "overallActive": {
+      "q4": {
+        "fitPoints": 4,
+        "heldOutPoints": 2,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 8.361228475765316,
+              "perMpxGb": 8.534411994778365
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 2.9971987838779306,
+              "maxAbsGib": 4.2031250000000036
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.4757779025757176,
+              "maxAbsGib": 0.5478515625000036
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 11.769531250000004,
+                "residualGib": -0.5478515624999964
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 16.051757812499996,
+                "residualGib": 4.2031249999999964
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.769531250000004,
+                "residualGib": 0.5478515625000036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 16.051757812499996,
+                "residualGib": -4.2031250000000036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.769531250000004,
+                "residualGib": 0.5478515625000036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.051757812499996,
+                "residualGib": -0.39062500000000355
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 1.9502187300701408,
+              "perMpxGb": 5.402078433912614,
+              "perFrameGb": 0.0654866536458335
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.6756365804759399,
+              "maxAbsGib": 2.119531250000005
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 3.7316622047914527,
+              "maxAbsGib": 5.262890625000011
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.197851562499999,
+                "residualGib": -2.1195312500000014
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 12.908398437499992,
+                "residualGib": 1.0597656249999918
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.341210937500005,
+                "residualGib": 2.119531250000005
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.195117187500006,
+                "residualGib": -1.0597656249999936
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 16.48457031250001,
+                "residualGib": 5.262890625000011
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.0517578125,
+                "residualGib": -0.390625
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 8.074518759966878,
+              "perMpxGb": 0,
+              "perMpxFrameGb": 0.06716565403946351
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.3646309770055298,
+              "maxAbsGib": 1.8546471650947236
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3644313492886733,
+              "maxAbsGib": 1.9224381603377054
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.569083390506492,
+                "residualGib": -1.748299421993508
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.703279977594724,
+                "residualGib": 1.8546471650947236
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.856600619172099,
+                "residualGib": 0.6349209316720987
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.513614137726695,
+                "residualGib": -0.7412686747733055
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.144117847837705,
+                "residualGib": 1.9224381603377054
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.60844705766071,
+                "residualGib": 0.16606424516071172
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 7.966539133559129,
+              "perLatentTokenGb": 0.0005325066425702908
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.4123210905458579,
+              "maxAbsGib": 1.9754793893323281
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3032907774478424,
+              "maxAbsGib": 1.832960415818258
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.562509016089297,
+                "residualGib": -1.7548737964107026
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.824112201832328,
+                "residualGib": 1.9754793893323281
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.808574559703777,
+                "residualGib": 0.5868948722037768
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.4473823473746,
+                "residualGib": -0.8075004651254005
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.054640103318258,
+                "residualGib": 1.832960415818258
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.635747274603464,
+                "residualGib": 0.1933644621034638
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 8.074518759966878,
+              "perMpxFrameGb": 0.06716565403946351
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.3646309770055298,
+              "maxAbsGib": 1.8546471650947236
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3644313492886733,
+              "maxAbsGib": 1.9224381603377054
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.569083390506492,
+                "residualGib": -1.748299421993508
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.703279977594724,
+                "residualGib": 1.8546471650947236
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.856600619172099,
+                "residualGib": 0.6349209316720987
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.513614137726695,
+                "residualGib": -0.7412686747733055
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.144117847837705,
+                "residualGib": 1.9224381603377054
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.60844705766071,
+                "residualGib": 0.16606424516071172
+              }
+            ]
+          }
+        },
+        "chosen": "area_only",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "maxPhaseActivePlusCache": {
+      "q4": {
+        "fitPoints": 4,
+        "heldOutPoints": 2,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 8.361228475765316,
+              "perMpxGb": 8.534411994778365
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 2.9971987838779306,
+              "maxAbsGib": 4.2031250000000036
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 0.4757779025757176,
+              "maxAbsGib": 0.5478515625000036
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 11.769531250000004,
+                "residualGib": -0.5478515624999964
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 16.051757812499996,
+                "residualGib": 4.2031249999999964
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.769531250000004,
+                "residualGib": 0.5478515625000036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 16.051757812499996,
+                "residualGib": -4.2031250000000036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.769531250000004,
+                "residualGib": 0.5478515625000036
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.051757812499996,
+                "residualGib": -0.39062500000000355
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 1.9502187300701408,
+              "perMpxGb": 5.402078433912614,
+              "perFrameGb": 0.0654866536458335
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.6756365804759399,
+              "maxAbsGib": 2.119531250000005
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 3.7316622047914527,
+              "maxAbsGib": 5.262890625000011
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.197851562499999,
+                "residualGib": -2.1195312500000014
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 12.908398437499992,
+                "residualGib": 1.0597656249999918
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.341210937500005,
+                "residualGib": 2.119531250000005
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.195117187500006,
+                "residualGib": -1.0597656249999936
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 16.48457031250001,
+                "residualGib": 5.262890625000011
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.0517578125,
+                "residualGib": -0.390625
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 8.074518759966878,
+              "perMpxGb": 0,
+              "perMpxFrameGb": 0.06716565403946351
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.3646309770055298,
+              "maxAbsGib": 1.8546471650947236
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3644313492886733,
+              "maxAbsGib": 1.9224381603377054
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.569083390506492,
+                "residualGib": -1.748299421993508
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.703279977594724,
+                "residualGib": 1.8546471650947236
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.856600619172099,
+                "residualGib": 0.6349209316720987
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.513614137726695,
+                "residualGib": -0.7412686747733055
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.144117847837705,
+                "residualGib": 1.9224381603377054
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.60844705766071,
+                "residualGib": 0.16606424516071172
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 7.966539133559129,
+              "perLatentTokenGb": 0.0005325066425702908
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.4123210905458579,
+              "maxAbsGib": 1.9754793893323281
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3032907774478424,
+              "maxAbsGib": 1.832960415818258
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.562509016089297,
+                "residualGib": -1.7548737964107026
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.824112201832328,
+                "residualGib": 1.9754793893323281
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.808574559703777,
+                "residualGib": 0.5868948722037768
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.4473823473746,
+                "residualGib": -0.8075004651254005
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.054640103318258,
+                "residualGib": 1.832960415818258
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.635747274603464,
+                "residualGib": 0.1933644621034638
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 8.074518759966878,
+              "perMpxFrameGb": 0.06716565403946351
+            },
+            "fit": {
+              "count": 4,
+              "rmseGib": 1.3646309770055298,
+              "maxAbsGib": 1.8546471650947236
+            },
+            "heldOut": {
+              "count": 2,
+              "rmseGib": 1.3644313492886733,
+              "maxAbsGib": 1.9224381603377054
+            },
+            "points": [
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 12.3173828125,
+                "predictedGib": 10.569083390506492,
+                "residualGib": -1.748299421993508
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.8486328125,
+                "predictedGib": 13.703279977594724,
+                "residualGib": 1.8546471650947236
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 11.856600619172099,
+                "residualGib": 0.6349209316720987
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+                "role": "fit",
+                "measuredGib": 20.2548828125,
+                "predictedGib": 19.513614137726695,
+                "residualGib": -0.7412686747733055
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 11.2216796875,
+                "predictedGib": 13.144117847837705,
+                "residualGib": 1.9224381603377054
+              },
+              {
+                "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+                "role": "held_out",
+                "measuredGib": 16.4423828125,
+                "predictedGib": 16.60844705766071,
+                "residualGib": 0.16606424516071172
+              }
+            ]
+          }
+        },
+        "chosen": "area_only",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    }
+  }
+}
