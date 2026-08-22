@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import {
   lstat,
   mkdir,
+  open,
   readdir,
+  readlink,
   realpath,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -84,15 +84,56 @@ async function listLogicalFiles(root) {
   return files;
 }
 
-async function hashFile(file, bytes) {
-  const sha256 = createHash("sha256");
-  const gitBlob = createHash("sha1");
-  gitBlob.update(`blob ${bytes}\0`);
-  for await (const chunk of createReadStream(file)) {
-    sha256.update(chunk);
-    gitBlob.update(chunk);
+function rawLinkTargetIsAbsolute(target) {
+  return path.posix.isAbsolute(target) || path.win32.isAbsolute(target) || /^[A-Za-z]:/.test(target);
+}
+
+function normalizedLinkTarget(link, rawTarget) {
+  const platformRelativeTarget = rawTarget.replaceAll(/[\\/]/g, path.sep);
+  return path.resolve(path.dirname(link), path.normalize(platformRelativeTarget));
+}
+
+export function validateRawLinkTarget({ logicalPath, rawTarget, repositoryRoot, expectedObject }) {
+  if (rawLinkTargetIsAbsolute(rawTarget)) {
+    throw new Error("artifact link target must be relative, not absolute or drive-qualified");
   }
-  return { sha256: sha256.digest("hex"), gitBlob: gitBlob.digest("hex") };
+  const expectedLexicalTarget = path.join(repositoryRoot, "blobs", expectedObject);
+  const actualLexicalTarget = normalizedLinkTarget(logicalPath, rawTarget);
+  if (!samePath(actualLexicalTarget, expectedLexicalTarget)) {
+    throw new Error("artifact link does not name its exact direct repository blob");
+  }
+  return actualLexicalTarget;
+}
+
+async function inspectOpenFile(file) {
+  const handle = await open(file, "r");
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new Error(`resolved artifact payload is not a regular file: ${file}`);
+    }
+    const sha256 = createHash("sha256");
+    const gitBlob = createHash("sha1");
+    gitBlob.update(`blob ${metadata.size}\0`);
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let streamedBytes = 0;
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, streamedBytes);
+      if (bytesRead === 0) break;
+      const chunk = buffer.subarray(0, bytesRead);
+      sha256.update(chunk);
+      gitBlob.update(chunk);
+      streamedBytes += bytesRead;
+    }
+    return {
+      metadata,
+      streamedBytes,
+      sha256: sha256.digest("hex"),
+      gitBlob: gitBlob.digest("hex"),
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 function normalizeExpectedFiles(expectedFiles) {
@@ -214,11 +255,20 @@ export async function inventorySc19057WanArtifact({
       }
       const [expectedBytes, expectedObject] = expectedFile;
 
-      const physicalPath = await realpath(logicalPath);
-      const physicalMetadata = await stat(physicalPath);
-      if (!physicalMetadata.isFile()) {
-        throw new Error(`artifact entry does not resolve to an immutable file: ${relativePath}`);
+      if (logicalMetadata.isSymbolicLink()) {
+        const rawTarget = await readlink(logicalPath);
+        try {
+          const lexicalTarget = validateRawLinkTarget({ logicalPath, rawTarget, repositoryRoot, expectedObject });
+          const targetMetadata = await lstat(lexicalTarget);
+          if (!targetMetadata.isFile() || targetMetadata.isSymbolicLink()) {
+            throw new Error("artifact link target must be a normal content-addressed file");
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`${message}: ${relativePath}`);
+        }
       }
+      const physicalPath = await realpath(logicalPath);
       if (logicalMetadata.isSymbolicLink()) {
         if (!isInside(canonicalBlobsRoot, physicalPath) || !samePath(path.dirname(physicalPath), canonicalBlobsRoot)) {
           throw new Error(`artifact link escapes the exact repository blobs root: ${relativePath}`);
@@ -233,20 +283,23 @@ export async function inventorySc19057WanArtifact({
         throw new Error(`duplicate resolved artifact file: ${relativePath}`);
       }
       seenPhysicalPaths.add(pathKey(physicalPath));
-      if (physicalMetadata.size !== expectedBytes) {
-        throw new Error(`artifact byte count mismatch for ${relativePath}: expected ${expectedBytes}, found ${physicalMetadata.size}`);
+      const inspected = await inspectOpenFile(physicalPath);
+      if (inspected.streamedBytes !== inspected.metadata.size) {
+        throw new Error(`artifact changed size while being read: ${relativePath}`);
+      }
+      if (inspected.streamedBytes !== expectedBytes) {
+        throw new Error(`artifact byte count mismatch for ${relativePath}: expected ${expectedBytes}, found ${inspected.streamedBytes}`);
       }
 
-      const hashes = await hashFile(physicalPath, physicalMetadata.size);
-      const authoritativeHash = expectedObject.length === 64 ? hashes.sha256 : hashes.gitBlob;
+      const authoritativeHash = expectedObject.length === 64 ? inspected.sha256 : inspected.gitBlob;
       if (authoritativeHash !== expectedObject) {
         throw new Error(`artifact content hash mismatch for ${relativePath}`);
       }
-      totalBytes += physicalMetadata.size;
+      totalBytes += inspected.streamedBytes;
       inventory.push({
         path: relativePath,
-        bytes: physicalMetadata.size,
-        sha256: hashes.sha256,
+        bytes: inspected.streamedBytes,
+        sha256: inspected.sha256,
         cacheObject: expectedObject,
         resolvedFromLink: logicalMetadata.isSymbolicLink(),
       });

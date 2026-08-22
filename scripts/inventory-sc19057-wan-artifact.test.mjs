@@ -11,6 +11,7 @@ import {
   SC19057_WAN_REVISION,
   SC19057_WAN_TOTAL_BYTES,
   inventorySc19057WanArtifact,
+  validateRawLinkTarget,
 } from "./inventory-sc19057-wan-artifact.mjs";
 
 function gitBlobId(content) {
@@ -68,6 +69,23 @@ test("SC-19057 inventories resolved link bytes and hashes rather than zero-sized
   assert.equal(JSON.parse(await readFile(path.join(setup.evidence, "wan-q4-inventory-preflight.json"), "utf8")).status, "PASS");
 });
 
+test("SC-19057 accepts an authenticated copied regular file when Windows cannot create a link", async (t) => {
+  const setup = await fixture(t);
+  const object = gitBlobId(setup.content);
+  await writeFile(path.join(setup.root, "model.bin"), setup.content);
+
+  const result = await inventorySc19057WanArtifact({
+    root: setup.root,
+    evidence: setup.evidence,
+    expectedFiles: { "model.bin": [setup.content.length, object] },
+    expectedTotalBytes: setup.content.length,
+  });
+
+  assert.equal(result.fileCount, 1);
+  assert.equal(result.files[0].resolvedFromLink, false);
+  assert.equal(result.files[0].cacheObject, object);
+});
+
 test("SC-19057 records an auditable failure before rejecting a broken cache link", async (t) => {
   const setup = await fixture(t);
   const object = "a".repeat(64);
@@ -90,23 +108,95 @@ test("SC-19057 records an auditable failure before rejecting a broken cache link
   assert.match(receipt.error, /ENOENT|no such file|cannot find/i);
 });
 
-test("SC-19057 rejects a link that resolves outside the exact repository blobs root", async (t) => {
-  const setup = await fixture(t);
-  const object = gitBlobId(setup.content);
-  const outside = path.join(setup.scratch, "outside", object);
-  await mkdir(path.dirname(outside), { recursive: true });
-  await writeFile(outside, setup.content);
-  await symlink(path.relative(setup.root, outside), path.join(setup.root, "escape.bin"), "file");
+test("SC-19057 rejects raw absolute, drive-qualified, UNC, and device link targets before dereference", () => {
+  const expectedObject = "a".repeat(64);
+  const repositoryRoot = path.resolve("cache", "models--SceneWorks--wan2.2-ti2v-5b-candle");
+  const logicalPath = path.join(repositoryRoot, "snapshots", SC19057_WAN_REVISION, "q4", "model.bin");
+  for (const rawTarget of [
+    `/tmp/${expectedObject}`,
+    `C:\\cache\\blobs\\${expectedObject}`,
+    `C:blobs\\${expectedObject}`,
+    `\\\\server\\share\\${expectedObject}`,
+    `\\\\?\\C:\\cache\\blobs\\${expectedObject}`,
+  ]) {
+    assert.throws(
+      () => validateRawLinkTarget({ logicalPath, rawTarget, repositoryRoot, expectedObject }),
+      /must be relative, not absolute or drive-qualified/,
+      rawTarget,
+    );
+  }
+});
 
-  await assert.rejects(
-    inventorySc19057WanArtifact({
-      root: setup.root,
-      evidence: setup.evidence,
-      expectedFiles: { "escape.bin": [setup.content.length, object] },
-      expectedTotalBytes: setup.content.length,
-    }),
-    /escapes the exact repository blobs root/,
-  );
+test("SC-19057 rejects absolute, sibling-repository, junction, and directory links", async (t) => {
+  await t.test("absolute POSIX target", async (t) => {
+    const setup = await fixture(t);
+    const object = gitBlobId(setup.content);
+    const outside = path.join(setup.scratch, "outside", object);
+    await mkdir(path.dirname(outside), { recursive: true });
+    await writeFile(outside, setup.content);
+    await symlink(outside, path.join(setup.root, "absolute.bin"), "file");
+    await assert.rejects(
+      inventorySc19057WanArtifact({
+        root: setup.root,
+        evidence: setup.evidence,
+        expectedFiles: { "absolute.bin": [setup.content.length, object] },
+        expectedTotalBytes: setup.content.length,
+      }),
+      /must be relative, not absolute or drive-qualified/,
+    );
+  });
+
+  await t.test("sibling repository", async (t) => {
+    const setup = await fixture(t);
+    const object = gitBlobId(setup.content);
+    const siblingBlob = path.join(setup.scratch, "models--SceneWorks--lookalike", "blobs", object);
+    await mkdir(path.dirname(siblingBlob), { recursive: true });
+    await writeFile(siblingBlob, setup.content);
+    await symlink(path.relative(setup.root, siblingBlob), path.join(setup.root, "sibling.bin"), "file");
+    await assert.rejects(
+      inventorySc19057WanArtifact({
+        root: setup.root,
+        evidence: setup.evidence,
+        expectedFiles: { "sibling.bin": [setup.content.length, object] },
+        expectedTotalBytes: setup.content.length,
+      }),
+      /does not name its exact direct repository blob/,
+    );
+  });
+
+  await t.test("junction", async (t) => {
+    const setup = await fixture(t);
+    const object = "b".repeat(64);
+    const outsideDirectory = path.join(setup.scratch, "junction-target");
+    await mkdir(outsideDirectory);
+    await symlink(outsideDirectory, path.join(setup.root, "junction.bin"), "junction");
+    await assert.rejects(
+      inventorySc19057WanArtifact({
+        root: setup.root,
+        evidence: setup.evidence,
+        expectedFiles: { "junction.bin": [0, object] },
+        expectedTotalBytes: 0,
+      }),
+      /must be relative, not absolute or drive-qualified/,
+    );
+  });
+
+  await t.test("directory link", async (t) => {
+    const setup = await fixture(t);
+    const object = "c".repeat(64);
+    const directoryObject = path.join(setup.blobs, object);
+    await mkdir(directoryObject);
+    await symlink(path.relative(setup.root, directoryObject), path.join(setup.root, "directory.bin"), "dir");
+    await assert.rejects(
+      inventorySc19057WanArtifact({
+        root: setup.root,
+        evidence: setup.evidence,
+        expectedFiles: { "directory.bin": [0, object] },
+        expectedTotalBytes: 0,
+      }),
+      /target must be a normal content-addressed file/,
+    );
+  });
 });
 
 test("SC-19057 rejects wrong size, content hash, count, and duplicate content-addresses", async (t) => {

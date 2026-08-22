@@ -27,17 +27,35 @@ function escaped(value) {
 function assertInventorySourceContract(source) {
   assert.match(source, /export const SC19057_WAN_TOTAL_BYTES = 17_338_835_457/);
   assert.match(source, /export const SC19057_WAN_FILES = Object\.freeze\(\{/);
+  assert.match(source, /path\.posix\.isAbsolute\(target\)/);
+  assert.match(source, /path\.win32\.isAbsolute\(target\)/);
+  assert.match(source, /\/\^\[A-Za-z\]\:\/\.test\(target\)/);
+  assert.match(source, /const metadata = await lstat\(entryPath\)/);
+  assert.match(source, /const rawTarget = await readlink\(logicalPath\)/);
+  assert.match(source, /const lexicalTarget = validateRawLinkTarget\(\{ logicalPath, rawTarget, repositoryRoot, expectedObject \}\)/);
+  assert.match(source, /path\.join\(repositoryRoot, "blobs", expectedObject\)/);
+  assert.match(source, /samePath\(actualLexicalTarget, expectedLexicalTarget\)/);
+  assert.match(source, /const targetMetadata = await lstat\(lexicalTarget\)/);
+  assert.match(source, /!targetMetadata\.isFile\(\) \|\| targetMetadata\.isSymbolicLink\(\)/);
   assert.match(source, /const physicalPath = await realpath\(logicalPath\)/);
-  assert.match(source, /const physicalMetadata = await stat\(physicalPath\)/);
   assert.match(source, /if \(logicalMetadata\.isSymbolicLink\(\)\)/);
   assert.match(source, /!isInside\(canonicalBlobsRoot, physicalPath\)/);
   assert.match(source, /!samePath\(path\.dirname\(physicalPath\), canonicalBlobsRoot\)/);
   assert.match(source, /path\.basename\(physicalPath\)\.toLowerCase\(\) !== expectedObject/);
   assert.match(source, /seenPhysicalPaths\.has\(pathKey\(physicalPath\)\)/);
   assert.match(source, /seenPhysicalPaths\.add\(pathKey\(physicalPath\)\)/);
-  assert.match(source, /physicalMetadata\.size !== expectedBytes/);
-  assert.match(source, /hashFile\(physicalPath, physicalMetadata\.size\)/);
-  assert.match(source, /expectedObject\.length === 64 \? hashes\.sha256 : hashes\.gitBlob/);
+  assert.match(source, /const handle = await open\(file, "r"\)/);
+  assert.match(source, /const metadata = await handle\.stat\(\)/);
+  assert.match(source, /const \{ bytesRead \} = await handle\.read\(buffer, 0, buffer\.length, streamedBytes\)/);
+  assert.match(source, /await handle\.close\(\)/);
+  assert.match(source, /inspected\.streamedBytes !== inspected\.metadata\.size/);
+  assert.match(source, /inspected\.streamedBytes !== expectedBytes/);
+  assert.match(source, /expectedObject\.length === 64 \? inspected\.sha256 : inspected\.gitBlob/);
+  assert.doesNotMatch(source, /createReadStream|await stat\(physicalPath\)/);
+  const readlinkAt = source.indexOf("await readlink(logicalPath)");
+  const targetLstatAt = source.indexOf("await lstat(lexicalTarget)");
+  const realpathAt = source.indexOf("await realpath(logicalPath)");
+  assert.ok(readlinkAt >= 0 && readlinkAt < targetLstatAt && targetLstatAt < realpathAt, "raw link authentication must precede dereference");
   assert.match(source, /status: "STARTED"/);
   assert.match(source, /status: "PASS"/);
   assert.match(source, /status: "FAIL"/);
@@ -192,13 +210,26 @@ test("the workflow contract kills routing artifact capture and cleanup disconnec
 test("the source contract kills link-metadata, escape, duplicate, hash, and early-receipt mutations", async () => {
   const source = await readFile(INVENTORY_URL, "utf8");
   const mutations = [
-    ["link metadata bytes", (text) => text.replace("physicalMetadata.size !== expectedBytes", "logicalMetadata.size !== expectedBytes")],
-    ["unresolved hashing", (text) => text.replace("hashFile(physicalPath, physicalMetadata.size)", "hashFile(logicalPath, logicalMetadata.size)")],
+    ["POSIX absolute target", (text) => text.replace("path.posix.isAbsolute(target)", "false")],
+    ["Windows absolute target", (text) => text.replace("path.win32.isAbsolute(target)", "false")],
+    ["drive-qualified relative target", (text) => text.replace("/^[A-Za-z]:/.test(target)", "false")],
+    ["followed enumeration metadata", (text) => text.replace("await lstat(entryPath)", "await realpath(entryPath)")],
+    ["unread raw link", (text) => text.replace("await readlink(logicalPath)", '"unchecked"')],
+    ["wrong lexical target", (text) => text.replace('path.join(repositoryRoot, "blobs", expectedObject)', "logicalPath")],
+    ["lexical equality bypass", (text) => text.replace("samePath(actualLexicalTarget, expectedLexicalTarget)", "true")],
+    ["followed target metadata", (text) => text.replace("await lstat(lexicalTarget)", "await stat(lexicalTarget)")],
+    ["directory target", (text) => text.replace("!targetMetadata.isFile() || targetMetadata.isSymbolicLink()", "false")],
     ["outside blob root", (text) => text.replace("!isInside(canonicalBlobsRoot, physicalPath)", "false")],
     ["nested lookalike blob root", (text) => text.replace("!samePath(path.dirname(physicalPath), canonicalBlobsRoot)", "false")],
     ["wrong content object", (text) => text.replace("path.basename(physicalPath).toLowerCase() !== expectedObject", "false")],
     ["duplicate resolved file", (text) => text.replace("seenPhysicalPaths.has(pathKey(physicalPath))", "false")],
-    ["no content hash authority", (text) => text.replace("expectedObject.length === 64 ? hashes.sha256 : hashes.gitBlob", "expectedObject")],
+    ["split path stat", (text) => text.replace("await handle.stat()", "await stat(file)")],
+    ["split path stream", (text) => text.replace("await handle.read(buffer, 0, buffer.length, streamedBytes)", "await createReadStream(file)")],
+    ["unclosed payload", (text) => text.replace("await handle.close()", "return")],
+    ["no stream-fstat parity", (text) => text.replace("inspected.streamedBytes !== inspected.metadata.size", "false")],
+    ["link metadata bytes", (text) => text.replace("inspected.streamedBytes !== expectedBytes", "logicalMetadata.size !== expectedBytes")],
+    ["no content hash authority", (text) => text.replace("expectedObject.length === 64 ? inspected.sha256 : inspected.gitBlob", "expectedObject")],
+    ["added split path stream", (text) => `${text}\ncreateReadStream(physicalPath);\n`],
     ["no started receipt", (text) => text.replace('status: "STARTED"', 'status: "UNKNOWN"')],
     ["no failure receipt", (text) => text.replace('status: "FAIL"', 'status: "UNKNOWN"')],
   ];
