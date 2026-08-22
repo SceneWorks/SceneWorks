@@ -923,6 +923,12 @@ fn unsupported_video_surfaces_fail_open_before_contract_selection() {
     request.overlay = Some("enhancer");
     assert_open("enhancer", request);
 
+    let mut request = inputs(121, budget(128.0), 18 * GIB);
+    request.fps = 30;
+    request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    request.overlay = Some("provider_video_mode:no_audio");
+    assert_open("provider no-audio mode", request);
+
     for fps in [0, 1, 23, 31, 60] {
         let mut request = inputs(121, budget(128.0), 18 * GIB);
         request.fps = fps;
@@ -1011,6 +1017,13 @@ fn evidence_preflight_needs_no_runtime_and_skips_unsupported_requests() {
     exact.fps = 30;
     assert!(packaged_video_evidence_covers_request(&generator, &exact));
 
+    exact.overlay = Some("provider_video_mode:no_audio");
+    assert!(
+        !packaged_video_evidence_covers_request(&generator, &exact),
+        "no-audio must be rejected before a live runtime probe until separately evidenced"
+    );
+
+    exact.overlay = None;
     exact.mode = "image_to_video";
     exact.reference_count = 1;
     exact.reference_shape = "image";

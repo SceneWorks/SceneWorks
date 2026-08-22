@@ -165,6 +165,9 @@ pub(crate) struct VideoRequestIdentity<'a> {
     /// Input carrier shape. Count alone cannot distinguish image conditioning from another future
     /// reference transport, so both are part of curve/evidence identity.
     pub(crate) reference_shape: &'a str,
+    /// Overlay identity. Provider-only video modes use the same sealed axis as resident
+    /// adapters/enhancers (`provider_video_mode:<resolved mode>`), so a catalog T2V request
+    /// cannot borrow the base carrier's curve after its provider workload changes.
     pub(crate) overlay: Option<&'a str>,
     /// Output rate is an evidence axis even when a fitted peak is frame-count based.
     pub(crate) fps: u32,

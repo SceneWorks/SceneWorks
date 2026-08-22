@@ -53,6 +53,23 @@ fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
     );
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
+    let mut input = VideoGenInput::default();
+    assert_eq!(video_admission_overlay(&input), None);
+
+    input.video_mode = Some("no_audio".to_owned());
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("provider_video_mode:no_audio"),
+        "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
+    );
+}
+
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
 /// 5B route therefore resolves the lane key `mlx:wan2_2_ti2v_5b`; the generated closure catalog is
 /// stamped only after the final inference head is frozen.

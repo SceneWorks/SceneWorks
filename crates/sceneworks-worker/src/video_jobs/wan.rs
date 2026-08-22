@@ -1479,6 +1479,31 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     spec
 }
 
+/// Provider-only request modifiers share the overlay evidence axis with adapters and enhancers.
+/// A catalog `text_to_video` request can still select a different provider workload (LTX's
+/// `no_audio` is the live case), so the resolved provider mode must not borrow the ordinary
+/// no-overlay curve until a receipt names this exact carrier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
+    let mut overlays = Vec::new();
+    if !input.adapters.is_empty() {
+        overlays.push(format!("adapters:{}", input.adapters.len()));
+    }
+    if input.enhance_prompt
+        || input.use_uncensored_enhancer
+        || input.uncensored_enhancer_dir.is_some()
+    {
+        overlays.push("enhancer".to_owned());
+    }
+    if let Some(video_mode) = input.video_mode.as_deref() {
+        overlays.push(format!("provider_video_mode:{video_mode}"));
+    }
+    (!overlays.is_empty()).then(|| overlays.join("+"))
+}
+
 /// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
 /// This check runs before the live-budget probe and before contract selection, so unsupported
 /// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
@@ -2032,17 +2057,7 @@ pub(super) async fn generate_video_using(
                         _ => "other",
                     }
                 };
-                let mut overlays = Vec::new();
-                if !input.adapters.is_empty() {
-                    overlays.push(format!("adapters:{}", input.adapters.len()));
-                }
-                if input.enhance_prompt
-                    || input.use_uncensored_enhancer
-                    || input.uncensored_enhancer_dir.is_some()
-                {
-                    overlays.push("enhancer".to_owned());
-                }
-                let admission_overlay = (!overlays.is_empty()).then(|| overlays.join("+"));
+                let admission_overlay = video_admission_overlay(&input);
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,
