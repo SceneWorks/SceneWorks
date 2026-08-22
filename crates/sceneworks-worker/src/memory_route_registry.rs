@@ -417,6 +417,8 @@ const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
     MemoryRouteMode::StyleVariations,
 ];
 const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
+const QWEN_EDIT_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::EditImage, MemoryRouteMode::CharacterImage];
 const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::EditImage,
     MemoryRouteMode::CharacterImage,
@@ -454,6 +456,11 @@ const PLAIN_LORA_IP: &[MemoryRouteLoadProfile] = &[
 const Q4_Q8: &[MemoryRouteTier] = &[MemoryRouteTier::Q4, MemoryRouteTier::Q8];
 const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
 const BF16_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Bf16];
+const BF16_Q4_Q8: &[MemoryRouteTier] = &[
+    MemoryRouteTier::Bf16,
+    MemoryRouteTier::Q4,
+    MemoryRouteTier::Q8,
+];
 
 const RULES: &[MemoryRouteRule] = &[
     MemoryRouteRule {
@@ -817,11 +824,11 @@ const RULES: &[MemoryRouteRule] = &[
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
         provider: "qwen_image_edit",
-        tiers: ALL_TIERS,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
+        tiers: BF16_Q4_Q8,
+        modes: QWEN_EDIT_MODES,
+        load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
-        legacy_shaping: true,
+        legacy_shaping: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
@@ -1144,6 +1151,16 @@ fn expected_provider_mode(
     context: MemoryRouteRequestContext,
 ) -> &'static str {
     match (runtime_provider, context.mode) {
+        ("qwen_image_edit", MemoryRouteMode::EditImage)
+            if (1..=5).contains(&context.reference_count) =>
+        {
+            "edit_image"
+        }
+        ("qwen_image_edit", MemoryRouteMode::CharacterImage)
+            if (1..=5).contains(&context.reference_count) =>
+        {
+            "character_image"
+        }
         (
             "flux1_schnell" | "flux1_dev",
             MemoryRouteMode::TextToImage | MemoryRouteMode::StyleVariations,
@@ -1362,7 +1379,7 @@ fn request_strategy_context_matches(
         .ok_or(())?;
     if !matches!(
         provider_mode,
-        "text_to_image" | "image_to_image" | "edit_image"
+        "text_to_image" | "image_to_image" | "edit_image" | "character_image"
     ) {
         return Err(());
     }
@@ -5580,7 +5597,6 @@ mod tests {
     fn legacy_candle_qwen_flux_and_mage_shaping_is_unchanged() {
         for (provider, profile) in [
             ("qwen_image", MemoryRouteLoadProfile::Plain),
-            ("qwen_image_edit", MemoryRouteLoadProfile::Plain),
             ("flux1_dev", MemoryRouteLoadProfile::SingleControl),
             ("flux2_dev", MemoryRouteLoadProfile::Plain),
             ("mage_flow_base", MemoryRouteLoadProfile::Plain),
@@ -5602,6 +5618,130 @@ mod tests {
                 LoadShapeDeclarationResult::NotEvaluated
             );
         }
+    }
+
+    #[test]
+    fn candle_qwen_edit_declaration_binds_exact_modes_references_tiers_and_overlays() {
+        let base = shipped_model("qwen_image_edit_2511");
+        let lightning = shipped_model("qwen_image_edit_2511_lightning");
+        let plain = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain)
+            .with_resolved_route("qwen_image_edit_2511");
+        let lora = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Lora)
+            .with_resolved_route("qwen_image_edit_2511");
+        let lightning_lora = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Lora)
+            .with_resolved_route("qwen_image_edit_2511_lightning");
+        let evaluate = |manifest: &JsonObject<String, Value>,
+                        spec: &LoadSpec,
+                        context: MemoryRouteRequestContext,
+                        tier: &str| {
+            declared_candle_request_strategy_contract_with(
+                "qwen_image_edit",
+                Some(tier),
+                manifest,
+                spec,
+                context,
+                |_| Some(staged_contract("qwen_image_edit")),
+            )
+        };
+
+        for (mode, references) in [
+            (MemoryRouteMode::EditImage, 1),
+            (MemoryRouteMode::EditImage, 5),
+            (MemoryRouteMode::CharacterImage, 1),
+            (MemoryRouteMode::CharacterImage, 2),
+        ] {
+            let context = MemoryRouteRequestContext {
+                mode,
+                reference_count: references,
+                use_pid: false,
+                has_phases: false,
+            };
+            for (manifest, candidate, expected_overlay) in [
+                (&base, &plain, None),
+                (&base, &lora, Some("lora")),
+                (&lightning, &lightning_lora, Some("lora")),
+            ] {
+                assert!(matches!(
+                    evaluate(manifest, candidate, context, "q4"),
+                    DeclaredCandleStrategyContract::Applied {
+                        provider_mode,
+                        provider_overlay,
+                        ..
+                    } if provider_mode == if mode == MemoryRouteMode::CharacterImage {
+                        "character_image"
+                    } else {
+                        "edit_image"
+                    }
+                        && provider_overlay.as_deref() == expected_overlay
+                ));
+            }
+        }
+
+        let exact = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::EditImage,
+            reference_count: 1,
+            use_pid: false,
+            has_phases: false,
+        };
+        for refused in [
+            evaluate(
+                &base,
+                &plain,
+                MemoryRouteRequestContext {
+                    reference_count: 0,
+                    ..exact
+                },
+                "q4",
+            ),
+            evaluate(
+                &base,
+                &plain,
+                MemoryRouteRequestContext {
+                    reference_count: 6,
+                    ..exact
+                },
+                "q4",
+            ),
+            evaluate(
+                &base,
+                &plain,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    ..exact
+                },
+                "q4",
+            ),
+            evaluate(
+                &base,
+                &plain,
+                MemoryRouteRequestContext {
+                    use_pid: true,
+                    ..exact
+                },
+                "q4",
+            ),
+            evaluate(
+                &base,
+                &plain,
+                MemoryRouteRequestContext {
+                    has_phases: true,
+                    ..exact
+                },
+                "q4",
+            ),
+            evaluate(&base, &plain, exact, "nvfp4"),
+            evaluate(&lightning, &plain, exact, "q4"),
+        ] {
+            assert!(matches!(refused, DeclaredCandleStrategyContract::Refused));
+        }
+
+        let lightning_rows = lightning["candle"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("Lightning Candle declaration");
+        assert!(lightning_rows.iter().all(|row| {
+            row["rung"].as_str() != Some("bounded_transformer_residency")
+                && row["loadProfiles"] == serde_json::json!(["lora"])
+        }));
     }
 
     #[test]
@@ -6557,9 +6697,15 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             providers,
-            ["krea_2_edit", "krea_2_raw", "krea_2_turbo_edit"].into()
+            [
+                "krea_2_edit",
+                "krea_2_raw",
+                "krea_2_turbo_edit",
+                "qwen_image_edit",
+            ]
+            .into()
         );
-        assert_eq!(witnesses.len(), 24);
+        assert_eq!(witnesses.len(), 36);
         assert!(witnesses.iter().all(|witness| {
             matches!(
                 witness.tier,
