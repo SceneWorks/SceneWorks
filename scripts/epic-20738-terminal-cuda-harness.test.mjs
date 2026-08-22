@@ -377,6 +377,8 @@ function fixtureReceipt(status = "passed", cellIndex = 0) {
     verifiedAfter: true,
     derivedAfter: cell.artifactIds.map((artifactId) => ({
       artifactId,
+      derivedDisposition: artifactId === fluxArtifact
+        ? "bounded-transformer-sidecars" : "not-applicable",
       files: artifactId === fluxArtifact ? 494 : 0,
       bytes: artifactId === fluxArtifact ? fluxBytes : 0,
       inventories: artifactId === fluxArtifact ? [{
@@ -885,6 +887,11 @@ test("b646 derived sidecars occupy one exact canonical namespace with no global 
     };
     const expected = await expectedB646DerivedNamespace(artifact, derived);
     assert.match(path.basename(expected), /^[0-9a-f]{64}$/);
+    const resident = await inspectDerivedSidecarRoot(
+      derived, expected, { allowExactEmpty: true },
+    );
+    assert.equal(resident.namespaces.length, 0);
+    assert.equal(resident.rootInventory.files, 0);
     const empty = await inspectDerivedSidecarRoot(
       derived, expected, { materializeExactEmpty: true },
     );
@@ -1084,7 +1091,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     preflightFault = null, cellFault = null, omitObstructions = false,
     derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
     runtimeResultMode = "valid", providerRuntimeFailureAt = null,
-    providerFailureDerivedMode = "empty",
+    providerFailureDerivedMode = "empty", successfulFluxDerivedMode = "bounded",
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -1201,9 +1208,21 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
         };
         const id = runtimeCells.at(-1)?.id;
         assert.ok(id?.startsWith("flux1-"));
-        await mkdir(expectedNamespace, { recursive: true });
         const providerFailed = id === providerRuntimeFailureAt;
         if (providerFailed) assert.equal(options.materializeExactEmpty, true);
+        if (!providerFailed && successfulFluxDerivedMode === "resident") {
+          assert.equal(options.allowExactEmpty, true);
+          return {
+            rootInventory: {
+              root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+            },
+            namespaces: [],
+          };
+        }
+        if (!providerFailed && successfulFluxDerivedMode === "stray") {
+          throw new Error("fixture FLUX derived sidecar root has stray files");
+        }
+        await mkdir(expectedNamespace, { recursive: true });
         const bytes = id.endsWith("q4") ? 7_396_392_960 : 12_573_868_032;
         const inventory = {
           root: expectedNamespace,
@@ -1477,6 +1496,10 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   );
   const providerFailureReceipt = providerFailed.continuationReceipts[0];
   assert.equal(providerFailureReceipt.authorityLifecycle.providerExecution, "failed");
+  assert.equal(
+    providerFailureReceipt.authorityLifecycle.derivedAfter[0].derivedDisposition,
+    "provider-failed-empty",
+  );
   assert.equal(providerFailureReceipt.authorityLifecycle.derivedAfter[0].files, 0);
   assert.equal(providerFailureReceipt.authorityLifecycle.derivedAfter[0].inventories.length, 1);
   assert.equal(providerFailureReceipt.authorityLifecycle.staged[0].derivedNamespaces.length, 1);
@@ -1498,6 +1521,29 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.throws(
     () => validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, missingCacheProviderState),
     /required property 'providerExecution'/,
+  );
+  const missingCacheDisposition = structuredClone(providerFailed.cacheEvidence);
+  delete missingCacheDisposition.derivedSidecarLifecycle.afterCells[0].derivedDisposition;
+  assert.throws(
+    () => validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, missingCacheDisposition),
+    /required property 'derivedDisposition'/,
+  );
+  const missingDisposition = structuredClone(providerFailureReceipt);
+  delete missingDisposition.authorityLifecycle.derivedAfter[0].derivedDisposition;
+  assert.throws(
+    () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingDisposition),
+    /required property 'derivedDisposition'/,
+  );
+  const wrongDisposition = structuredClone(providerFailureReceipt);
+  wrongDisposition.authorityLifecycle.derivedAfter[0].derivedDisposition = "resident-empty";
+  assert.throws(
+    () => validateReceipt(
+      wrongDisposition,
+      providerFailed.checked.cells[7],
+      providerFailed.checked,
+      providerFailed.lifecycleContext,
+    ),
+    /FLUX derived lifecycle/,
   );
 
   const providerPartial = await scenario({
@@ -1547,6 +1593,14 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   );
   assert.equal(passed.events.filter((event) => event.startsWith("offline:")).length, 16);
   assert.equal(passed.runtimeCells.length, 12, passed.result.summary.campaignErrors.join("\n"));
+  assert.equal(
+    passed.continuationReceipts[0].authorityLifecycle.derivedAfter[0].derivedDisposition,
+    "bounded-transformer-sidecars",
+  );
+  assert.equal(
+    passed.cacheEvidence.derivedSidecarLifecycle.afterCells[0].derivedDisposition,
+    "bounded-transformer-sidecars",
+  );
   assert.ok(
     passed.events.indexOf("execute:flux1-dev-q8")
       < passed.events.indexOf("stage:flux1-schnell-q4"),
@@ -1580,6 +1634,26 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(passed.result.summary.finalAuthorityLifecycle.stage.files, 0);
   assert.equal(passed.result.summary.finalAuthorityLifecycle.derived.files, 0);
   assert.equal(passed.result.summary.finalAuthorityLifecycle.missingStoreAbsent, true);
+
+  const resident = await scenario({ successfulFluxDerivedMode: "resident" });
+  assert.equal(resident.runtimeCells.length, 12, resident.result.summary.campaignErrors.join("\n"));
+  assert.equal(resident.result.summary.failed, 0);
+  assert.equal(resident.result.summary.passed, 19);
+  assert.equal(resident.runtimeCells[1].id, "flux1-schnell-q4");
+  const residentReceipt = resident.continuationReceipts[0];
+  assert.equal(residentReceipt.authorityLifecycle.providerExecution, "completed");
+  assert.equal(
+    residentReceipt.authorityLifecycle.derivedAfter[0].derivedDisposition,
+    "resident-empty",
+  );
+  assert.equal(residentReceipt.authorityLifecycle.derivedAfter[0].files, 0);
+  assert.equal(residentReceipt.authorityLifecycle.derivedAfter[0].inventories.length, 0);
+  assert.equal(residentReceipt.authorityLifecycle.staged[0].derivedNamespaces.length, 0);
+  assert.equal(residentReceipt.authorityLifecycle.released[0].derivedRemoved, true);
+  assert.equal(
+    resident.cacheEvidence.derivedSidecarLifecycle.afterCells[0].derivedDisposition,
+    "resident-empty",
+  );
 
   const filled = await scenario({ missingId: "flux1-schnell-q8", downloadSucceeds: true });
   assert.deepEqual(
@@ -1752,6 +1826,15 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       (outcome) => outcome.status === "failed" && outcome.receipt,
     ));
   }
+  const strayDerived = await scenario({ successfulFluxDerivedMode: "stray" });
+  assert.equal(strayDerived.runtimeCells.length, 1);
+  assert.match(
+    strayDerived.result.summary.campaignErrors.join("\n"),
+    /derived Candle sidecar evidence failed.*stray files/,
+  );
+  assert.ok(strayDerived.result.summary.receipts.slice(8).every(
+    (outcome) => outcome.status === "failed" && outcome.receipt,
+  ));
 });
 
 test("schemas, clean Node dependencies, and workflow preserve the opt-in single-job terminal contract", async () => {

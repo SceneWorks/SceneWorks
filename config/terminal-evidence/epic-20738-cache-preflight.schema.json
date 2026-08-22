@@ -221,11 +221,19 @@
     "sidecarSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "cellId", "providerExecution", "inventory"],
+      "required": ["ordinal", "cellId", "providerExecution", "derivedDisposition", "inventory"],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
         "cellId": { "$ref": "#/$defs/id" },
         "providerExecution": { "enum": ["failed", "completed"] },
+        "derivedDisposition": {
+          "enum": [
+            "not-applicable",
+            "resident-empty",
+            "bounded-transformer-sidecars",
+            "provider-failed-empty"
+          ]
+        },
         "inventory": { "$ref": "#/$defs/inventory" }
       }
     },

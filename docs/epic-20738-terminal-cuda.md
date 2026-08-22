@@ -81,8 +81,9 @@ the complete production-approved cached parent revision
 `254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. After the one possible
 fill, network mode is forced offline for every JIT stage and cell.
 
-The disk admission model binds exact source bytes, the contracted FLUX sidecar payloads (494 files;
-q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file reserve), and a
+The disk admission model binds exact source bytes, the conservative streamed-FLUX sidecar ceilings
+(494 files; q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file
+reserve), and a
 40-GiB non-model reserve for Cargo target, output, the pinned venv, logs, and filesystem fluctuation.
 The persistent Schnell-q8 miss is retained only through cell 10 and removed with that authority.
 The largest model-plus-sidecar live set is therefore the LTX pair itself at
@@ -104,10 +105,14 @@ All writable cache and temporary environment variables are redirected to the cur
 while model roots point only at the active JIT staging roots. Every selected root and nested
 top-level component root carries an ordinary-file `.candle-device-format-v1` obstruction, forcing
 Candle away from model-adjacent writes. `SCENEWORKS_CANDLE_DEVICE_CACHE_DIR` points to a separate
-campaign-owned derived root under `RUNNER_TEMP`; the one b646 component-path-derived namespace shares
-the authority's lifetime and is inventoried and removed after its last consumer. A FLUX namespace
-must contain the exact bounded 494-file sidecar set with no other file or empty namespace anywhere in
-the derived root; every non-FLUX root must stay exactly empty. The controller rehashes
+campaign-owned derived root under `RUNNER_TEMP`. The terminal request leaves `GenerationRequest.memory`
+at its production default: on an ample device, a successful resident/non-streamed FLUX request must
+leave the canonical derived root exactly empty. If the provider instead exercises its bounded
+transformer path, exactly one b646 component-path-derived namespace shares the authority's lifetime
+and must contain the reviewed bounded 494-file sidecar set. Partial, stray, multiple, wrong, or
+non-regular derived entries fail closed in either case; every non-FLUX root must stay exactly empty.
+An early provider failure may retain only its separately labeled exact-empty namespace evidence. The
+controller rehashes
 each selected staged authority file and every obstruction immediately before and after every cell,
 then proves exact stage/namespace absence at release and proves final staging, derived cache, and
 missing-file store emptiness. Any stage, hash, capacity, or cleanup drift quarantines later cells; the
@@ -141,7 +146,9 @@ The closed Draft 2020-12 `cache-preflight.json` binds the download-evidence SHA-
 filename census, followed target bytes/hashes, hit/download partition, first/last-use plan, persistent
 store, exact disk plan/free floor, and the no-GPU-before-validation verdict. Its own byte count and
 SHA-256 are bound from the campaign summary. Each continuation receipt binds that cell's live-set
-transition, free-space probes, pre/post immutable verification, derived inventory, and exact releases;
+transition, free-space probes, pre/post immutable verification, the exact derived disposition
+(`resident-empty`, `bounded-transformer-sidecars`, `provider-failed-empty`, or `not-applicable`),
+derived inventory, and exact releases;
 the final summary binds the complete lifecycle and empty terminal state.
 
 A cache preflight directory, write, stat, hash, schema/semantic validation, census, staging, or final

@@ -57,6 +57,10 @@ const NON_MODEL_DISK_RESERVE_BYTES = 40 * 1024 ** 3;
 const REVIEWED_FREE_FLOOR_BYTES = 99_106_288_594;
 const FLUX_Q4_SIDECAR_BYTES = 7_396_392_960 + 494 * 16_384;
 const FLUX_Q8_SIDECAR_BYTES = 12_573_868_032 + 494 * 16_384;
+const DERIVED_DISPOSITION_NOT_APPLICABLE = "not-applicable";
+const DERIVED_DISPOSITION_RESIDENT = "resident-empty";
+const DERIVED_DISPOSITION_BOUNDED = "bounded-transformer-sidecars";
+const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REVIEWED_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 
 function fail(message) {
@@ -971,12 +975,19 @@ function validateReceiptInternal(
           && derived.files === 0 && derived.bytes === 0 && oneBoundNamespace
           && derived.inventories[0].files === 0 && derived.inventories[0].bytes === 0
           && derived.inventories[0].sha256 === createHash("sha256").digest("hex");
+        const exactResident = lifecycle.providerExecution === "completed"
+          && derived.files === 0 && derived.bytes === 0 && derived.inventories.length === 0
+          && staged?.derivedNamespaces.length === 0;
         const exactComplete = derived.files === 494 && derived.bytes >= payloadFloor
           && derived.bytes <= payloadCeiling && oneBoundNamespace;
-        if (!exactEmptyFailure && !exactComplete) {
-          fail("receipt FLUX derived lifecycle is not one exact bounded b646 namespace");
+        const expectedDisposition = exactResident ? DERIVED_DISPOSITION_RESIDENT
+          : exactEmptyFailure ? DERIVED_DISPOSITION_PROVIDER_FAILED
+            : exactComplete ? DERIVED_DISPOSITION_BOUNDED : null;
+        if (!expectedDisposition || derived.derivedDisposition !== expectedDisposition) {
+          fail("receipt FLUX derived lifecycle is neither exact resident-empty nor one exact bounded b646 namespace");
         }
-      } else if (derived.files !== 0 || derived.bytes !== 0 || derived.inventories.length !== 0) {
+      } else if (derived.derivedDisposition !== DERIVED_DISPOSITION_NOT_APPLICABLE
+        || derived.files !== 0 || derived.bytes !== 0 || derived.inventories.length !== 0) {
         fail("receipt non-FLUX derived lifecycle is not exactly empty");
       }
     }
@@ -1632,7 +1643,8 @@ export async function expectedB646DerivedNamespace(artifact, derivedSidecarRoot)
 }
 
 export async function inspectDerivedSidecarRoot(
-  derivedSidecarRoot, expectedNamespace = null, { materializeExactEmpty = false } = {},
+  derivedSidecarRoot, expectedNamespace = null,
+  { materializeExactEmpty = false, allowExactEmpty = false } = {},
 ) {
   let rootEntries = await readdir(derivedSidecarRoot, { withFileTypes: true });
   if (!expectedNamespace) {
@@ -1640,6 +1652,9 @@ export async function inspectDerivedSidecarRoot(
     return { rootInventory: await directoryInventory(derivedSidecarRoot), namespaces: [] };
   }
   const expectedVersionRoot = path.join(derivedSidecarRoot, "candle-device-format-v1");
+  if (allowExactEmpty && rootEntries.length === 0) {
+    return { rootInventory: await directoryInventory(derivedSidecarRoot), namespaces: [] };
+  }
   if (materializeExactEmpty && rootEntries.length === 0) {
     if (comparable(path.dirname(expectedNamespace)) !== comparable(expectedVersionRoot)
       || !/^[0-9a-f]{64}$/.test(path.basename(expectedNamespace))) {
@@ -2199,11 +2214,19 @@ export function validateCachePreflightEvidence(document, {
     const emptyProviderFailure = snapshot.providerExecution === "failed"
       && snapshot.inventory.files === 0 && snapshot.inventory.bytes === 0
       && snapshot.inventory.sha256 === createHash("sha256").digest("hex");
-    if (flux ? (!emptyProviderFailure && (snapshot.inventory.files !== 494
-        || snapshot.inventory.bytes < payloadFloor
-        || snapshot.inventory.bytes > payloadCeiling))
-      : (snapshot.inventory.files !== 0 || snapshot.inventory.bytes !== 0
-        || snapshot.inventory.sha256 !== createHash("sha256").digest("hex"))) {
+    const emptyResident = snapshot.providerExecution === "completed"
+      && snapshot.inventory.files === 0 && snapshot.inventory.bytes === 0
+      && snapshot.inventory.sha256 === createHash("sha256").digest("hex");
+    const exactBounded = flux && snapshot.inventory.files === 494
+      && snapshot.inventory.bytes >= payloadFloor
+      && snapshot.inventory.bytes <= payloadCeiling;
+    const expectedDisposition = !flux ? DERIVED_DISPOSITION_NOT_APPLICABLE
+      : emptyResident ? DERIVED_DISPOSITION_RESIDENT
+        : emptyProviderFailure ? DERIVED_DISPOSITION_PROVIDER_FAILED
+          : exactBounded ? DERIVED_DISPOSITION_BOUNDED : null;
+    if (!expectedDisposition || snapshot.derivedDisposition !== expectedDisposition
+      || (!flux && (snapshot.inventory.files !== 0 || snapshot.inventory.bytes !== 0
+        || snapshot.inventory.sha256 !== createHash("sha256").digest("hex")))) {
       fail("derived Candle sidecar lifecycle inventory drifted from the cell family contract");
     }
     previous = snapshot.ordinal;
@@ -2814,7 +2837,10 @@ export async function runCampaign(args, options = {}) {
           ) : null;
         const derivedInspection = await operations.inspectDerivedSidecarRoot(
           derivedSidecarRoot, expectedNamespace,
-          { materializeExactEmpty: runtimeFailure !== null && expectedNamespace !== null },
+          {
+            materializeExactEmpty: runtimeFailure !== null && expectedNamespace !== null,
+            allowExactEmpty: runtimeFailure === null && expectedNamespace !== null,
+          },
         );
         if (fluxArtifacts.length === 1) {
           sharedArtifacts.get(fluxArtifacts[0]).derivedNamespaces.splice(
@@ -2835,21 +2861,38 @@ export async function runCampaign(args, options = {}) {
           const bytes = inventories.reduce((sum, inventory) => sum + inventory.bytes, 0);
           const exactEmptyProviderFailure = runtimeFailure !== null
             && files === 0 && bytes === 0 && inventories.length === 1;
-          if (artifactId.startsWith("flux1-") && !exactEmptyProviderFailure && (files !== 494
-              || bytes < (artifactId.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032)
-              || bytes > (artifactId.endsWith("-q4")
-                ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES))) {
+          const exactResident = runtimeFailure === null
+            && files === 0 && bytes === 0 && inventories.length === 0;
+          const exactBounded = files === 494
+            && bytes >= (artifactId.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032)
+            && bytes <= (artifactId.endsWith("-q4")
+              ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES)
+            && inventories.length === 1;
+          const derivedDisposition = artifactId.startsWith("flux1-")
+            ? exactResident ? DERIVED_DISPOSITION_RESIDENT
+              : exactEmptyProviderFailure ? DERIVED_DISPOSITION_PROVIDER_FAILED
+                : exactBounded ? DERIVED_DISPOSITION_BOUNDED : null
+            : DERIVED_DISPOSITION_NOT_APPLICABLE;
+          if (artifactId.startsWith("flux1-") && !derivedDisposition) {
             fail(`FLUX derived-sidecar contract drifted for ${artifactId}: ${files} files/${bytes} bytes`);
           }
-          if (!artifactId.startsWith("flux1-") && (files !== 0 || bytes !== 0)) {
+          if (!artifactId.startsWith("flux1-") && (files !== 0 || bytes !== 0
+              || inventories.length !== 0)) {
             fail(`non-FLUX authority unexpectedly created derived sidecars: ${artifactId}`);
           }
-          lifecycle.derivedAfter.push({ artifactId, files, bytes, inventories });
+          lifecycle.derivedAfter.push({
+            artifactId, derivedDisposition, files, bytes, inventories,
+          });
         }
+        const derivedDisposition = fluxArtifacts.length === 0
+          ? DERIVED_DISPOSITION_NOT_APPLICABLE
+          : lifecycle.derivedAfter.find((entry) => entry.artifactId === fluxArtifacts[0])
+            ?.derivedDisposition;
         derivedSidecarLifecycle.afterCells.push({
           ordinal: index + 1,
           cellId: cell.id,
           providerExecution: lifecycle.providerExecution,
+          derivedDisposition,
           inventory: derivedInspection.rootInventory,
         });
       } catch (error) {

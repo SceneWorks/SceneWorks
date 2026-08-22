@@ -86,6 +86,21 @@ fn family_load_spec_quant_bits(kind: &str, engine_id: &str, requested_tier: &str
     }
 }
 
+/// The reviewed terminal requests deliberately leave the production request-memory policy at its
+/// default. In particular, FLUX on an ample CUDA device is resident/non-streamed and therefore does
+/// not create bounded-transformer sidecars. This helper makes that absence reviewable and rejects a
+/// new family before it can silently inherit a different harness policy.
+fn family_generation_memory(kind: &str, engine_id: &str) -> Option<gen_core::GenerationMemory> {
+    match (kind, engine_id) {
+        ("image", "chroma1_base" | "chroma1_flash" | "chroma1_hd")
+        | ("image", "flux1_dev" | "flux1_schnell")
+        | ("ltx", "ltx_2_3_distilled")
+        | ("sdxlOpenPose", "sdxl")
+        | ("scail2", "scail2_14b") => None,
+        _ => panic!("unreviewed terminal request-memory family {kind}/{engine_id}"),
+    }
+}
+
 fn primary_load_spec(cell: &Cell, primary: &Artifact) -> LoadSpec {
     let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
         .with_resolved_route(cell.model_id.clone());
@@ -311,6 +326,7 @@ fn generate_image(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         guidance: cell.request.guidance,
         true_cfg: cell.request.true_cfg,
         sampler: cell.request.sampler.clone(),
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let image = image_output(
@@ -397,6 +413,7 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
             kind: ControlKind::Pose,
             scale: Some(1.0),
         }],
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let image = image_output(
@@ -508,6 +525,7 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         seed: Some(cell.request.seed),
         conditioning,
         video_mode: Some("animation".to_owned()),
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let output_value = generator
@@ -546,6 +564,7 @@ fn generate_ltx(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         fps: cell.request.fps,
         steps: Some(cell.request.steps),
         seed: Some(cell.request.seed),
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let generated = generator
@@ -742,6 +761,43 @@ mod cpu_contract_tests {
                 "{id} load-quant policy"
             );
         }
+    }
+
+    #[test]
+    fn family_request_memory_policy_keeps_all_19_terminal_cells_at_default() {
+        let cases = [
+            ("chroma1-base-q4", "image", "chroma1_base"),
+            ("chroma1-base-q8", "image", "chroma1_base"),
+            ("chroma1-flash-q4", "image", "chroma1_flash"),
+            ("chroma1-flash-q8", "image", "chroma1_flash"),
+            ("chroma1-hd-q4", "image", "chroma1_hd"),
+            ("chroma1-hd-q8", "image", "chroma1_hd"),
+            ("flux1-dev-q4", "image", "flux1_dev"),
+            ("flux1-dev-q8", "image", "flux1_dev"),
+            ("flux1-schnell-q4", "image", "flux1_schnell"),
+            ("flux1-schnell-q8", "image", "flux1_schnell"),
+            ("scail2-q4", "scail2", "scail2_14b"),
+            ("scail2-multi-reference-q4", "scail2", "scail2_14b"),
+            ("scail2-q8", "scail2", "scail2_14b"),
+            ("ltx-2-3-q8", "ltx", "ltx_2_3_distilled"),
+            ("sdxl-openpose", "sdxlOpenPose", "sdxl"),
+            ("realvisxl-openpose", "sdxlOpenPose", "sdxl"),
+            ("realvisxl-lightning-openpose", "sdxlOpenPose", "sdxl"),
+            ("illustrious-v1-openpose", "sdxlOpenPose", "sdxl"),
+            ("illustrious-v2-openpose", "sdxlOpenPose", "sdxl"),
+        ];
+        assert_eq!(cases.len(), 19);
+        for (id, kind, engine_id) in cases {
+            assert!(
+                family_generation_memory(kind, engine_id).is_none(),
+                "{id} must keep GenerationRequest.memory at its reviewed default"
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| family_generation_memory("image", "unreviewed_engine"))
+                .is_err(),
+            "an unreviewed family must not silently inherit the default request-memory contract"
+        );
     }
 
     #[test]

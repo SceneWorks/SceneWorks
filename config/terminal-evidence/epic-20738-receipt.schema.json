@@ -264,9 +264,17 @@
     "derivedAuthority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["artifactId", "files", "bytes", "inventories"],
+      "required": ["artifactId", "derivedDisposition", "files", "bytes", "inventories"],
       "properties": {
         "artifactId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "derivedDisposition": {
+          "enum": [
+            "not-applicable",
+            "resident-empty",
+            "bounded-transformer-sidecars",
+            "provider-failed-empty"
+          ]
+        },
         "files": { "type": "integer", "minimum": 0 },
         "bytes": { "type": "integer", "minimum": 0 },
         "inventories": { "type": "array", "items": { "$ref": "#/$defs/plainInventory" } }
