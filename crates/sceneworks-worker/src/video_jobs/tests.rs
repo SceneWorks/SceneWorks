@@ -72,14 +72,21 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     input.enhance_prompt = true;
     assert_eq!(
         video_admission_overlay(&input).as_deref(),
-        Some("enhancer+provider_video_mode:no_audio"),
-        "enhancer and provider mode remain separate exact identity axes"
+        Some("enhancer:standard+provider_video_mode:no_audio"),
+        "standard prompt enhancement and provider mode remain exact identity axes"
+    );
+
+    input.use_uncensored_enhancer = true;
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored+provider_video_mode:no_audio"),
+        "uncensored enhancement must not borrow standard prompt-enhancement evidence"
     );
 
     input.video_mode = None;
     assert_eq!(
         video_admission_overlay(&input).as_deref(),
-        Some("enhancer"),
+        Some("enhancer:uncensored"),
         "removing the request-only mode must not erase the loaded enhancer axis"
     );
 }

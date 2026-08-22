@@ -1492,11 +1492,10 @@ pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
     if !input.adapters.is_empty() {
         overlays.push(format!("adapters:{}", input.adapters.len()));
     }
-    if input.enhance_prompt
-        || input.use_uncensored_enhancer
-        || input.uncensored_enhancer_dir.is_some()
-    {
-        overlays.push("enhancer".to_owned());
+    if input.use_uncensored_enhancer || input.uncensored_enhancer_dir.is_some() {
+        overlays.push("enhancer:uncensored".to_owned());
+    } else if input.enhance_prompt {
+        overlays.push("enhancer:standard".to_owned());
     }
     if let Some(video_mode) = input.video_mode.as_deref() {
         overlays.push(format!("provider_video_mode:{video_mode}"));
