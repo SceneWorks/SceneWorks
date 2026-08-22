@@ -59,6 +59,7 @@ const MAGE_FINETUNED_COMPONENT_TIER: &str = "bf16";
 
 /// Stable request/evidence identity for the bespoke imported-transformer lane. The user model id
 /// remains asset provenance; it must not masquerade as one of the six pinned builtin providers.
+#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_MEMORY_ROUTE: &str = "mage_finetuned";
 
 /// Denoise-steps / guidance fallbacks — the undistilled `mage_flow_base` regime a fine-tune
@@ -448,9 +449,12 @@ async fn generate_mage_finetuned_stream(
             #[cfg(target_os = "macos")]
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             #[cfg(not(target_os = "macos"))]
-            warm_policy.decline(
-                crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
-            );
+            {
+                let _ = (cache_state, loaded_policy, external_committed_bytes);
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+            }
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);

@@ -15098,6 +15098,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
         assert_eq!(
