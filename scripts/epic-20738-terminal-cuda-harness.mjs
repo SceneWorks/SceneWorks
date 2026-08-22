@@ -82,6 +82,39 @@ export function cellSemanticsSha256(cells) {
   return canonicalSha256(tuples);
 }
 
+// Match the worker's family policy for immutable packed roots. The selected tier remains q4/q8
+// evidence, while this value records whether the final LoadSpec asks the provider to quantize at
+// load. SDXL keeps its production advisory Q4 selector, and Candle SCAIL carries the exact requested
+// Q4/Q8 tier hint used by its production cold-load plan.
+export function expectedLoadSpecQuantBits(cell) {
+  const family = `${cell?.kind ?? ""}/${cell?.engineId ?? ""}`;
+  if (cell?.kind === "sdxlOpenPose" && cell.engineId === "sdxl") return 4;
+  if (cell?.kind === "scail2" && cell.engineId === "scail2_14b") {
+    if (cell.requestedTier === "q4") return 4;
+    if (cell.requestedTier === "q8") return 8;
+    fail(`unreviewed terminal SCAIL tier ${cell.requestedTier}`);
+  }
+  if ((cell?.kind === "image" && new Set([
+    "chroma1_base", "chroma1_flash", "chroma1_hd", "flux1_dev", "flux1_schnell",
+  ]).has(cell.engineId))
+    || (cell?.kind === "ltx" && cell.engineId === "ltx_2_3_distilled")) return null;
+  fail(`unreviewed terminal load-quant family ${family}`);
+}
+
+export function validateRuntimeResult(runtimeResult, cell) {
+  object(runtimeResult, `${cell.id} runtime result`);
+  const expectedQuant = expectedLoadSpecQuantBits(cell);
+  if (runtimeResult.requestedTier !== cell.requestedTier
+    || runtimeResult.resolvedTier !== cell.requestedTier || runtimeResult.denseFallback !== false) {
+    fail(`${cell.id} runtime result did not prove exact-tier/no-fallback execution`);
+  }
+  if (!Object.hasOwn(runtimeResult, "loadSpecQuantBits")
+    || runtimeResult.loadSpecQuantBits !== expectedQuant) {
+    fail(`${cell.id} runtime result did not prove family loadSpecQuantBits=${expectedQuant}`);
+  }
+  return runtimeResult;
+}
+
 export function loadProfile(profilePath = PROFILE_PATH) {
   return JSON.parse(readFileSync(profilePath, "utf8"));
 }
@@ -502,6 +535,7 @@ export function receiptSkeleton({
     cell: {
       id: cell.id, ordinal, modelId: cell.modelId, engineId: cell.engineId, kind: cell.kind,
       requestedTier: cell.requestedTier, resolvedTier: cell.requestedTier, denseFallback: false,
+      loadSpecQuantBits: expectedLoadSpecQuantBits(cell),
     },
     status: "failed",
     error: "cell has not completed",
@@ -536,6 +570,11 @@ export function validateReceipt(receipt, expectedCell, profile) {
   }
   if (receipt.cell.requestedTier !== receipt.cell.resolvedTier || receipt.cell.denseFallback !== false) {
     fail(`${receipt.cell.id} receipt permits a dense or cross-tier fallback`);
+  }
+  const expectedQuant = expectedLoadSpecQuantBits(expectedCell);
+  if (!Object.hasOwn(receipt.cell, "loadSpecQuantBits")
+    || receipt.cell.loadSpecQuantBits !== expectedQuant) {
+    fail(`${receipt.cell.id} receipt does not bind family loadSpecQuantBits=${expectedQuant}`);
   }
   if (!receipt.repositories?.sceneworks?.clean || !receipt.repositories?.inference?.clean) {
     fail("receipt does not bind clean paired repositories");
@@ -1007,10 +1046,8 @@ export async function runCampaign(args, options = {}) {
       await operations.executeCell({ sceneworks: sceneworksRoot, cellFile, cellDir, logFile, samples });
       operations.sample(samples, errors, "post-execution VRAM sample failed");
       const runtimeResult = JSON.parse(await readFile(path.join(cellDir, "runtime-result.json"), "utf8"));
-      if (runtimeResult.requestedTier !== cell.requestedTier
-        || runtimeResult.resolvedTier !== cell.requestedTier || runtimeResult.denseFallback !== false) {
-        fail(`${cell.id} runtime result did not prove exact-tier/no-fallback execution`);
-      }
+      validateRuntimeResult(runtimeResult, cell);
+      receipt.cell.loadSpecQuantBits = runtimeResult.loadSpecQuantBits;
       executionPassed = true;
     } catch (error) {
       const message = recordError(errors, "cell lifecycle failed", error);

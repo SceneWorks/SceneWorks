@@ -11,7 +11,7 @@
     "cell": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "ordinal", "modelId", "engineId", "kind", "requestedTier", "resolvedTier", "denseFallback"],
+      "required": ["id", "ordinal", "modelId", "engineId", "kind", "requestedTier", "resolvedTier", "denseFallback", "loadSpecQuantBits"],
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
         "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
@@ -20,8 +20,24 @@
         "kind": { "enum": ["image", "scail2", "ltx", "sdxlOpenPose"] },
         "requestedTier": { "enum": ["q4", "q8"] },
         "resolvedTier": { "enum": ["q4", "q8"] },
-        "denseFallback": { "const": false }
-      }
+        "denseFallback": { "const": false },
+        "loadSpecQuantBits": { "enum": [null, 4, 8] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "sdxlOpenPose" } }, "required": ["kind"] },
+          "then": { "properties": { "loadSpecQuantBits": { "const": 4 } } },
+          "else": {
+            "if": { "properties": { "kind": { "const": "scail2" } }, "required": ["kind"] },
+            "then": {
+              "if": { "properties": { "requestedTier": { "const": "q4" } }, "required": ["requestedTier"] },
+              "then": { "properties": { "loadSpecQuantBits": { "const": 4 } } },
+              "else": { "properties": { "loadSpecQuantBits": { "const": 8 } } }
+            },
+            "else": { "properties": { "loadSpecQuantBits": { "const": null } } }
+          }
+        }
+      ]
     },
     "status": { "enum": ["passed", "failed"] },
     "error": { "type": ["string", "null"] },
