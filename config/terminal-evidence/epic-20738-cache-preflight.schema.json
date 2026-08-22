@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schemaVersion", "profile", "status", "error", "downloadEvidenceSha256",
+    "schemaVersion", "profile", "evidencePhase", "status", "error", "downloadEvidenceSha256",
     "expectedArtifactIds", "sourceCacheRoot", "campaignStagingRoot", "derivedSidecarRoot", "missingFileStore",
     "frozenMissingFiles", "sidecarObstructions", "reusedFiles", "downloadedFiles", "networkDownloadCount", "phases",
     "lifetimePlan", "diskPlan", "derivedSidecarLifecycle", "offlineBeforeCells"
@@ -13,6 +13,7 @@
   "properties": {
     "schemaVersion": { "const": 1 },
     "profile": { "const": "epic-20738-candle-cuda-terminal-v1" },
+    "evidencePhase": { "enum": ["initial", "final"] },
     "status": { "enum": ["passed", "failed"] },
     "error": { "type": ["string", "null"] },
     "downloadEvidenceSha256": { "$ref": "#/$defs/sha256" },

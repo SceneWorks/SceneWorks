@@ -84,7 +84,8 @@ fill, network mode is forced offline for every JIT stage and cell.
 The disk admission model binds exact source bytes, the contracted FLUX sidecar payloads (494 files;
 q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file reserve), and a
 40-GiB non-model reserve for Cargo target, output, the pinned venv, logs, and filesystem fluctuation.
-Its largest model-plus-sidecar live set is the LTX pair plus persistent Schnell miss at
+The persistent Schnell-q8 miss is retained only through cell 10 and removed with that authority.
+The largest model-plus-sidecar live set is therefore the LTX pair itself at
 56,156,615,634 bytes, so the controller requires at least 99,106,288,594 free bytes. It checks that
 floor after the missing-file fill, before every authority stage, and before every GPU process. The
 former all-at-once plan is deterministically refused.
@@ -103,9 +104,10 @@ All writable cache and temporary environment variables are redirected to the cur
 while model roots point only at the active JIT staging roots. Every selected root and nested
 top-level component root carries an ordinary-file `.candle-device-format-v1` obstruction, forcing
 Candle away from model-adjacent writes. `SCENEWORKS_CANDLE_DEVICE_CACHE_DIR` points to a separate
-campaign-owned derived root under `RUNNER_TEMP`; exact component-path namespaces share the authority's
-lifetime and are inventoried and removed after its last consumer. FLUX namespaces must contain the
-exact bounded 494-file sidecar set; every non-FLUX namespace must stay empty. The controller rehashes
+campaign-owned derived root under `RUNNER_TEMP`; the one b646 component-path-derived namespace shares
+the authority's lifetime and is inventoried and removed after its last consumer. A FLUX namespace
+must contain the exact bounded 494-file sidecar set with no other file or empty namespace anywhere in
+the derived root; every non-FLUX root must stay exactly empty. The controller rehashes
 each selected staged authority file and every obstruction immediately before and after every cell,
 then proves exact stage/namespace absence at release and proves final staging, derived cache, and
 missing-file store emptiness. Any stage, hash, capacity, or cleanup drift quarantines later cells; the

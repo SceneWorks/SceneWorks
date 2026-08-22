@@ -141,9 +141,14 @@ export function estimateJitDiskPlan(
       row.firstOrdinal <= ordinal && row.lastOrdinal >= ordinal
     ));
     const physical = new Map();
-    for (const file of lifetimes.flatMap((row) => row.physicalFiles).filter(
-      (file) => file.persistent,
-    )) physical.set(file.key, file.bytes);
+    // The reviewed download is persistent across the preflight and earlier cells, but belongs to
+    // its authority's lifetime: it is deleted with Schnell q8 after cell 10, never charged forever.
+    for (const row of lifetimes) {
+      if (ordinal > row.lastOrdinal) continue;
+      for (const file of row.physicalFiles.filter((entry) => entry.persistent)) {
+        physical.set(file.key, file.bytes);
+      }
+    }
     for (const file of active.flatMap((row) => row.physicalFiles)) {
       const existing = physical.get(file.key);
       if (existing !== undefined && existing !== file.bytes) {
@@ -184,6 +189,12 @@ export function estimateJitDiskPlan(
   }
   const logicalSourceBytes = lifetimes.reduce((sum, row) => sum + row.sourceBytes, 0);
   const allAtOnceSourceBytes = [...allPhysical.values()].reduce((sum, bytes) => sum + bytes, 0);
+  const persistentBytesFromPlan = [...new Map(lifetimes.flatMap((row) => (
+    row.physicalFiles.filter((file) => file.persistent).map((file) => [file.key, file.bytes])
+  ))).values()].reduce((sum, bytes) => sum + bytes, 0);
+  if (persistentBytesFromPlan !== persistentMissingBytes) {
+    fail(`persistent missing-file byte census drifted: plan=${persistentBytesFromPlan}, input=${persistentMissingBytes}`);
+  }
   const allAtOnceSidecarReserveBytes = Math.max(FLUX_Q4_SIDECAR_BYTES, FLUX_Q8_SIDECAR_BYTES);
   if (logicalSourceBytes === REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
     && (allAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
@@ -811,7 +822,7 @@ export function receiptSkeleton({
   };
 }
 
-export function validateReceipt(receipt, expectedCell, profile) {
+export function validateReceipt(receipt, expectedCell, profile, lifecycleContext = null) {
   if (receipt.schemaVersion !== 1 || receipt.profile !== PROFILE_NAME) fail("receipt identity mismatch");
   if (!new Set(["passed", "failed"]).has(receipt.status)) fail("receipt status is invalid");
   if (receipt.cell.ordinal < 1 || receipt.cell.ordinal > EXPECTED_CELLS.length
@@ -892,6 +903,10 @@ export function validateReceipt(receipt, expectedCell, profile) {
     || (receipt.cleanup.error !== null && typeof receipt.cleanup.error !== "string")) {
     fail("receipt cleanup evidence is incomplete");
   }
+  if (!receipt.authorityLifecycle
+    && receipt.repositories.sceneworks.sha !== LEGACY_SCENEWORKS_HEAD) {
+    fail("continuation receipt is missing required authority lifecycle evidence");
+  }
   if (receipt.authorityLifecycle) {
     const lifecycle = receipt.authorityLifecycle;
     if (lifecycle.ordinal !== receipt.cell.ordinal || lifecycle.cellId !== receipt.cell.id
@@ -899,6 +914,65 @@ export function validateReceipt(receipt, expectedCell, profile) {
       || lifecycle.staged.some((entry) => !expectedCell.artifactIds.includes(entry.artifactId))
       || lifecycle.released.some((entry) => !expectedCell.artifactIds.includes(entry.artifactId))) {
       fail("receipt authority lifecycle identity drifted");
+    }
+    for (const derived of lifecycle.derivedAfter) {
+      const isFlux = derived.artifactId.startsWith("flux1-");
+      const payloadFloor = derived.artifactId.endsWith("-q4")
+        ? 7_396_392_960 : 12_573_868_032;
+      const payloadCeiling = derived.artifactId.endsWith("-q4")
+        ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES;
+      if (isFlux) {
+        const staged = lifecycle.staged.find((entry) => entry.artifactId === derived.artifactId);
+        if (derived.files !== 494 || derived.bytes < payloadFloor
+          || derived.bytes > payloadCeiling || derived.inventories.length !== 1
+          || staged?.derivedNamespaces.length !== 1
+          || comparable(derived.inventories[0].root) !== comparable(staged.derivedNamespaces[0])
+          || !/^[0-9a-f]{64}$/.test(path.basename(derived.inventories[0].root))
+          || path.basename(path.dirname(derived.inventories[0].root)) !== "candle-device-format-v1") {
+          fail("receipt FLUX derived lifecycle is not one exact bounded b646 namespace");
+        }
+      } else if (derived.files !== 0 || derived.bytes !== 0 || derived.inventories.length !== 0) {
+        fail("receipt non-FLUX derived lifecycle is not exactly empty");
+      }
+    }
+    if (lifecycleContext) {
+      const { lifetimeById, scratchRoot, requiredFreeBytes, completeLifecycle = false } = lifecycleContext;
+      const startingIds = expectedCell.artifactIds.filter(
+        (id) => lifetimeById.get(id)?.firstOrdinal === receipt.cell.ordinal,
+      );
+      const endingIds = expectedCell.artifactIds.filter(
+        (id) => lifetimeById.get(id)?.lastOrdinal === receipt.cell.ordinal,
+      );
+      const expectedPhases = [
+        ...startingIds.map((id) => `before-stage:${id}`),
+        "before-execution",
+      ];
+      const actualPhases = lifecycle.diskProbes.map((probe) => probe.phase);
+      if (JSON.stringify(actualPhases)
+        !== JSON.stringify(expectedPhases.slice(0, actualPhases.length))
+        || lifecycle.diskProbes.some((probe) => (
+          probe.ordinal !== receipt.cell.ordinal
+          || comparable(probe.root) !== comparable(scratchRoot)
+          || probe.requiredFreeBytes !== requiredFreeBytes
+          || !Number.isSafeInteger(probe.freeBytes)
+          || probe.freeBytes < 0
+        ))) {
+        fail("receipt disk probes drifted from the exact authority transition schedule");
+      }
+      const stagedIds = lifecycle.staged.map((entry) => entry.artifactId);
+      const releasedIds = lifecycle.released.map((entry) => entry.artifactId);
+      if (JSON.stringify(stagedIds) !== JSON.stringify(startingIds.slice(0, stagedIds.length))
+        || releasedIds.some((id) => !new Set([...startingIds, ...endingIds]).has(id))) {
+        fail("receipt staged/released authorities drifted from the lifetime plan");
+      }
+      if (completeLifecycle && (JSON.stringify(actualPhases) !== JSON.stringify(expectedPhases)
+        || lifecycle.diskProbes.some((probe) => probe.freeBytes < requiredFreeBytes)
+        || JSON.stringify(stagedIds) !== JSON.stringify(startingIds)
+        || JSON.stringify(releasedIds) !== JSON.stringify(endingIds)
+        || JSON.stringify(lifecycle.derivedAfter.map((entry) => entry.artifactId))
+          !== JSON.stringify(expectedCell.artifactIds))) {
+        fail("completed receipt lifecycle omitted an exact transition, probe, or derivation");
+      }
     }
     if (receipt.status === "passed" && (!lifecycle.verifiedBefore || !lifecycle.verifiedAfter
       || lifecycle.diskProbes.length < lifecycle.staged.length + 1
@@ -1479,25 +1553,61 @@ export async function installSidecarObstructions(sharedArtifacts) {
   return records.sort((left, right) => left.root.localeCompare(right.root));
 }
 
-export async function listDerivedSidecarNamespaces(derivedSidecarRoot) {
-  const namespaceRoot = path.join(derivedSidecarRoot, "candle-device-format-v1");
-  let entries;
-  try {
-    entries = await readdir(namespaceRoot, { withFileTypes: true });
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    throw error;
+function rustCanonicalPath(resolved, platform = process.platform) {
+  if (platform !== "win32" || resolved.startsWith("\\\\?\\")) return resolved;
+  if (resolved.startsWith("\\\\")) return `\\\\?\\UNC\\${resolved.slice(2)}`;
+  return `\\\\?\\${resolved}`;
+}
+
+export async function expectedB646DerivedNamespace(artifact, derivedSidecarRoot) {
+  if (!artifact.matchedFiles.includes("transformer/model.safetensors")) {
+    fail(`FLUX artifact lacks the exact packed transformer component: ${artifact.id}`);
   }
-  const namespaces = [];
-  for (const entry of entries) {
-    const candidate = path.join(namespaceRoot, entry.name);
+  const component = await realpath(path.join(artifact.selectedRoot, "transformer"));
+  const digest = createHash("sha256")
+    .update("sceneworks-candle-device-format-component-v1\0")
+    .update(rustCanonicalPath(component))
+    .digest("hex");
+  return path.join(derivedSidecarRoot, "candle-device-format-v1", digest);
+}
+
+export async function inspectDerivedSidecarRoot(derivedSidecarRoot, expectedNamespace = null) {
+  const rootEntries = await readdir(derivedSidecarRoot, { withFileTypes: true });
+  if (!expectedNamespace) {
+    if (rootEntries.length) fail("non-FLUX derived sidecar root must be exactly empty");
+    return { rootInventory: await directoryInventory(derivedSidecarRoot), namespaces: [] };
+  }
+  if (rootEntries.length !== 1 || rootEntries[0].name !== "candle-device-format-v1"
+    || !rootEntries[0].isDirectory()) {
+    fail("FLUX derived sidecar root has stray files, directories, or versions");
+  }
+  const versionRoot = path.join(derivedSidecarRoot, "candle-device-format-v1");
+  const versionMetadata = await lstat(versionRoot);
+  if (versionMetadata.isSymbolicLink()) fail("derived sidecar version root is a reparse point");
+  const namespaceEntries = await readdir(versionRoot, { withFileTypes: true });
+  const expectedName = path.basename(expectedNamespace);
+  if (namespaceEntries.length !== 1 || namespaceEntries[0].name !== expectedName
+    || !namespaceEntries[0].isDirectory()) {
+    fail("FLUX derived sidecar root does not contain one exact b646 namespace");
+  }
+  const namespace = path.join(versionRoot, expectedName);
+  if (comparable(namespace) !== comparable(expectedNamespace)
+    || (await lstat(namespace)).isSymbolicLink()) {
+    fail("FLUX derived sidecar namespace identity is not canonical");
+  }
+  for (const entry of await readdir(namespace, { withFileTypes: true })) {
+    const candidate = path.join(namespace, entry.name);
     const metadata = await lstat(candidate);
-    if (!entry.isDirectory() || metadata.isSymbolicLink()) {
-      fail(`derived sidecar namespace must be an ordinary directory: ${candidate}`);
+    if (!entry.isFile() || metadata.isSymbolicLink()) {
+      fail(`FLUX derived sidecar namespace contains a non-regular entry: ${candidate}`);
     }
-    namespaces.push(candidate);
   }
-  return namespaces.sort();
+  const inventory = await directoryInventory(namespace);
+  const rootInventory = await directoryInventory(derivedSidecarRoot);
+  if (rootInventory.files !== inventory.files || rootInventory.bytes !== inventory.bytes) {
+    fail("derived sidecar global inventory does not equal its one canonical namespace");
+  }
+  return { rootInventory, namespaces: [{ path: namespace, inventory }] };
 }
 
 async function diskFreeBytes(directory) {
@@ -1627,6 +1737,7 @@ async function invokeFault(fault, stage, index) {
 }
 
 async function refreshEvidence(receipt, cellDir, errors, { fault, index } = {}) {
+  let primaryFailure = null;
   try {
     await invokeFault(fault, "evidenceHash", index);
     const evidence = await evidenceFiles(cellDir);
@@ -1636,6 +1747,7 @@ async function refreshEvidence(receipt, cellDir, errors, { fault, index } = {}) 
     if (!receipt.logs.length) fail("no controller or runtime log was available to hash");
   } catch (error) {
     const message = recordError(errors, "evidence hashing failed", error);
+    primaryFailure = message;
     receipt.inputs = [];
     receipt.outputs = [];
     const fallbackLog = path.join(cellDir, "evidence-fallback.log");
@@ -1644,15 +1756,25 @@ async function refreshEvidence(receipt, cellDir, errors, { fault, index } = {}) 
     const fallback = await hashedFiles(cellDir, { exclude: new Set(["receipt.json"]) });
     receipt.logs = fallback.filter((file) => file.path.endsWith(".log"));
   }
+  return primaryFailure;
 }
 
-async function writePrimaryReceipt({ file, receipt, cell, profile, fault, index }) {
+async function writePrimaryReceipt({
+  file, receipt, cell, profile, fault, index, lifecycleContext,
+}) {
   await invokeFault(fault, "semanticValidation", index);
-  validateReceipt(receipt, cell, profile);
+  validateReceipt(receipt, cell, profile, lifecycleContext);
   await invokeFault(fault, "schemaValidation", index);
   validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
   await invokeFault(fault, "receiptWrite", index);
   await writeJsonAtomically(file, receipt);
+  await invokeFault(fault, "receiptStat", index);
+  const metadata = await stat(file);
+  if (!metadata.isFile() || metadata.size < 1) fail("primary receipt was not durably materialized");
+  await invokeFault(fault, "receiptHash", index);
+  if (!/^[0-9a-f]{64}$/.test(await sha256File(file))) {
+    fail("primary receipt hash finalization failed");
+  }
 }
 
 function emptyAuthorityLifecycle(cell, index) {
@@ -1671,7 +1793,7 @@ function emptyAuthorityLifecycle(cell, index) {
 
 async function writeEmergencyReceipt({
   profile, cell, index, ordinalName, output, cacheRoot, repositories, execution, gpuIdentity,
-  systemMemory, error, cleanup, authorityLifecycle,
+  systemMemory, error, cleanup, authorityLifecycle, lifecycleContext,
 }) {
   // This path deliberately bypasses all injected/primary finalization operations. If the primary
   // log, evidence hash, semantic/schema check, or atomic writer fails, a fresh controller-owned
@@ -1697,7 +1819,7 @@ async function writeEmergencyReceipt({
   const evidence = await evidenceFiles(cellDir);
   receipt.logs = evidence.logs;
   receipt.completedAt = new Date().toISOString();
-  validateReceipt(receipt, cell, profile);
+  validateReceipt(receipt, cell, profile, lifecycleContext);
   validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
   await writeJsonAtomically(path.join(cellDir, "receipt.json"), receipt);
   return `_emergency/${ordinalName}/receipt.json`;
@@ -1705,7 +1827,7 @@ async function writeEmergencyReceipt({
 
 async function writeLastResortEmergencyReceipt({
   profile, cell, index, ordinalName, output, cacheRoot, repositories, execution, gpuIdentity,
-  systemMemory, errors, cleanup, authorityLifecycle,
+  systemMemory, errors, cleanup, authorityLifecycle, lifecycleContext,
 }) {
   // A second implementation intentionally avoids evidenceFiles(), writeJsonAtomically(), and every
   // primary/injected callback. It hashes its one log directly and publishes under a different name.
@@ -1737,7 +1859,7 @@ async function writeLastResortEmergencyReceipt({
     path: "controller-last-resort.log", bytes: metadata.size, sha256: await sha256File(logFile),
   }];
   receipt.completedAt = new Date().toISOString();
-  validateReceipt(receipt, cell, profile);
+  validateReceipt(receipt, cell, profile, lifecycleContext);
   validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
   const finalPath = path.join(cellDir, "receipt-last-resort.json");
   const temporary = `${finalPath}.tmp-${process.pid}-${randomUUID()}`;
@@ -1786,13 +1908,14 @@ async function writeSummaryDurably({ output, summary, fault }) {
 }
 
 function cachePreflightDocument({
-  status, error, downloadEvidenceSha256, remainingArtifactIds, guard, stagingRoot,
+  evidencePhase, status, error, downloadEvidenceSha256, remainingArtifactIds, guard, stagingRoot,
   derivedSidecarRoot, frozenMissing, sidecarObstructions, cacheProvisioning,
   derivedSidecarLifecycle, missingStore, lifetimePlan, diskPlan, missingDownload,
 }) {
   return {
     schemaVersion: 1,
     profile: PROFILE_NAME,
+    evidencePhase,
     status,
     error,
     downloadEvidenceSha256,
@@ -1820,7 +1943,7 @@ function cachePreflightDocument({
 
 export function validateCachePreflightEvidence(document, {
   remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
-  derivedSidecarRoot, missingStore, profile,
+  derivedSidecarRoot, missingStore, expectedNonModelPaths, profile,
 }) {
   validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
   if (document.profile !== profile.profile
@@ -1831,6 +1954,10 @@ export function validateCachePreflightEvidence(document, {
     || document.missingFileStore !== missingStore
     || JSON.stringify(document.expectedArtifactIds) !== JSON.stringify(remainingArtifactIds)) {
     fail("cache preflight identity/path binding drifted");
+  }
+  if (document.diskPlan
+    && JSON.stringify(document.diskPlan.nonModelPaths) !== JSON.stringify(expectedNonModelPaths)) {
+    fail("cache preflight non-model paths drifted from runtime-owned paths");
   }
   const ids = new Set(remainingArtifactIds);
   for (const phase of ["sourceCensus", "staging", "finalOffline"]) {
@@ -1950,6 +2077,35 @@ export function validateCachePreflightEvidence(document, {
           : document.diskPlan.peakModelAndSidecarBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES))) {
       fail("passed cache preflight drifted from reviewed target-byte totals and JIT floor");
     }
+    if (document.evidencePhase === "initial") {
+      if (document.phases.staging.length || document.phases.finalOffline.length
+        || document.derivedSidecarLifecycle.afterCells.length
+        || document.sidecarObstructions.length) {
+        fail("initial cache preflight contains post-cell lifecycle evidence");
+      }
+    } else {
+      const plannedIds = document.lifetimePlan.map((row) => row.artifactId);
+      if (JSON.stringify(document.phases.staging.map((row) => row.id))
+          !== JSON.stringify(plannedIds)
+        || JSON.stringify(document.phases.finalOffline.map((row) => row.id))
+          !== JSON.stringify(plannedIds)) {
+        fail("final cache preflight omitted an exact staged/offline authority transition");
+      }
+      const startIndex = profile.cells.length - document.diskPlan.cells.length;
+      const expectedCells = profile.cells.slice(startIndex).map((cell, offset) => ({
+        ordinal: startIndex + offset + 1,
+        cellId: cell.id,
+      }));
+      if (JSON.stringify(document.derivedSidecarLifecycle.afterCells.map(
+        ({ ordinal, cellId }) => ({ ordinal, cellId }),
+      )) !== JSON.stringify(expectedCells)) {
+        fail("final cache preflight omitted exact per-cell derived lifecycle coverage");
+      }
+      const obstructed = new Set(document.sidecarObstructions.flatMap((row) => row.artifactIds));
+      if (plannedIds.some((id) => !obstructed.has(id))) {
+        fail("final cache preflight omitted a staged authority sidecar obstruction");
+      }
+    }
   }
   let previous = 0;
   for (const snapshot of document.derivedSidecarLifecycle.afterCells) {
@@ -1957,6 +2113,17 @@ export function validateCachePreflightEvidence(document, {
     if (!expected || snapshot.cellId !== expected.id || snapshot.ordinal <= previous
       || snapshot.inventory.root !== derivedSidecarRoot) {
       fail("derived Candle sidecar lifecycle ordering drifted");
+    }
+    const flux = expected.artifactIds.find((id) => id.startsWith("flux1-"));
+    const payloadFloor = flux?.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032;
+    const payloadCeiling = flux?.endsWith("-q4")
+      ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES;
+    if (flux ? (snapshot.inventory.files !== 494
+        || snapshot.inventory.bytes < payloadFloor
+        || snapshot.inventory.bytes > payloadCeiling)
+      : (snapshot.inventory.files !== 0 || snapshot.inventory.bytes !== 0
+        || snapshot.inventory.sha256 !== createHash("sha256").digest("hex"))) {
+      fail("derived Candle sidecar lifecycle inventory drifted from the cell family contract");
     }
     previous = snapshot.ordinal;
   }
@@ -2083,8 +2250,10 @@ export async function runCampaign(args, options = {}) {
     installSidecarObstructions:
       options.operations?.installSidecarObstructions ?? installSidecarObstructions,
     directoryInventory: options.operations?.directoryInventory ?? directoryInventory,
-    listDerivedSidecarNamespaces:
-      options.operations?.listDerivedSidecarNamespaces ?? listDerivedSidecarNamespaces,
+    expectedB646DerivedNamespace:
+      options.operations?.expectedB646DerivedNamespace ?? expectedB646DerivedNamespace,
+    inspectDerivedSidecarRoot:
+      options.operations?.inspectDerivedSidecarRoot ?? inspectDerivedSidecarRoot,
     diskFreeBytes: options.operations?.diskFreeBytes ?? diskFreeBytes,
     verifyArtifactUnchanged:
       options.operations?.verifyArtifactUnchanged ?? verifyArtifactUnchanged,
@@ -2109,6 +2278,12 @@ export async function runCampaign(args, options = {}) {
   const stagingRoot = path.join(scratch, "authority-stage");
   const derivedSidecarRoot = path.join(scratch, "derived-candle-device-cache");
   const missingStore = path.join(scratch, "persistent-missing-file");
+  const expectedNonModelPaths = [
+    { kind: "cargoTarget", path: path.resolve(process.env.CARGO_TARGET_DIR ?? path.join(sceneworksRoot, "target")) },
+    { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
+    { kind: "campaignOutput", path: output },
+    { kind: "pythonVenv", path: python ? path.dirname(path.dirname(path.resolve(python))) : "fixture-unavailable" },
+  ];
   const remainingArtifactIds = [...new Set(
     profile.cells.slice(startIndex).flatMap((cell) => cell.artifactIds),
   )];
@@ -2206,12 +2381,7 @@ export async function runCampaign(args, options = {}) {
         lifetimePlan,
         freeBytes,
         missingDownload?.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0) ?? 0,
-        [
-          { kind: "cargoTarget", path: path.resolve(process.env.CARGO_TARGET_DIR ?? path.join(sceneworksRoot, "target")) },
-          { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
-          { kind: "campaignOutput", path: output },
-          { kind: "pythonVenv", path: python ? path.dirname(path.dirname(path.resolve(python))) : "fixture-unavailable" },
-        ],
+        expectedNonModelPaths,
       );
       if (!diskPlan.admitted) {
         fail(`JIT staging disk admission refused: requires ${diskPlan.peakRequiredAdditionalBytes} bytes at cell ${diskPlan.peakOrdinal}, only ${diskPlan.freeBytes} free`);
@@ -2240,9 +2410,10 @@ export async function runCampaign(args, options = {}) {
   }
   const cacheValidation = {
     remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
-    derivedSidecarRoot, missingStore, profile,
+    derivedSidecarRoot, missingStore, expectedNonModelPaths, profile,
   };
   let initialDocument = cachePreflightDocument({
+    evidencePhase: "initial",
     status: quarantineReason ? "failed" : "passed",
     error: quarantineReason,
     downloadEvidenceSha256,
@@ -2272,6 +2443,7 @@ export async function runCampaign(args, options = {}) {
       campaignErrors.push(evidenceError);
     }
     initialDocument = cachePreflightDocument({
+      evidencePhase: "initial",
       status: "failed",
       error: `${quarantineReason}; no continuation GPU cell started`,
       downloadEvidenceSha256,
@@ -2306,12 +2478,25 @@ export async function runCampaign(args, options = {}) {
     }
   }
   const lifetimeById = new Map(lifetimePlan.map((row) => [row.artifactId, row]));
+  const lifecycleContext = (completeLifecycle = false) => ({
+    lifetimeById,
+    scratchRoot: scratch,
+    requiredFreeBytes: diskPlan?.peakRequiredAdditionalBytes ?? REVIEWED_FREE_FLOOR_BYTES,
+    completeLifecycle,
+  });
   const authorityLifecycle = [];
   const diskFreeProbes = [];
-  const probeDisk = async (phase, ordinal) => {
+  const probeDisk = async (lifecycle, phase, ordinal) => {
     const freeBytes = await operations.diskFreeBytes(scratch);
-    const record = { phase, ordinal, root: scratch, freeBytes };
+    const record = {
+      phase,
+      ordinal,
+      root: scratch,
+      freeBytes,
+      requiredFreeBytes: diskPlan?.peakRequiredAdditionalBytes ?? REVIEWED_FREE_FLOOR_BYTES,
+    };
     diskFreeProbes.push(record);
+    lifecycle.diskProbes.push(record);
     if (!diskPlan || freeBytes < diskPlan.peakRequiredAdditionalBytes) {
       fail(`disk capacity fell below the ${diskPlan?.peakRequiredAdditionalBytes ?? "unavailable"}-byte JIT floor during ${phase}: ${freeBytes}`);
     }
@@ -2351,6 +2536,7 @@ export async function runCampaign(args, options = {}) {
     let receiptPath = path.join(cellDir, "receipt.json");
     let activeArtifactIndex = null;
     let authorityTransitioning = false;
+    let executionAttempted = false;
     let transitionArtifactIds = [];
     const transitionRoots = new Map();
     const lifecycle = {
@@ -2372,7 +2558,10 @@ export async function runCampaign(args, options = {}) {
       const logFile = path.join(cellDir, "runtime.log");
       await writeFile(controllerLog, `${startedAt} starting ${cell.id}\n`, { encoding: "utf8", flag: "wx" });
       receipt.logs = (await evidenceFiles(cellDir)).logs;
-      await writePrimaryReceipt({ file: receiptPath, receipt, cell, profile, fault, index });
+      await writePrimaryReceipt({
+        file: receiptPath, receipt, cell, profile, fault, index,
+        lifecycleContext: lifecycleContext(false),
+      });
 
       await mkdir(cellScratch);
       scratchCreated = true;
@@ -2384,7 +2573,7 @@ export async function runCampaign(args, options = {}) {
       authorityTransitioning = startingIds.length > 0;
       for (const artifactId of startingIds) {
         await invokeFault(fault, "stage", index);
-        lifecycle.diskProbes.push(await probeDisk(`before-stage:${artifactId}`, index + 1));
+        await probeDisk(lifecycle, `before-stage:${artifactId}`, index + 1);
         const audit = sourceAudits.get(artifactId);
         const artifactStageRoot = artifactId === "flux1-schnell-q8" && missingDownload
           ? missingStore : path.join(stagingRoot, artifactId);
@@ -2501,16 +2690,12 @@ export async function runCampaign(args, options = {}) {
         campaignErrors.push(quarantineReason);
         throw error;
       }
-      const derivedBefore = await operations.directoryInventory(derivedSidecarRoot);
-      if (derivedBefore.files !== 0 || derivedBefore.bytes !== 0) {
-        quarantineReason = `derived Candle cache was not empty before cell ${cell.id}`;
-        campaignErrors.push(quarantineReason);
-        fail(quarantineReason);
-      }
+      await operations.inspectDerivedSidecarRoot(derivedSidecarRoot, null);
       operations.sample(samples, errors, "pre-execution VRAM sample failed");
-      lifecycle.diskProbes.push(await probeDisk("before-execution", index + 1));
+      await probeDisk(lifecycle, "before-execution", index + 1);
       await invokeFault(fault, "execute", index);
       let runtimeFailure = null;
+      executionAttempted = true;
       try {
         await operations.executeCell({
           sceneworks: sceneworksRoot,
@@ -2533,22 +2718,29 @@ export async function runCampaign(args, options = {}) {
         throw error;
       }
       try {
-        const namespaces = await operations.listDerivedSidecarNamespaces(derivedSidecarRoot);
         const fluxArtifacts = cell.artifactIds.filter((artifactId) => artifactId.startsWith("flux1-"));
-        if (namespaces.length && fluxArtifacts.length !== 1) {
-          fail(`derived sidecars appeared outside one exact FLUX authority for ${cell.id}`);
-        }
-        if (!namespaces.length && fluxArtifacts.length) {
-          fail(`FLUX cell did not create its exact derived-sidecar namespace: ${cell.id}`);
-        }
+        if (fluxArtifacts.length > 1) fail(`cell ${cell.id} has multiple FLUX sidecar authorities`);
+        const expectedNamespace = fluxArtifacts.length === 1
+          ? await operations.expectedB646DerivedNamespace(
+            sharedArtifacts.get(fluxArtifacts[0]), derivedSidecarRoot,
+          ) : null;
+        const derivedInspection = await operations.inspectDerivedSidecarRoot(
+          derivedSidecarRoot, expectedNamespace,
+        );
         if (fluxArtifacts.length === 1) {
-          sharedArtifacts.get(fluxArtifacts[0]).derivedNamespaces.splice(0, Infinity, ...namespaces);
+          sharedArtifacts.get(fluxArtifacts[0]).derivedNamespaces.splice(
+            0, Infinity, ...derivedInspection.namespaces.map((entry) => entry.path),
+          );
         }
         for (const artifactId of cell.artifactIds) {
           const artifact = sharedArtifacts.get(artifactId);
           const inventories = [];
           for (const namespace of artifact.derivedNamespaces) {
-            inventories.push(await operations.directoryInventory(namespace));
+            const bound = derivedInspection.namespaces.find(
+              (entry) => comparable(entry.path) === comparable(namespace),
+            );
+            if (!bound) fail(`derived namespace was not bound by global inspection: ${namespace}`);
+            inventories.push(bound.inventory);
           }
           const files = inventories.reduce((sum, inventory) => sum + inventory.files, 0);
           const bytes = inventories.reduce((sum, inventory) => sum + inventory.bytes, 0);
@@ -2566,7 +2758,7 @@ export async function runCampaign(args, options = {}) {
         derivedSidecarLifecycle.afterCells.push({
           ordinal: index + 1,
           cellId: cell.id,
-          inventory: await operations.directoryInventory(derivedSidecarRoot),
+          inventory: derivedInspection.rootInventory,
         });
       } catch (error) {
         quarantineReason = `derived Candle sidecar evidence failed after cell ${cell.id}: ${errorText(error)}`;
@@ -2581,8 +2773,10 @@ export async function runCampaign(args, options = {}) {
       executionPassed = true;
     } catch (error) {
       const message = recordError(errors, "cell lifecycle failed", error);
-      if (authorityTransitioning && !quarantineReason) {
-        quarantineReason = `JIT authority stage/copy/hash failed before cell ${cell.id}: ${errorText(error)}`;
+      if (!executionAttempted && !quarantineReason) {
+        quarantineReason = authorityTransitioning
+          ? `JIT authority stage/copy/hash failed before cell ${cell.id}: ${errorText(error)}`
+          : `cell pre-execution admission/evidence failed before ${cell.id}: ${errorText(error)}`;
         campaignErrors.push(quarantineReason);
       }
       if (activeArtifactIndex !== null && artifacts[activeArtifactIndex].inventory.complete === false) {
@@ -2643,6 +2837,9 @@ export async function runCampaign(args, options = {}) {
             release.derivedBeforeCleanup.push(await operations.directoryInventory(namespace));
             await operations.cleanup(namespace, guard, `derived sidecars for ${artifactId}`);
             await assertPathAbsent(namespace, `derived sidecars for ${artifactId}`);
+            const versionRoot = path.dirname(namespace);
+            await operations.cleanup(versionRoot, guard, `derived sidecar version for ${artifactId}`);
+            await assertPathAbsent(versionRoot, `derived sidecar version for ${artifactId}`);
           }
           release.derivedRemoved = true;
           await operations.cleanup(artifact.stageRoot, guard, `staged authority ${artifactId}`);
@@ -2697,17 +2894,28 @@ export async function runCampaign(args, options = {}) {
           );
         } catch (error) {
           recordError(errors, "controller log finalization failed", error);
+          if (!quarantineReason) {
+            quarantineReason = `primary receipt finalization failed for ${cell.id}: ${errorText(error)}`;
+            campaignErrors.push(quarantineReason);
+          }
           controllerLog = path.join(cellDir, "controller-fallback.log");
           await invokeFault(fault, "fallbackLog", index);
           await writeFile(controllerLog, `${new Date().toISOString()} ${errors.join("\n")}\n`, "utf8");
         }
         receipt.artifacts = artifacts;
         receipt.hardware.rawVramSamples = samples;
-        await refreshEvidence(receipt, cellDir, errors, { fault, index });
+        const evidenceFailure = await refreshEvidence(receipt, cellDir, errors, { fault, index });
+        if (evidenceFailure && !quarantineReason) {
+          quarantineReason = `primary receipt evidence finalization failed for ${cell.id}: ${evidenceFailure}`;
+          campaignErrors.push(quarantineReason);
+        }
         receipt.status = executionPassed && errors.length === 0 && receipt.cleanup.completed ? "passed" : "failed";
         receipt.error = receipt.status === "passed" ? null : (errors.join("\n") || "cell did not complete");
         receipt.completedAt = new Date().toISOString();
-        await writePrimaryReceipt({ file: receiptPath, receipt, cell, profile, fault, index });
+        await writePrimaryReceipt({
+          file: receiptPath, receipt, cell, profile, fault, index,
+          lifecycleContext: lifecycleContext(true),
+        });
         receipts.push({
           id: cell.id, status: receipt.status,
           receipt: `${path.basename(cellDir)}/receipt.json`, error: receipt.error,
@@ -2722,6 +2930,10 @@ export async function runCampaign(args, options = {}) {
     } catch (error) {
       let receiptPath;
       let emergencyError = [...emergencyFailureMessages, errorText(error)].filter(Boolean).join("\n");
+      if (!quarantineReason) {
+        quarantineReason = `primary receipt semantic/schema/write/stat/hash finalization failed for ${cell.id}: ${errorText(error)}`;
+        campaignErrors.push(quarantineReason);
+      }
       let emergencyAuthorityLifecycle = authorityLifecycle.find(
         (entry) => entry.ordinal === index + 1,
       );
@@ -2736,6 +2948,7 @@ export async function runCampaign(args, options = {}) {
           repositories, execution, gpuIdentity,
           systemMemory, error: new Error(emergencyError), cleanup: emergencyCleanup,
           authorityLifecycle: emergencyAuthorityLifecycle,
+          lifecycleContext: lifecycleContext(false),
         });
       } catch (receiptError) {
         emergencyError += `\nemergency receipt failed: ${errorText(receiptError)}`;
@@ -2745,6 +2958,7 @@ export async function runCampaign(args, options = {}) {
             repositories, execution, gpuIdentity,
             systemMemory, errors: [emergencyError], cleanup: emergencyCleanup,
             authorityLifecycle: emergencyAuthorityLifecycle,
+            lifecycleContext: lifecycleContext(false),
           });
         } catch (lastResortError) {
           emergencyError += `\nlast-resort emergency receipt failed: ${errorText(lastResortError)}`;
@@ -2760,7 +2974,8 @@ export async function runCampaign(args, options = {}) {
   let finalLifecycle = null;
   try {
     const stage = await operations.directoryInventory(stagingRoot);
-    const derived = await operations.directoryInventory(derivedSidecarRoot);
+    const derivedInspection = await operations.inspectDerivedSidecarRoot(derivedSidecarRoot, null);
+    const derived = derivedInspection.rootInventory;
     let missingStoreAbsent = false;
     try {
       await lstat(missingStore);
@@ -2768,7 +2983,7 @@ export async function runCampaign(args, options = {}) {
       if (error?.code !== "ENOENT") throw error;
       missingStoreAbsent = true;
     }
-    finalLifecycle = { stage, derived, missingStoreAbsent };
+    finalLifecycle = { stage, derived, derivedNamespaces: [], missingStoreAbsent };
     if (stage.files !== 0 || stage.bytes !== 0 || derived.files !== 0 || derived.bytes !== 0
       || !missingStoreAbsent || sharedArtifacts.size !== 0) {
       fail("final JIT stage/derived/missing-file lifecycle is not empty");
@@ -2780,6 +2995,7 @@ export async function runCampaign(args, options = {}) {
   }
 
   let finalDocument = cachePreflightDocument({
+    evidencePhase: "final",
     status: quarantineReason ? "failed" : "passed",
     error: quarantineReason,
     downloadEvidenceSha256,
@@ -2804,6 +3020,7 @@ export async function runCampaign(args, options = {}) {
     const evidenceError = `final cache preflight evidence failed: ${errorText(finalWrite.error)}`;
     campaignErrors.push(evidenceError);
     finalDocument = cachePreflightDocument({
+      evidencePhase: "final",
       status: "failed",
       error: quarantineReason ? `${quarantineReason}; ${evidenceError}` : evidenceError,
       downloadEvidenceSha256,
@@ -2882,6 +3099,7 @@ async function main() {
     validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, {
       schemaVersion: 1,
       profile: PROFILE_NAME,
+      evidencePhase: "initial",
       status: "failed",
       error: "schema self-check fixture",
       downloadEvidenceSha256: "0".repeat(64),

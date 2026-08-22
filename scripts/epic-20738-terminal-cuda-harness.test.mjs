@@ -14,12 +14,14 @@ import {
   authorityLifetimePlan,
   cellSemanticsSha256,
   directoryInventory,
+  expectedB646DerivedNamespace,
   expectedArtifactFilesFromEvidence,
   expectedLoadSpecQuantBits,
   estimateJitDiskPlan,
   inferencePins,
   hashedFiles,
   installSidecarObstructions,
+  inspectDerivedSidecarRoot,
   importPrefixEvidence,
   loadProfile,
   parseNvidiaSmi,
@@ -126,25 +128,22 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
   });
   const persistent = file("schnell-q8/missing", 12_637_521_668, true);
   const lifetimes = [
-    row("flux1-dev-q8", 8, 8, [file("dev-q8", 23_371_725_325)]),
-    row("flux1-schnell-q4", 9, 9, [file("schnell-q4", 14_973_205_319)]),
+    row("flux1-dev-q8", 8, 8, [file("dev-q8", 18_010_071_290)]),
+    row("flux1-schnell-q4", 9, 9, [file("schnell-q4", 9_611_551_284)]),
     row("flux1-schnell-q8", 10, 10, [file("schnell-q8/cache", 5_361_654_035), persistent]),
-    row("scail2-q4", 11, 12, [file("scail-q4", 29_000_000_000)]),
-    row("scail2-q8", 13, 13, [file("scail-q8", 19_429_609_601)]),
-    row("ltx23-q8", 14, 14, [file("ltx-q8", 30_000_000_000)]),
-    row("ltx23-gemma", 14, 14, [file("ltx-gemma", 13_519_093_966)]),
-    ...[0, 1, 2, 3, 4].map((index) => row(
-      `sdxl-primary-${index}`,
-      15 + index,
-      15 + index,
-      [file(`sdxl-primary-${index}`, index === 4 ? 6_047_177_674 : 6_047_177_669)],
-    )),
-    ...[0, 1, 2, 3].map((index) => row(
-      `sdxl-support-${index}`,
-      15,
-      19,
-      [file(`sdxl-support-${index}`, 125_000_000)],
-    )),
+    row("scail2-q4", 11, 12, [file("scail-q4", 23_993_093_306)]),
+    row("scail2-q8", 13, 13, [file("scail-q8", 32_067_131_269)]),
+    row("ltx23-q8", 14, 14, [file("ltx-q8", 29_728_720_716)]),
+    row("ltx23-gemma", 14, 14, [file("ltx-gemma", 26_427_894_918)]),
+    row("sdxl-base-q4", 15, 15, [file("sdxl-base-q4", 2_703_202_068)]),
+    row("realvisxl-q4", 16, 16, [file("realvisxl-q4", 3_911_656_467)]),
+    row("realvisxl-lightning-q4", 17, 17, [file("realvisxl-lightning-q4", 3_911_657_599)]),
+    row("illustrious-v1-q4", 18, 18, [file("illustrious-v1-q4", 3_911_656_791)]),
+    row("illustrious-v2-q4", 19, 19, [file("illustrious-v2-q4", 3_911_656_467)]),
+    row("sdxl-openpose", 15, 19, [file("sdxl-openpose", 2_502_139_104)]),
+    row("sdxl-tokenizer-l", 15, 19, [file("sdxl-tokenizer-l", 2_224_003)]),
+    row("sdxl-tokenizer-bigg", 15, 19, [file("sdxl-tokenizer-bigg", 2_224_041)]),
+    row("sdxl-vae-fix", 15, 19, [file("sdxl-vae-fix", 334_643_238)]),
   ];
   const floor = 99_106_288_594;
   const admitted = estimateJitDiskPlan(lifetimes, floor, persistent.bytes);
@@ -155,10 +154,11 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
     5_361_654_035,
     "link-length accounting must never undercount followed Schnell q8 blob bytes",
   );
-  assert.equal(admitted.cells.find((entry) => entry.ordinal === 8).modelAndSidecarBytes, 48_591_208_721);
-  assert.equal(admitted.cells.find((entry) => entry.ordinal === 9).modelAndSidecarBytes, 35_015_213_643);
+  assert.equal(admitted.cells.find((entry) => entry.ordinal === 8).modelAndSidecarBytes, 43_229_554_686);
+  assert.equal(admitted.cells.find((entry) => entry.ordinal === 9).modelAndSidecarBytes, 29_653_559_608);
   assert.equal(admitted.cells.find((entry) => entry.ordinal === 10).modelAndSidecarBytes, 30_581_137_431);
   assert.equal(admitted.cells.find((entry) => entry.ordinal === 13).modelAndSidecarBytes, 32_067_131_269);
+  assert.equal(admitted.cells.find((entry) => entry.ordinal === 14).stagedBytes, 56_156_615_634);
   assert.equal(admitted.peakModelAndSidecarBytes, 56_156_615_634);
   assert.equal(admitted.peakRequiredAdditionalBytes, floor);
   assert.equal(admitted.admitted, true);
@@ -172,7 +172,11 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
     persistent: false,
   }));
   const completePlan = estimateJitDiskPlan(completeCache, floor, 0);
-  assert.ok(completePlan.peakModelAndSidecarBytes < admitted.peakModelAndSidecarBytes);
+  assert.equal(completePlan.peakModelAndSidecarBytes, admitted.peakModelAndSidecarBytes);
+  assert.equal(
+    completePlan.cells.find((entry) => entry.ordinal === 8).modelAndSidecarBytes,
+    admitted.cells.find((entry) => entry.ordinal === 8).modelAndSidecarBytes - persistent.bytes,
+  );
   assert.equal(completePlan.peakRequiredAdditionalBytes, floor);
   assert.equal(completePlan.admitted, true);
   assert.equal(estimateJitDiskPlan(completeCache, floor - 1, 0).admitted, false);
@@ -348,6 +352,51 @@ function fixtureReceipt(status = "passed", cellIndex = 0) {
   receipt.inputs = [{ path: "cell.json", bytes: 7, sha256: "6".repeat(64) }];
   receipt.outputs = [{ path: "runtime-result.json", bytes: 7, sha256: "7".repeat(64) }];
   receipt.logs = [{ path: "controller.log", bytes: 7, sha256: "5".repeat(64) }];
+  const fluxArtifact = cell.artifactIds.find((artifactId) => artifactId.startsWith("flux1-"));
+  const fluxNamespace = fluxArtifact ? path.resolve(
+    "fixture-runner", "scratch", "derived-candle-device-cache", "candle-device-format-v1",
+    "a".repeat(64),
+  ) : null;
+  const fluxBytes = fluxArtifact?.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032;
+  receipt.authorityLifecycle = {
+    ordinal: cellIndex + 1,
+    cellId: cell.id,
+    staged: fluxArtifact ? [{
+      artifactId: fluxArtifact,
+      stageRoot: artifacts.find((artifact) => artifact.id === fluxArtifact).selectedRoot,
+      inventory: {
+        root: artifacts.find((artifact) => artifact.id === fluxArtifact).selectedRoot,
+        files: 3, bytes: 42, sha256: "4".repeat(64),
+      },
+      obstructionCount: 1,
+      derivedNamespaces: [fluxNamespace],
+    }] : [],
+    activeArtifactIds: [...cell.artifactIds],
+    verifiedBefore: true,
+    verifiedAfter: true,
+    derivedAfter: cell.artifactIds.map((artifactId) => ({
+      artifactId,
+      files: artifactId === fluxArtifact ? 494 : 0,
+      bytes: artifactId === fluxArtifact ? fluxBytes : 0,
+      inventories: artifactId === fluxArtifact ? [{
+        root: fluxNamespace, files: 494, bytes: fluxBytes, sha256: "8".repeat(64),
+      }] : [],
+    })),
+    released: [],
+    diskProbes: [...(fluxArtifact ? [{
+      phase: `before-stage:${fluxArtifact}`,
+      ordinal: cellIndex + 1,
+      root: path.resolve("fixture-runner", "scratch"),
+      freeBytes: 128 * 1024 ** 3,
+      requiredFreeBytes: 99_106_288_594,
+    }] : []), {
+      phase: "before-execution",
+      ordinal: cellIndex + 1,
+      root: path.resolve("fixture-runner", "scratch"),
+      freeBytes: 128 * 1024 ** 3,
+      requiredFreeBytes: 99_106_288_594,
+    }],
+  };
   return receipt;
 }
 
@@ -811,7 +860,47 @@ test("staged authorities obstruct adjacent Candle sidecars and use a separate de
   }
 });
 
-test("injected lifecycle faults preserve all 19 outcomes and quarantine after cleanup isolation failure", async () => {
+test("b646 derived sidecars occupy one exact canonical namespace with no global residue", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-derived-"));
+  const selectedRoot = path.join(temporary, "stage", "q8");
+  const transformer = path.join(selectedRoot, "transformer");
+  const derived = path.join(temporary, "derived");
+  try {
+    await Promise.all([mkdir(transformer, { recursive: true }), mkdir(derived)]);
+    const artifact = {
+      id: "flux1-fixture-q8",
+      selectedRoot,
+      matchedFiles: ["transformer/model.safetensors"],
+    };
+    const expected = await expectedB646DerivedNamespace(artifact, derived);
+    assert.match(path.basename(expected), /^[0-9a-f]{64}$/);
+    await mkdir(expected, { recursive: true });
+    await Promise.all(Array.from({ length: 494 }, (_, index) => (
+      writeFile(path.join(expected, `${String(index).padStart(3, "0")}.safetensors`), "x")
+    )));
+    const exact = await inspectDerivedSidecarRoot(derived, expected);
+    assert.equal(exact.namespaces.length, 1);
+    assert.equal(exact.rootInventory.files, 494);
+    assert.equal(exact.rootInventory.bytes, 494);
+
+    const extra = path.join(path.dirname(expected), "f".repeat(64));
+    await mkdir(extra);
+    await assert.rejects(
+      inspectDerivedSidecarRoot(derived, expected),
+      /one exact b646 namespace/,
+    );
+    await rm(extra, { recursive: true });
+    await writeFile(path.join(derived, "stray.bin"), "stray");
+    await assert.rejects(
+      inspectDerivedSidecarRoot(derived, expected),
+      /stray files, directories, or versions/,
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("cleanup isolation failure preserves all 19 durable outcomes and quarantines later cells", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-faults-"));
   const runnerTemp = path.join(temporary, "runner-temp");
   const sceneworks = path.join(temporary, "sceneworks");
@@ -845,13 +934,7 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
   const injectedStages = [];
   const fault = async (stage, index) => {
     if (stage === "setup") attemptedCells.push(index);
-    const shouldFail = (index === 0 && new Set(["setup", "emergencyReceipt"]).has(stage))
-      || (index === 1 && new Set(["finalLog", "fallbackLog"]).has(stage))
-      || (index === 2 && new Set(["evidenceHash", "evidenceRehash"]).has(stage))
-      || (index === 3 && stage === "semanticValidation")
-      || (index === 4 && stage === "schemaValidation")
-      || (index === 5 && stage === "receiptWrite")
-      || (index === 6 && stage === "cleanup")
+    const shouldFail = (index === 6 && stage === "cleanup")
       || (index === null && stage === "summaryWrite");
     if (shouldFail) {
       injectedStages.push(`${index}:${stage}`);
@@ -883,12 +966,27 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
       };
     },
     installSidecarObstructions: async (artifacts) => fixtureSidecarObstructions(artifacts),
-    listDerivedSidecarNamespaces: async (root) => {
+    expectedB646DerivedNamespace: async (artifact, root) => (
+      path.join(root, "candle-device-format-v1", "a".repeat(64))
+    ),
+    inspectDerivedSidecarRoot: async (root, expectedNamespace) => {
+      if (!expectedNamespace) return {
+        rootInventory: {
+          root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+        },
+        namespaces: [],
+      };
       const id = executedCells.at(-1);
-      if (!id?.startsWith("flux1-")) return [];
-      const namespace = path.join(root, "candle-device-format-v1", id);
-      await mkdir(namespace, { recursive: true });
-      return [namespace];
+      assert.ok(id?.startsWith("flux1-"));
+      await mkdir(expectedNamespace, { recursive: true });
+      const bytes = id.endsWith("q4") ? 7_396_392_960 : 12_573_868_032;
+      const inventory = {
+        root: expectedNamespace, files: 494, bytes, sha256: createHash("sha256").digest("hex"),
+      };
+      return {
+        rootInventory: { ...inventory, root },
+        namespaces: [{ path: expectedNamespace, inventory }],
+      };
     },
     directoryInventory: async (root) => ({
       root,
@@ -933,8 +1031,8 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
       result.summary.campaignErrors.join("\n"),
     );
     assert.equal(preflightCalls.filter((call) => call.startsWith("audit:")).length, 23);
-    assert.equal(preflightCalls.filter((call) => call.startsWith("stage:")).length, 3);
-    assert.equal(preflightCalls.filter((call) => call.startsWith("offline:")).length, 3);
+    assert.equal(preflightCalls.filter((call) => call.startsWith("stage:")).length, 7);
+    assert.equal(preflightCalls.filter((call) => call.startsWith("offline:")).length, 7);
     assert.ok(executedCells.length > 0);
     assert.ok(executedCells.every((id) => checked.cells.slice(0, 7).some((cell) => cell.id === id)));
     assert.equal(executedCells.at(-1), checked.cells[6].id);
@@ -949,12 +1047,6 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
       assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt));
       assert.doesNotThrow(() => validateReceipt(receipt, checked.cells[index], checked));
     }
-    for (const index of [0, 1, 2, 3, 4, 5]) {
-      assert.match(result.summary.receipts[index].receipt, /^_emergency\//);
-      assert.equal(result.summary.receipts[index].emergencyReceiptError, null);
-    }
-    assert.match(result.summary.receipts[0].receipt, /receipt-last-resort\.json$/);
-    assert.match(result.summary.receipts[0].error, /emergency receipt failed/);
     assert.doesNotMatch(result.summary.receipts[6].receipt, /^_emergency\//);
     assert.match(result.summary.campaignErrors.join("\n"), /prior cell .* scratch cleanup isolation failed/);
     for (const outcome of result.summary.receipts.slice(7)) {
@@ -972,7 +1064,8 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
 test("continuation freezes census, downloads once, and JIT stages exact authority lifetimes", async () => {
   async function scenario({
     missingId = null, downloadSucceeds = false, mutateCache = false, mutateSourceAtStage = false,
-    preflightFault = null, omitObstructions = false, diskFreeValues = [256 * 1024 ** 3],
+    preflightFault = null, cellFault = null, omitObstructions = false,
+    derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -1000,6 +1093,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     const runtimeCells = [];
     let verificationCalls = 0;
     let diskFreeCall = 0;
+    let cellFaultCalls = 0;
     const operations = {
       auditArtifact: async ({ id, artifact }) => {
         events.push(`audit:${id}`);
@@ -1076,12 +1170,30 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       installSidecarObstructions: async (artifacts) => (
         omitObstructions ? [] : fixtureSidecarObstructions(artifacts)
       ),
-      listDerivedSidecarNamespaces: async (root) => {
+      expectedB646DerivedNamespace: async (artifact, root) => (
+        path.join(root, "candle-device-format-v1", "a".repeat(64))
+      ),
+      inspectDerivedSidecarRoot: async (root, expectedNamespace) => {
+        if (!expectedNamespace) return {
+          rootInventory: {
+            root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+          },
+          namespaces: [],
+        };
         const id = runtimeCells.at(-1)?.id;
-        if (!id?.startsWith("flux1-")) return [];
-        const namespace = path.join(root, "candle-device-format-v1", id);
-        await mkdir(namespace, { recursive: true });
-        return [namespace];
+        assert.ok(id?.startsWith("flux1-"));
+        await mkdir(expectedNamespace, { recursive: true });
+        const bytes = id.endsWith("q4") ? 7_396_392_960 : 12_573_868_032;
+        const inventory = {
+          root: expectedNamespace,
+          files: derivedContractDrift?.files ?? 494,
+          bytes: derivedContractDrift?.bytes ?? bytes,
+          sha256: createHash("sha256").digest("hex"),
+        };
+        return {
+          rootInventory: { ...inventory, root },
+          namespaces: [{ path: expectedNamespace, inventory }],
+        };
       },
       directoryInventory: async (root) => ({
         root,
@@ -1152,8 +1264,14 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
         prefixSelection: {},
         importedPrefix,
         operations,
-        fault: preflightFault ? async (stage) => {
+        fault: preflightFault || cellFault ? async (stage, index) => {
           if (stage === preflightFault) throw new Error(`injected ${stage}`);
+          if (cellFault && stage === cellFault.stage && index === (cellFault.index ?? 7)) {
+            cellFaultCalls += 1;
+            if (cellFaultCalls === (cellFault.occurrence ?? 1)) {
+              throw new Error(`injected ${stage} at cell ${index}`);
+            }
+          }
         } : undefined,
         suppressVerdict: true,
       });
@@ -1161,8 +1279,16 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
         path.join(output, ...result.summary.cachePreflight.path.split("/")),
         "utf8",
       ));
+      const continuationReceipts = [];
+      for (const outcome of result.summary.receipts.slice(7)) {
+        if (!outcome.receipt) continue;
+        continuationReceipts.push(JSON.parse(await readFile(
+          path.join(output, ...outcome.receipt.split("/")), "utf8",
+        )));
+      }
       return {
         result, events, runtimeCells, checked, cacheEvidence,
+        continuationReceipts,
         cacheValidation: {
           remainingArtifactIds: [...new Set(checked.cells.slice(7).flatMap(
             (cell) => cell.artifactIds,
@@ -1173,7 +1299,20 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           stagingRoot: path.join(scratch, "authority-stage"),
           derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
           missingStore: path.join(scratch, "persistent-missing-file"),
+          expectedNonModelPaths: [
+            { kind: "cargoTarget", path: path.resolve(sceneworks, "target") },
+            { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
+            { kind: "campaignOutput", path: output },
+            { kind: "pythonVenv", path: path.dirname(path.dirname(path.resolve("python"))) },
+          ],
           profile: checked,
+        },
+        lifecycleContext: {
+          lifetimeById: new Map(cacheEvidence.lifetimePlan.map((row) => [row.artifactId, row])),
+          scratchRoot: scratch,
+          requiredFreeBytes: cacheEvidence.diskPlan?.peakRequiredAdditionalBytes
+            ?? 99_106_288_594,
+          completeLifecycle: true,
         },
       };
     } finally {
@@ -1224,6 +1363,40 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     diskDropsBeforeStage.result.summary.campaignErrors.join("\n"),
     /disk capacity fell below.*before-stage:flux1-dev-q8/,
   );
+
+  const diskDropsBeforeExecution = await scenario({
+    diskFreeValues: [256 * 1024 ** 3, 256 * 1024 ** 3, 1],
+  });
+  assert.equal(diskDropsBeforeExecution.runtimeCells.length, 0);
+  assert.match(
+    diskDropsBeforeExecution.result.summary.campaignErrors.join("\n"),
+    /disk capacity fell below.*before-execution/,
+  );
+  assert.ok(diskDropsBeforeExecution.result.summary.receipts.slice(7).every(
+    (outcome) => outcome.status === "failed" && outcome.receipt,
+  ));
+
+  for (const cellFault of [
+    { stage: "finalLog" },
+    { stage: "evidenceHash" },
+    { stage: "semanticValidation", occurrence: 2 },
+    { stage: "schemaValidation", occurrence: 2 },
+    { stage: "receiptWrite", occurrence: 2 },
+    { stage: "receiptStat", occurrence: 2 },
+    { stage: "receiptHash", occurrence: 2 },
+  ]) {
+    const faulted = await scenario({ cellFault });
+    assert.equal(faulted.runtimeCells.length, 1, cellFault.stage);
+    assert.equal(faulted.result.summary.receipts.length, 19, cellFault.stage);
+    assert.ok(faulted.result.summary.receipts.slice(8).every(
+      (outcome) => outcome.status === "failed" && outcome.receipt,
+    ), cellFault.stage);
+    assert.match(
+      faulted.result.summary.campaignErrors.join("\n"),
+      /primary receipt.*finalization failed/,
+      cellFault.stage,
+    );
+  }
 
   const passed = await scenario();
   assert.deepEqual(
@@ -1315,6 +1488,20 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     () => validateCachePreflightEvidence(censusDrift, filled.cacheValidation),
     /authority census drifted/,
   );
+  for (const [label, mutate, pattern] of [
+    ["staging", (value) => value.phases.staging.pop(), /staged\/offline authority transition/],
+    ["offline", (value) => value.phases.finalOffline.pop(), /staged\/offline authority transition/],
+    ["afterCells", (value) => value.derivedSidecarLifecycle.afterCells.pop(), /per-cell derived lifecycle/],
+    ["nonModelPaths", (value) => { value.diskPlan.nonModelPaths[0].path += "-drift"; }, /non-model paths/],
+  ]) {
+    const drifted = structuredClone(filled.cacheEvidence);
+    mutate(drifted);
+    assert.throws(
+      () => validateCachePreflightEvidence(drifted, filled.cacheValidation),
+      pattern,
+      label,
+    );
+  }
   assert.equal(filled.cacheEvidence.lifetimePlan.length, 16);
   assert.equal(filled.cacheEvidence.diskPlan.admitted, true);
   const downloadDrift = structuredClone(filled.cacheEvidence);
@@ -1323,6 +1510,39 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     () => validateCachePreflightEvidence(downloadDrift, filled.cacheValidation),
     /partition drifted|unreviewed model download/,
   );
+
+  const firstReceipt = filled.continuationReceipts[0];
+  const firstCell = filled.checked.cells[7];
+  assert.doesNotThrow(() => validateReceipt(
+    firstReceipt, firstCell, filled.checked, filled.lifecycleContext,
+  ));
+  const missingLifecycle = structuredClone(firstReceipt);
+  delete missingLifecycle.authorityLifecycle;
+  assert.throws(
+    () => validateReceipt(missingLifecycle, firstCell, filled.checked, filled.lifecycleContext),
+    /missing required authority lifecycle/,
+  );
+  assert.throws(
+    () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingLifecycle),
+    /required property 'authorityLifecycle'/,
+  );
+  for (const [label, mutate] of [
+    ["phase", (value) => { value.authorityLifecycle.diskProbes[0].phase = "before-stage:wrong"; }],
+    ["ordinal", (value) => { value.authorityLifecycle.diskProbes[0].ordinal += 1; }],
+    ["root", (value) => { value.authorityLifecycle.diskProbes[0].root += "-wrong"; }],
+    ["floor", (value) => { value.authorityLifecycle.diskProbes[0].requiredFreeBytes -= 1; }],
+    ["free", (value) => { value.authorityLifecycle.diskProbes[0].freeBytes = 1; }],
+    ["transition", (value) => { value.authorityLifecycle.staged.pop(); }],
+    ["derived", (value) => { value.authorityLifecycle.derivedAfter.pop(); }],
+  ]) {
+    const drifted = structuredClone(firstReceipt);
+    mutate(drifted);
+    assert.throws(
+      () => validateReceipt(drifted, firstCell, filled.checked, filled.lifecycleContext),
+      /disk probes drifted|completed receipt lifecycle omitted|FLUX derived lifecycle/,
+      label,
+    );
+  }
 
   const mutated = await scenario({ mutateCache: true });
   assert.equal(mutated.runtimeCells.length, 1, "the first cell runs before its after-inventory detects mutation");
@@ -1358,6 +1578,21 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     CACHE_PREFLIGHT_SCHEMA_PATH,
     semanticFault.cacheEvidence,
   ));
+
+  for (const drift of [
+    { files: 493, bytes: 12_573_868_032 },
+    { files: 494, bytes: 12_573_868_032 + 494 * 16_384 + 1 },
+  ]) {
+    const derivedFault = await scenario({ derivedContractDrift: drift });
+    assert.equal(derivedFault.runtimeCells.length, 1);
+    assert.match(
+      derivedFault.result.summary.campaignErrors.join("\n"),
+      /derived Candle sidecar evidence failed.*FLUX derived-sidecar contract drifted/,
+    );
+    assert.ok(derivedFault.result.summary.receipts.slice(8).every(
+      (outcome) => outcome.status === "failed" && outcome.receipt,
+    ));
+  }
 });
 
 test("schemas, clean Node dependencies, and workflow preserve the opt-in single-job terminal contract", async () => {
