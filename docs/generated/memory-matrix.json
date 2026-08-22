@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6881f70de96ac938a4a97073b52a217931ec67f9d1de98c541e971b84b54ccdf",
+    "sceneWorksRevision": "source-tree:69d5e81033ee5c5953565c30f8abb0e1dc3de58b6e19fee5ca95046d9857cc2f",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "cb0c972a490a49fd631930a1f20ccc16efae4d74bbb366c139e36ddd00385b41"
+        "sha256": "efa9dc884aa4b17bc5200ccd621b0dc348d319616fd5bce3d1284e1b7b387dd9"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -58,7 +58,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "bd97b32a05808add71e6e615fbd2edac75897dd8d9e94538acc329144387f21a"
+        "sha256": "f0054a5968a6ce227527b664d06592e9fe6807671e05fedb4805d141282b458f"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -86,7 +86,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "180b8c9c1f16ad2e1ec13583bca17f03039df972be68c775084a6302bbe8b47c"
+        "sha256": "fdf3368bba48e1ef6558541fc6951b7f3ea013cc8cd6d08853fdad461fa19c9c"
       },
       "rung4ContractPrerequisites": {
         "path": "config/rung4-contract-prerequisites.json",
@@ -176,11 +176,11 @@
     "publishedCells": 163,
     "elidedCells": 8592,
     "elidedByState": {
-      "Implemented/unverified": 2754,
-      "Missing": 5838
+      "Implemented/unverified": 2826,
+      "Missing": 5766
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
-    "mlxStagedStaticCoverage": 38,
+    "mlxStagedStaticCoverage": 44,
     "mlxStagedStaticCoverageDenominator": 53,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 10,
@@ -195,11 +195,11 @@
     "memoryContractReconciliation": {
       "providers": 73,
       "bespokeWaivers": 1,
-      "mismatches": 503,
+      "mismatches": 467,
       "byLeg": {
-        "engine_manifest": 284,
-        "manifest_route": 70,
-        "survey_engine": 149
+        "engine_manifest": 212,
+        "manifest_route": 88,
+        "survey_engine": 167
       }
     },
     "rung4Survey": {
@@ -216,8 +216,8 @@
         "unmeasured": 36
       },
       "implementation": {
-        "none": 31,
-        "shared-primitive": 18
+        "none": 30,
+        "shared-primitive": 19
       }
     }
   },
@@ -4653,8 +4653,8 @@
       "backend": "mlx",
       "structuralApplicability": "full",
       "requestPeak": "unmeasured",
-      "implementation": "none",
-      "summary": "One uniform 12-block dual-stream stack. Windowable in principle; the smallest N in the catalog, so the ceiling on the saving is the lowest.",
+      "implementation": "shared-primitive",
+      "summary": "The shared Mage MLX contract now reopens the text encoder and uniform 12-block DiT through one-block request windows for every exact adapter-free builtin route whose installed tier is prepacked and directory-backed.",
       "blockStacks": [
         {
           "name": "transformer_blocks",
@@ -4662,10 +4662,7 @@
           "windowable": true
         }
       ],
-      "findings": [
-        "N = 12 is the smallest uniform stack surveyed. A window of 1 bounds trunk weights at 1/12, against ~1/30 on z-image and ~1/60 on Qwen-Image — applicable, but the least leverage per unit of re-materialization cost.",
-        "Mage-Flow is TE-heavy: the conditioning encoder is a full decoder stack of its own (text_encoder/layer.rs). A Dit-scoped window bounds only the 12-block trunk, so the component scope, not the window size, is the parameter that decides whether rung 4 is worth anything here."
-      ]
+      "findings": []
     },
     {
       "familyStory": 15510,
@@ -10898,39 +10895,15 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "mage_flow_base",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 6,
-      "published": 0,
-      "elided": 6,
-      "implemented": 0,
-      "states": {
-        "Missing": 6
-      }
-    },
-    {
-      "modelId": "mage_flow_base",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 6,
-      "published": 0,
-      "elided": 6,
-      "implemented": 0,
-      "states": {
-        "Missing": 6
-      }
-    },
-    {
-      "modelId": "mage_flow_base",
-      "backend": "mlx",
-      "rung": "resident",
       "coordinates": 6,
       "published": 0,
       "elided": 6,
@@ -10942,7 +10915,34 @@
     {
       "modelId": "mage_flow_base",
       "backend": "mlx",
-      "rung": "staged_residency",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3,
+        "Missing": 3
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "text_to_image": 3
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 3
+        }
+      }
+    },
+    {
+      "modelId": "mage_flow_base",
+      "backend": "mlx",
+      "rung": "resident",
       "coordinates": 6,
       "published": 0,
       "elided": 6,
@@ -10952,6 +10952,18 @@
       }
     },
     {
+      "modelId": "mage_flow_base",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 6,
+      "states": {
+        "Implemented/unverified": 6
+      }
+    },
+    {
       "modelId": "mage_flow_edit_base",
       "backend": "candle",
       "rung": "bounded_attention",
@@ -11018,39 +11030,15 @@
       "coordinates": 3,
       "published": 0,
       "elided": 3,
-      "implemented": 0,
+      "implemented": 3,
       "states": {
-        "Missing": 3
+        "Implemented/unverified": 3
       }
     },
     {
       "modelId": "mage_flow_edit_base",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 3,
-      "published": 0,
-      "elided": 3,
-      "implemented": 0,
-      "states": {
-        "Missing": 3
-      }
-    },
-    {
-      "modelId": "mage_flow_edit_base",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 3,
-      "published": 0,
-      "elided": 3,
-      "implemented": 0,
-      "states": {
-        "Missing": 3
-      }
-    },
-    {
-      "modelId": "mage_flow_edit_base",
-      "backend": "mlx",
-      "rung": "resident",
       "coordinates": 3,
       "published": 0,
       "elided": 3,
@@ -11062,13 +11050,37 @@
     {
       "modelId": "mage_flow_edit_base",
       "backend": "mlx",
-      "rung": "staged_residency",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 3,
+      "published": 0,
+      "elided": 3,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3
+      }
+    },
+    {
+      "modelId": "mage_flow_edit_base",
+      "backend": "mlx",
+      "rung": "resident",
       "coordinates": 3,
       "published": 0,
       "elided": 3,
       "implemented": 0,
       "states": {
         "Missing": 3
+      }
+    },
+    {
+      "modelId": "mage_flow_edit_base",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 3,
+      "published": 0,
+      "elided": 3,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3
       }
     },
     {
@@ -11138,39 +11150,15 @@
       "coordinates": 3,
       "published": 0,
       "elided": 3,
-      "implemented": 0,
+      "implemented": 3,
       "states": {
-        "Missing": 3
+        "Implemented/unverified": 3
       }
     },
     {
       "modelId": "mage_flow_edit_turbo",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 3,
-      "published": 0,
-      "elided": 3,
-      "implemented": 0,
-      "states": {
-        "Missing": 3
-      }
-    },
-    {
-      "modelId": "mage_flow_edit_turbo",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 3,
-      "published": 0,
-      "elided": 3,
-      "implemented": 0,
-      "states": {
-        "Missing": 3
-      }
-    },
-    {
-      "modelId": "mage_flow_edit_turbo",
-      "backend": "mlx",
-      "rung": "resident",
       "coordinates": 3,
       "published": 0,
       "elided": 3,
@@ -11182,13 +11170,37 @@
     {
       "modelId": "mage_flow_edit_turbo",
       "backend": "mlx",
-      "rung": "staged_residency",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 3,
+      "published": 0,
+      "elided": 3,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3
+      }
+    },
+    {
+      "modelId": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "rung": "resident",
       "coordinates": 3,
       "published": 0,
       "elided": 3,
       "implemented": 0,
       "states": {
         "Missing": 3
+      }
+    },
+    {
+      "modelId": "mage_flow_edit_turbo",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 3,
+      "published": 0,
+      "elided": 3,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3
       }
     },
     {
@@ -11258,39 +11270,15 @@
       "coordinates": 3,
       "published": 0,
       "elided": 3,
-      "implemented": 0,
+      "implemented": 3,
       "states": {
-        "Missing": 3
+        "Implemented/unverified": 3
       }
     },
     {
       "modelId": "mage_flow_edit",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 3,
-      "published": 0,
-      "elided": 3,
-      "implemented": 0,
-      "states": {
-        "Missing": 3
-      }
-    },
-    {
-      "modelId": "mage_flow_edit",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 3,
-      "published": 0,
-      "elided": 3,
-      "implemented": 0,
-      "states": {
-        "Missing": 3
-      }
-    },
-    {
-      "modelId": "mage_flow_edit",
-      "backend": "mlx",
-      "rung": "resident",
       "coordinates": 3,
       "published": 0,
       "elided": 3,
@@ -11302,13 +11290,37 @@
     {
       "modelId": "mage_flow_edit",
       "backend": "mlx",
-      "rung": "staged_residency",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 3,
+      "published": 0,
+      "elided": 3,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3
+      }
+    },
+    {
+      "modelId": "mage_flow_edit",
+      "backend": "mlx",
+      "rung": "resident",
       "coordinates": 3,
       "published": 0,
       "elided": 3,
       "implemented": 0,
       "states": {
         "Missing": 3
+      }
+    },
+    {
+      "modelId": "mage_flow_edit",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 3,
+      "published": 0,
+      "elided": 3,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3
       }
     },
     {
@@ -11423,39 +11435,15 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "mage_flow_turbo",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 6,
-      "published": 0,
-      "elided": 6,
-      "implemented": 0,
-      "states": {
-        "Missing": 6
-      }
-    },
-    {
-      "modelId": "mage_flow_turbo",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 6,
-      "published": 0,
-      "elided": 6,
-      "implemented": 0,
-      "states": {
-        "Missing": 6
-      }
-    },
-    {
-      "modelId": "mage_flow_turbo",
-      "backend": "mlx",
-      "rung": "resident",
       "coordinates": 6,
       "published": 0,
       "elided": 6,
@@ -11467,13 +11455,52 @@
     {
       "modelId": "mage_flow_turbo",
       "backend": "mlx",
-      "rung": "staged_residency",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3,
+        "Missing": 3
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "text_to_image": 3
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 3
+        }
+      }
+    },
+    {
+      "modelId": "mage_flow_turbo",
+      "backend": "mlx",
+      "rung": "resident",
       "coordinates": 6,
       "published": 0,
       "elided": 6,
       "implemented": 0,
       "states": {
         "Missing": 6
+      }
+    },
+    {
+      "modelId": "mage_flow_turbo",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 6,
+      "states": {
+        "Implemented/unverified": 6
       }
     },
     {
@@ -11588,39 +11615,15 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 6
       }
     },
     {
       "modelId": "mage_flow",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 6,
-      "published": 0,
-      "elided": 6,
-      "implemented": 0,
-      "states": {
-        "Missing": 6
-      }
-    },
-    {
-      "modelId": "mage_flow",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 6,
-      "published": 0,
-      "elided": 6,
-      "implemented": 0,
-      "states": {
-        "Missing": 6
-      }
-    },
-    {
-      "modelId": "mage_flow",
-      "backend": "mlx",
-      "rung": "resident",
       "coordinates": 6,
       "published": 0,
       "elided": 6,
@@ -11632,13 +11635,52 @@
     {
       "modelId": "mage_flow",
       "backend": "mlx",
-      "rung": "staged_residency",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 3,
+      "states": {
+        "Implemented/unverified": 3,
+        "Missing": 3
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "text_to_image": 3
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 3
+        }
+      }
+    },
+    {
+      "modelId": "mage_flow",
+      "backend": "mlx",
+      "rung": "resident",
       "coordinates": 6,
       "published": 0,
       "elided": 6,
       "implemented": 0,
       "states": {
         "Missing": 6
+      }
+    },
+    {
+      "modelId": "mage_flow",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 6,
+      "published": 0,
+      "elided": 6,
+      "implemented": 6,
+      "states": {
+        "Implemented/unverified": 6
       }
     },
     {

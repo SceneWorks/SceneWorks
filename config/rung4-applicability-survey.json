@@ -343,8 +343,23 @@
       "backends": {
         "mlx": {
           "structuralApplicability": "full",
-          "implementation": "none",
-          "summary": "One uniform 12-block dual-stream stack. Windowable in principle; the smallest N in the catalog, so the ceiling on the saving is the lowest.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Both"
+          },
+          "summary": "The shared Mage MLX contract now reopens the text encoder and uniform 12-block DiT through one-block request windows for every exact adapter-free builtin route whose installed tier is prepacked and directory-backed.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -363,17 +378,18 @@
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
-              "reason": "The provider contract declares Resident Implemented and every other rung Missing, so no rung-4 code path exists."
+              "reason": "The load-exact provider contract declares a Both-scoped one-block Transformer window only for deferred, adapter-free, directory-backed bf16/q4/q8 artifacts; eager, load-time-quantized and adapter loads remain Missing."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs",
+              "reason": "The request-scoped pipeline streams the text encoder and DiT windows through the provider-owned staged residency implementation and releases them at phase boundaries."
             }
           ],
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Mage-Flow on either backend."
+            "reason": "No current packaged matrix evidence is promoted for this story; the implementation is therefore published as Implemented/unverified rather than measured."
           },
-          "findings": [
-            "N = 12 is the smallest uniform stack surveyed. A window of 1 bounds trunk weights at 1/12, against ~1/30 on z-image and ~1/60 on Qwen-Image — applicable, but the least leverage per unit of re-materialization cost.",
-            "Mage-Flow is TE-heavy: the conditioning encoder is a full decoder stack of its own (text_encoder/layer.rs). A Dit-scoped window bounds only the 12-block trunk, so the component scope, not the window size, is the parameter that decides whether rung 4 is worth anything here."
-          ]
+          "findings": []
         },
         "candle": {
           "structuralApplicability": "full",

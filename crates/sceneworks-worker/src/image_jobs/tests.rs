@@ -19047,6 +19047,65 @@ fn mage_finetuned_generation_request_threads_negative_prompt() {
     assert_eq!(request.seed, Some(42));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn mage_finetuned_memory_shape_requires_exact_source_proof() {
+    let plain = LoadSpec::new(WeightsSource::Dir("finetuned-transformer".into()))
+        .with_resolved_route(MAGE_FINETUNED_MEMORY_ROUTE);
+    let deferred = mage_finetuned_memory_load_shape_with(plain.clone(), |candidate| {
+        candidate.load_shape == gen_core::LoadShape::DeferredMaterialization
+            && candidate.quantize.is_none()
+            && candidate.adapters.is_empty()
+    });
+    assert_eq!(
+        deferred.load_shape,
+        gen_core::LoadShape::DeferredMaterialization
+    );
+    assert_eq!(
+        deferred.load_shape_declaration_result,
+        gen_core::LoadShapeDeclarationResult::Applied,
+    );
+
+    for eager in [
+        plain.clone().with_quant(gen_core::Quant::Q4),
+        plain.clone().with_quant(gen_core::Quant::Q8),
+        plain.with_adapters(vec![gen_core::AdapterSpec::new(
+            "adapter.safetensors".into(),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )]),
+    ] {
+        let shaped = mage_finetuned_memory_load_shape_with(eager, |candidate| {
+            candidate.quantize.is_none() && candidate.adapters.is_empty()
+        });
+        assert_eq!(shaped.load_shape, gen_core::LoadShape::EagerMaterialization);
+        assert_eq!(
+            shaped.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::NotEvaluated,
+            "unproven Transformer must stay Missing without suppressing provider-owned lower rungs",
+        );
+    }
+}
+
+#[test]
+fn mage_finetuned_stream_uses_shared_admission_scope_and_lifecycle() {
+    let source = include_str!("mage_finetuned.rs");
+    for marker in [
+        "start_cached_gen_stream_with_request_state(",
+        "crate::mlx_fit_gate::evaluate_request(",
+        "crate::memory_strategy::generate_with_scope(",
+        "apply_request_gpu_memory_limit",
+    ] {
+        assert!(
+            source
+                .lines()
+                .any(|line| { line.contains(marker) && !line.trim_start().starts_with("//") }),
+            "Mage fine-tuned route lost request-scoped memory seam {marker}",
+        );
+    }
+    assert!(source.contains("MAGE_FINETUNED_MEMORY_ROUTE: &str = \"mage_finetuned\""));
+}
+
 /// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint
 /// must be the identity-guard-free one.
 ///
@@ -19669,6 +19728,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         let handoff = [
             "start_gen_stream(",
             "start_cached_gen_stream(",
+            "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
         ]
         .iter()
