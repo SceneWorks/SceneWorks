@@ -39,6 +39,19 @@ use sceneworks_core::contracts::JsonObject;
 /// meanings or values to the same dedicated pool.
 pub(crate) const HEADROOM_GB: f64 = dedicated_vram_reserve().gb;
 
+/// Whether a manifest's Candle scalar capacity evidence is explicitly attributed to this lane.
+/// The containing `candle` key is routing metadata, not measurement provenance: third-party
+/// manifests can replace that object wholesale, so missing or foreign provenance must never
+/// authorize a shared-selector candidate. Legacy scalar readers deliberately remain independent of
+/// this predicate so an unverified manifest preserves its established best-effort execution.
+pub(crate) fn scalar_measurement_lane_is_candle(manifest_entry: &JsonObject) -> bool {
+    manifest_entry
+        .get("candle")
+        .and_then(|candle| candle.get("measurementLane"))
+        .and_then(serde_json::Value::as_str)
+        == Some("candle")
+}
+
 /// A live (or capped) VRAM budget for the selected GPU, in GB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct VramBudget {
@@ -364,6 +377,7 @@ mod tests {
     fn measured_entry(measured: bool) -> JsonObject {
         entry(json!({
             "candle": {
+                "measurementLane": "candle",
                 "measured": measured,
                 "vramMeasuredPixels": 1_048_576,
                 "minMemoryGb": 40,
@@ -371,6 +385,52 @@ mod tests {
                 "sequentialPeakGb": { "q4": 10.0 }
             }
         }))
+    }
+
+    #[test]
+    fn scalar_provenance_is_explicit_without_changing_legacy_numbers() {
+        let mut missing = measured_entry(true);
+        missing
+            .get_mut("candle")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("candle object")
+            .remove("measurementLane");
+        let mut foreign = missing.clone();
+        foreign
+            .get_mut("candle")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("candle object")
+            .insert("measurementLane".to_owned(), json!("mlx"));
+        let candle = measured_entry(true);
+
+        assert!(scalar_measurement_lane_is_candle(&candle));
+        assert!(!scalar_measurement_lane_is_candle(&missing));
+        assert!(!scalar_measurement_lane_is_candle(&foreign));
+        for malformed in [json!(null), json!(true), json!(1), json!({}), json!([])] {
+            let mut entry = candle.clone();
+            entry
+                .get_mut("candle")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("candle object")
+                .insert("measurementLane".to_owned(), malformed);
+            assert!(
+                !scalar_measurement_lane_is_candle(&entry),
+                "a non-string measurementLane must not authorize Candle evidence"
+            );
+            assert_eq!(
+                predicted_peak_gb(&entry, "q4"),
+                predicted_peak_gb(&candle, "q4"),
+                "provenance must not mutate legacy scalar arithmetic"
+            );
+        }
+        assert_eq!(
+            predicted_peak_gb(&missing, "q4"),
+            predicted_peak_gb(&candle, "q4")
+        );
+        assert_eq!(
+            predicted_peak_gb(&foreign, "q4"),
+            predicted_peak_gb(&candle, "q4")
+        );
     }
 
     /// **sc-19054 headline: the scalar gate is geometry-aware.** On a `measured: true` route

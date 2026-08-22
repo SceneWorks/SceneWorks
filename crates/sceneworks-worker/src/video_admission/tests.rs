@@ -441,7 +441,7 @@ fn select_once(
         },
         contract,
         budget,
-        headroom_bytes,
+        Some(headroom_bytes),
         0,
     );
     let verdict = selector.select(geometry);
@@ -453,6 +453,124 @@ fn select_once(
             .map(|candidate| (candidate.binding_geometry, candidate.selection))
             .collect(),
     )
+}
+
+#[test]
+fn candle_without_a_fitted_curve_offers_no_mlx_headroom_floor() {
+    let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
+    let mut selector = LadderVideoSelector::with_curve_bundle(
+        VideoRequestIdentity {
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
+            lane: VideoLane::Candle,
+            tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
+        },
+        &contract,
+        budget(128.0),
+        None,
+        0,
+        None,
+    );
+    assert_eq!(
+        selector.select(geometry(121, VideoGeometryRole::Requested)),
+        VideoRungSelection::Undecidable,
+        "missing fallback allowance must not create a zero-byte Candle candidate"
+    );
+    assert!(selector.selections.is_empty());
+}
+
+const CANDLE_FITTED_CLOSURE: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn exact_candle_curve(
+    query: sceneworks_core::video_memory_curves::VideoCurveQuery<'_>,
+) -> Option<ResolvedVideoCurveEvaluation> {
+    (query.model_id == "ltx_2_3"
+        && query.model_family == "ltx-video"
+        && query.provider == "ltx_2_3"
+        && query.backend == sceneworks_core::memory_calibration::MeasurementLane::Candle
+        && query.tier == "q8"
+        && query.mode == "text_to_video"
+        && query.rung == StrategyRung::Resident
+        && query.load_shape
+            == sceneworks_core::video_memory_curves::VideoCurveLoadShape::EagerMaterialization
+        && query.closure_digest == CANDLE_FITTED_CLOSURE
+        && query.calibration_abi == gen_core::MEMORY_CALIBRATION_ABI
+        && query.calibration_fingerprint == "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+        && query.decode_pass
+            == sceneworks_core::video_memory_curves::VideoCurveDecodePass::SinglePass
+        && query.geometry.width == 1280
+        && query.geometry.height == 704
+        && query.geometry.frames == 121
+        && query.geometry.batch == 1)
+        .then(|| ResolvedVideoCurveEvaluation {
+            curve_id: "candle-exact-curve-fixture".to_owned(),
+            closure_digest: CANDLE_FITTED_CLOSURE.to_owned(),
+            phases: sceneworks_core::video_memory_curves::VideoPhasePeakBytes {
+                conditioning: 28 * GIB,
+                denoise: 30 * GIB,
+                decode: 24 * GIB,
+            },
+        })
+}
+
+#[test]
+fn exact_candle_contract_and_curve_select_fitted_without_a_fallback_allowance() {
+    let contract = fixture_contract_with_realization(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+        MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: true,
+            block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    let mut selector = LadderVideoSelector::with_curve_bundle(
+        VideoRequestIdentity {
+            model_id: "ltx_2_3",
+            model_family: "ltx-video",
+            route: "ltx_2_3",
+            mode: "text_to_video",
+            reference_count: 0,
+            overlay: None,
+            lane: VideoLane::Candle,
+            tier: tier(),
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            expected_closure_digest: CANDLE_FITTED_CLOSURE,
+        },
+        &contract,
+        budget(128.0),
+        None,
+        0,
+        None,
+    )
+    .with_curve_evaluation_override(exact_candle_curve);
+
+    assert!(matches!(
+        selector.select(geometry(121, VideoGeometryRole::Requested)),
+        VideoRungSelection::Selected {
+            rung: StrategyRung::Resident,
+            ..
+        }
+    ));
+    assert_eq!(selector.selections.len(), 1);
+    assert_eq!(
+        selector.selections[0].basis,
+        CandidateBasis::EstimateFittedCurve,
+        "an exact Candle curve must remain selectable independently of fallback allowance"
+    );
+    assert_eq!(
+        selector.selections[0].evidence_revision,
+        "candle-exact-curve-fixture"
+    );
 }
 
 /// The promoted sc-18810 curve used as a historical, structurally valid fixture. The fixture
@@ -531,7 +649,7 @@ fn selector_with_curves<'a>(
         },
         contract,
         budget,
-        18 * GIB,
+        Some(18 * GIB),
         0,
         curves,
     )
@@ -682,7 +800,7 @@ fn inputs<'a>(
             load_policy: gen_core::OffloadPolicy::Resident,
             provider_resident_bytes: 0,
         }),
-        headroom_bytes,
+        headroom_bytes: Some(headroom_bytes),
         expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
     }
 }
@@ -1055,7 +1173,7 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
         // In the staged-not-resident window: above the widened 34 GiB staged floor, below the
         // widened 38 GiB resident floor, so both graded geometries land on the same staged rung.
         budget(mlx_widened_gb(34, 0.5)),
-        18 * GIB,
+        Some(18 * GIB),
         0,
     );
     // f305 at 1280x704 is past LTX's 297-frame single-pass cap, so both geometries are graded.
@@ -1288,7 +1406,7 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
         },
         &contract,
         budget(8.0),
-        18 * GIB,
+        Some(18 * GIB),
         0,
     );
     assert_eq!(
@@ -1375,7 +1493,7 @@ fn the_gen_core_geometry_carries_the_role_aware_estimate_frame_count() {
 /// candle lane against the MLX contract every other test uses is excluded — so the agreement is
 /// shown to be load-bearing rather than incidentally satisfied.
 #[test]
-fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
+fn the_candle_lane_reaches_the_selector_unverified_without_a_candle_curve() {
     let candle_contract = fixture_contract_with_realization(
         20,
         4,
@@ -1387,9 +1505,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
         },
     );
-    // 20 GiB weights + 18 GiB headroom = 38 GiB resident, widened by the 4% CANDLE estimate margin
-    // to 39.52. Staged drops co-residency to max(4, 16) = 16, i.e. 34 GiB -> 35.36 widened. A 38 GiB
-    // host therefore refuses resident and admits staged.
+    // Candle has no fallback allowance. Candidate absence must survive into the shared selector,
+    // which returns Undecidable without manufacturing resident or staged evidence.
     let mut selector = LadderVideoSelector::new(
         VideoRequestIdentity {
             model_id: "ltx_2_3",
@@ -1405,7 +1522,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
         },
         &candle_contract,
         budget(38.0),
-        18 * GIB,
+        None,
         0,
     );
     // `ltx_2_3` is candle-routed, so core's gate reaches the selector rather than short-circuiting.
@@ -1418,11 +1535,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
         None,
         &mut selector,
     );
-    let VideoAdmission::Admitted { rung, .. } = verdict else {
-        panic!("expected a candle-lane admission, got {verdict:?}");
-    };
-    assert_eq!(rung, StrategyRung::StagedResidency);
-    assert_eq!(selector.selections.len(), 1);
+    assert_eq!(verdict, VideoAdmission::Undecidable);
+    assert!(selector.selections.is_empty());
     // The evidence really did key to candle, not to the MLX default.
     assert_eq!(
         LadderVideoSelector::new(
@@ -1440,7 +1554,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             },
             &candle_contract,
             budget(38.0),
-            18 * GIB,
+            None,
             0,
         )
         .lane()
@@ -1448,9 +1562,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
         gen_core::MemoryBackend::Candle
     );
 
-    // The SAME candle-lane request against an MLX-realization contract is excluded by the shared
-    // `candidate_exclusion` backend agreement, so nothing is selected. That is what makes the
-    // assertion above about the agreement holding rather than about 38 GiB being roomy.
+    // A mismatched realization is likewise Undecidable; neither path may fabricate a candidate.
     let mlx_contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let mut mismatched = LadderVideoSelector::new(
         VideoRequestIdentity {
@@ -1467,7 +1579,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
         },
         &mlx_contract,
         budget(38.0),
-        18 * GIB,
+        None,
         0,
     );
     assert_eq!(
@@ -1507,7 +1619,7 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
             },
             &contract,
             budget(128.0),
-            18 * GIB,
+            Some(18 * GIB),
             0,
         )
         .lane()
@@ -1739,11 +1851,12 @@ fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
         role: VideoGeometryRole::Requested,
     };
     let (small_peaks, small_basis, closure, curve_id, _) =
-        fitted_or_floor_phase_peaks(&selector, small, MemoryStrategy::StagedResidency, &engaged);
+        fitted_or_floor_phase_peaks(&selector, small, MemoryStrategy::StagedResidency, &engaged)
+            .expect("the MLX fixture has a fitted candidate");
     assert_eq!(small_basis, CandidateBasis::EstimateFittedCurve);
     assert_eq!(closure, FITTED_CURVE_CLOSURE);
     assert_eq!(
-        curve_id,
+        curve_id.as_deref(),
         Some("ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
     );
     assert_eq!(small_peaks.binding_phase(), VideoBindingPhase::Conditioning);
@@ -1751,7 +1864,8 @@ fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
 
     let large = geometry(145, VideoGeometryRole::Requested);
     let (large_peaks, large_basis, ..) =
-        fitted_or_floor_phase_peaks(&selector, large, MemoryStrategy::StagedResidency, &engaged);
+        fitted_or_floor_phase_peaks(&selector, large, MemoryStrategy::StagedResidency, &engaged)
+            .expect("the MLX fixture has a fitted candidate");
     assert_eq!(large_basis, CandidateBasis::EstimateFittedCurve);
     assert_eq!(large_peaks.binding_phase(), VideoBindingPhase::Decode);
     assert_eq!(large_peaks.peak_bytes(), large_peaks.decode_bytes);
@@ -1842,7 +1956,8 @@ fn historical_q8_curve_fixture_is_tier_exact_while_q4_and_bf16_keep_an_honest_fl
             request,
             MemoryStrategy::StagedResidency,
             &engaged,
-        );
+        )
+        .expect("the MLX fixture retains a floor when its fitted identity misses");
         assert_eq!(basis, expected_basis, "checkpoint tier {quant:?}");
     }
 
@@ -2023,7 +2138,8 @@ fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
     );
     let engaged = stale_contract.engaged_composition(MemoryStrategy::StagedResidency);
     let (_, basis, ..) =
-        fitted_or_floor_phase_peaks(&selector, inside, MemoryStrategy::StagedResidency, &engaged);
+        fitted_or_floor_phase_peaks(&selector, inside, MemoryStrategy::StagedResidency, &engaged)
+            .expect("the MLX fixture retains a floor on ABI mismatch");
     assert_eq!(
         basis,
         CandidateBasis::EstimateFloor,
@@ -2188,6 +2304,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
         let selector = selector_with_curves(&contract, Some(&curves), budget(95.0));
         let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
         fitted_or_floor_phase_peaks(&selector, cap, MemoryStrategy::StagedResidency, &engaged)
+            .expect("the MLX fixture has a fitted cap candidate")
             .0
             .peak_bytes()
     };

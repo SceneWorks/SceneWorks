@@ -387,12 +387,16 @@ pub(crate) struct LadderVideoSelector<'a> {
     identity: VideoRequestIdentity<'a>,
     contract: &'a MemoryProviderContract,
     budget: Option<Budget>,
-    /// The activation-headroom allowance the caller already charges this load. Supplied, never
-    /// derived here — see the module doc.
-    headroom_bytes: u64,
+    /// The lane-local activation allowance the caller already charges this load. `None` is
+    /// authoritative absence, not a numeric zero: without an exact fitted curve it must produce
+    /// no estimate-floor candidate.
+    headroom_bytes: Option<u64>,
     /// The shared backend-neutral fitted-curve container. `None` is a normal fail-open state: every
     /// rung retains its pre-existing weights-plus-headroom floor candidate.
     curves: Option<&'a VideoMemoryCurveBundle>,
+    #[cfg(test)]
+    curve_evaluation_override:
+        Option<fn(VideoCurveQuery<'_>) -> Option<ResolvedVideoCurveEvaluation>>,
     /// Backend bundle resolver for the provider's load-bearing decode working set. Tests default to
     /// `None` so focused curve/floor fixtures do not accidentally inherit a real provider profile.
     decode_profile: VideoDecodeProfileResolver,
@@ -424,6 +428,15 @@ struct VideoSelectedCandidate {
     /// provider lifecycle context must receive; `Selection::needed_gb` is already widened.
     predicted_peak_bytes: u64,
     evidence_revision: String,
+    #[cfg(test)]
+    basis: CandidateBasis,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedVideoCurveEvaluation {
+    curve_id: String,
+    closure_digest: String,
+    phases: sceneworks_core::video_memory_curves::VideoPhasePeakBytes,
 }
 
 impl<'a> LadderVideoSelector<'a> {
@@ -432,7 +445,7 @@ impl<'a> LadderVideoSelector<'a> {
         identity: VideoRequestIdentity<'a>,
         contract: &'a MemoryProviderContract,
         budget: Option<Budget>,
-        headroom_bytes: u64,
+        headroom_bytes: Option<u64>,
         attributable_resident_bytes: u64,
     ) -> Self {
         Self::with_curve_bundle(
@@ -449,7 +462,7 @@ impl<'a> LadderVideoSelector<'a> {
         identity: VideoRequestIdentity<'a>,
         contract: &'a MemoryProviderContract,
         budget: Option<Budget>,
-        headroom_bytes: u64,
+        headroom_bytes: Option<u64>,
         attributable_resident_bytes: u64,
         curves: Option<&'a VideoMemoryCurveBundle>,
     ) -> Self {
@@ -459,6 +472,8 @@ impl<'a> LadderVideoSelector<'a> {
             budget,
             headroom_bytes,
             curves,
+            #[cfg(test)]
+            curve_evaluation_override: None,
             decode_profile: no_video_decode_profile,
             attributable_resident_bytes,
             accounting_error: None,
@@ -472,7 +487,7 @@ impl<'a> LadderVideoSelector<'a> {
         identity: VideoRequestIdentity<'a>,
         contract: &'a MemoryProviderContract,
         budget: Option<Budget>,
-        headroom_bytes: u64,
+        headroom_bytes: Option<u64>,
         attributable_resident_bytes: u64,
         curves: Option<&'a VideoMemoryCurveBundle>,
         decode_profile: VideoDecodeProfileResolver,
@@ -487,6 +502,15 @@ impl<'a> LadderVideoSelector<'a> {
         );
         selector.decode_profile = decode_profile;
         selector
+    }
+
+    #[cfg(test)]
+    fn with_curve_evaluation_override(
+        mut self,
+        evaluate: fn(VideoCurveQuery<'_>) -> Option<ResolvedVideoCurveEvaluation>,
+    ) -> Self {
+        self.curve_evaluation_override = Some(evaluate);
+        self
     }
 
     /// The estimate lane this video request synthesizes under (sc-19050).
@@ -599,8 +623,9 @@ fn profiled_floor_phase_peaks(
     geometry: VideoAdmissionGeometry,
     selection: MemorySelection,
     engaged: &[MemoryStrategy],
+    headroom_bytes: u64,
 ) -> (PhasePeaks, Option<&'static str>) {
-    let generic = floor_phase_peaks(selector.contract, engaged, selector.headroom_bytes);
+    let generic = floor_phase_peaks(selector.contract, engaged, headroom_bytes);
     let resolved = match (selector.decode_profile)(
         selector.identity.lane,
         &selector.contract.provider_id,
@@ -671,51 +696,75 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
 /// There is deliberately no binding-phase flip band here. Each phase has its own fitted law and the
 /// scalar is the max over those three evaluations at this exact geometry, so a phase crossing is a
 /// result of the measured curves rather than an extrapolation away from one scalar anchor.
-fn fitted_or_floor_phase_peaks<'a>(
-    selector: &LadderVideoSelector<'a>,
+type VideoPhaseCandidate = (
+    PhasePeaks,
+    CandidateBasis,
+    String,
+    Option<String>,
+    Option<&'static str>,
+);
+
+fn evaluate_fitted_video_curve(
+    selector: &LadderVideoSelector<'_>,
+    query: VideoCurveQuery<'_>,
+) -> Option<ResolvedVideoCurveEvaluation> {
+    #[cfg(test)]
+    if let Some(evaluate) = selector.curve_evaluation_override {
+        return evaluate(query);
+    }
+    selector
+        .curves?
+        .evaluate(query)
+        .map(|evaluation| ResolvedVideoCurveEvaluation {
+            curve_id: evaluation.curve_id.to_owned(),
+            closure_digest: evaluation.closure_digest.to_owned(),
+            phases: evaluation.phases,
+        })
+}
+
+fn fitted_or_floor_phase_peaks(
+    selector: &LadderVideoSelector<'_>,
     geometry: VideoAdmissionGeometry,
     strategy: MemoryStrategy,
     engaged: &[MemoryStrategy],
-) -> (
-    PhasePeaks,
-    CandidateBasis,
-    &'a str,
-    Option<&'a str>,
-    Option<&'static str>,
-) {
+) -> Option<VideoPhaseCandidate> {
     let fitted = selector
-        .curves
-        .zip(selector.contract.calibration.as_ref())
-        .and_then(|(bundle, calibration)| {
+        .contract
+        .calibration
+        .as_ref()
+        .and_then(|calibration| {
             if calibration.abi != selector.identity.calibration_abi {
                 return None;
             }
-            bundle.evaluate(VideoCurveQuery {
-                model_id: selector.identity.model_id,
-                model_family: selector.identity.model_family,
-                provider: &selector.contract.provider_id,
-                backend: curve_backend(selector.identity.lane),
-                tier: crate::mlx_fit_gate::plan_tier_key(selector.identity.tier),
-                mode: selector.identity.mode,
-                rung: rung_of(strategy),
-                load_shape: curve_load_shape(selector.contract.load_shape),
-                closure_digest: selector.identity.expected_closure_digest,
-                calibration_abi: selector.identity.calibration_abi,
-                calibration_fingerprint: &calibration.fingerprint,
-                decode_pass: curve_decode_pass(geometry.decode_pass),
-                geometry: VideoCurveGeometry {
-                    width: geometry.width,
-                    height: geometry.height,
-                    frames: geometry.estimate_frames(),
-                    batch: geometry.batch,
+            evaluate_fitted_video_curve(
+                selector,
+                VideoCurveQuery {
+                    model_id: selector.identity.model_id,
+                    model_family: selector.identity.model_family,
+                    provider: &selector.contract.provider_id,
+                    backend: curve_backend(selector.identity.lane),
+                    tier: crate::mlx_fit_gate::plan_tier_key(selector.identity.tier),
+                    mode: selector.identity.mode,
+                    rung: rung_of(strategy),
+                    load_shape: curve_load_shape(selector.contract.load_shape),
+                    closure_digest: selector.identity.expected_closure_digest,
+                    calibration_abi: selector.identity.calibration_abi,
+                    calibration_fingerprint: &calibration.fingerprint,
+                    decode_pass: curve_decode_pass(geometry.decode_pass),
+                    geometry: VideoCurveGeometry {
+                        width: geometry.width,
+                        height: geometry.height,
+                        frames: geometry.estimate_frames(),
+                        batch: geometry.batch,
+                    },
                 },
-            })
+            )
         });
     if let Some(evaluation) = fitted {
         // This candidate is the narrowly ratified binding-phase exemption documented and pinned in
         // `ladder_margin_policy`: every phase has its own residual-bounded law and the scalar below
         // is their request-geometry maximum.
-        return (
+        return Some((
             PhasePeaks {
                 conditioning_bytes: evaluation.phases.conditioning,
                 denoise_bytes: evaluation.phases.denoise,
@@ -725,8 +774,15 @@ fn fitted_or_floor_phase_peaks<'a>(
             evaluation.closure_digest,
             Some(evaluation.curve_id),
             None,
-        );
+        ));
     }
+    // Candle's historical 18 GiB activation allowance was measured on MLX and is not portable
+    // evidence. Until this exact Candle cell has a fitted curve, offer no optimized candidate: the
+    // shared selector returns Unverified and the established resident execution remains unchanged.
+    if selector.identity.lane == VideoLane::Candle {
+        return None;
+    }
+    let headroom_bytes = selector.headroom_bytes?;
     let selection = MemorySelection {
         strategy,
         parameters: crate::estimate_synthesis::floor_smallest_parameters(
@@ -737,14 +793,14 @@ fn fitted_or_floor_phase_peaks<'a>(
         tier: selector.identity.tier,
     };
     let (floor, profile_revision) =
-        profiled_floor_phase_peaks(selector, geometry, selection, engaged);
-    (
+        profiled_floor_phase_peaks(selector, geometry, selection, engaged, headroom_bytes);
+    Some((
         floor,
         CandidateBasis::EstimateFloor,
-        selector.identity.expected_closure_digest,
+        selector.identity.expected_closure_digest.to_owned(),
         None,
         profile_revision,
-    )
+    ))
 }
 
 /// The gen-core geometry for one video admission cell.
@@ -806,8 +862,11 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             };
             // Phase-resolved for as long as possible: the scalar is taken only here, where
             // gen-core's evidence type forces one.
-            let (phase_peaks, basis, closure_digest, curve_id, profile_revision) =
-                fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged);
+            let Some((phase_peaks, basis, closure_digest, curve_id, profile_revision)) =
+                fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged)
+            else {
+                continue;
+            };
             if self.profile_error.borrow().is_some() {
                 return VideoRungSelection::Undecidable;
             }
@@ -849,10 +908,6 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 profile_revision,
             ));
         }
-        if synthesized.is_empty() {
-            return VideoRungSelection::Undecidable;
-        }
-
         let candidates = synthesized
             .iter()
             .map(
@@ -903,7 +958,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     curve_id = synthesized
                         .iter()
                         .find(|(candidate, ..)| candidate.strategy == selection.strategy)
-                        .and_then(|(_, _, _, _, _, curve_id, _)| *curve_id)
+                        .and_then(|(_, _, _, _, _, curve_id, _)| curve_id.as_deref())
                         .unwrap_or("none"),
                     needed_gb,
                     available_gb,
@@ -918,9 +973,12 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     predicted_peak_bytes: selected.1.predicted_peak_bytes,
                     evidence_revision: selected
                         .5
+                        .as_deref()
                         .or(selected.6)
                         .unwrap_or("video-estimate-floor-v1")
                         .to_owned(),
+                    #[cfg(test)]
+                    basis: selected.3,
                 });
                 VideoRungSelection::Selected {
                     rung: rung_of(selection.strategy),
@@ -1265,7 +1323,9 @@ pub(crate) struct VideoAdmissionInputs<'a> {
     /// keyed. SC-18810 exercised 24 and 30 fps; values outside that envelope fail open.
     pub(crate) fps: u32,
     pub(crate) runtime: Option<VideoRuntimeMemoryState>,
-    pub(crate) headroom_bytes: u64,
+    /// Lane-local fallback allowance. `None` must remain candidate absence all the way through the
+    /// selector; exact fitted curves are independent of it.
+    pub(crate) headroom_bytes: Option<u64>,
     pub(crate) expected_closure_digest: &'a str,
 }
 

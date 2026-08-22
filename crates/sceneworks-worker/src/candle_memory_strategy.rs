@@ -51,6 +51,36 @@ pub(crate) struct CandleMemoryEvaluation {
     pub predicted_peak_gb: f64,
 }
 
+fn select_unverified_scalar_provenance(
+    engine_id: &str,
+    tier: MemoryNumericTier,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    contract: &gen_core::MemoryProviderContract,
+    budget: VramBudget,
+) -> Selection {
+    crate::memory_strategy::select_strategy(
+        RequestScope {
+            resolved_route: engine_id,
+            backend: "candle",
+            tier,
+            mode: mode_key,
+            overlay,
+            geometry,
+            expected_closure_digest: "",
+        },
+        contract,
+        Some(Budget {
+            available_gb: budget.free_gb,
+            reclaimable_gb: 0.0,
+            total_gb: budget.total_gb,
+            reserved_headroom_gb: 2.0,
+        }),
+        &[],
+    )
+}
+
 /// Image routes whose only production admission truth is the existing Candle scalar gate. They
 /// enter the shared selector through a resident-only compatibility contract, then retain the
 /// established sequential fallback when that resident candidate does not fit.
@@ -75,15 +105,39 @@ pub(crate) const LEGACY_SCALAR_COMPATIBILITY_ROUTES: &[&str] = &[
     "sensenova_u1_8b_infographic_v3_fast",
 ];
 
-/// Bespoke image routes with a source-backed on-disk structural lower bound but no calibrated
+/// Bespoke routes with a source-backed on-disk structural lower bound but no calibrated
 /// provider contract. Their exact production gates bind that floor through
 /// [`select_compatibility_resident`]; other evidence-free image routes are intentionally absent.
 #[allow(dead_code)] // source-consumed by the generated inventory; call sites pass the exact routes
 pub(crate) const STRUCTURAL_FLOOR_COMPATIBILITY_ROUTES: &[&str] =
-    &["bernini_image", "instantid_realvisxl"];
+    &["bernini", "bernini_image", "instantid_realvisxl"];
+
+/// Image routes with no Candle capacity truth. They still enter the shared selector, but submit no
+/// candidate and therefore resolve to `Unverified`; the caller then preserves the established
+/// best-effort resident execution.
+pub(crate) const UNVERIFIED_IMAGE_COMPATIBILITY_ROUTES: &[&str] = &[
+    "anima_aesthetic",
+    "anima_base",
+    "anima_turbo",
+    "boogu_image_edit",
+    "chroma1_base",
+    "chroma1_flash",
+    "chroma1_hd",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
+    "realvisxl",
+    "realvisxl_lightning",
+    "sana_1600m",
+    "sana_sprint_1600m",
+    "sdxl",
+];
 
 pub(crate) fn is_legacy_scalar_compatibility_route(model_id: &str) -> bool {
     LEGACY_SCALAR_COMPATIBILITY_ROUTES.contains(&model_id)
+}
+
+pub(crate) fn is_unverified_image_compatibility_route(model_id: &str) -> bool {
+    UNVERIFIED_IMAGE_COMPATIBILITY_ROUTES.contains(&model_id)
 }
 
 /// Submit one already-normalized Candle resident ceiling to the shared selector through inference's
@@ -118,11 +172,7 @@ pub(crate) fn select_compatibility_resident(
             reason: MemoryEvidenceVerdict::Invalid,
         };
     };
-    let Some(peak_gb) = peak_gb.filter(|value| value.is_finite() && *value > 0.0) else {
-        return Selection::Unverified {
-            reason: MemoryEvidenceVerdict::Missing,
-        };
-    };
+    let peak_gb = peak_gb.filter(|value| value.is_finite() && *value > 0.0);
     let contract = gen_core::MemoryProviderContract::compatibility_default(
         route,
         gen_core::MemoryBackendRealization::CandleCuda {
@@ -138,7 +188,7 @@ pub(crate) fn select_compatibility_resident(
         parameters: Default::default(),
         tier,
     };
-    let evidence = MemoryEvidence {
+    let evidence = peak_gb.map(|peak_gb| MemoryEvidence {
         key: MemoryEvidenceKey {
             resolved_route: route.to_owned(),
             backend: MemoryBackend::Candle,
@@ -169,16 +219,20 @@ pub(crate) fn select_compatibility_resident(
         observed_peak_bytes: None,
         parity: MemoryParityContract::Exact,
         parity_result: MemoryParityResult::NotRun,
-    };
-    let candidate = Candidate {
-        selection,
-        evidence: &evidence,
-        // No-margin compatibility evidence is source-current by construction and does not enter the
-        // measured-closure currency branch. Keep the field honest and empty instead of fabricating a
-        // calibration closure.
-        closure_digest: "",
-        basis,
-    };
+    });
+    let candidates = evidence
+        .as_ref()
+        .map(|evidence| Candidate {
+            selection,
+            evidence,
+            // No-margin compatibility evidence is source-current by construction and does not enter the
+            // measured-closure currency branch. Keep the field honest and empty instead of fabricating a
+            // calibration closure.
+            closure_digest: "",
+            basis,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
     crate::memory_strategy::select_strategy(
         RequestScope {
             resolved_route: route,
@@ -198,7 +252,7 @@ pub(crate) fn select_compatibility_resident(
             // double-charge every migrated route.
             reserved_headroom_gb: 0.0,
         }),
-        &[candidate],
+        &candidates,
     )
 }
 
@@ -1257,6 +1311,23 @@ fn evaluate_shared_image_inner(
             contract
         }
     };
+    // A scalar inside a `candle` object is not, by position alone, Candle measurement evidence.
+    // Third-party manifests replace this object wholesale. Missing or foreign provenance reaches
+    // the shared selector with no candidate (therefore `Unverified`) and then preserves the legacy
+    // resident execution through this function's `None` result.
+    if !crate::candle_scalar_gate::scalar_measurement_lane_is_candle(manifest) {
+        let selection = select_unverified_scalar_provenance(
+            engine_id,
+            tier,
+            &mode.scope_key,
+            provider_overlay,
+            geometry,
+            &contract,
+            budget,
+        );
+        debug_assert!(matches!(selection, Selection::Unverified { .. }));
+        return Ok(None);
+    }
     let calibration = contract.calibration.as_ref();
     let resident_selection = MemorySelection {
         strategy: MemoryStrategy::Resident,
@@ -1690,6 +1761,87 @@ mod tests {
             })),
         )
         .is_some());
+    }
+
+    #[test]
+    fn malformed_scalar_provenance_reaches_the_production_selector_empty_and_unverified() {
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let budget = VramBudget {
+            free_gb: 96.0,
+            total_gb: 96.0,
+        };
+        let tier = numeric_tier("boogu_image", "q4").expect("known production tier");
+        let contract = gen_core::MemoryProviderContract::compatibility_default(
+            "boogu_image",
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-boogu-q4")))
+            .with_quant(Quant::Q4)
+            .with_resolved_route("boogu_image");
+
+        for malformed in [json!(null), json!(true), json!(1), json!({}), json!([])] {
+            let manifest = json!({
+                "candle": {
+                    "measurementLane": malformed,
+                    "vramGbByTier": { "q4": 30.0 }
+                }
+            })
+            .as_object()
+            .expect("manifest object")
+            .clone();
+            assert!(matches!(
+                select_unverified_scalar_provenance(
+                    "boogu_image",
+                    tier,
+                    "text_to_image",
+                    None,
+                    geometry,
+                    &contract,
+                    budget,
+                ),
+                Selection::Unverified { .. }
+            ));
+            assert!(
+                evaluate_shared_image_inner(
+                    "boogu_image",
+                    "boogu_image",
+                    &spec,
+                    true,
+                    &manifest,
+                    "q4",
+                    "text_to_image",
+                    None,
+                    None,
+                    geometry,
+                    false,
+                    false,
+                    false,
+                    false,
+                    Some(budget),
+                    Some(32.0),
+                    0,
+                    MemoryCacheState::Cold,
+                    None,
+                    Some(contract.clone()),
+                    None,
+                    None,
+                )
+                .expect("production scalar evaluation")
+                .is_none(),
+                "Unverified provenance must preserve legacy resident execution"
+            );
+        }
     }
 
     #[test]
@@ -3913,5 +4065,35 @@ mod tests {
         account_for_runtime_overlay_bytes(std::slice::from_mut(&mut evidence), 512);
 
         assert_eq!(evidence.predicted_peak_bytes, 8 * 1024 + 512);
+    }
+
+    #[test]
+    fn evidence_free_compatibility_routes_reach_the_shared_selector_as_unverified() {
+        let verdict = select_compatibility_resident(
+            "sdxl",
+            "bf16",
+            "text_to_image",
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            Some(VramBudget {
+                free_gb: 1.0,
+                total_gb: 24.0,
+            }),
+            None,
+            crate::memory_strategy::CandidateBasis::LegacyScalar,
+        );
+        assert!(matches!(
+            verdict,
+            Selection::Unverified {
+                reason: MemoryEvidenceVerdict::Missing
+            }
+        ));
+        assert_eq!(UNVERIFIED_IMAGE_COMPATIBILITY_ROUTES.len(), 14);
+        assert!(UNVERIFIED_IMAGE_COMPATIBILITY_ROUTES.contains(&"sdxl"));
     }
 }

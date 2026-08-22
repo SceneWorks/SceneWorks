@@ -10263,20 +10263,32 @@ async fn generate_candle_stream(
     // selector with no second reserve or margin. A resident reject still flows into the existing
     // sequential-capability decision below; an Unverified result preserves the established
     // never-block-without-evidence fallback.
-    let legacy_scalar_selection =
-        crate::candle_memory_strategy::is_legacy_scalar_compatibility_route(&request.model).then(
-            || {
+    let legacy_scalar_compatibility =
+        crate::candle_memory_strategy::is_legacy_scalar_compatibility_route(&request.model);
+    let unverified_image_compatibility =
+        crate::candle_memory_strategy::is_unverified_image_compatibility_route(&request.model);
+    let compatibility_selection =
+        (legacy_scalar_compatibility || unverified_image_compatibility).then(|| {
+            // The unverified set never owns scalar evidence. Legacy compatibility routes may
+            // submit their existing ceiling only when its provenance explicitly names Candle;
+            // missing/foreign third-party tags still reach the selector empty and then fall back
+            // to the unchanged legacy arithmetic below.
+            let candidate_peak = (legacy_scalar_compatibility
+                && crate::candle_scalar_gate::scalar_measurement_lane_is_candle(
+                    &request.model_manifest_entry,
+                ))
+            .then_some(gated_needed)
+            .flatten();
                 crate::candle_memory_strategy::select_compatibility_resident(
                     &request.model,
                     tier,
                     shared_request_mode,
                     shared_geometry,
                     budget,
-                    gated_needed,
+                    candidate_peak,
                     crate::memory_strategy::CandidateBasis::LegacyScalar,
                 )
-            },
-        );
+        });
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
     // unverified path; only then may the established gate remain as provider-safe fallback.
@@ -10361,7 +10373,7 @@ async fn generate_candle_stream(
                 }
             } else if krea_turbo_ladder {
                 krea_unverified_resident_decision(gated_needed, budget)
-            } else if let Some(selection) = legacy_scalar_selection {
+            } else if let Some(selection) = compatibility_selection {
                 match selection {
                     crate::memory_strategy::Selection::Selected { .. } => {
                         crate::vram_gate::FitDecision::Fits

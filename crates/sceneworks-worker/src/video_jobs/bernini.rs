@@ -298,6 +298,13 @@ pub(super) fn bernini_engine_video_mode(mode: &str) -> &'static str {
     }
 }
 
+/// Whether Bernini's source-backed structural pre-load floor covers this request. Deliberately
+/// independent of FPS: the shipped route runs at 16 fps, outside the generic fitted-video envelope.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(super) fn bernini_structural_floor_applies(mode_key: &str, reference_count: u32) -> bool {
+    mode_key == "t2v" && reference_count == 0
+}
+
 /// Resolve the source media for a Bernini editing/reference request into the planner conditioning:
 /// source clips → [`Conditioning::VideoClip`] (the edit structure, VAE/ViT-encoded by the engine)
 /// and subject reference images → [`Conditioning::MultiReference`]. `text_to_video` needs none.
@@ -606,6 +613,41 @@ pub(super) async fn generate_candle_bernini(
     let (model_dir, quant) =
         crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     let adapters = resolve_wan_adapters(settings, request, engine_id)?;
+    let adapter_resident_bytes =
+        crate::image_jobs::bernini_adapter_resident_bytes(&adapters, quant)?;
+    let tier_key = match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        _ => "bf16",
+    };
+    let mode_key = bernini_engine_video_mode(&request.mode);
+    let selector_geometry = gen_core::MemoryGeometry {
+        width: request.width,
+        height: request.height,
+        batch: 1,
+        frames: wan_frame_count(request.raw_frame_count()),
+        reference_count: u32::try_from(conditioning.len()).unwrap_or(u32::MAX),
+    };
+    crate::image_jobs::admit_candle_base_floor_with_resident_overlay_via_selector(
+        "bernini",
+        "Bernini video",
+        settings,
+        &[model_dir.as_path()],
+        adapter_resident_bytes,
+        crate::image_jobs::BaseFloorSelectorScope {
+            route: "bernini",
+            tier_key,
+            mode_key,
+            geometry: selector_geometry,
+            // Only plain T2V has the truthful structural pre-load surface. Every conditioned mode
+            // reaches the same selector with no candidate and preserves the established run.
+            structural_floor_applies: bernini_structural_floor_applies(
+                mode_key,
+                selector_geometry.reference_count,
+            ),
+        },
+    )
+    .await?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -621,7 +663,7 @@ pub(super) async fn generate_candle_bernini(
         frames: wan_frame_count(request.raw_frame_count()),
         fps: request.fps,
         seed: resolve_video_seed(request) as u64,
-        video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
+        video_mode: Some(mode_key.to_owned()),
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, &request.advanced, input).await

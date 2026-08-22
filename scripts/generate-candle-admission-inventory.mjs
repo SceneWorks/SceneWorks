@@ -162,9 +162,12 @@ export const SOURCE_PATHS = Object.freeze({
   imageQwenEdit: "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
   imageZimageControl: "crates/sceneworks-worker/src/image_jobs/zimage_control.rs",
   imageInstantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
+  imageBernini: "crates/sceneworks-worker/src/image_jobs/bernini.rs",
   imagePulid: "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
   imageDetail: "crates/sceneworks-worker/src/image_jobs/detail.rs",
   videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
+  videoRouteBernini: "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+  videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
 });
 
 /**
@@ -242,6 +245,14 @@ export const ADMISSION_MECHANISMS = Object.freeze([
     callPattern: "(?<!fn\\s)\\bselect_compatibility_resident\\s*\\(",
     summary:
       "Resident-only shared-selector compatibility candidate carrying a source-backed structural lower bound with no calibration claim or estimate widening.",
+  },
+  {
+    id: "shared_selector_unverified_compatibility",
+    source: "candleMemoryStrategy",
+    definitionSymbols: Object.freeze(["select_compatibility_resident"]),
+    callPattern: "(?<!fn\\s)\\bselect_compatibility_resident\\s*\\(",
+    summary:
+      "Evidence-free resident route submitted to the shared selector with no candidate; its Unverified verdict preserves the legacy best-effort resident execution.",
   },
   {
     id: "shared_selector_legacy_video_compatibility",
@@ -594,7 +605,9 @@ export function parseCompatibilityRoutes(source, constant) {
 
 /** Extract a Rust function body with balanced braces; throws instead of treating missing code as wiring. */
 function rustFunctionBody(source, symbol) {
-  const signature = new RegExp(`(?:pub\\(crate\\)\\s+)?fn\\s+${symbol}\\s*\\(`).exec(source);
+  const signature = new RegExp(
+    `(?:pub\\(crate\\)\\s+)?fn\\s+${symbol}(?:<[^>]*>)?\\s*\\(`,
+  ).exec(source);
   if (!signature) throw new Error(`could not locate production function ${symbol}`);
   const open = source.indexOf("{", signature.index);
   if (open === -1) throw new Error(`${symbol}: no function body`);
@@ -643,14 +656,49 @@ export function validateCompatibilityWiring(bodies) {
   ) {
     throw new Error("legacy scalar image routes are not wired to their typed compatibility candidate");
   }
-  for (const [source, symbol] of [
-    [bodies.conditioningFit, "decide_via_compatibility_selector"],
-    [bodies.imageBaseAdmission, "admit_candle_base_floor_with_resident_overlay_inner"],
-  ]) {
+  if (
+    !imageBody.includes("is_unverified_image_compatibility_route") ||
+    !compatibilityBody.includes("let candidates = evidence") ||
+    !compatibilityBody.includes("&candidates")
+  ) {
+    throw new Error("evidence-free image routes must invoke the shared selector with an empty candidate set");
+  }
+  if (
+    !/legacy_scalar_compatibility\s*&&\s*crate::candle_scalar_gate::scalar_measurement_lane_is_candle/.test(
+      imageBody,
+    ) ||
+    !imageBody.includes(".then_some(gated_needed)")
+  ) {
+    throw new Error("legacy scalar compatibility candidates must reject missing/foreign lanes as Unverified");
+  }
+  const sharedImage = rustFunctionBody(bodies.candleMemoryStrategy, "evaluate_shared_image_inner");
+  const scalarProvenance = rustFunctionBody(
+    bodies.candleMemoryStrategy,
+    "select_unverified_scalar_provenance",
+  );
+  if (
+    !sharedImage.includes("scalar_measurement_lane_is_candle(manifest)") ||
+    !sharedImage.includes("select_unverified_scalar_provenance") ||
+    !scalarProvenance.includes("&[]") ||
+    !bodies.candleScalarGate.includes("== Some(\"candle\")")
+  ) {
+    throw new Error("scalar selector provenance must reject missing/foreign lanes as Unverified");
+  }
+  for (const [source, symbol] of [[bodies.conditioningFit, "decide_via_compatibility_selector"]]) {
     const body = rustFunctionBody(source, symbol);
     if (!body.includes("CandidateBasis::StructuralFloor") || !body.includes("select_compatibility_resident")) {
       throw new Error(`${symbol} is not wired to its structural-floor compatibility candidate`);
     }
+  }
+  const baseFloorSelector = rustFunctionBody(
+    bodies.imageBaseAdmission,
+    "compatibility_base_floor_plan",
+  );
+  if (
+    !baseFloorSelector.includes("CandidateBasis::StructuralFloor") ||
+    !baseFloorSelector.includes("select_compatibility_resident")
+  ) {
+    throw new Error("compatibility_base_floor_plan is not wired to its structural-floor candidate");
   }
   const videoSelector = rustFunctionBody(bodies.videoAdmission, "select_legacy_video_resident");
   if (
@@ -658,6 +706,66 @@ export function validateCompatibilityWiring(bodies) {
     !videoSelector.includes("CandidateBasis::LegacyVideo")
   ) {
     throw new Error("legacy video selector lost its typed Candle lane or LegacyVideo basis");
+  }
+  if (!baseFloorSelector.includes("scope.structural_floor_applies.then_some(floor_gb)")) {
+    throw new Error("structural-floor selector must withhold its candidate on unsupported modes");
+  }
+  if (
+    !baseFloorSelector.includes("if !scope.structural_floor_applies") ||
+    !baseFloorSelector.includes("LoadPlan::Resident")
+  ) {
+    throw new Error("unsupported Bernini modes must preserve resident execution after Unverified");
+  }
+  const berniniVideo = rustFunctionBody(bodies.videoRouteBernini, "generate_candle_bernini");
+  const berniniFloor = rustFunctionBody(
+    bodies.videoRouteBernini,
+    "bernini_structural_floor_applies",
+  );
+  if (!berniniFloor.includes('mode_key == "t2v" && reference_count == 0')) {
+    throw new Error("Bernini structural floor must be exact T2V with zero references");
+  }
+  for (const marker of [
+    "bernini_adapter_resident_bytes(&adapters, quant)",
+    "width: request.width",
+    "height: request.height",
+    "frames: wan_frame_count(request.raw_frame_count())",
+    "reference_count: u32::try_from(conditioning.len())",
+    "structural_floor_applies: bernini_structural_floor_applies(",
+    "admit_candle_base_floor_with_resident_overlay_via_selector",
+  ]) {
+    if (!berniniVideo.includes(marker)) {
+      throw new Error(`Bernini video structural selector lost production input: ${marker}`);
+    }
+  }
+  const videoSelection = rustFunctionBody(bodies.videoAdmission, "fitted_or_floor_phase_peaks");
+  if (
+    !videoSelection.includes("selector.identity.lane == VideoLane::Candle") ||
+    !videoSelection.includes("return None")
+  ) {
+    throw new Error("Candle optimized video candidates must remain Unverified without a fitted curve");
+  }
+  if (
+    !videoSelection.includes("let headroom_bytes = selector.headroom_bytes?") ||
+    videoSelection.includes("headroom_bytes.unwrap_or(0)")
+  ) {
+    throw new Error("video fallback allowance absence must not create an estimate-floor candidate");
+  }
+  const wanFallback = rustFunctionBody(bodies.videoRouteWan, "admission_fallback_headroom_bytes");
+  if (
+    !bodies.videoRouteWan.includes("fallback_headroom_bytes: Option<u64>") ||
+    !wanFallback.includes("checked_sub(runtime.budget.reserved_headroom_bytes)") ||
+    wanFallback.includes("unwrap_or(0)")
+  ) {
+    throw new Error("Wan fallback headroom must preserve Option absence and normalize real reserve once");
+  }
+  if (
+    !bodies.videoRouteWan.includes("fallback_headroom_bytes") ||
+    !bodies.videoRouteWan.includes(
+      'if cfg!(all(not(target_os = "macos"), feature = "backend-candle")) {\n                        None',
+    ) ||
+    !bodies.videoRouteWan.includes("admission_fallback_headroom_bytes(")
+  ) {
+    throw new Error("Wan production callback must pass an absent Candle fallback allowance");
   }
   for (const symbol of [
     "mochi_fit_error",
@@ -1408,6 +1516,7 @@ function candleEvidence(entry) {
     return {
       hasCandleBlock: false,
       measured: null,
+      measurementLane: null,
       measuredTiers: [],
       sequentialTiers: [],
       minMemoryGb: null,
@@ -1421,6 +1530,7 @@ function candleEvidence(entry) {
     hasCandleBlock: true,
     // A BARE BOOLEAN, not an evidence class. See the header note.
     measured: typeof candle.measured === "boolean" ? candle.measured : null,
+    measurementLane: typeof candle.measurementLane === "string" ? candle.measurementLane : null,
     measuredTiers: Object.keys(candle.vramGbByTier ?? {}).sort(),
     sequentialTiers: Object.keys(candle.sequentialPeakGb ?? {}).sort(),
     minMemoryGb: typeof candle.minMemoryGb === "number" ? candle.minMemoryGb : null,
@@ -1460,6 +1570,13 @@ function classifyRoute({
       evidenceRevision: "sc-19055-candle-compatibility-v1",
     };
     mechanisms.push("shared_selector_legacy_scalar_compatibility");
+  } else if (compatibility.unverifiedImage.has(modelId)) {
+    sharedSelector = {
+      reached: true,
+      via: "unverified_compatibility",
+      evidenceRevision: null,
+    };
+    mechanisms.push("shared_selector_unverified_compatibility");
   } else if (compatibility.structuralFloor.has(modelId)) {
     sharedSelector = {
       reached: true,
@@ -1533,10 +1650,30 @@ function classifyRoute({
 export function buildInventory(bodies) {
   validateCompatibilityWiring(bodies);
   const entries = manifestEntries(bodies.manifest);
+  const scalarEntries = [...entries.values()].filter((entry) => {
+    const candle = entry.candle;
+    return Boolean(
+      candle &&
+        ("minMemoryGb" in candle || "vramGbByTier" in candle || "sequentialPeakGb" in candle),
+    );
+  });
+  if (scalarEntries.length !== 45) {
+    throw new Error(`expected the exact 45 shipped Candle scalar manifests, found ${scalarEntries.length}`);
+  }
+  const wrongLane = scalarEntries.filter((entry) => entry.candle.measurementLane !== "candle");
+  if (wrongLane.length > 0) {
+    throw new Error(
+      `Candle scalar manifests require measurementLane=candle: ${wrongLane.map((entry) => entry.id).join(", ")}`,
+    );
+  }
   const compatibility = {
     legacyScalar: parseCompatibilityRoutes(
       bodies.candleMemoryStrategy,
       "LEGACY_SCALAR_COMPATIBILITY_ROUTES",
+    ),
+    unverifiedImage: parseCompatibilityRoutes(
+      bodies.candleMemoryStrategy,
+      "UNVERIFIED_IMAGE_COMPATIBILITY_ROUTES",
     ),
     structuralFloor: parseCompatibilityRoutes(
       bodies.candleMemoryStrategy,
@@ -1708,7 +1845,11 @@ export function buildInventory(bodies) {
         detail: "the scalar gate has no candle.vramGbByTier row and falls through to candle.minMemoryGb",
       });
     }
-    if (route.modality === "video" && !route.videoFitSymbol) {
+    if (
+      route.modality === "video" &&
+      !route.videoFitSymbol &&
+      route.sharedSelector.via !== "structural_floor_compatibility"
+    ) {
       divergences.push({
         kind: "video_route_without_fit_gate",
         modelId: route.modelId,
@@ -1794,6 +1935,9 @@ export function buildInventory(bodies) {
         legacyScalarCompatibility: routes.filter(
           (route) => route.sharedSelector.via === "legacy_scalar_compatibility",
         ).length,
+        unverifiedCompatibility: routes.filter(
+          (route) => route.sharedSelector.via === "unverified_compatibility",
+        ).length,
         structuralFloorCompatibility: routes.filter(
           (route) => route.sharedSelector.via === "structural_floor_compatibility",
         ).length,
@@ -1842,8 +1986,9 @@ function knownGaps({ curveLanes }) {
         "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign " +
         `lane, but the packaged curve data covers ${JSON.stringify(
           Object.fromEntries([...curveLanes.entries()].sort()),
-        )} â€” there are no candle curves at all, so every candle video route falls back to the ` +
-        "weights+headroom lower bound.",
+        )} â€” there are no candle curves at all. Optimized Candle candidates are therefore ` +
+        "Unverified; the seven legacy ceilings and Bernini's T2V structural pre-load floor remain " +
+        "the only source-backed resident admission inputs.",
       paths: ["docs/generated/video-memory-curves.json"],
     },
     {

@@ -4012,6 +4012,7 @@
         "adapter": "wan_video",
         "candle": {
           "measured": true,
+          "measurementLane": "candle",
           "minMemoryGb": 14,
           "vramGbByTier": {
             "bf16": 14.5,

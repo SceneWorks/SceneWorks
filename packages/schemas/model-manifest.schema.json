@@ -1341,9 +1341,23 @@
               {
                 "if": { "required": ["vramGbByTier"] },
                 "then": { "required": ["vramMeasuredPixels", "measured"] }
+              },
+              {
+                "if": {
+                  "anyOf": [
+                    { "required": ["minMemoryGb"] },
+                    { "required": ["vramGbByTier"] },
+                    { "required": ["sequentialPeakGb"] }
+                  ]
+                },
+                "then": { "required": ["measurementLane"] }
               }
             ],
             "properties": {
+              "measurementLane": {
+                "$ref": "#/$defs/measurementLane",
+                "description": "Lane that produced the scalar Candle capacity evidence. Runtime admission accepts only candle; a foreign value remains schema-valid for third-party provenance but is Unverified on this lane."
+              },
               "minMemoryGb": {
                 "type": "integer",
                 "minimum": 1,

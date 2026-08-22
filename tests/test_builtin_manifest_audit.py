@@ -262,6 +262,7 @@ def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
         for key, value in model["candle"].items()
         if key != "memoryStrategyContract"
     } == {
+        "measurementLane": "candle",
         "minMemoryGb": 17,
         "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
         "vramMeasuredPixels": 1024 * 1024,
@@ -984,6 +985,7 @@ def test_scail2_candle_admission_matches_the_validated_shared_package_evidence()
     # that a reader can check against the authority. The authority is
     # `estimate_synthesis::graded_scalar_gb` (margin: `ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`).
     assert candle == {
+        "measurementLane": "candle",
         "minMemoryGb": 109,
         "vramGbByTier": {"bf16": 102.115},
         "vramMeasuredPixels": 832 * 480,
@@ -2104,6 +2106,38 @@ def test_schema_requires_a_lane_tag_on_the_fit_block_and_admits_one_per_curve():
     assert mutated(
         lambda candidate: curve_of(candidate).update({"measurementlane": "candle"})
     ), "a misspelled per-curve lane must be rejected, not silently ignored"
+
+
+def test_all_shipped_candle_scalar_containers_require_explicit_lane_provenance():
+    """SC-19059: scalar capacity evidence is tagged independently of its container key."""
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    scalar = [
+        model
+        for model in manifest["models"]
+        if model.get("candle")
+        and any(
+            key in model["candle"]
+            for key in ("minMemoryGb", "vramGbByTier", "sequentialPeakGb")
+        )
+    ]
+    assert len(scalar) == 45
+    assert all(model["candle"].get("measurementLane") == "candle" for model in scalar)
+
+    missing = copy.deepcopy(manifest)
+    next(
+        model for model in missing["models"] if model["id"] == scalar[0]["id"]
+    )["candle"].pop("measurementLane")
+    assert list(validator.iter_errors(missing)), "a scalar container without provenance must fail"
+
+    # Foreign provenance remains authorable for third-party manifests; the runtime selector treats
+    # it as Unverified rather than pretending those measurements were taken on Candle.
+    foreign = copy.deepcopy(manifest)
+    next(
+        model for model in foreign["models"] if model["id"] == scalar[0]["id"]
+    )["candle"]["measurementLane"] = "mlx"
+    assert not list(validator.iter_errors(foreign))
 
 
 def _tiers_declaring_a_temporal_curve(turbo_fit: dict) -> set:

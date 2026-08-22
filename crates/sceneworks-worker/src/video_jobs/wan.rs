@@ -1498,6 +1498,35 @@ pub(super) fn calibrated_video_memory_surface(input: &VideoGenInput, mode: &str)
         && (24..=30).contains(&input.fps)
 }
 
+/// Remove the live allocator reserve from a real lane-local fallback allowance exactly once.
+///
+/// `None` is authoritative absence. In particular, Candle has no MLX-derived generic allowance;
+/// carrying that absence through this seam prevents both a reserve-underflow refusal and a forged
+/// zero-byte estimate-floor candidate. Exact fitted curves do not consume this fallback value.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn admission_fallback_headroom_bytes(
+    engine_id: &str,
+    fallback_headroom_bytes: Option<u64>,
+    runtime: Option<crate::video_admission::VideoRuntimeMemoryState>,
+) -> WorkerResult<Option<u64>> {
+    let (Some(fallback_headroom_bytes), Some(runtime)) = (fallback_headroom_bytes, runtime) else {
+        return Ok(fallback_headroom_bytes);
+    };
+    fallback_headroom_bytes
+        .checked_sub(runtime.budget.reserved_headroom_bytes)
+        .map(Some)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} live memory reserve {} exceeds fallback headroom {}; refusing an \
+                 inconsistent video budget",
+                runtime.budget.reserved_headroom_bytes, fallback_headroom_bytes,
+            ))
+        })
+}
+
 /// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
 /// lifecycle context in one operation makes it impossible for the generation request to carry an
 /// optimized rung while silently bypassing its safety/begin/configure/finish contract.
@@ -2027,8 +2056,18 @@ pub(super) async fn generate_video_using(
                 let mut input = input;
                 let admission_tier =
                     crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
-                let spec_headroom_bytes =
-                    crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
+                // The 18 GiB generic video allowance is MLX measurement, not Candle evidence.
+                // Candle optimized candidates remain Unverified until their own fitted curve is
+                // promoted; legacy pre-load resident admission is independent and unchanged.
+                let fallback_headroom_bytes =
+                    if cfg!(all(not(target_os = "macos"), feature = "backend-candle")) {
+                        None
+                    } else {
+                        Some(crate::mlx_fit_gate::spec_headroom_bytes(
+                            engine_id,
+                            &admission_spec,
+                        ))
+                    };
                 let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
                 let mut overlays = Vec::new();
                 if !input.adapters.is_empty() {
@@ -2057,20 +2096,11 @@ pub(super) async fn generate_video_using(
                     } else {
                         None
                     };
-                let admission_headroom_bytes = match admission_runtime {
-                    Some(runtime) => spec_headroom_bytes
-                        .checked_sub(runtime.budget.reserved_headroom_bytes)
-                        .ok_or_else(|| {
-                            WorkerError::InvalidPayload(format!(
-                                "{engine_id} live memory reserve {} exceeds fallback headroom {}; \
-                                 refusing an inconsistent video budget",
-                                runtime.budget.reserved_headroom_bytes, spec_headroom_bytes,
-                            ))
-                        })?,
-                    // Unsupported surfaces and lanes without a canonical post-load snapshot fail
-                    // open before selection, so this value is observationally inert there.
-                    None => spec_headroom_bytes,
-                };
+                let admission_headroom_bytes = admission_fallback_headroom_bytes(
+                    engine_id,
+                    fallback_headroom_bytes,
+                    admission_runtime,
+                )?;
                 let outcome = crate::video_admission::admit_video_generation(
                     generator,
                     crate::video_admission::VideoAdmissionInputs {

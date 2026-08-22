@@ -747,19 +747,20 @@ mod tests {
         );
     }
 
-    /// **SC-19055 reopened: pin the fourteen image routes whose policy still needs an owner.**
+    /// **SC-19059 owner policy: pin the fourteen evidence-free image routes as Unverified.**
     ///
     /// The source-backed classes now reach the selector through an honest resident-only
     /// `compatibility_default`: fourteen scalar routes plus InstantID and Bernini image. The
     /// remaining fourteen publish neither a provider contract nor a source-owned capacity truth.
-    /// Choosing legacy fail-open versus disable for those routes is explicitly outside this change,
-    /// so an exact-set assertion prevents accidental policy by adjacency.
+    /// The approved policy sends them through the selector with no candidate and preserves resident
+    /// execution, so an exact-set assertion prevents fabricated evidence or accidental disablement.
     #[test]
-    fn only_the_fourteen_owner_pending_image_routes_remain_unreached() {
+    fn all_image_routes_reach_the_selector_and_exactly_fourteen_are_unverified() {
         let inventory: Value = serde_json::from_str(INVENTORY).expect("inventory parses");
         let routes = inventory["routes"].as_array().expect("routes");
 
         let mut unreached_image = Vec::new();
+        let mut unverified_image = Vec::new();
         let mut reached_without_declaration = Vec::new();
         for route in routes {
             if route["modality"].as_str() != Some("image") {
@@ -778,8 +779,15 @@ mod tests {
             let named = route["sharedSelector"]["via"].as_str() == Some("named_revision");
             let compatibility = matches!(
                 route["sharedSelector"]["via"].as_str(),
-                Some("legacy_scalar_compatibility" | "structural_floor_compatibility")
+                Some(
+                    "legacy_scalar_compatibility"
+                        | "structural_floor_compatibility"
+                        | "unverified_compatibility"
+                )
             );
+            if route["sharedSelector"]["via"].as_str() == Some("unverified_compatibility") {
+                unverified_image.push(model_id.to_owned());
+            }
             if !reached {
                 assert!(
                     !declares,
@@ -798,9 +806,13 @@ mod tests {
              override, a compatibility basis, nor a manifest provider contract: \
              {reached_without_declaration:?}"
         );
-        unreached_image.sort();
+        assert!(
+            unreached_image.is_empty(),
+            "all image routes must reach the selector"
+        );
+        unverified_image.sort();
         assert_eq!(
-            unreached_image,
+            unverified_image,
             [
                 "anima_aesthetic",
                 "anima_base",
@@ -817,16 +829,7 @@ mod tests {
                 "sana_sprint_1600m",
                 "sdxl",
             ],
-            "the owner-pending image class changed; do not silently choose fallback-versus-disable"
-        );
-
-        // The blocker is upstream, so the count is a property of the PIN, not of this tree. Printed
-        // rather than pinned: pinning it would red on an inference bump that publishes a contract,
-        // which is the outcome the epic wants, not a regression.
-        eprintln!(
-            "sc-19055: {} evidence-free candle image routes remain off the shared selector: {:?}",
-            unreached_image.len(),
-            unreached_image
+            "the approved evidence-free Unverified image class changed"
         );
     }
 }
