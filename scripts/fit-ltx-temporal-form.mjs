@@ -83,11 +83,16 @@ export function videoCurveSchemaErrors(schema, value, root = schema, at = "$") {
     errors.push(`${at}: ${JSON.stringify(value)} is outside ${JSON.stringify(schema.enum)}`);
   }
   const actual = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+  const allowedTypes = schema.type === undefined
+    ? []
+    : Array.isArray(schema.type)
+      ? schema.type
+      : [schema.type];
   const typeMatches =
-    !schema.type ||
-    schema.type === actual ||
-    (schema.type === "object" && actual === "object") ||
-    (schema.type === "integer" && typeof value === "number" && Number.isInteger(value));
+    allowedTypes.length === 0 ||
+    allowedTypes.includes(actual) ||
+    (allowedTypes.includes("object") && actual === "object") ||
+    (allowedTypes.includes("integer") && typeof value === "number" && Number.isInteger(value));
   if (!typeMatches) {
     errors.push(`${at}: expected ${schema.type}, got ${actual}`);
     return errors;
@@ -362,9 +367,14 @@ export function pointsFrom(records, roleByFixture, manifest = null) {
     const measurements = Object.fromEntries(
       record.diagnostics.measurements.map((entry) => [entry.name, entry.value]),
     );
-    const fps = measurements.outputFps;
     const role = roleByFixture.get(record.fixture);
     if (!role) throw new Error(`record fixture ${record.fixture} has no role in the sweep plan`);
+    const fps = measurements.outputFps;
+    const referenceCount = record.target.referenceCount ?? (record.target.mode === "text_to_video" ? 0 : null);
+    const referenceShape = record.target.referenceShape ?? (referenceCount === 0 ? "none" : null);
+    if (!Number.isInteger(referenceCount) || referenceCount < 0 || typeof referenceShape !== "string" || referenceShape.length === 0 || (referenceShape === "none") !== (referenceCount === 0) || !Number.isInteger(fps) || fps < 1) {
+      throw new Error(`record ${record.id} has an incomplete reference/FPS evidence identity`);
+    }
     const modelFamily = manifest?.models?.find((model) => model.id === record.target.modelId)?.family;
     if (manifest && typeof modelFamily !== "string") {
       throw new Error(`model ${record.target.modelId} is absent from builtin.models.jsonc`);
@@ -375,10 +385,14 @@ export function pointsFrom(records, roleByFixture, manifest = null) {
       capturedAt: record.capturedAt,
       modelId: record.target.modelId,
       modelFamily,
+      route: record.target.route ?? record.target.provider,
       provider: record.target.provider,
       backend: record.backend,
       tier: record.target.tier,
       mode: record.target.mode,
+      referenceShape,
+      referenceCount,
+      overlay: record.target.overlay === "none" ? null : record.target.overlay,
       role,
       rung: record.strategy.rung,
       loadShape: record.loadShape,
@@ -393,6 +407,7 @@ export function pointsFrom(records, roleByFixture, manifest = null) {
       // capture noise.
       replicateKey: JSON.stringify([
         record.target.modelId,
+        record.target.route ?? record.target.provider,
         record.target.provider,
         record.backend,
         record.target.tier,
@@ -435,6 +450,7 @@ function persistedObservation(point) {
     fixture: point.fixture,
     modelId: point.modelId,
     modelFamily: point.modelFamily,
+    route: point.route,
     provider: point.provider,
     backend: point.backend,
     tier: point.tier,
@@ -754,10 +770,14 @@ function completeSelectorOfPoint(point) {
   const selector = {
     modelId: point.modelId,
     modelFamily: point.modelFamily,
+    route: point.route,
     provider: point.provider,
     backend: point.backend,
     tier: point.tier,
     mode: point.mode,
+    referenceShape: point.referenceShape,
+    referenceCount: point.referenceCount,
+    overlay: point.overlay,
     rung: point.rung,
     loadShape: point.loadShape,
     batch: point.batch,
@@ -767,7 +787,9 @@ function completeSelectorOfPoint(point) {
     decodePass: point.decodeTilingEngaged ? "tiled" : "single_pass",
   };
   if (
-    Object.entries(selector).some(([, value]) => value === undefined || value === null || value === "")
+    Object.entries(selector).some(
+      ([key, value]) => value === undefined || value === "" || (value === null && key !== "overlay"),
+    )
   ) {
     throw new Error(`record ${point.recordId} has an incomplete video-curve selector`);
   }
@@ -1327,13 +1349,23 @@ export function buildVideoMemoryCurveBundle(
     }
     const catalogModel = manifest.models.find((model) => model.id === record.target.modelId);
     if (!catalogModel) throw new Error(`model ${record.target.modelId} is absent from builtin.models.jsonc`);
+    const referenceCount = record.target.referenceCount ?? (record.target.mode === "text_to_video" ? 0 : null);
+    const referenceShape = record.target.referenceShape ?? (referenceCount === 0 ? "none" : null);
+    const outputFps = record.diagnostics.measurements.find((entry) => entry.name === "outputFps")?.value;
+    if (!Number.isInteger(referenceCount) || referenceCount < 0 || typeof referenceShape !== "string" || referenceShape.length === 0 || (referenceShape === "none") !== (referenceCount === 0) || !Number.isInteger(outputFps) || outputFps < 1) {
+      throw new Error(`record ${record.id} has an incomplete reference/FPS evidence identity`);
+    }
     return {
       modelId: record.target.modelId,
       modelFamily: catalogModel.family,
+      route: record.target.route ?? record.target.provider,
       provider: record.target.provider,
       backend: record.backend,
       tier: record.target.tier,
       mode: record.target.mode,
+      referenceShape,
+      referenceCount,
+      overlay: record.target.overlay === "none" ? null : record.target.overlay,
       rung: record.strategy.rung,
       loadShape: record.loadShape,
       batch: record.target.geometry.batch,
@@ -1374,10 +1406,14 @@ export function buildVideoMemoryCurveBundle(
     const {
       modelId,
       modelFamily,
+      route,
       provider,
       backend,
       tier,
       mode,
+      referenceShape,
+      referenceCount,
+      overlay,
       rung,
       loadShape,
       batch,
@@ -1466,16 +1502,28 @@ export function buildVideoMemoryCurveBundle(
         `${modelId}/${tier}/${rung} contains records outside the fitted or held-out subsets: ${unscored.join(", ")}`,
       );
     }
+    const framesPerSecond = [
+      ...new Set(
+        scopedRecords.map((record) =>
+          record.diagnostics.measurements.find((entry) => entry.name === "outputFps")?.value,
+        ),
+      ),
+    ].sort((a, b) => a - b);
     return {
       // Keep the human-readable id bijective with the complete selector. Runtime also validates
       // every field independently; the id is not an authorization shortcut.
-      id: `${modelId}:${modelFamily}:${provider}:${backend}:${tier}:${mode}:${rung}:${loadShape}:b${batch}:abi${calibrationAbi}:${decodePass}:${closureDigest.slice(0, 12)}:${calibrationFingerprint}`,
+      id: `${modelId}:${modelFamily}:${route}:${provider}:${backend}:${tier}:${mode}:ref${referenceShape}-${referenceCount}:fps${framesPerSecond.join("+")}:${overlay ?? "none"}:${rung}:${loadShape}:b${batch}:abi${calibrationAbi}:${decodePass}:${closureDigest.slice(0, 12)}:${calibrationFingerprint}`,
       modelId,
       modelFamily,
+      route,
       provider,
       backend,
       tier,
       mode,
+      referenceShape,
+      referenceCount,
+      framesPerSecond,
+      overlay,
       rung,
       loadShape,
       batch,
@@ -1496,7 +1544,7 @@ export function buildVideoMemoryCurveBundle(
   curves.sort((left, right) => compareText(left.id, right.id));
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
     sourceFit,
     sourceCatalog,

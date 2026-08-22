@@ -12,11 +12,16 @@
 //! not re-implemented here — `select_strategy` does all three, exactly as it does for
 //! `mlx_fit_gate` (the MLX image lane) and `candle_memory_strategy` (the candle image lane).
 //!
-//! **Prediction is exact-or-floor.** A candidate whose full catalog/provider/lane/tier/mode/rung/
-//! load-shape/ABI/fingerprint/closure/decode-regime identity matches a packaged fitted curve uses
+//! **Request selection is evidence-gated; prediction is exact-or-floor.** The request entry point
+//! first requires a full curve match across catalog/provider/lane/tier/mode/reference shape and
+//! count/output FPS/overlay/rung/load-shape/ABI/fingerprint/closure/decode-regime. A candidate
+//! whose identity matches a packaged fitted curve then uses
 //! its three residual-bounded affine cross laws
-//! (`fixed + perMpx*mpx + perMpxFrame*mpx*frames + maxResidual`). Every curve mismatch —
-//! including geometry outside the measured area-by-voxel hull — falls back to the established
+//! (`fixed + perMpx*mpx + perMpxFrame*mpx*frames + maxResidual`). The internal selector retains
+//! a floor for legacy load-time/sequential behavior and focused candidate tests, but it is never
+//! request-scoped evidence. A request mismatch — including geometry outside the measured
+//! area-by-voxel hull — keeps direct generation and receives no memory context. The floor remains
+//! the established
 //! [`crate::mlx_fit_gate::estimate_floor_weights_bytes`] plus activation-headroom lower bound,
 //! strengthened when the selected provider exports a larger decode working-set profile. Requested
 //! rows key `gen_core::MemoryGeometry` to the real clip length; synthetic cap rows key it to the cap
@@ -157,7 +162,12 @@ pub(crate) struct VideoRequestIdentity<'a> {
     /// references and no overlay, but these still travel through evidence identity so a future
     /// calibrated surface cannot accidentally inherit the base T2V cell.
     pub(crate) reference_count: u32,
+    /// Input carrier shape. Count alone cannot distinguish image conditioning from another future
+    /// reference transport, so both are part of curve/evidence identity.
+    pub(crate) reference_shape: &'a str,
     pub(crate) overlay: Option<&'a str>,
+    /// Output rate is an evidence axis even when a fitted peak is frame-count based.
+    pub(crate) fps: u32,
     pub(crate) lane: VideoLane,
     pub(crate) tier: MemoryNumericTier,
     /// The contract's live calibration ABI. Carried separately from the optional calibration
@@ -477,10 +487,15 @@ fn fitted_or_floor_phase_peaks<'a>(
             bundle.evaluate(VideoCurveQuery {
                 model_id: selector.identity.model_id,
                 model_family: selector.identity.model_family,
+                route: selector.identity.route,
                 provider: &selector.contract.provider_id,
                 backend: curve_backend(selector.identity.lane),
                 tier: crate::mlx_fit_gate::plan_tier_key(selector.identity.tier),
                 mode: selector.identity.mode,
+                reference_shape: selector.identity.reference_shape,
+                reference_count: selector.identity.reference_count,
+                frames_per_second: selector.identity.fps,
+                overlay: selector.identity.overlay,
                 rung: rung_of(strategy),
                 load_shape: curve_load_shape(selector.contract.load_shape),
                 closure_digest: selector.identity.expected_closure_digest,
@@ -767,6 +782,7 @@ pub(crate) fn admit_video_generation(
         request,
         sceneworks_core::video_memory_curves::packaged_video_memory_curves(),
         packaged_video_decode_profile,
+        true,
     )
 }
 
@@ -783,6 +799,7 @@ fn admit_video_generation_with_curves(
         request,
         curves,
         no_video_decode_profile,
+        false,
     )
 }
 
@@ -791,14 +808,10 @@ fn admit_video_generation_with_curves_and_profiles(
     request: VideoAdmissionInputs<'_>,
     curves: Option<&VideoMemoryCurveBundle>,
     decode_profile: VideoDecodeProfileResolver,
+    require_request_evidence: bool,
 ) -> VideoAdmissionOutcome {
-    // The promoted SC-18810 evidence is the reference-free, overlay-free T2V surface. Do not let a
-    // provider contract make the floor look like calibration coverage for I2V/keyframe/clip loads,
-    // adapters, or enhancers; those routes retain their pre-gate request byte-for-byte.
-    if request.mode != "text_to_video"
-        || request.reference_count != 0
-        || request.overlay.is_some()
-        || !(24..=30).contains(&request.fps)
+    if request.reference_shape.trim().is_empty()
+        || (request.reference_shape == "none") != (request.reference_count == 0)
     {
         return VideoAdmissionOutcome::default();
     }
@@ -813,6 +826,12 @@ fn admit_video_generation_with_curves_and_profiles(
     let Some(contract) = generator.memory_strategy_contract() else {
         return VideoAdmissionOutcome::default();
     };
+    // The request must have one fully matching fitted curve before any estimate/floor candidate is
+    // allowed into the selector. This replaces the historical exact-T2V predicate: a future mode
+    // is admitted by adding its own sealed curve, not by weakening a mode/reference/FPS `if`.
+    if require_request_evidence && !curve_evidence_covers_request(curves, contract, &request) {
+        return VideoAdmissionOutcome::default();
+    }
     let attributable_resident_bytes = runtime
         .provider_resident_bytes
         .min(runtime.budget.committed_bytes)
@@ -824,7 +843,9 @@ fn admit_video_generation_with_curves_and_profiles(
             route: request.route,
             mode: request.mode,
             reference_count: request.reference_count,
+            reference_shape: request.reference_shape,
             overlay: request.overlay,
+            fps: request.fps,
             lane: request.lane,
             tier: request.tier,
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
@@ -988,6 +1009,71 @@ fn admit_video_generation_with_curves_and_profiles(
     }
 }
 
+fn curve_evidence_covers_request(
+    curves: Option<&VideoMemoryCurveBundle>,
+    contract: &MemoryProviderContract,
+    request: &VideoAdmissionInputs<'_>,
+) -> bool {
+    let Some(curves) = curves else {
+        return false;
+    };
+    let Some(calibration) = contract.calibration.as_ref() else {
+        return false;
+    };
+    let geometries = sceneworks_core::video_request::video_admission_geometries(
+        request.model_id,
+        request.lane,
+        request.width,
+        request.height,
+        request.frames,
+        request.decode_chunk_size,
+    );
+    curves.curves.iter().any(|curve| {
+        curve.model_id == request.model_id
+            && curve.model_family == request.model_family
+            && curve.route == request.route
+            && curve.provider == contract.provider_id
+            && curve.backend == curve_backend(request.lane)
+            && curve.tier == crate::mlx_fit_gate::plan_tier_key(request.tier)
+            && curve.mode == request.mode
+            && curve.reference_shape == request.reference_shape
+            && curve.reference_count == request.reference_count
+            && curve.frames_per_second.contains(&request.fps)
+            && curve.overlay.as_deref() == request.overlay
+            && curve.calibration_abi == gen_core::MEMORY_CALIBRATION_ABI
+            && curve.calibration_fingerprint == calibration.fingerprint
+            && geometries.iter().all(|geometry| {
+                curves
+                    .evaluate(VideoCurveQuery {
+                        model_id: request.model_id,
+                        model_family: request.model_family,
+                        route: request.route,
+                        provider: &contract.provider_id,
+                        backend: curve_backend(request.lane),
+                        tier: crate::mlx_fit_gate::plan_tier_key(request.tier),
+                        mode: request.mode,
+                        reference_shape: request.reference_shape,
+                        reference_count: request.reference_count,
+                        frames_per_second: request.fps,
+                        overlay: request.overlay,
+                        rung: curve.rung,
+                        load_shape: curve_load_shape(contract.load_shape),
+                        closure_digest: request.expected_closure_digest,
+                        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+                        calibration_fingerprint: &calibration.fingerprint,
+                        decode_pass: curve_decode_pass(geometry.decode_pass),
+                        geometry: VideoCurveGeometry {
+                            width: geometry.width,
+                            height: geometry.height,
+                            frames: geometry.estimate_frames(),
+                            batch: geometry.batch,
+                        },
+                    })
+                    .is_some()
+            })
+    })
+}
+
 /// Whether a ladder rejection may be suppressed as a pure **estimate-margin artifact** on a
 /// **floor-shaped peak** — the only refusal `admit_video_generation`'s non-regression guard is
 /// entitled to swallow.
@@ -1036,6 +1122,8 @@ pub(crate) struct VideoAdmissionInputs<'a> {
     /// Evidence-mode key (`text_to_video`, `image_to_video`, or another explicitly measured mode).
     pub(crate) mode: &'a str,
     pub(crate) reference_count: u32,
+    /// Exact carrier used by the references. Must be `none` iff `reference_count` is zero.
+    pub(crate) reference_shape: &'a str,
     pub(crate) overlay: Option<&'a str>,
     pub(crate) lane: VideoLane,
     pub(crate) tier: MemoryNumericTier,

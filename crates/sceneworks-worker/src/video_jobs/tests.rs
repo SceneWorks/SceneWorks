@@ -645,58 +645,17 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
-fn calibrated_video_memory_surface_is_exact_t2v_only() {
-    let mut input = VideoGenInput {
-        fps: 24,
-        ..VideoGenInput::default()
-    };
-    assert!(calibrated_video_memory_surface(&input, "text_to_video"));
-    assert!(calibrated_video_memory_surface(
-        &VideoGenInput {
-            fps: 30,
-            ..VideoGenInput::default()
-        },
-        "text_to_video"
-    ));
-
-    assert!(!calibrated_video_memory_surface(&input, "image_to_video"));
-    input.conditioning.push(Conditioning::Reference {
-        image: gen_core::Image {
-            width: 1,
-            height: 1,
-            pixels: vec![0, 0, 0],
-        },
-        strength: None,
-    });
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.conditioning.clear();
-    input.enhance_prompt = true;
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.enhance_prompt = false;
-    input.use_uncensored_enhancer = true;
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.use_uncensored_enhancer = false;
-    input.uncensored_enhancer_dir = Some(PathBuf::from("/fixture/enhancer"));
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.uncensored_enhancer_dir = None;
-    input.adapters.push(AdapterSpec {
-        path: PathBuf::from("/fixture/adapter.safetensors"),
-        scale: 1.0,
-        kind: gen_core::AdapterKind::Lora,
-        pass_scales: None,
-        moe_expert: None,
-    });
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.adapters.clear();
-    input.video_mode = Some("no_audio".to_owned());
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.video_mode = None;
-    for fps in [0, 1, 23, 31, 60] {
-        input.fps = fps;
-        assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    }
+fn video_funnel_has_no_exact_t2v_admission_predicate() {
+    const WAN: &str = include_str!("wan.rs");
+    assert!(
+        !WAN.contains("calibrated_video_memory_surface"),
+        "video admission must be keyed by packaged evidence, not a hard-coded surface helper"
+    );
+    assert!(
+        WAN.contains("reference_shape: admission_reference_shape"),
+        "the funnel must carry the reference carrier to evidence admission"
+    );
 }
 
 #[test]

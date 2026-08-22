@@ -294,17 +294,22 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
   );
   const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
-  assert.equal(bundle.schemaVersion, 2);
+  assert.equal(bundle.schemaVersion, 3);
   assert.equal(bundle.curves.length, 1);
   const curve = bundle.curves[0];
   assert.deepEqual(
     {
       modelId: curve.modelId,
       modelFamily: curve.modelFamily,
+      route: curve.route,
       provider: curve.provider,
       backend: curve.backend,
       tier: curve.tier,
       mode: curve.mode,
+      referenceShape: curve.referenceShape,
+      referenceCount: curve.referenceCount,
+      framesPerSecond: curve.framesPerSecond,
+      overlay: curve.overlay,
       rung: curve.rung,
       loadShape: curve.loadShape,
       batch: curve.batch,
@@ -316,10 +321,15 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     {
       modelId: "ltx_2_3",
       modelFamily: "ltx-video",
+      route: "ltx_2_3",
       provider: "ltx_2_3",
       backend: "mlx",
       tier: "q8",
       mode: "text_to_video",
+      referenceShape: "none",
+      referenceCount: 0,
+      framesPerSecond: [24, 30],
+      overlay: null,
       rung: "staged_residency",
       loadShape: "eager_materialization",
       batch: 1,
@@ -382,7 +392,7 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
   );
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(schema.properties.schemaVersion.const, 2);
+  assert.equal(schema.properties.schemaVersion.const, 3);
   assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
   assert.equal(
     schema.properties.sourceFit.pattern,

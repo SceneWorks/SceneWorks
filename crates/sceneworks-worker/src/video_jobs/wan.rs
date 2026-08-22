@@ -1487,17 +1487,6 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) fn calibrated_video_memory_surface(input: &VideoGenInput, mode: &str) -> bool {
-    mode == "text_to_video"
-        && input.conditioning.is_empty()
-        && input.adapters.is_empty()
-        && !input.enhance_prompt
-        && !input.use_uncensored_enhancer
-        && input.uncensored_enhancer_dir.is_none()
-        && input.video_mode.is_none()
-        && (24..=30).contains(&input.fps)
-}
-
 /// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
 /// lifecycle context in one operation makes it impossible for the generation request to carry an
 /// optimized rung while silently bypassing its safety/begin/configure/finish contract.
@@ -2030,6 +2019,19 @@ pub(super) async fn generate_video_using(
                 let spec_headroom_bytes =
                     crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
                 let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
+                // This is the provider-facing carrier, not a synonym for the user-visible mode:
+                // Wan turns clip extension/bridging into pinned keyframes, while I2V reaches the
+                // reference-image encoder. A future measured row must name that real residency
+                // surface before request-scoped selection can use it.
+                let admission_reference_shape = if reference_count == 0 {
+                    "none"
+                } else {
+                    match admission_mode.as_str() {
+                        "image_to_video" => "image",
+                        "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
+                        _ => "other",
+                    }
+                };
                 let mut overlays = Vec::new();
                 if !input.adapters.is_empty() {
                     overlays.push(format!("adapters:{}", input.adapters.len()));
@@ -2041,22 +2043,19 @@ pub(super) async fn generate_video_using(
                     overlays.push("enhancer".to_owned());
                 }
                 let admission_overlay = (!overlays.is_empty()).then(|| overlays.join("+"));
-                let exact_promoted_surface =
-                    calibrated_video_memory_surface(&input, &admission_mode);
                 // No contract means no declared lifecycle/selection seam. Preserve direct
                 // generation without even asking for a live budget; a budget-probe failure must
                 // not turn contract absence into a new refusal.
-                let admission_runtime =
-                    if exact_promoted_surface && generator.memory_strategy_contract().is_some() {
-                        crate::video_admission::live_video_runtime_state(
-                            engine_id,
-                            cache_state,
-                            load_policy,
-                            provider_resident_bytes,
-                        )?
-                    } else {
-                        None
-                    };
+                let admission_runtime = if generator.memory_strategy_contract().is_some() {
+                    crate::video_admission::live_video_runtime_state(
+                        engine_id,
+                        cache_state,
+                        load_policy,
+                        provider_resident_bytes,
+                    )?
+                } else {
+                    None
+                };
                 let admission_headroom_bytes = match admission_runtime {
                     Some(runtime) => spec_headroom_bytes
                         .checked_sub(runtime.budget.reserved_headroom_bytes)
@@ -2079,6 +2078,7 @@ pub(super) async fn generate_video_using(
                         route: engine_id,
                         mode: &admission_mode,
                         reference_count,
+                        reference_shape: admission_reference_shape,
                         overlay: admission_overlay.as_deref(),
                         lane: crate::video_admission::LANE,
                         tier: admission_tier,
