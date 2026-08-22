@@ -786,6 +786,28 @@ pub(crate) fn admit_video_generation(
     )
 }
 
+/// Whether a request has sealed packaged evidence before the worker pays for a live-memory probe.
+/// This is deliberately independent of the post-load budget: an unsupported mode/shape/rate must
+/// preserve direct generation even when that platform's budget probe would itself fail.
+pub(crate) fn packaged_video_evidence_covers_request(
+    generator: &dyn gen_core::Generator,
+    request: &VideoAdmissionInputs<'_>,
+) -> bool {
+    if request.reference_shape.trim().is_empty()
+        || (request.reference_shape == "none") != (request.reference_count == 0)
+    {
+        return false;
+    }
+    let Some(contract) = generator.memory_strategy_contract() else {
+        return false;
+    };
+    curve_evidence_covers_request(
+        sceneworks_core::video_memory_curves::packaged_video_memory_curves(),
+        contract,
+        request,
+    )
+}
+
 /// Test seam for exact fixture contracts/curves. Production always calls
 /// [`admit_video_generation`] and therefore consumes only the validated packaged bundle.
 #[cfg(test)]
@@ -815,6 +837,9 @@ fn admit_video_generation_with_curves_and_profiles(
     {
         return VideoAdmissionOutcome::default();
     }
+    if require_request_evidence && !packaged_video_evidence_covers_request(generator, &request) {
+        return VideoAdmissionOutcome::default();
+    }
     // Provider safety requires a same-moment post-load budget snapshot. A pre-load total-only probe
     // cannot describe unrelated committed bytes or credit already-resident provider bytes exactly
     // once, so a lane without this snapshot fails open instead of forging a context.
@@ -829,9 +854,8 @@ fn admit_video_generation_with_curves_and_profiles(
     // The request must have one fully matching fitted curve before any estimate/floor candidate is
     // allowed into the selector. This replaces the historical exact-T2V predicate: a future mode
     // is admitted by adding its own sealed curve, not by weakening a mode/reference/FPS `if`.
-    if require_request_evidence && !curve_evidence_covers_request(curves, contract, &request) {
-        return VideoAdmissionOutcome::default();
-    }
+    // The production entry already checked the packaged bundle before probing. Test seams can
+    // intentionally exercise legacy floor behavior with their own fixture bundle.
     let attributable_resident_bytes = runtime
         .provider_resident_bytes
         .min(runtime.budget.committed_bytes)

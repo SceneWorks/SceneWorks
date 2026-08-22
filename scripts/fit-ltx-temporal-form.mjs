@@ -777,6 +777,7 @@ function completeSelectorOfPoint(point) {
     mode: point.mode,
     referenceShape: point.referenceShape,
     referenceCount: point.referenceCount,
+    outputFps: point.geometry.fps,
     overlay: point.overlay,
     rung: point.rung,
     loadShape: point.loadShape,
@@ -1365,6 +1366,7 @@ export function buildVideoMemoryCurveBundle(
       mode: record.target.mode,
       referenceShape,
       referenceCount,
+      outputFps,
       overlay: record.target.overlay === "none" ? null : record.target.overlay,
       rung: record.strategy.rung,
       loadShape: record.loadShape,
@@ -1401,7 +1403,7 @@ export function buildVideoMemoryCurveBundle(
     reportedFits.set(key, entry);
   }
 
-  const curves = [...groups.entries()].map(([selectorKey, { selector, records: scopedRecords }]) => {
+  const curves = [...groups.entries()].flatMap(([selectorKey, { selector, records: scopedRecords }]) => {
     scopedRecords.sort((left, right) => compareText(left.id, right.id));
     const {
       modelId,
@@ -1413,6 +1415,7 @@ export function buildVideoMemoryCurveBundle(
       mode,
       referenceShape,
       referenceCount,
+      outputFps,
       overlay,
       rung,
       loadShape,
@@ -1426,6 +1429,12 @@ export function buildVideoMemoryCurveBundle(
       throw new Error(`inference closure digest is not sha256: ${closureDigest}`);
     }
     const observations = scopedRecords.map((record) => observationById.get(record.id));
+    const distinctGeometries = new Set(
+      observations.map(({ geometry }) => `${geometry.width}x${geometry.height}:f${geometry.frames}`),
+    );
+    // A distinct output FPS is a distinct measured surface. Keep an under-measured rate out of
+    // the runtime bundle rather than borrowing the other rate's fit or hull.
+    if (distinctGeometries.size < 3) return [];
     const reported = reportedFits.get(selectorKey);
     if (
       !reported ||
@@ -1502,14 +1511,8 @@ export function buildVideoMemoryCurveBundle(
         `${modelId}/${tier}/${rung} contains records outside the fitted or held-out subsets: ${unscored.join(", ")}`,
       );
     }
-    const framesPerSecond = [
-      ...new Set(
-        scopedRecords.map((record) =>
-          record.diagnostics.measurements.find((entry) => entry.name === "outputFps")?.value,
-        ),
-      ),
-    ].sort((a, b) => a - b);
-    return {
+    const framesPerSecond = [outputFps];
+    return [{
       // Keep the human-readable id bijective with the complete selector. Runtime also validates
       // every field independently; the id is not an authorization shortcut.
       id: `${modelId}:${modelFamily}:${route}:${provider}:${backend}:${tier}:${mode}:ref${referenceShape}-${referenceCount}:fps${framesPerSecond.join("+")}:${overlay ?? "none"}:${rung}:${loadShape}:b${batch}:abi${calibrationAbi}:${decodePass}:${closureDigest.slice(0, 12)}:${calibrationFingerprint}`,
@@ -1539,7 +1542,7 @@ export function buildVideoMemoryCurveBundle(
         heldOutPoints,
         sources: evidenceSources,
       },
-    };
+    }];
   });
   curves.sort((left, right) => compareText(left.id, right.id));
 

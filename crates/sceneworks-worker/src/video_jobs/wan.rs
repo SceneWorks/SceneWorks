@@ -2043,19 +2043,41 @@ pub(super) async fn generate_video_using(
                     overlays.push("enhancer".to_owned());
                 }
                 let admission_overlay = (!overlays.is_empty()).then(|| overlays.join("+"));
-                // No contract means no declared lifecycle/selection seam. Preserve direct
-                // generation without even asking for a live budget; a budget-probe failure must
-                // not turn contract absence into a new refusal.
-                let admission_runtime = if generator.memory_strategy_contract().is_some() {
-                    crate::video_admission::live_video_runtime_state(
-                        engine_id,
-                        cache_state,
-                        load_policy,
-                        provider_resident_bytes,
-                    )?
-                } else {
-                    None
+                let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
+                    model_id: &admission_model_id,
+                    model_family: &admission_model_family,
+                    route: engine_id,
+                    mode: &admission_mode,
+                    reference_count,
+                    reference_shape: admission_reference_shape,
+                    overlay: admission_overlay.as_deref(),
+                    lane: crate::video_admission::LANE,
+                    tier: admission_tier,
+                    width: admission_geometry.0,
+                    height: admission_geometry.1,
+                    frames: admission_geometry.2,
+                    decode_chunk_size: admission_geometry.3,
+                    fps: input.fps,
+                    runtime: None,
+                    headroom_bytes: spec_headroom_bytes,
+                    expected_closure_digest: &admission_closure_digest,
                 };
+                // Evidence is the preflight: an unsupported request stays direct generation without
+                // attempting a platform memory probe that could fail independently of admission.
+                let admission_runtime =
+                    if crate::video_admission::packaged_video_evidence_covers_request(
+                        generator,
+                        &admission_inputs,
+                    ) {
+                        crate::video_admission::live_video_runtime_state(
+                            engine_id,
+                            cache_state,
+                            load_policy,
+                            provider_resident_bytes,
+                        )?
+                    } else {
+                        None
+                    };
                 let admission_headroom_bytes = match admission_runtime {
                     Some(runtime) => spec_headroom_bytes
                         .checked_sub(runtime.budget.reserved_headroom_bytes)
@@ -2070,28 +2092,10 @@ pub(super) async fn generate_video_using(
                     // open before selection, so this value is observationally inert there.
                     None => spec_headroom_bytes,
                 };
-                let outcome = crate::video_admission::admit_video_generation(
-                    generator,
-                    crate::video_admission::VideoAdmissionInputs {
-                        model_id: &admission_model_id,
-                        model_family: &admission_model_family,
-                        route: engine_id,
-                        mode: &admission_mode,
-                        reference_count,
-                        reference_shape: admission_reference_shape,
-                        overlay: admission_overlay.as_deref(),
-                        lane: crate::video_admission::LANE,
-                        tier: admission_tier,
-                        width: admission_geometry.0,
-                        height: admission_geometry.1,
-                        frames: admission_geometry.2,
-                        decode_chunk_size: admission_geometry.3,
-                        fps: input.fps,
-                        runtime: admission_runtime,
-                        headroom_bytes: admission_headroom_bytes,
-                        expected_closure_digest: &admission_closure_digest,
-                    },
-                );
+                admission_inputs.runtime = admission_runtime;
+                admission_inputs.headroom_bytes = admission_headroom_bytes;
+                let outcome =
+                    crate::video_admission::admit_video_generation(generator, admission_inputs);
                 apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /

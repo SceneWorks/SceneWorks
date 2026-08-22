@@ -110,10 +110,8 @@ test("held-out tier analysis uses only the exact staged single-pass selector", (
     "sc-18946",
   );
   assert.equal(report.coefficientTransfer.verdict, "open");
-  assert.deepEqual(report.coefficientTransfer.missingTiers, ["bf16"]);
-  assert.equal(report.phaseFlip.tiers.q8.status, "measured");
-  assert.equal(report.phaseFlip.tiers.q8.selector.rung, "staged_residency");
-  assert.equal(report.phaseFlip.tiers.q8.selector.decodePass, "single_pass");
+  assert.deepEqual(report.coefficientTransfer.missingTiers, ["q8", "q4", "bf16"]);
+  assert.equal(report.phaseFlip.tiers.q8.status, "insufficient_data");
 
 });
 
@@ -328,7 +326,7 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
       mode: "text_to_video",
       referenceShape: "none",
       referenceCount: 0,
-      framesPerSecond: [24, 30],
+      framesPerSecond: [30],
       overlay: null,
       rung: "staged_residency",
       loadShape: "eager_materialization",
@@ -339,15 +337,11 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
       decodePass: "single_pass",
     },
   );
-  assert.deepEqual(
-    {
-      text: report.fits.text.q8.chosen,
-      denoise: report.fits.denoise.q8.chosen,
-      decode: report.fits.decode.q8.chosen,
-    },
-    { text: "area_only", denoise: "latent_tokens", decode: "cross" },
-    "the fit report's generic winner is deliberately not the ratified cross-curve selector",
-  );
+  const q8At30 = report.selectorFits.find((entry) => entry.selector.outputFps === 30);
+  assert.ok(q8At30, "the 30 FPS selector is independently fitted");
+  for (const phase of ["text", "denoise", "decode"]) {
+    assert.ok(q8At30.fits[phase].candidates.cross, `${phase} retains an exact 30 FPS cross fit`);
+  }
   for (const [wirePhase, fitPhase] of [
     ["conditioning", "text"],
     ["denoise", "denoise"],
@@ -357,14 +351,17 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
       Object.fromEntries(
         Object.entries(curve.phases[wirePhase]).filter(([key]) => key !== "maxResidualGb"),
       ),
-      report.fits[fitPhase].q8.candidates.cross.coefficients,
+      q8At30.fits[fitPhase].candidates.cross.coefficients,
       `${wirePhase} must carry the ratified cross coefficients verbatim`,
     );
   }
-  assert.equal(curve.evidence.records, DATASET.records.length);
+  const recordsAt30 = DATASET.records.filter((record) =>
+    record.diagnostics.measurements.some((entry) => entry.name === "outputFps" && entry.value === 30),
+  );
+  assert.equal(curve.evidence.records, recordsAt30.length);
   assert.deepEqual(
     curve.evidence.sources[0].recordIds,
-    DATASET.records.map((record) => record.id).sort(),
+    recordsAt30.map((record) => record.id).sort(),
     "the runtime artifact must name every immutable source record",
   );
   assert.equal(
@@ -471,7 +468,10 @@ test("mixed complete selectors and sources produce deterministic independent cur
   assert.deepEqual(boundedCurve.evidence.sources.map(({ path }) => path), ["evidence/c.json"]);
   assert.deepEqual(
     q4Curve.evidence.sources.flatMap(({ recordIds }) => recordIds).sort(),
-    q4.records.map(({ id }) => id).sort(),
+    q4.records
+      .filter((record) => record.diagnostics.measurements.some((entry) => entry.name === "outputFps" && entry.value === 30))
+      .map(({ id }) => id)
+      .sort(),
   );
   assert.ok(
     Math.abs(
@@ -485,11 +485,11 @@ test("mixed complete selectors and sources produce deterministic independent cur
     ) < 1e-12,
     "bounded decode is fitted independently even though it shares q8 tier identity",
   );
-  assert.equal(mixedReport.selectorFits.length, 3);
+  assert.equal(mixedReport.selectorFits.length, 6);
   assert.deepEqual(
     mixedReport.legacyFitsOmittedForTiers,
-    ["q8"],
-    "the legacy tier-only view may not pool two complete q8 selectors",
+    ["q4", "q8"],
+    "the legacy tier-only view may not pool selectors with different FPS surfaces",
   );
 });
 
@@ -552,8 +552,8 @@ test("multi-dataset CLI output stays current when source order is reversed", () 
     assert.ok(generatedReport.coefficientTransfer);
     assert.ok(generatedReport.phaseFlip);
     assert.equal(JSON.parse(readFileSync(curvePath, "utf8")).sourceFit, "docs/generated/ltx-temporal-form-fit-sc-18946.json");
-    assert.equal(generatedReport.selectorFits.length, 3);
-    assert.deepEqual(generatedReport.legacyFitsOmittedForTiers, ["q8"]);
+    assert.equal(generatedReport.selectorFits.length, 6);
+    assert.deepEqual(generatedReport.legacyFitsOmittedForTiers, ["q4", "q8"]);
     assert.equal(
       generatedReport.noiseFloors.decode.replicatedGeometries,
       12,
@@ -604,7 +604,7 @@ test("duplicate or malformed source record identities cannot be promoted", () =>
   );
 
   const detachedSelectorSubset = structuredClone(report);
-  detachedSelectorSubset.selectorFits[0].recordIds.pop();
+  detachedSelectorSubset.selectorFits.find((entry) => entry.selector.outputFps === 30).recordIds.pop();
   assert.throws(
     () => buildVideoMemoryCurveBundle(detachedSelectorSubset, DATASET.records, MANIFEST, DATASET_SOURCES),
     /fit report record subset is detached/,

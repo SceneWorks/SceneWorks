@@ -23,9 +23,9 @@ use crate::memory_calibration::StrategyRung;
 pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 3;
 pub const PACKAGED_VIDEO_MEMORY_CURVES: &str =
     include_str!("../../../docs/generated/video-memory-curves.json");
-/// Every immutable evidence source compiled alongside the promoted curve bundle. The loader treats
-/// this as one catalog: paths and record ids must be globally unique, every byte digest must agree,
-/// and every source record must be consumed by exactly one complete-selector curve.
+/// Immutable evidence sources compiled alongside the promoted curve bundle. Paths and record ids
+/// are globally unique and bytes/digests must agree. A source record may remain unmodeled (such as
+/// an under-sampled FPS), but every curve source record must match one complete selector exactly.
 const PACKAGED_VIDEO_MEMORY_CURVE_SOURCES: &[(&str, &str)] = &[(
     "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
     include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
@@ -405,23 +405,6 @@ fn validate_video_memory_curve_bundle_ref(
             }
         }
     }
-    let expected_records = sources
-        .iter()
-        .flat_map(|(path, source)| {
-            source.records.iter().filter_map(move |record| {
-                record
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(|id| (path.clone(), id.to_owned()))
-            })
-        })
-        .collect::<BTreeSet<_>>();
-    if referenced_records != expected_records {
-        return Err(
-            "video-memory curves do not consume the exact compiled source-record catalog"
-                .to_owned(),
-        );
-    }
     Ok(())
 }
 
@@ -643,7 +626,7 @@ fn source_route(record: &Value) -> Option<&str> {
         .or_else(|| value_at_str(record, &["target", "provider"]))
 }
 
-fn source_reference_shape<'a>(record: &'a Value, reference_count: u32) -> Option<&'a str> {
+fn source_reference_shape(record: &Value, reference_count: u32) -> Option<&str> {
     value_at_str(record, &["target", "referenceShape"])
         .or_else(|| (reference_count == 0).then_some("none"))
 }
@@ -960,7 +943,7 @@ mod tests {
             .expect("q8 LTX curve matches");
         assert_eq!(
             evaluation.curve_id,
-            "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps24+30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+            "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
         );
         assert!(evaluation.phases.conditioning > evaluation.phases.denoise);
         assert!(evaluation.phases.denoise > evaluation.phases.decode);
@@ -1041,6 +1024,19 @@ mod tests {
         assert!(
             bundle.evaluate(query).is_none(),
             "crossed reference shape/count"
+        );
+
+        let mut query = packaged_query();
+        query.frames_per_second = 24;
+        query.geometry = VideoCurveGeometry {
+            width: 768,
+            height: 512,
+            frames: 241,
+            batch: 1,
+        };
+        assert!(
+            bundle.evaluate(query).is_none(),
+            "crossed FPS cannot borrow its geometry hull"
         );
 
         let mut query = packaged_query();

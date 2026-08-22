@@ -26,15 +26,30 @@ fn video_admission_captures_the_resolved_decode_chunk_from_the_engine_input() {
     );
 
     let inputs = WAN
-        .split_once("crate::video_admission::VideoAdmissionInputs {")
+        .split_once("let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {")
         .expect("shared video funnel invokes admission")
         .1
-        .split_once("},")
+        .split_once("};")
         .expect("admission inputs close")
         .0;
     assert!(
         inputs.contains("decode_chunk_size: admission_geometry.3"),
         "the captured chunk must reach VideoAdmissionInputs: {inputs}"
+    );
+}
+
+#[test]
+fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
+    const WAN: &str = include_str!("wan.rs");
+    let preflight = WAN
+        .find("packaged_video_evidence_covers_request")
+        .expect("production funnel has packaged-evidence preflight");
+    let probe = WAN
+        .find("live_video_runtime_state(")
+        .expect("production funnel has live-memory probe");
+    assert!(
+        preflight < probe,
+        "unsupported modes must retain direct generation before any fallible memory probe"
     );
 }
 
