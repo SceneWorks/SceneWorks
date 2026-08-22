@@ -69,8 +69,7 @@
       },
       "else": {
         "properties": {
-          "error": { "type": "string", "minLength": 1 },
-          "offlineBeforeCells": { "const": false }
+          "error": { "type": "string", "minLength": 1 }
         }
       }
     }

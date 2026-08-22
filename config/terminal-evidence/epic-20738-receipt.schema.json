@@ -4,7 +4,7 @@
   "title": "Epic 20738 CUDA terminal evidence receipt",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "profile", "cell", "status", "error", "repositories", "artifacts", "execution", "hardware", "cleanup", "inputs", "outputs", "logs", "startedAt", "completedAt"],
+  "required": ["schemaVersion", "profile", "cell", "status", "error", "repositories", "artifacts", "execution", "hardware", "cleanup", "authorityLifecycle", "inputs", "outputs", "logs", "startedAt", "completedAt"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "profile": { "const": "epic-20738-candle-cuda-terminal-v1" },
@@ -153,31 +153,6 @@
     {
       "if": { "type": "object", "properties": { "status": { "const": "failed" } }, "required": ["status"] },
       "then": { "type": "object", "properties": { "error": { "type": "string", "minLength": 1 } } }
-    },
-    {
-      "if": {
-        "type": "object",
-        "properties": {
-          "repositories": {
-            "type": "object",
-            "properties": {
-              "sceneworks": {
-                "type": "object",
-                "properties": { "sha": { "const": "8886a9e69f26beec05688c81b414859bd102f6d0" } },
-                "required": ["sha"]
-              }
-            },
-            "required": ["sceneworks"]
-          }
-        },
-        "required": ["repositories"]
-      },
-      "then": {},
-      "else": {
-        "type": "object",
-        "properties": { "authorityLifecycle": { "$ref": "#/$defs/authorityLifecycle" } },
-        "required": ["authorityLifecycle"]
-      }
     }
   ],
   "$defs": {

@@ -1066,6 +1066,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     missingId = null, downloadSucceeds = false, mutateCache = false, mutateSourceAtStage = false,
     preflightFault = null, cellFault = null, omitObstructions = false,
     derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
+    runtimeResultMode = "valid", providerRuntimeFailureAt = null,
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -1210,12 +1211,22 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
         const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
         runtimeCells.push(runtimeCell);
         events.push(`execute:${runtimeCell.id}`);
-        await writeFile(path.join(cellDir, "runtime-result.json"), `${JSON.stringify({
-          requestedTier: runtimeCell.requestedTier,
-          resolvedTier: runtimeCell.requestedTier,
-          denseFallback: false,
-          loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
-        })}\n`, "utf8");
+        if (runtimeCell.id === providerRuntimeFailureAt) {
+          throw new Error("fixture provider runtime failed");
+        }
+        if (runtimeResultMode !== "missing" || runtimeCells.length !== 1) {
+          const runtimeResult = runtimeResultMode === "malformed" && runtimeCells.length === 1
+            ? "{"
+            : `${JSON.stringify({
+              requestedTier: runtimeCell.requestedTier,
+              resolvedTier: runtimeResultMode === "wrong-semantic" && runtimeCells.length === 1
+                ? (runtimeCell.requestedTier === "q4" ? "q8" : "q4")
+                : runtimeCell.requestedTier,
+              denseFallback: false,
+              loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
+            })}\n`;
+          await writeFile(path.join(cellDir, "runtime-result.json"), runtimeResult, "utf8");
+        }
         await writeFile(path.join(cellDir, "output.bin"), "fixture", "utf8");
       },
       verifyArtifactUnchanged: async () => {
@@ -1327,6 +1338,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(failed.runtimeCells.length, 0);
   assert.equal(failed.result.summary.passed, 7);
   assert.equal(failed.result.summary.failed, 12);
+  assert.equal(failed.cacheEvidence.offlineBeforeCells, false);
   assert.match(
     failed.result.summary.campaignErrors.join("\n"),
     /cache-only transfer\/disk preflight failed[\s\S]*exact missing-file transfer failed[\s\S]*no continuation GPU cell started/,
@@ -1375,6 +1387,49 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.ok(diskDropsBeforeExecution.result.summary.receipts.slice(7).every(
     (outcome) => outcome.status === "failed" && outcome.receipt,
   ));
+
+  for (const runtimeResultMode of ["missing", "malformed", "wrong-semantic"]) {
+    const faulted = await scenario({ runtimeResultMode });
+    assert.equal(faulted.runtimeCells.length, 1, runtimeResultMode);
+    assert.ok(faulted.result.summary.receipts.slice(8).every(
+      (outcome) => outcome.status === "failed" && outcome.receipt,
+    ), runtimeResultMode);
+    assert.match(
+      faulted.result.summary.campaignErrors.join("\n"),
+      /runtime-result evidence failed after cell flux1-dev-q8/,
+      runtimeResultMode,
+    );
+    assert.equal(faulted.cacheEvidence.offlineBeforeCells, true, runtimeResultMode);
+  }
+  const runtimeHashFault = await scenario({ cellFault: { stage: "runtimeResultHash" } });
+  assert.equal(runtimeHashFault.runtimeCells.length, 1);
+  assert.ok(runtimeHashFault.result.summary.receipts.slice(8).every(
+    (outcome) => outcome.status === "failed" && outcome.receipt,
+  ));
+  assert.match(
+    runtimeHashFault.result.summary.campaignErrors.join("\n"),
+    /runtime-result evidence failed after cell flux1-dev-q8.*runtimeResultHash/,
+  );
+  assert.equal(runtimeHashFault.cacheEvidence.offlineBeforeCells, true);
+  const falseAfterOffline = structuredClone(runtimeHashFault.cacheEvidence);
+  falseAfterOffline.offlineBeforeCells = false;
+  assert.doesNotThrow(() => validateDocumentWithSchema(
+    CACHE_PREFLIGHT_SCHEMA_PATH,
+    falseAfterOffline,
+  ));
+  assert.throws(
+    () => validateCachePreflightEvidence(falseAfterOffline, runtimeHashFault.cacheValidation),
+    /cell lifecycle evidence before network-offline establishment/,
+  );
+
+  const providerFailed = await scenario({ providerRuntimeFailureAt: "flux1-dev-q8" });
+  assert.equal(providerFailed.runtimeCells.length, 12);
+  assert.equal(providerFailed.result.summary.failed, 1);
+  assert.equal(providerFailed.result.summary.passed, 18);
+  assert.equal(
+    providerFailed.result.summary.campaignErrors.some((error) => error.includes("runtime-result evidence")),
+    false,
+  );
 
   for (const cellFault of [
     { stage: "finalLog" },
@@ -1526,6 +1581,27 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingLifecycle),
     /required property 'authorityLifecycle'/,
   );
+  const forgedLegacyLifecycleOmission = structuredClone(firstReceipt);
+  forgedLegacyLifecycleOmission.repositories.sceneworks.sha = "8886a9e69f26beec05688c81b414859bd102f6d0";
+  forgedLegacyLifecycleOmission.execution.headSha = "8886a9e69f26beec05688c81b414859bd102f6d0";
+  delete forgedLegacyLifecycleOmission.authorityLifecycle;
+  assert.throws(
+    () => validateReceipt(
+      forgedLegacyLifecycleOmission, firstCell, filled.checked, filled.lifecycleContext,
+    ),
+    /missing required authority lifecycle/,
+  );
+  assert.throws(
+    () => validateReceipt(
+      forgedLegacyLifecycleOmission, firstCell, filled.checked, filled.lifecycleContext,
+      { trustedLegacyImport: true },
+    ),
+    /missing required authority lifecycle/,
+  );
+  assert.throws(
+    () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, forgedLegacyLifecycleOmission),
+    /required property 'authorityLifecycle'/,
+  );
   for (const [label, mutate] of [
     ["phase", (value) => { value.authorityLifecycle.diskProbes[0].phase = "before-stage:wrong"; }],
     ["ordinal", (value) => { value.authorityLifecycle.diskProbes[0].ordinal += 1; }],
@@ -1565,6 +1641,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       CACHE_PREFLIGHT_SCHEMA_PATH,
       faulted.cacheEvidence,
     ));
+    assert.equal(faulted.cacheEvidence.offlineBeforeCells, stage === "preflightMkdir" ? false : true);
   }
   const semanticFault = await scenario({ omitObstructions: true });
   assert.equal(semanticFault.runtimeCells.length, 0);

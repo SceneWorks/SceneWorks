@@ -26,6 +26,8 @@ export const CACHE_PREFLIGHT_SCHEMA_PATH = "config/terminal-evidence/epic-20738-
 const DOWNLOAD_EVIDENCE_PATH = "config/download-pattern-evidence.json";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCHEMA_VALIDATORS = new Map();
+let LEGACY_IMPORTED_RECEIPT_VALIDATOR = null;
+const TRUSTED_LEGACY_IMPORT_CONTEXT = Symbol("trusted legacy prefix import");
 const SHA40 = /^[0-9a-f]{40}$/;
 const SAFE_ID = /^[a-z0-9][a-z0-9-]+$/;
 const BLOCKED = ["anima", "sana", "vace", "flux2", "true_v2", "true-v2", "eros"];
@@ -535,6 +537,24 @@ export function validateDocumentWithSchema(schemaPath, document) {
   return value;
 }
 
+function validateTrustedLegacyImportedReceiptDocument(receipt) {
+  if (!LEGACY_IMPORTED_RECEIPT_VALIDATOR) {
+    const absolute = path.resolve(ROOT, RECEIPT_SCHEMA_PATH);
+    const schema = JSON.parse(readFileSync(absolute, "utf8"));
+    schema.$id = schema.$id.replace(/\.json$/, "-trusted-legacy-import.json");
+    schema.required = schema.required.filter((field) => field !== "authorityLifecycle");
+    const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
+    addFormats(ajv);
+    LEGACY_IMPORTED_RECEIPT_VALIDATOR = ajv.compile(schema);
+  }
+  if (!LEGACY_IMPORTED_RECEIPT_VALIDATOR(receipt)) {
+    const details = LEGACY_IMPORTED_RECEIPT_VALIDATOR.errors
+      .map((error) => `${error.instancePath || "/"}: ${error.message}`).join("\n");
+    fail(`trusted legacy prefix receipt failed Draft 2020-12 validation:\n${details}`);
+  }
+  return receipt;
+}
+
 async function writeJsonAtomically(file, value, { schemaPath } = {}) {
   await mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
@@ -822,7 +842,9 @@ export function receiptSkeleton({
   };
 }
 
-export function validateReceipt(receipt, expectedCell, profile, lifecycleContext = null) {
+function validateReceiptInternal(
+  receipt, expectedCell, profile, lifecycleContext = null, trustedContext = null,
+) {
   if (receipt.schemaVersion !== 1 || receipt.profile !== PROFILE_NAME) fail("receipt identity mismatch");
   if (!new Set(["passed", "failed"]).has(receipt.status)) fail("receipt status is invalid");
   if (receipt.cell.ordinal < 1 || receipt.cell.ordinal > EXPECTED_CELLS.length
@@ -903,8 +925,7 @@ export function validateReceipt(receipt, expectedCell, profile, lifecycleContext
     || (receipt.cleanup.error !== null && typeof receipt.cleanup.error !== "string")) {
     fail("receipt cleanup evidence is incomplete");
   }
-  if (!receipt.authorityLifecycle
-    && receipt.repositories.sceneworks.sha !== LEGACY_SCENEWORKS_HEAD) {
+  if (!receipt.authorityLifecycle && trustedContext !== TRUSTED_LEGACY_IMPORT_CONTEXT) {
     fail("continuation receipt is missing required authority lifecycle evidence");
   }
   if (receipt.authorityLifecycle) {
@@ -988,6 +1009,10 @@ export function validateReceipt(receipt, expectedCell, profile, lifecycleContext
     fail("failed receipt must retain an error");
   }
   return receipt;
+}
+
+export function validateReceipt(receipt, expectedCell, profile, lifecycleContext = null) {
+  return validateReceiptInternal(receipt, expectedCell, profile, lifecycleContext);
 }
 
 function cachedArtifactRoots(cacheRoot, artifact) {
@@ -1102,16 +1127,18 @@ async function validatePrefixCandidate(candidate, currentProfile) {
       fail(`imported prefix is missing the exact primary receipt for ${ordinalName}`);
     }
     const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
-    validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
-    validateReceipt(receipt, cell, legacyProfile);
     if (receipt.status !== "passed"
-      || receipt.repositories.sceneworks.sha !== LEGACY_SCENEWORKS_HEAD
-      || receipt.repositories.inference.sha !== FROZEN_INFERENCE_PIN
-      || receipt.execution.headSha !== LEGACY_SCENEWORKS_HEAD
-      || receipt.execution.runId !== metadata.runId
-      || receipt.execution.runAttempt !== metadata.runAttempt) {
+      || receipt.cell?.ordinal !== index + 1
+      || receipt.cell?.id !== cell.id
+      || receipt.repositories?.sceneworks?.sha !== LEGACY_SCENEWORKS_HEAD
+      || receipt.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+      || receipt.execution?.headSha !== LEGACY_SCENEWORKS_HEAD
+      || receipt.execution?.runId !== metadata.runId
+      || receipt.execution?.runAttempt !== metadata.runAttempt) {
       fail(`imported prefix receipt ${ordinalName} is not an exact PASS from the bound old run`);
     }
+    validateTrustedLegacyImportedReceiptDocument(receipt);
+    validateReceiptInternal(receipt, cell, legacyProfile, null, TRUSTED_LEGACY_IMPORT_CONTEXT);
     const rehashed = await evidenceFiles(cellDir);
     for (const field of ["inputs", "outputs", "logs"]) {
       if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
@@ -1145,16 +1172,22 @@ async function validatePrefixCandidate(candidate, currentProfile) {
     fail("imported artifact contains evidence outside the seven PASS cells and cell-8 boundary residue");
   }
   const boundaryReceipt = JSON.parse(await readFile(path.join(boundaryDir, "receipt.json"), "utf8"));
-  validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, boundaryReceipt);
-  validateReceipt(boundaryReceipt, boundaryCell, legacyProfile);
-  const boundaryLog = (await hashedFiles(boundaryDir, { exclude: new Set(["receipt.json"]) }));
   if (boundaryReceipt.status !== "failed"
-    || boundaryReceipt.error !== "cell has not completed"
-    || boundaryReceipt.repositories.sceneworks.sha !== LEGACY_SCENEWORKS_HEAD
-    || boundaryReceipt.repositories.inference.sha !== FROZEN_INFERENCE_PIN
-    || boundaryReceipt.execution.headSha !== LEGACY_SCENEWORKS_HEAD
-    || boundaryReceipt.execution.runId !== metadata.runId
-    || boundaryReceipt.execution.runAttempt !== metadata.runAttempt
+    || boundaryReceipt.cell?.ordinal !== boundaryIndex + 1
+    || boundaryReceipt.cell?.id !== boundaryCell.id
+    || boundaryReceipt.repositories?.sceneworks?.sha !== LEGACY_SCENEWORKS_HEAD
+    || boundaryReceipt.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || boundaryReceipt.execution?.headSha !== LEGACY_SCENEWORKS_HEAD
+    || boundaryReceipt.execution?.runId !== metadata.runId
+    || boundaryReceipt.execution?.runAttempt !== metadata.runAttempt) {
+    fail("imported cell-8 residue is not bound to the exact legacy run boundary");
+  }
+  validateTrustedLegacyImportedReceiptDocument(boundaryReceipt);
+  validateReceiptInternal(
+    boundaryReceipt, boundaryCell, legacyProfile, null, TRUSTED_LEGACY_IMPORT_CONTEXT,
+  );
+  const boundaryLog = (await hashedFiles(boundaryDir, { exclude: new Set(["receipt.json"]) }));
+  if (boundaryReceipt.error !== "cell has not completed"
     || boundaryReceipt.startedAt !== boundaryReceipt.completedAt
     || boundaryReceipt.cleanup.attempted !== false
     || boundaryReceipt.cleanup.completed !== false
@@ -1911,6 +1944,7 @@ function cachePreflightDocument({
   evidencePhase, status, error, downloadEvidenceSha256, remainingArtifactIds, guard, stagingRoot,
   derivedSidecarRoot, frozenMissing, sidecarObstructions, cacheProvisioning,
   derivedSidecarLifecycle, missingStore, lifetimePlan, diskPlan, missingDownload,
+  networkOfflineEstablished,
 }) {
   return {
     schemaVersion: 1,
@@ -1937,7 +1971,7 @@ function cachePreflightDocument({
     lifetimePlan,
     diskPlan,
     derivedSidecarLifecycle,
-    offlineBeforeCells: status === "passed",
+    offlineBeforeCells: networkOfflineEstablished,
   };
 }
 
@@ -2027,6 +2061,11 @@ export function validateCachePreflightEvidence(document, {
   if (document.networkDownloadCount !== document.downloadedFiles.length
     || document.networkDownloadCount !== frozen.length) {
     fail("cache preflight network count drifted from the frozen missing set");
+  }
+  if (!document.offlineBeforeCells && (document.phases.staging.length
+    || document.phases.finalOffline.length || document.sidecarObstructions.length
+    || document.derivedSidecarLifecycle.afterCells.length)) {
+    fail("cache preflight records cell lifecycle evidence before network-offline establishment");
   }
   if (document.status === "passed") {
     const plannedAudits = new Map(document.phases.sourceCensus.map((row) => [row.id, {
@@ -2353,6 +2392,7 @@ export async function runCampaign(args, options = {}) {
   }
 
   let missingDownload = null;
+  let networkOfflineEstablished = false;
   let sidecarObstructions = [];
   const derivedSidecarLifecycle = { initial: null, afterCells: [] };
   let lifetimePlan = [];
@@ -2395,6 +2435,7 @@ export async function runCampaign(args, options = {}) {
       quarantineReason = `cache-only transfer/disk preflight failed: ${errorText(error)}`;
     }
   }
+  if (!quarantineReason) networkOfflineEstablished = true;
   if (quarantineReason) {
     quarantineReason = `${quarantineReason}; no continuation GPU cell started`;
     campaignErrors.push(quarantineReason);
@@ -2429,6 +2470,7 @@ export async function runCampaign(args, options = {}) {
     lifetimePlan,
     diskPlan,
     missingDownload,
+    networkOfflineEstablished,
   });
   let initialWrite = await writeCachePreflightDurably({
     output, filename: "cache-preflight-initial.json", document: initialDocument,
@@ -2459,6 +2501,7 @@ export async function runCampaign(args, options = {}) {
       lifetimePlan: [],
       diskPlan: null,
       missingDownload: null,
+      networkOfflineEstablished,
     });
     initialWrite = {
       evidence: await writeCachePreflightFallback({
@@ -2767,10 +2810,30 @@ export async function runCampaign(args, options = {}) {
       }
       if (runtimeFailure) throw runtimeFailure;
       operations.sample(samples, errors, "post-execution VRAM sample failed");
-      const runtimeResult = JSON.parse(await readFile(path.join(cellDir, "runtime-result.json"), "utf8"));
-      validateRuntimeResult(runtimeResult, cell);
-      receipt.cell.loadSpecQuantBits = runtimeResult.loadSpecQuantBits;
-      executionPassed = true;
+      try {
+        const runtimeResultPath = path.join(cellDir, "runtime-result.json");
+        await invokeFault(fault, "runtimeResultRead", index);
+        const before = await stat(runtimeResultPath);
+        const runtimeResultBytes = await readFile(runtimeResultPath);
+        await invokeFault(fault, "runtimeResultHash", index);
+        const rawSha256 = createHash("sha256").update(runtimeResultBytes).digest("hex");
+        const fileSha256 = await sha256File(runtimeResultPath);
+        const after = await stat(runtimeResultPath);
+        if (!before.isFile() || before.size !== runtimeResultBytes.length
+          || after.size !== before.size || rawSha256 !== fileSha256) {
+          fail(`runtime-result file/hash changed while validating ${cell.id}`);
+        }
+        await invokeFault(fault, "runtimeResultParse", index);
+        const runtimeResult = JSON.parse(runtimeResultBytes.toString("utf8"));
+        await invokeFault(fault, "runtimeResultSemantic", index);
+        validateRuntimeResult(runtimeResult, cell);
+        receipt.cell.loadSpecQuantBits = runtimeResult.loadSpecQuantBits;
+        executionPassed = true;
+      } catch (error) {
+        quarantineReason = `runtime-result evidence failed after cell ${cell.id}: ${errorText(error)}`;
+        campaignErrors.push(quarantineReason);
+        throw error;
+      }
     } catch (error) {
       const message = recordError(errors, "cell lifecycle failed", error);
       if (!executionAttempted && !quarantineReason) {
@@ -3011,6 +3074,7 @@ export async function runCampaign(args, options = {}) {
     lifetimePlan,
     diskPlan,
     missingDownload,
+    networkOfflineEstablished,
   });
   let finalWrite = await writeCachePreflightDurably({
     output, filename: "cache-preflight.json", document: finalDocument,
@@ -3036,6 +3100,7 @@ export async function runCampaign(args, options = {}) {
       lifetimePlan: [],
       diskPlan: null,
       missingDownload: null,
+      networkOfflineEstablished,
     });
     finalWrite = {
       evidence: await writeCachePreflightFallback({
