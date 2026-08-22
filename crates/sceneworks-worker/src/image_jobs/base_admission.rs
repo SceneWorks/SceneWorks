@@ -296,8 +296,36 @@ pub(crate) struct BaseFloorSelectorScope<'a> {
     pub(crate) geometry: gen_core::MemoryGeometry,
     /// Whether this request mode is covered by the route's structural pre-load floor. `false`
     /// still reaches the selector, but with no candidate, so unsupported edit/reference modes are
-    /// explicitly Unverified before the unchanged floor-only fallback runs.
+    /// explicitly Unverified before preserving the pre-selector resident execution path.
     pub(crate) structural_floor_applies: bool,
+}
+
+fn compatibility_base_floor_plan(
+    scope: BaseFloorSelectorScope<'_>,
+    floor_gb: f64,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> LoadPlan {
+    match crate::candle_memory_strategy::select_compatibility_resident(
+        scope.route,
+        scope.tier_key,
+        scope.mode_key,
+        scope.geometry,
+        budget,
+        scope.structural_floor_applies.then_some(floor_gb),
+        crate::memory_strategy::CandidateBasis::StructuralFloor,
+    ) {
+        crate::memory_strategy::Selection::Selected { .. } => LoadPlan::Resident,
+        crate::memory_strategy::Selection::Reject { .. } => LoadPlan::Reject,
+        // A mode outside the truthful structural surface deliberately submitted no candidate.
+        // It still reached the selector as Unverified, then must preserve the historical direct
+        // resident execution rather than reapplying a floor the mode is not allowed to inherit.
+        crate::memory_strategy::Selection::Unverified { .. } if !scope.structural_floor_applies => {
+            LoadPlan::Resident
+        }
+        crate::memory_strategy::Selection::Unverified { .. } => {
+            crate::vram_gate::load_plan(Some(floor_gb), None, budget, false)
+        }
+    }
 }
 
 /// Gate an uncataloged base on its on-disk weights plus any independently resident overlay bytes.
@@ -349,21 +377,7 @@ async fn admit_candle_base_floor_with_resident_overlay_inner(
             let Some(scope) = selector_scope else {
                 return crate::vram_gate::load_plan(needed, None, budget, false);
             };
-            match crate::candle_memory_strategy::select_compatibility_resident(
-                scope.route,
-                scope.tier_key,
-                scope.mode_key,
-                scope.geometry,
-                budget,
-                scope.structural_floor_applies.then_some(floor_gb),
-                crate::memory_strategy::CandidateBasis::StructuralFloor,
-            ) {
-                crate::memory_strategy::Selection::Selected { .. } => LoadPlan::Resident,
-                crate::memory_strategy::Selection::Reject { .. } => LoadPlan::Reject,
-                crate::memory_strategy::Selection::Unverified { .. } => {
-                    crate::vram_gate::load_plan(needed, None, budget, false)
-                }
-            }
+            compatibility_base_floor_plan(scope, floor_gb, budget)
         },
         |raw, reclaimed| raw != reclaimed,
     )
@@ -590,6 +604,44 @@ pub(super) async fn admit_candle_load_spec_floor(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn bernini_scope(structural_floor_applies: bool) -> BaseFloorSelectorScope<'static> {
+        BaseFloorSelectorScope {
+            route: "bernini_image",
+            tier_key: "safetensors",
+            mode_key: if structural_floor_applies {
+                "text_to_video"
+            } else {
+                "video_to_video"
+            },
+            geometry: gen_core::MemoryGeometry {
+                width: 1280,
+                height: 704,
+                batch: 1,
+                frames: 65,
+                reference_count: u32::from(!structural_floor_applies),
+            },
+            structural_floor_applies,
+        }
+    }
+
+    #[test]
+    fn unsupported_bernini_mode_reaches_unverified_then_preserves_resident_execution() {
+        let below_floor = Some(crate::vram_gate::VramBudget {
+            free_gb: 1.0,
+            total_gb: 24.0,
+        });
+        assert_eq!(
+            compatibility_base_floor_plan(bernini_scope(false), 20.0, below_floor),
+            LoadPlan::Resident,
+            "unsupported conditioned modes must not inherit the T2V structural floor"
+        );
+        assert_eq!(
+            compatibility_base_floor_plan(bernini_scope(true), 20.0, below_floor),
+            LoadPlan::Reject,
+            "the same floor remains load-bearing for truthful T2V structural scope"
+        );
+    }
 
     #[test]
     fn imported_file_floor_excludes_the_replaced_snapshot_transformer() {

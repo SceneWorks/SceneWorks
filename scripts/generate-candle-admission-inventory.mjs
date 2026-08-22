@@ -167,6 +167,7 @@ export const SOURCE_PATHS = Object.freeze({
   imageDetail: "crates/sceneworks-worker/src/image_jobs/detail.rs",
   videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
   videoRouteBernini: "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+  videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
 });
 
 /**
@@ -671,21 +672,33 @@ export function validateCompatibilityWiring(bodies) {
     throw new Error("legacy scalar compatibility candidates must reject missing/foreign lanes as Unverified");
   }
   const sharedImage = rustFunctionBody(bodies.candleMemoryStrategy, "evaluate_shared_image_inner");
+  const scalarProvenance = rustFunctionBody(
+    bodies.candleMemoryStrategy,
+    "select_unverified_scalar_provenance",
+  );
   if (
     !sharedImage.includes("scalar_measurement_lane_is_candle(manifest)") ||
-    !sharedImage.includes("&[]") ||
+    !sharedImage.includes("select_unverified_scalar_provenance") ||
+    !scalarProvenance.includes("&[]") ||
     !bodies.candleScalarGate.includes("== Some(\"candle\")")
   ) {
     throw new Error("scalar selector provenance must reject missing/foreign lanes as Unverified");
   }
-  for (const [source, symbol] of [
-    [bodies.conditioningFit, "decide_via_compatibility_selector"],
-    [bodies.imageBaseAdmission, "admit_candle_base_floor_with_resident_overlay_inner"],
-  ]) {
+  for (const [source, symbol] of [[bodies.conditioningFit, "decide_via_compatibility_selector"]]) {
     const body = rustFunctionBody(source, symbol);
     if (!body.includes("CandidateBasis::StructuralFloor") || !body.includes("select_compatibility_resident")) {
       throw new Error(`${symbol} is not wired to its structural-floor compatibility candidate`);
     }
+  }
+  const baseFloorSelector = rustFunctionBody(
+    bodies.imageBaseAdmission,
+    "compatibility_base_floor_plan",
+  );
+  if (
+    !baseFloorSelector.includes("CandidateBasis::StructuralFloor") ||
+    !baseFloorSelector.includes("select_compatibility_resident")
+  ) {
+    throw new Error("compatibility_base_floor_plan is not wired to its structural-floor candidate");
   }
   const videoSelector = rustFunctionBody(bodies.videoAdmission, "select_legacy_video_resident");
   if (
@@ -694,12 +707,14 @@ export function validateCompatibilityWiring(bodies) {
   ) {
     throw new Error("legacy video selector lost its typed Candle lane or LegacyVideo basis");
   }
-  const baseFloor = rustFunctionBody(
-    bodies.imageBaseAdmission,
-    "admit_candle_base_floor_with_resident_overlay_inner",
-  );
-  if (!baseFloor.includes("scope.structural_floor_applies.then_some(floor_gb)")) {
+  if (!baseFloorSelector.includes("scope.structural_floor_applies.then_some(floor_gb)")) {
     throw new Error("structural-floor selector must withhold its candidate on unsupported modes");
+  }
+  if (
+    !baseFloorSelector.includes("if !scope.structural_floor_applies") ||
+    !baseFloorSelector.includes("LoadPlan::Resident")
+  ) {
+    throw new Error("unsupported Bernini modes must preserve resident execution after Unverified");
   }
   const berniniVideo = rustFunctionBody(bodies.videoRouteBernini, "generate_candle_bernini");
   const berniniFloor = rustFunctionBody(
@@ -728,6 +743,29 @@ export function validateCompatibilityWiring(bodies) {
     !videoSelection.includes("return None")
   ) {
     throw new Error("Candle optimized video candidates must remain Unverified without a fitted curve");
+  }
+  if (
+    !videoSelection.includes("let headroom_bytes = selector.headroom_bytes?") ||
+    videoSelection.includes("headroom_bytes.unwrap_or(0)")
+  ) {
+    throw new Error("video fallback allowance absence must not create an estimate-floor candidate");
+  }
+  const wanFallback = rustFunctionBody(bodies.videoRouteWan, "admission_fallback_headroom_bytes");
+  if (
+    !bodies.videoRouteWan.includes("fallback_headroom_bytes: Option<u64>") ||
+    !wanFallback.includes("checked_sub(runtime.budget.reserved_headroom_bytes)") ||
+    wanFallback.includes("unwrap_or(0)")
+  ) {
+    throw new Error("Wan fallback headroom must preserve Option absence and normalize real reserve once");
+  }
+  if (
+    !bodies.videoRouteWan.includes("fallback_headroom_bytes") ||
+    !bodies.videoRouteWan.includes(
+      'if cfg!(all(not(target_os = "macos"), feature = "backend-candle")) {\n                        None',
+    ) ||
+    !bodies.videoRouteWan.includes("admission_fallback_headroom_bytes(")
+  ) {
+    throw new Error("Wan production callback must pass an absent Candle fallback allowance");
   }
   for (const symbol of [
     "mochi_fit_error",

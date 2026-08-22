@@ -51,6 +51,36 @@ pub(crate) struct CandleMemoryEvaluation {
     pub predicted_peak_gb: f64,
 }
 
+fn select_unverified_scalar_provenance(
+    engine_id: &str,
+    tier: MemoryNumericTier,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    contract: &gen_core::MemoryProviderContract,
+    budget: VramBudget,
+) -> Selection {
+    crate::memory_strategy::select_strategy(
+        RequestScope {
+            resolved_route: engine_id,
+            backend: "candle",
+            tier,
+            mode: mode_key,
+            overlay,
+            geometry,
+            expected_closure_digest: "",
+        },
+        contract,
+        Some(Budget {
+            available_gb: budget.free_gb,
+            reclaimable_gb: 0.0,
+            total_gb: budget.total_gb,
+            reserved_headroom_gb: 2.0,
+        }),
+        &[],
+    )
+}
+
 /// Image routes whose only production admission truth is the existing Candle scalar gate. They
 /// enter the shared selector through a resident-only compatibility contract, then retain the
 /// established sequential fallback when that resident candidate does not fit.
@@ -1286,24 +1316,14 @@ fn evaluate_shared_image_inner(
     // the shared selector with no candidate (therefore `Unverified`) and then preserves the legacy
     // resident execution through this function's `None` result.
     if !crate::candle_scalar_gate::scalar_measurement_lane_is_candle(manifest) {
-        let selection = crate::memory_strategy::select_strategy(
-            RequestScope {
-                resolved_route: engine_id,
-                backend: "candle",
-                tier,
-                mode: &mode.scope_key,
-                overlay: provider_overlay,
-                geometry,
-                expected_closure_digest: "",
-            },
+        let selection = select_unverified_scalar_provenance(
+            engine_id,
+            tier,
+            &mode.scope_key,
+            provider_overlay,
+            geometry,
             &contract,
-            Some(Budget {
-                available_gb: budget.free_gb,
-                reclaimable_gb: 0.0,
-                total_gb: budget.total_gb,
-                reserved_headroom_gb: 2.0,
-            }),
-            &[],
+            budget,
         );
         debug_assert!(matches!(selection, Selection::Unverified { .. }));
         return Ok(None);
@@ -1741,6 +1761,87 @@ mod tests {
             })),
         )
         .is_some());
+    }
+
+    #[test]
+    fn malformed_scalar_provenance_reaches_the_production_selector_empty_and_unverified() {
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let budget = VramBudget {
+            free_gb: 96.0,
+            total_gb: 96.0,
+        };
+        let tier = numeric_tier("boogu_image", "q4").expect("known production tier");
+        let contract = gen_core::MemoryProviderContract::compatibility_default(
+            "boogu_image",
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-boogu-q4")))
+            .with_quant(Quant::Q4)
+            .with_resolved_route("boogu_image");
+
+        for malformed in [json!(null), json!(true), json!(1), json!({}), json!([])] {
+            let manifest = json!({
+                "candle": {
+                    "measurementLane": malformed,
+                    "vramGbByTier": { "q4": 30.0 }
+                }
+            })
+            .as_object()
+            .expect("manifest object")
+            .clone();
+            assert!(matches!(
+                select_unverified_scalar_provenance(
+                    "boogu_image",
+                    tier,
+                    "text_to_image",
+                    None,
+                    geometry,
+                    &contract,
+                    budget,
+                ),
+                Selection::Unverified { .. }
+            ));
+            assert!(
+                evaluate_shared_image_inner(
+                    "boogu_image",
+                    "boogu_image",
+                    &spec,
+                    true,
+                    &manifest,
+                    "q4",
+                    "text_to_image",
+                    None,
+                    None,
+                    geometry,
+                    false,
+                    false,
+                    false,
+                    false,
+                    Some(budget),
+                    Some(32.0),
+                    0,
+                    MemoryCacheState::Cold,
+                    None,
+                    Some(contract.clone()),
+                    None,
+                    None,
+                )
+                .expect("production scalar evaluation")
+                .is_none(),
+                "Unverified provenance must preserve legacy resident execution"
+            );
+        }
     }
 
     #[test]

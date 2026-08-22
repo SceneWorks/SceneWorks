@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:417d92271d4c4b1e94b010f80d2daebd0f38277296de46111950fe3b7c9cfd89",
+    "sceneWorksRevision": "source-tree:a36422078caea244dd11211f9ee541832e005462b5c3ebccf2fc601759dbec3f",
     "decisions": {
       "path": "docs/generated/candle-admission-decisions.json",
       "digest": "sha256:03fe68dc3dc37ee7c2e15aaa061ca23f2e4766cb149fc4845e7fba3a372c36f3",

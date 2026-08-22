@@ -635,11 +635,15 @@ fn krea_rung_phase_peaks(
 /// carry a complete phase triple for the rung, which fails the estimate closed.
 fn krea_record_phase_peaks(record: &Value, manifest_rung: &str) -> Option<KreaTurboPhasePeaks> {
     let phases = record.get("predictedPhasesGb")?.get(manifest_rung)?;
-    Some(KreaTurboPhasePeaks {
+    let peaks = KreaTurboPhasePeaks {
         text_gb: phases.get("text").and_then(json_f64)?,
         denoise_gb: phases.get("denoise").and_then(json_f64)?,
         decode_gb: phases.get("decode").and_then(json_f64)?,
-    })
+    };
+    [peaks.text_gb, peaks.denoise_gb, peaks.decode_gb]
+        .into_iter()
+        .all(f64::is_finite)
+        .then_some(peaks)
 }
 
 /// The phase index (0 text, 1 denoise, 2 decode) carrying the peak of a phase triple (sc-18097).
@@ -4037,6 +4041,49 @@ mod tests {
             krea_turbo_fit(&manifest, "q4", 1024, 1024, None, true),
             None
         );
+    }
+
+    #[test]
+    fn krea_record_phase_constructor_rejects_non_finite_first_middle_and_last_values() {
+        for (phase, value) in [("text", "NaN"), ("denoise", "inf"), ("decode", "-inf")] {
+            let mut manifest = krea_fit_manifest();
+            manifest["candle"]["turboFit"]["evidenceRecords"][0]["predictedPhasesGb"]
+                ["threeStage"][phase] = Value::String(value.to_owned());
+            let record = &manifest["candle"]["turboFit"]["evidenceRecords"][0];
+            assert_eq!(
+                krea_record_phase_peaks(record, "threeStage"),
+                None,
+                "{phase}={value} must not reach binding-phase selection"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_record_phase_triples_leave_the_end_to_end_fit_unverified() {
+        let mut manifest = krea_fit_manifest();
+        for rung in [
+            "threeStage",
+            "tiledVae",
+            "chunkedAttention",
+            "streamedBlocks",
+        ] {
+            manifest["candle"]["turboFit"]["evidenceRecords"][0]["predictedPhasesGb"][rung]
+                ["denoise"] = Value::String("NaN".to_owned());
+        }
+        assert!(matches!(
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                1024,
+                1024,
+                Some(VramBudget {
+                    free_gb: 17.0,
+                    total_gb: 17.0,
+                }),
+                true,
+            ),
+            Some(KreaTurboFit::Unverified { .. })
+        ));
     }
 
     #[test]

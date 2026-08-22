@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:417d92271d4c4b1e94b010f80d2daebd0f38277296de46111950fe3b7c9cfd89",
+    "sceneWorksRevision": "source-tree:a36422078caea244dd11211f9ee541832e005462b5c3ebccf2fc601759dbec3f",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -31,15 +31,15 @@
       },
       "candleScalarGate": {
         "path": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
-        "sha256": "9b4f6bd4cb150b8730352ce80e33bd5e0b8c1b67db47967e4997ff0e68343d33"
+        "sha256": "542d755bd1cdafbb9f49dda1808181c7b806ad43fef5b301437c12b14657d280"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "06bc544f0950b3483e521ca20e61742fa7926a574bebf82f9ed982b8c5690b8a"
+        "sha256": "64e2f2ed687df43a388b6c182b8a7a5dbac4a1c4db40fb14bd2f4d21a7b865c6"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "1fd1b50d2ae1f904f74b89cb9659097e059cce2f4a9339c4d1ea3cea0e2f2258"
+        "sha256": "5e550f921e40f6f3e594ddc301093bee08679510a2ed79836a20392f3ccef911"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -55,7 +55,7 @@
       },
       "videoAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "2fdff9b9b087517ce7fa7bfa53a50fa8285d7c430ac51acb140cb0365d8d8c6c"
+        "sha256": "f9f856dbbbeed49537af2433c3be405e7349bf9276d20c60e0e0a95a9e16486e"
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
@@ -71,7 +71,7 @@
       },
       "imageBaseAdmission": {
         "path": "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
-        "sha256": "dacae2107cca6cde6ddc18bbf61f528b6fb45915ee1ab00b5a879f00ae18a1df"
+        "sha256": "160f9acfd89095b07d135d89024237ca9ab1a7160791fee14a1934f9031b5579"
       },
       "imageConditioningGate": {
         "path": "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
@@ -148,6 +148,10 @@
       "videoRouteBernini": {
         "path": "crates/sceneworks-worker/src/video_jobs/bernini.rs",
         "sha256": "6379dd23de4af0dc84f367315f1bdb41e2295e3407088049f88c3d5bf4d765df"
+      },
+      "videoRouteWan": {
+        "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
+        "sha256": "67604dadf2e7fea8429e8ddeecac76fd86d4404af87eb00d450542101d5bf75b"
       }
     }
   },

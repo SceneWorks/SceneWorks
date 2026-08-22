@@ -645,6 +645,43 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
     );
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn production_headroom_seam_preserves_absence_and_normalizes_real_allowance_once() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let runtime = crate::video_admission::VideoRuntimeMemoryState {
+        budget: gen_core::MemoryBudget {
+            total_bytes: 24 * GIB,
+            committed_bytes: 14 * GIB,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 2 * GIB,
+        },
+        cache_state: gen_core::MemoryCacheState::Cold,
+        load_policy: gen_core::OffloadPolicy::Resident,
+        provider_resident_bytes: 10 * GIB,
+    };
+
+    assert_eq!(
+        admission_fallback_headroom_bytes("ltx_2_3", None, Some(runtime))
+            .expect("absence is not a reserve-underflow error"),
+        None,
+        "a missing Candle fallback allowance must remain candidate absence"
+    );
+    assert_eq!(
+        admission_fallback_headroom_bytes("ltx_2_3", Some(18 * GIB), Some(runtime))
+            .expect("the MLX allowance exceeds the reserve"),
+        Some(16 * GIB),
+        "a real allowance must pay the allocator reserve exactly once"
+    );
+    assert!(
+        admission_fallback_headroom_bytes("ltx_2_3", Some(GIB), Some(runtime)).is_err(),
+        "a real allowance below the reserve remains an accounting error"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn calibrated_video_memory_surface_is_exact_t2v_only() {

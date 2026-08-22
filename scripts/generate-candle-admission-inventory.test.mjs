@@ -323,6 +323,7 @@ test("compatibility wiring rejects call, typed-lane, and reserve-normalization m
     ["imageRouting", "is_unverified_image_compatibility_route", "removed_unverified_route"],
     ["imageRouting", "scalar_measurement_lane_is_candle", "removed_scalar_lane_check"],
     ["candleMemoryStrategy", "scalar_measurement_lane_is_candle(manifest)", "true"],
+    ["candleMemoryStrategy", "select_unverified_scalar_provenance", "removed_empty_selector"],
     ["candleScalarGate", '== Some("candle")', '== Some("mlx")'],
     [
       "imageBaseAdmission",
@@ -333,6 +334,21 @@ test("compatibility wiring rejects call, typed-lane, and reserve-normalization m
       "videoAdmission",
       "selector.identity.lane == VideoLane::Candle",
       "selector.identity.lane == VideoLane::Mlx",
+    ],
+    [
+      "videoAdmission",
+      "let headroom_bytes = selector.headroom_bytes?",
+      "let headroom_bytes = selector.headroom_bytes.unwrap_or(0)",
+    ],
+    [
+      "videoRouteWan",
+      "checked_sub(runtime.budget.reserved_headroom_bytes)",
+      "saturating_sub(runtime.budget.reserved_headroom_bytes)",
+    ],
+    [
+      "videoRouteWan",
+      "if cfg!(all(not(target_os = \"macos\"), feature = \"backend-candle\")) {\n                        None",
+      "if cfg!(all(not(target_os = \"macos\"), feature = \"backend-candle\")) {\n                        Some(0)",
     ],
     [
       "videoRouteBernini",

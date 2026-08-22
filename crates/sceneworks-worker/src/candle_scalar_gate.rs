@@ -406,6 +406,23 @@ mod tests {
         assert!(scalar_measurement_lane_is_candle(&candle));
         assert!(!scalar_measurement_lane_is_candle(&missing));
         assert!(!scalar_measurement_lane_is_candle(&foreign));
+        for malformed in [json!(null), json!(true), json!(1), json!({}), json!([])] {
+            let mut entry = candle.clone();
+            entry
+                .get_mut("candle")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("candle object")
+                .insert("measurementLane".to_owned(), malformed);
+            assert!(
+                !scalar_measurement_lane_is_candle(&entry),
+                "a non-string measurementLane must not authorize Candle evidence"
+            );
+            assert_eq!(
+                predicted_peak_gb(&entry, "q4"),
+                predicted_peak_gb(&candle, "q4"),
+                "provenance must not mutate legacy scalar arithmetic"
+            );
+        }
         assert_eq!(
             predicted_peak_gb(&missing, "q4"),
             predicted_peak_gb(&candle, "q4")
