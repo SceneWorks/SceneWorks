@@ -70,6 +70,71 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     );
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_adapter_overlay_records_exact_artifact_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter_path = root.path().join("style.safetensors");
+    std::fs::write(&adapter_path, b"weights-free-adapter").unwrap();
+    let mut input = VideoGenInput::default();
+    input.engine_id = "bernini";
+    input.adapters = vec![AdapterSpec::new(
+        adapter_path.clone(),
+        0.75,
+        gen_core::AdapterKind::Lora,
+    )];
+
+    let overlay = video_admission_overlay(&input).expect("adapter overlay");
+    assert!(overlay.contains(&format!("artifact={}", adapter_path.display())));
+    assert!(overlay.contains("digest=sha256:"));
+    assert!(overlay.contains("kind=Lora"));
+    assert!(overlay.contains("scale=0.750000000"));
+    assert!(overlay.contains("expert=None"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[clip]),
+        "video"
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[]),
+        "none"
+    );
+    assert_eq!(
+        video_admission_reference_shape(
+            "bernini",
+            "video_to_video",
+            &[Conditioning::Reference {
+                image: Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0; 12],
+                },
+                strength: Some(1.0),
+            }],
+        ),
+        "other"
+    );
+}
+
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
 /// 5B route therefore resolves the lane key `mlx:wan2_2_ti2v_5b`; the generated closure catalog is
 /// stamped only after the final inference head is frozen.

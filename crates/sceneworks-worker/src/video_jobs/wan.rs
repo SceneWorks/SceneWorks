@@ -16,6 +16,7 @@ use super::{
 };
 #[cfg(target_os = "macos")]
 use super::{ltx::resolve_clip_media_path, vace::FRAME_PAD_COLOR};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Real MLX Wan2.2 generation (macOS, via mlx-gen-wan, sc-3034): T2V/TI2V (5B
@@ -1490,7 +1491,28 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
 pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
     let mut overlays = Vec::new();
     if !input.adapters.is_empty() {
-        overlays.push(format!("adapters:{}", input.adapters.len()));
+        if input.engine_id == "bernini" {
+            let adapters = input
+                .adapters
+                .iter()
+                .map(|adapter| {
+                    let digest = std::fs::read(&adapter.path)
+                        .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+                        .unwrap_or_else(|_| "unverified".to_owned());
+                    format!(
+                        "artifact={};digest={digest};kind={:?};scale={:.9};expert={:?}",
+                        adapter.path.display(),
+                        adapter.kind,
+                        adapter.scale,
+                        adapter.moe_expert
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            overlays.push(format!("adapters:[{adapters}]"));
+        } else {
+            overlays.push(format!("adapters:{}", input.adapters.len()));
+        }
     }
     if input.enhance_prompt
         || input.use_uncensored_enhancer
@@ -1502,6 +1524,30 @@ pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
         overlays.push(format!("provider_video_mode:{video_mode}"));
     }
     (!overlays.is_empty()).then(|| overlays.join("+"))
+}
+
+/// Bernini v2v carries one normalized [`Conditioning::VideoClip`]. A count-only identity would
+/// let another temporal carrier borrow the same evidence, so admission records the resolved
+/// carrier shape explicitly.
+pub(super) fn video_admission_reference_shape(
+    model_id: &str,
+    mode: &str,
+    conditioning: &[Conditioning],
+) -> &'static str {
+    if conditioning.is_empty() {
+        return "none";
+    }
+    if model_id == "bernini"
+        && mode == "video_to_video"
+        && matches!(conditioning, [Conditioning::VideoClip { .. }])
+    {
+        return "video";
+    }
+    match mode {
+        "image_to_video" => "image",
+        "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
+        _ => "other",
+    }
 }
 
 /// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
@@ -2048,15 +2094,11 @@ pub(super) async fn generate_video_using(
                 // Wan turns clip extension/bridging into pinned keyframes, while I2V reaches the
                 // reference-image encoder. A future measured row must name that real residency
                 // surface before request-scoped selection can use it.
-                let admission_reference_shape = if reference_count == 0 {
-                    "none"
-                } else {
-                    match admission_mode.as_str() {
-                        "image_to_video" => "image",
-                        "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
-                        _ => "other",
-                    }
-                };
+                let admission_reference_shape = video_admission_reference_shape(
+                    &admission_model_id,
+                    &admission_mode,
+                    &input.conditioning,
+                );
                 let admission_overlay = video_admission_overlay(&input);
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
                     model_id: &admission_model_id,
