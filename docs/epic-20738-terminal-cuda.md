@@ -5,6 +5,11 @@ SC-20945 adds one deliberately opt-in terminal evidence profile to
 The profile stays off on pushes, pull requests, and ordinary manual runs. Run it once only after the
 epic's SceneWorks and inference heads are final, clean, reviewed, and pin-matched.
 
+SC-20974's reviewed continuation is deliberately segmented. It imports and rehashes the contiguous
+PASS prefix from cells 1-7 of the old `8886a9e69f26beec05688c81b414859bd102f6d0` run, quarantines
+that run's non-executed cell-8 setup skeleton, and executes cells 8-19 under the corrected head. The
+summary records both run identities; it never represents the two segments as one run.
+
 ## Frozen scope
 
 `config/terminal-evidence/epic-20738-cuda.json` is the review authority. The controller rejects any
@@ -22,16 +27,20 @@ artifact IDs, requested tier, capability, and every request key/value:
 Anima, SANA, VACE, FLUX.2 TrueV2, and historical Eros surfaces are rejected by source validation.
 The four deliberately dismantled pin-keyed gates are not used or changed. This profile is terminal
 evidence, so it must not be added to routine measurement, calibration, canary, or memory-matrix runs.
+The ordered cell digest remains
+`dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879`; the reviewed 23-authority
+digest after the truthful LTX parent change is
+`5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932`.
 
 ## Dispatch contract
 
 Select **Windows Candle worker** in GitHub Actions and set:
 
 - `run_epic_20738_terminal_cuda`: `true`
-- `sceneworks_revision`: the exact 40-character SHA selected for the workflow run
 - `inference_revision`: the exact 40-character inference SHA pinned by that SceneWorks head
 
-Leave `run_five_rung_reference`, `provision_krea_snapshot`, and `run_ltx_eros_acceptance` false. The
+The SceneWorks revision is always the checked-out workflow SHA and is not a caller-controlled input.
+Leave `run_five_rung_reference`, `provision_snapshot`, and `run_ltx_eros_acceptance` false. The
 workflow rejects a combined dispatch. Its fixed terminal concurrency key admits only one campaign at
 a time across the Windows CUDA pool.
 
@@ -41,19 +50,47 @@ assigned a timeout above 360 minutes. The unrelated LTX Eros, provisioning, five
 job budgets remain 360, 240, 120, and 45 minutes respectively.
 
 The job checks out exact source revisions and requires both checkouts to be clean. It installs the
-lockfile-pinned in-process Node Draft 2020-12 validator and creates a fresh Python environment only
-for the pinned anonymous artifact client, then downloads
-each public Hugging Face artifact at its exact commit and allow-listed paths into isolated per-cell
-scratch. Runner caches, weight-root secrets, and pre-existing snapshots are not accepted as
-authorities. Output and scratch must be fresh, distinct, non-nested descendants of the resolved
-`RUNNER_TEMP`, outside both repositories. Every recursive removal rechecks that confinement and
-rejects symlink/reparse replacement.
+lockfile-pinned in-process Node Draft 2020-12 validator and creates a fresh `RUNNER_TEMP` Python
+virtual environment with `huggingface_hub==0.36.0`, then verifies and passes that exact interpreter
+to the controller. The trusted source cache is the fixed
+`E:\huggingface\hub`; it is not a dispatch input and is never used as writable runtime storage.
+Before any GPU cell, the controller freezes a census of every distinct remaining exact
+repository/revision/allow-pattern authority. The exact required filenames come from the checked-in
+immutable download-pattern evidence; every listed file is required, and only those files are copied.
+Unreviewed extras such as `.incomplete` blobs and model-adjacent `.candle-device-format-v1`
+derivatives are excluded. Hugging Face snapshot file links are valid only when
+their resolved blobs remain inside that trusted root; broken, empty, or escaping links fail closed.
+
+Each valid authority is copied once into a campaign-owned shared staging tree under `RUNNER_TEMP`
+and reused by every cell that names it. Existing valid files are never overwritten or downloaded.
+The sole reviewed network exception is
+`SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599` file
+`q8/transformer/model.safetensors`. If and only if the frozen census reports exactly that miss, the
+pinned client fetches that exact filename directly into fresh staging and proves the returned commit,
+metadata size, LFS SHA-256, and actual file SHA-256. It never calls a snapshot/glob/ref-main route;
+existing `.incomplete` files are untrusted and are neither renamed nor resumed. LTX q8 and Gemma use
+the complete production-approved cached parent revision
+`254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. After staging, every
+remaining authority must resolve again with offline mode forced before cell 8 may start.
+
+Output and scratch must be fresh, distinct, non-nested descendants of the resolved `RUNNER_TEMP`,
+outside both repositories. Every recursive removal rechecks that confinement and rejects
+symlink/reparse replacement.
 
 The Node controller awaits one fresh `sceneworks-worker` process for each cell with
 `--test-threads=1`; it never starts cells in parallel and exposes no per-cell dispatch input. The Rust
 entrypoint constructs the production load spec and deterministic request in reviewable code. Packed
 tier markers must agree with the requested q4/q8 directory, and runtime results must say requested
 tier equals resolved tier with `denseFallback: false`.
+
+All writable cache and temporary environment variables are redirected to the current cell's scratch,
+while model roots point only at the shared campaign staging tree. Every selected root and nested
+top-level component root carries an ordinary-file `.candle-device-format-v1` obstruction, forcing
+Candle away from model-adjacent writes. `SCENEWORKS_CANDLE_DEVICE_CACHE_DIR` points to a separate
+campaign-owned shared derived cache under `RUNNER_TEMP`; its empty initial state and post-cell
+inventories are bound in evidence. The controller rehashes each selected staged authority file and
+every obstruction immediately before and after every cell. Any added, removed, or changed staged
+authority byte quarantines the rest of the campaign; the source cache remains untouched.
 
 ## Evidence and failure behavior
 
@@ -68,7 +105,29 @@ persisted inputs, outputs, and logs. Receipts also bind:
 - workflow run, head, attempt, runner OS/architecture/name, system-memory identity, GPU index/PCI
   identity/UUID/compute capability/driver/total memory, and raw VRAM samples.
 
-A cell failure anywhere in setup, provisioning, execution, hashing, schema validation, atomic
+The controller discovers artifacts by the fixed old-head terminal prefix and accepts exactly one
+candidate whose first seven primary receipts are contiguous PASS outcomes at inference pin
+`b646a6f89ba9f6b07efe53dd583d8a42e21e9871`, old cell digest
+`dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879`, and old artifact digest
+`f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e`. It rehashes every imported
+input, output, and log and retains the GitHub artifact SHA-256 in lineage. Cell 8 may exist only as
+the initial controller log plus failed pre-execution
+receipt: no selected/model bytes, input, runtime result, output, or cleanup attempt. That residue is
+copied under `_imported-boundary-residue/` and excluded from the seven-PASS lineage. Any substantive
+cell-8 file or any later cell invalidates the candidate.
+
+The closed Draft 2020-12 `cache-preflight.json` binds the download-evidence SHA-256, authoritative
+filename census, copied-file and downloaded-file partition with bytes and SHA-256 values, each final
+offline staged inventory, component-root obstructions, the derived-sidecar lifecycle, and the
+no-GPU-before-validation verdict. Its own byte count and SHA-256 are bound from the campaign summary.
+An initial validated copy is published before cell 8, and the final copy binds post-cell lifecycle
+inventories.
+
+A cache preflight directory, write, stat, hash, schema/semantic validation, census, staging, or final
+offline-validation failure starts no continuation GPU cell. An independent emergency writer retains
+the failed preflight evidence, and the controller emits durable failed outcomes for cells 8-19 while
+retaining the seven imported PASS receipts. A cell
+failure anywhere in setup, provisioning, execution, hashing, schema validation, atomic
 receipt publication, or cleanup is recorded and the controller proceeds through all reviewed cells.
 If a per-cell scratch removal fails or its absence cannot be proven, the controller quarantines the
 campaign: it skips setup, provisioning, and execution for every later cell while still emitting
@@ -89,6 +148,7 @@ These checks do not dispatch hardware or download weights:
 npm ci --ignore-scripts
 node scripts/epic-20738-terminal-cuda-harness.mjs check
 node --test scripts/epic-20738-terminal-cuda-harness.test.mjs scripts/hash-artifact-inventory.test.mjs
+python -m unittest scripts/provision_epic_20738_terminal_artifact_test.py
 cargo fmt --all -- --check
 ```
 
