@@ -207,6 +207,11 @@ on:
         required: false
         type: boolean
         default: false
+      cleanup_sc19054_completed_residue:
+        description: "ONE SHOT: remove only the completed SC-19054 run 32551460830 attempt 1 scratch"
+        required: false
+        type: boolean
+        default: false
       run_sc19057_wan_capture:
         description: "Capture the exact SC-19057 Wan q4 six-row runtime-complete terminal bundle"
         required: false
@@ -319,9 +324,209 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ONE-SHOT RECOVERY ONLY. Artifact 9470472931 already preserves the completed acceptance output
+  # from run 32551460830 attempt 1. That run's malformed cleanup guard stranded its scratch on the
+  # shared Windows/CUDA host. All four `cuda` registrations are listeners on that physical box, so
+  # this generic label lets any listener perform the same bounded filesystem repair without model
+  # access. After one dispatched run uploads a PASS receipt proving post-absence, a follow-up PR
+  # must remove this input, job, and its mutation-sensitive contract; the hook is not permanent CI.
+  sc19054-completed-residue-cleanup:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.cleanup_sc19054_completed_residue }}
+    runs-on: ${{ fromJSON('["self-hosted","Windows","X64","cuda"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Inspect and remove the exact completed SC-19054 residue
+        shell: powershell
+        env:
+          PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          RUN_SC19054_FLUX_ACCEPTANCE: ${{ inputs.run_sc19054_flux_acceptance }}
+          RUN_SC19057_WAN_CAPTURE: ${{ inputs.run_sc19057_wan_capture }}
+        run: |
+          $literalTarget = 'D:\actions-runner-2\_work\_temp\sc19054-flux-acceptance-32551460830-1'
+          $receiptPath = Join-Path $env:RUNNER_TEMP "sc19054-residue-cleanup-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          "SC19054_RESIDUE_RECEIPT=$receiptPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $targetReceipt = [ordered]@{
+            path = $literalTarget
+            preExisted = $null
+            inventory = @()
+            removedEntries = @()
+            removalPerformed = $false
+            postAbsent = $null
+          }
+          $receipt = [ordered]@{
+            schemaVersion = 1
+            story = 'SC-19054'
+            operation = 'one-shot-completed-residue-cleanup'
+            workflow = [ordered]@{
+              repository = $env:GITHUB_REPOSITORY
+              revision = $env:GITHUB_SHA
+              ref = $env:GITHUB_REF
+              runId = $env:GITHUB_RUN_ID
+              runAttempt = $env:GITHUB_RUN_ATTEMPT
+            }
+            runner = [ordered]@{
+              name = $env:RUNNER_NAME
+              os = $env:RUNNER_OS
+              arch = $env:RUNNER_ARCH
+              temp = $env:RUNNER_TEMP
+            }
+            target = $targetReceipt
+            verdict = 'FAIL'
+            error = $null
+          }
+          function Get-Sc19054ResidueRoot([string]$LiteralPath) {
+            try {
+              return Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+            } catch [System.Management.Automation.ItemNotFoundException] {
+              return $null
+            }
+          }
+          $inventory = @()
+          $removedEntries = @()
+          try {
+            # Cleanup is a mode, never an adjunct to provisioning or a real-weight execution.
+            $conflicts = @()
+            if ($env:PROVISION_SNAPSHOT -eq 'true') { $conflicts += 'provision_snapshot' }
+            if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true') { $conflicts += 'run_five_rung_reference' }
+            if ($env:RUN_LTX_EROS_ACCEPTANCE -eq 'true') { $conflicts += 'run_ltx_eros_acceptance' }
+            if ($env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true') { $conflicts += 'run_sc19054_flux_acceptance' }
+            if ($env:RUN_SC19057_WAN_CAPTURE -eq 'true') { $conflicts += 'run_sc19057_wan_capture' }
+            if ($conflicts.Count -ne 0) {
+              throw "cleanup_sc19054_completed_residue is mutually exclusive with: $($conflicts -join ', ')"
+            }
+
+            $target = [System.IO.Path]::GetFullPath($literalTarget)
+            $literalParent = [System.IO.Path]::GetDirectoryName($literalTarget)
+            $targetParent = [System.IO.Path]::GetDirectoryName($target)
+            if (-not [string]::Equals($target, $literalTarget, [StringComparison]::OrdinalIgnoreCase) -or
+                -not [string]::Equals($targetParent, $literalParent, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "the literal SC-19054 residue target did not resolve to its exact documented parent: $target"
+            }
+
+            $root = Get-Sc19054ResidueRoot $target
+            $targetReceipt.preExisted = $null -ne $root
+            if ($null -ne $root) {
+              if (-not $root.PSIsContainer -or
+                  ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                throw "refusing an invalid SC-19054 residue root: $target"
+              }
+              $rootFiles = @('identity.json', 'model-files.json', 'acceptance.log', 'SHA256SUMS.txt')
+              $outputFiles = @('sc19054-flux-acceptance.json', 'sc19054-flux-schnell-q4-1024.png')
+              $rootEntries = @(Get-ChildItem -LiteralPath $target -Force | Sort-Object Name)
+              $outputEntries = @()
+              $outputEntry = $null
+              foreach ($item in $rootEntries) {
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                  throw "refusing an SC-19054 residue reparse point: $($item.FullName)"
+                }
+                if ($item.PSIsContainer) {
+                  if ($item.Name -ne 'output') {
+                    throw "refusing an unexpected SC-19054 residue directory: $($item.FullName)"
+                  }
+                  $outputEntry = $item
+                  $inventory += [ordered]@{ path = 'output'; kind = 'directory'; bytes = $null; sha256 = $null }
+                  $outputEntries = @(Get-ChildItem -LiteralPath $item.FullName -Force | Sort-Object Name)
+                  foreach ($child in $outputEntries) {
+                    if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                      throw "refusing an SC-19054 output reparse point: $($child.FullName)"
+                    }
+                    if ($child.PSIsContainer -or $outputFiles -notcontains $child.Name) {
+                      throw "refusing an unexpected SC-19054 output entry: $($child.FullName)"
+                    }
+                    $inventory += [ordered]@{
+                      path = "output/$($child.Name)"
+                      kind = 'file'
+                      bytes = $child.Length
+                      sha256 = (Get-FileHash -LiteralPath $child.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    }
+                  }
+                } else {
+                  if ($rootFiles -notcontains $item.Name) {
+                    throw "refusing an unexpected SC-19054 residue file: $($item.FullName)"
+                  }
+                  $inventory += [ordered]@{
+                    path = $item.Name
+                    kind = 'file'
+                    bytes = $item.Length
+                    sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  }
+                }
+              }
+              # The closed inventory is complete and contains no nested directory or reparse point.
+              # Remove only those inventoried file leaves, then the two empty directories.
+              foreach ($child in $outputEntries) {
+                Remove-Item -LiteralPath $child.FullName -Force
+                $removedEntries += "output/$($child.Name)"
+              }
+              if ($null -ne $outputEntry) {
+                Remove-Item -LiteralPath $outputEntry.FullName -Force
+                $removedEntries += 'output'
+              }
+              foreach ($item in @($rootEntries | Where-Object { -not $_.PSIsContainer })) {
+                Remove-Item -LiteralPath $item.FullName -Force
+                $removedEntries += $item.Name
+              }
+              Remove-Item -LiteralPath $target -Force
+              $removedEntries += '.'
+              $targetReceipt.removalPerformed = $true
+            }
+            $targetReceipt.postAbsent = $null -eq (Get-Sc19054ResidueRoot $target)
+            if (-not $targetReceipt.postAbsent) { throw 'exact SC-19054 completed residue remains after cleanup' }
+            $receipt.verdict = 'PASS'
+          } catch {
+            $receipt.error = $_.Exception.Message
+            throw
+          } finally {
+            $targetReceipt.inventory = @($inventory | Sort-Object path)
+            $targetReceipt.removedEntries = @($removedEntries)
+            $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $receiptPath -Encoding utf8
+          }
+      - name: Upload the one-shot SC-19054 cleanup receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc19054-residue-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SC19054_RESIDUE_RECEIPT }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Verify the exact SC-19054 residue is absent
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          $target = 'D:\actions-runner-2\_work\_temp\sc19054-flux-acceptance-32551460830-1'
+          try {
+            $remaining = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+          } catch [System.Management.Automation.ItemNotFoundException] {
+            $remaining = $null
+          }
+          if ($null -ne $remaining) {
+            throw "exact SC-19054 completed residue remains: $target"
+          }
+          if (-not (Test-Path -LiteralPath $env:SC19054_RESIDUE_RECEIPT -PathType Leaf)) {
+            throw 'SC-19054 cleanup receipt was not written'
+          }
+          $receipt = Get-Content -LiteralPath $env:SC19054_RESIDUE_RECEIPT -Raw | ConvertFrom-Json
+          if ($receipt.verdict -ne 'PASS' -or $receipt.target.postAbsent -ne $true) {
+            throw "SC-19054 cleanup receipt is not a PASS: $($receipt | ConvertTo-Json -Compress -Depth 8)"
+          }
+      - name: Remove the uploaded SC-19054 cleanup receipt scratch
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          $expected = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:RUNNER_TEMP "sc19054-residue-cleanup-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json")
+          )
+          $actual = [System.IO.Path]::GetFullPath($env:SC19054_RESIDUE_RECEIPT)
+          if (-not [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "refusing to remove an unexpected cleanup receipt path: $actual"
+          }
+          if (Test-Path -LiteralPath $actual -PathType Leaf) { Remove-Item -LiteralPath $actual -Force }
+
   candle-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.cleanup_sc19054_completed_residue) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     # A provisioning, five-rung, or SC-19057 dispatch additionally requires `real-weights`; ordinary PR and
     # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
     # adds `weights` for `run_memory_calibration || run_five_rung_reference` and is the convention
@@ -968,63 +1173,12 @@ jobs:
             }
             return $resolved
           }
-          function Remove-Sc19054ScratchTree([string]$ScratchPath) {
-            if (-not (Test-Path -LiteralPath $ScratchPath)) { return }
-            $root = Get-Item -LiteralPath $ScratchPath -Force
-            if (-not $root.PSIsContainer -or
-                ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-              throw "refusing an invalid SC-19054 scratch root: $ScratchPath"
-            }
-            $rootFiles = @('identity.json', 'model-files.json', 'acceptance.log', 'SHA256SUMS.txt')
-            $outputFiles = @('sc19054-flux-acceptance.json', 'sc19054-flux-schnell-q4-1024.png')
-            $output = Join-Path $ScratchPath 'output'
-            foreach ($item in @(Get-ChildItem -LiteralPath $ScratchPath -Force)) {
-              if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                throw "refusing an SC-19054 scratch reparse point: $($item.FullName)"
-              }
-              if ($item.PSIsContainer) {
-                if ($item.Name -ne 'output') {
-                  throw "refusing an unexpected SC-19054 scratch directory: $($item.FullName)"
-                }
-                foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)) {
-                  if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                    throw "refusing an SC-19054 output reparse point: $($child.FullName)"
-                  }
-                  if ($child.PSIsContainer -or $outputFiles -notcontains $child.Name) {
-                    throw "refusing an unexpected SC-19054 output entry: $($child.FullName)"
-                  }
-                }
-              } elseif ($rootFiles -notcontains $item.Name) {
-                throw "refusing an unexpected SC-19054 scratch file: $($item.FullName)"
-              }
-            }
-            # The complete inventory above is closed and contains no links or nested directories.
-            # Delete only inventoried leaves, then their empty parents; never recursively delete.
-            if (Test-Path -LiteralPath $output) {
-              Get-ChildItem -LiteralPath $output -File -Force |
-                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
-              Remove-Item -LiteralPath $output -Force
-            }
-            Get-ChildItem -LiteralPath $ScratchPath -File -Force |
-              ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
-            Remove-Item -LiteralPath $ScratchPath -Force
-          }
           $evidence = Resolve-Sc19054ScratchPath $evidence $env:RUNNER_TEMP
           $expectedEvidence = [System.IO.Path]::GetFullPath(
             (Join-Path $env:RUNNER_TEMP "sc19054-flux-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT")
           )
           if (-not [string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)) {
             throw "SC-19054 evidence path does not match this exact run attempt: $evidence"
-          }
-          # Run 32551460830 attempt 1 completed and uploaded artifact 9470472931 before its broken
-          # cleanup rejected this exact path. Reclaim that one known residue only. Other SC-19054
-          # directories may belong to concurrent SHA-keyed listeners sharing the physical host.
-          $completedResidue = Resolve-Sc19054ScratchPath (
-            (Join-Path $env:RUNNER_TEMP 'sc19054-flux-acceptance-32551460830-1')
-          ) $env:RUNNER_TEMP
-          if (Test-Path -LiteralPath $completedResidue) {
-            Write-Host "Removing completed SC-19054 residue: $completedResidue"
-            Remove-Sc19054ScratchTree $completedResidue
           }
           if (Test-Path -LiteralPath $evidence) {
             throw "refusing stale SC-19054 evidence directory: $evidence"
