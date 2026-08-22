@@ -3549,6 +3549,25 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         qwen_stream.contains("let adapter_count = adapters.len();"),
         "Qwen load telemetry must derive its adapter count from the resolved adapter stack"
     );
+    assert!(
+        qwen_stream.contains("crate::candle_memory_strategy::evaluate_shared_image(")
+            && qwen_stream.contains("qwen_shared_load_plan(")
+            && !qwen_stream.contains("crate::vram_gate::load_plan("),
+        "the shared selector must exclusively grant Qwen residency; the legacy gate may not select"
+    );
+    assert!(
+        qwen_stream.contains("QwenEdit::load_with_memory_context(")
+            && qwen_stream.contains("model.generate_with_memory_context("),
+        "Qwen admission context must remain provider-owned across load and generation"
+    );
+    assert!(
+        qwen_stream.contains("memoryArtifactCertified")
+            && qwen_stream.contains("memoryProviderProtocolAvailable")
+            && qwen_stream.contains("memoryOptimizedEvidenceCertified")
+            && qwen_stream.contains("memoryEvidenceRevision")
+            && qwen_stream.contains("memoryOverlay"),
+        "Qwen telemetry must report the actual selector identity"
+    );
     let start_args = between(
         qwen_stream,
         "let (cancel, rx, blocking) = start_gen_stream(",
@@ -19569,7 +19588,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "QwenEdit",
             "qwen_edit_candle.rs",
             include_str!("qwen_edit_candle.rs"),
-            "crate::vram_gate::load_plan(",
+            "crate::candle_memory_strategy::evaluate_shared_image(",
         ),
         (
             "KreaEdit",
