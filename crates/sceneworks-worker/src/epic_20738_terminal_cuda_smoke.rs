@@ -101,6 +101,55 @@ fn family_generation_memory(kind: &str, engine_id: &str) -> Option<gen_core::Gen
     }
 }
 
+fn request_memory_strategy_value(
+    is_flux: bool,
+    memory: Option<&gen_core::GenerationMemory>,
+) -> Value {
+    if !is_flux {
+        assert!(
+            memory.is_none(),
+            "non-FLUX terminal memory policy needs an explicit reviewed evidence contract"
+        );
+        return json!({
+            "strategy": "not-applicable",
+            "requestMemoryPresent": false,
+            "stageResidency": false,
+            "streamTransformerBlocks": false,
+        });
+    }
+    match memory {
+        None => json!({
+            "strategy": "default-resident",
+            "requestMemoryPresent": false,
+            "stageResidency": false,
+            "streamTransformerBlocks": false,
+        }),
+        Some(memory) => {
+            let strategy = if memory.stream_transformer_blocks {
+                "bounded-transformer"
+            } else if memory.stage_residency {
+                "staged-resident"
+            } else {
+                "explicit-resident"
+            };
+            json!({
+                "strategy": strategy,
+                "requestMemoryPresent": true,
+                "stageResidency": memory.stage_residency,
+                "streamTransformerBlocks": memory.stream_transformer_blocks,
+            })
+        }
+    }
+}
+
+fn family_request_memory_strategy(kind: &str, engine_id: &str) -> Value {
+    let memory = family_generation_memory(kind, engine_id);
+    request_memory_strategy_value(
+        kind == "image" && matches!(engine_id, "flux1_dev" | "flux1_schnell"),
+        memory.as_ref(),
+    )
+}
+
 fn primary_load_spec(cell: &Cell, primary: &Artifact) -> LoadSpec {
     let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
         .with_resolved_route(cell.model_id.clone());
@@ -638,6 +687,7 @@ fn epic_20738_terminal_cuda_cell() {
         other => panic!("unreviewed terminal cell kind {other}"),
     };
     let quant = family_load_spec_quant_bits(&cell.kind, &cell.engine_id, &cell.requested_tier);
+    let request_memory_strategy = family_request_memory_strategy(&cell.kind, &cell.engine_id);
     let result = json!({
         "schemaVersion": 1,
         "cell": cell.id,
@@ -645,6 +695,7 @@ fn epic_20738_terminal_cuda_cell() {
         "resolvedTier": primary.subdirectory,
         "denseFallback": false,
         "loadSpecQuantBits": quant,
+        "requestMemoryStrategy": request_memory_strategy,
         "metrics": metrics,
     });
     std::fs::write(
@@ -792,11 +843,54 @@ mod cpu_contract_tests {
                 family_generation_memory(kind, engine_id).is_none(),
                 "{id} must keep GenerationRequest.memory at its reviewed default"
             );
+            let expected_strategy = if engine_id.starts_with("flux1_") {
+                "default-resident"
+            } else {
+                "not-applicable"
+            };
+            assert_eq!(
+                family_request_memory_strategy(kind, engine_id),
+                json!({
+                    "strategy": expected_strategy,
+                    "requestMemoryPresent": false,
+                    "stageResidency": false,
+                    "streamTransformerBlocks": false,
+                }),
+                "{id} runtime evidence must describe the exact request used"
+            );
         }
         assert!(
             std::panic::catch_unwind(|| family_generation_memory("image", "unreviewed_engine"))
                 .is_err(),
             "an unreviewed family must not silently inherit the default request-memory contract"
+        );
+
+        let staged = gen_core::GenerationMemory {
+            stage_residency: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            request_memory_strategy_value(true, Some(&staged)),
+            json!({
+                "strategy": "staged-resident",
+                "requestMemoryPresent": true,
+                "stageResidency": true,
+                "streamTransformerBlocks": false,
+            })
+        );
+        let bounded = gen_core::GenerationMemory {
+            stage_residency: true,
+            stream_transformer_blocks: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            request_memory_strategy_value(true, Some(&bounded)),
+            json!({
+                "strategy": "bounded-transformer",
+                "requestMemoryPresent": true,
+                "stageResidency": true,
+                "streamTransformerBlocks": true,
+            })
         );
     }
 

@@ -287,6 +287,12 @@ test("all 19 cells require the exact family loadSpec quant policy", () => {
       resolvedTier: cell.requestedTier,
       denseFallback: false,
       loadSpecQuantBits: expected,
+      requestMemoryStrategy: {
+        strategy: cell.engineId.startsWith("flux1_") ? "default-resident" : "not-applicable",
+        requestMemoryPresent: false,
+        stageResidency: false,
+        streamTransformerBlocks: false,
+      },
     };
     assert.equal(validateRuntimeResult(valid, cell), valid, cell.id);
     const missing = { ...valid };
@@ -353,11 +359,6 @@ function fixtureReceipt(status = "passed", cellIndex = 0) {
   receipt.outputs = [{ path: "runtime-result.json", bytes: 7, sha256: "7".repeat(64) }];
   receipt.logs = [{ path: "controller.log", bytes: 7, sha256: "5".repeat(64) }];
   const fluxArtifact = cell.artifactIds.find((artifactId) => artifactId.startsWith("flux1-"));
-  const fluxNamespace = fluxArtifact ? path.resolve(
-    "fixture-runner", "scratch", "derived-candle-device-cache", "candle-device-format-v1",
-    "a".repeat(64),
-  ) : null;
-  const fluxBytes = fluxArtifact?.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032;
   receipt.authorityLifecycle = {
     ordinal: cellIndex + 1,
     cellId: cell.id,
@@ -369,21 +370,30 @@ function fixtureReceipt(status = "passed", cellIndex = 0) {
         files: 3, bytes: 42, sha256: "4".repeat(64),
       },
       obstructionCount: 1,
-      derivedNamespaces: [fluxNamespace],
+      derivedNamespaces: [],
     }] : [],
     activeArtifactIds: [...cell.artifactIds],
     providerExecution: "completed",
+    requestMemoryStrategy: fluxArtifact ? {
+      strategy: "default-resident",
+      requestMemoryPresent: false,
+      stageResidency: false,
+      streamTransformerBlocks: false,
+    } : {
+      strategy: "not-applicable",
+      requestMemoryPresent: false,
+      stageResidency: false,
+      streamTransformerBlocks: false,
+    },
     verifiedBefore: true,
     verifiedAfter: true,
     derivedAfter: cell.artifactIds.map((artifactId) => ({
       artifactId,
       derivedDisposition: artifactId === fluxArtifact
-        ? "bounded-transformer-sidecars" : "not-applicable",
-      files: artifactId === fluxArtifact ? 494 : 0,
-      bytes: artifactId === fluxArtifact ? fluxBytes : 0,
-      inventories: artifactId === fluxArtifact ? [{
-        root: fluxNamespace, files: 494, bytes: fluxBytes, sha256: "8".repeat(64),
-      }] : [],
+        ? "resident-empty" : "not-applicable",
+      files: 0,
+      bytes: 0,
+      inventories: [],
     })),
     released: [],
     diskProbes: [...(fluxArtifact ? [{
@@ -542,6 +552,25 @@ test("Draft 2020-12 schemas validate the profile and close adversarial receipt d
     assert.throws(
       () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingProviderStateFile),
       /must have required property 'providerExecution'/,
+    );
+
+    const missingRequestMemory = fixtureReceipt();
+    delete missingRequestMemory.authorityLifecycle.requestMemoryStrategy;
+    const missingRequestMemoryFile = await writeReceipt(
+      "missing-request-memory.json", missingRequestMemory,
+    );
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingRequestMemoryFile),
+      /must have required property 'requestMemoryStrategy'/,
+    );
+    const missingRequestMemoryField = fixtureReceipt();
+    delete missingRequestMemoryField.authorityLifecycle.requestMemoryStrategy.stageResidency;
+    const missingRequestMemoryFieldFile = await writeReceipt(
+      "missing-request-memory-field.json", missingRequestMemoryField,
+    );
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingRequestMemoryFieldFile),
+      /must have required property 'stageResidency'/,
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -993,8 +1022,8 @@ test("cleanup isolation failure preserves all 19 durable outcomes and quarantine
     expectedB646DerivedNamespace: async (artifact, root) => (
       path.join(root, "candle-device-format-v1", "a".repeat(64))
     ),
-    inspectDerivedSidecarRoot: async (root, expectedNamespace) => {
-      if (!expectedNamespace) return {
+    inspectDerivedSidecarRoot: async (root, expectedNamespace, options = {}) => {
+      if (!expectedNamespace || options.allowExactEmpty) return {
         rootInventory: {
           root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
         },
@@ -1024,11 +1053,19 @@ test("cleanup isolation failure preserves all 19 durable outcomes and quarantine
       await writeFile(logFile, "fixture runtime\n", "utf8");
       const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
       executedCells.push(runtimeCell.id);
+      const flux = runtimeCell.kind === "image"
+        && new Set(["flux1_dev", "flux1_schnell"]).has(runtimeCell.engineId);
       await writeFile(path.join(cellDir, "runtime-result.json"), `${JSON.stringify({
         requestedTier: runtimeCell.requestedTier,
         resolvedTier: runtimeCell.requestedTier,
         denseFallback: false,
         loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
+        requestMemoryStrategy: {
+          strategy: flux ? "default-resident" : "not-applicable",
+          requestMemoryPresent: false,
+          stageResidency: false,
+          streamTransformerBlocks: false,
+        },
       })}\n`, "utf8");
       await writeFile(path.join(cellDir, "output.bin"), "fixture", "utf8");
     },
@@ -1091,7 +1128,8 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     preflightFault = null, cellFault = null, omitObstructions = false,
     derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
     runtimeResultMode = "valid", providerRuntimeFailureAt = null,
-    providerFailureDerivedMode = "empty", successfulFluxDerivedMode = "bounded",
+    providerFailureDerivedMode = "empty", successfulFluxDerivedMode = "resident",
+    runtimeMemoryMode = "current",
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -1258,16 +1296,50 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           throw new Error("fixture provider runtime failed");
         }
         if (runtimeResultMode !== "missing" || runtimeCells.length !== 1) {
+          const isFlux = runtimeCell.kind === "image"
+            && new Set(["flux1_dev", "flux1_schnell"]).has(runtimeCell.engineId);
+          const requestMemoryStrategy = !isFlux ? {
+            strategy: "not-applicable",
+            requestMemoryPresent: false,
+            stageResidency: false,
+            streamTransformerBlocks: false,
+          } : runtimeMemoryMode === "bounded" ? {
+            strategy: "bounded-transformer",
+            requestMemoryPresent: true,
+            stageResidency: true,
+            streamTransformerBlocks: true,
+          } : runtimeMemoryMode === "staged" ? {
+            strategy: "staged-resident",
+            requestMemoryPresent: true,
+            stageResidency: true,
+            streamTransformerBlocks: false,
+          } : runtimeMemoryMode === "wrong" ? {
+            strategy: "bounded-transformer",
+            requestMemoryPresent: true,
+            stageResidency: true,
+            streamTransformerBlocks: false,
+          } : {
+            strategy: "default-resident",
+            requestMemoryPresent: false,
+            stageResidency: false,
+            streamTransformerBlocks: false,
+          };
+          const runtimeResultObject = {
+            requestedTier: runtimeCell.requestedTier,
+            resolvedTier: runtimeResultMode === "wrong-semantic" && runtimeCells.length === 1
+              ? (runtimeCell.requestedTier === "q4" ? "q8" : "q4")
+              : runtimeCell.requestedTier,
+            denseFallback: false,
+            loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
+            requestMemoryStrategy,
+          };
+          if (runtimeMemoryMode === "missing") delete runtimeResultObject.requestMemoryStrategy;
+          if (runtimeMemoryMode === "missing-field") {
+            delete runtimeResultObject.requestMemoryStrategy.streamTransformerBlocks;
+          }
           const runtimeResult = runtimeResultMode === "malformed" && runtimeCells.length === 1
             ? "{"
-            : `${JSON.stringify({
-              requestedTier: runtimeCell.requestedTier,
-              resolvedTier: runtimeResultMode === "wrong-semantic" && runtimeCells.length === 1
-                ? (runtimeCell.requestedTier === "q4" ? "q8" : "q4")
-                : runtimeCell.requestedTier,
-              denseFallback: false,
-              loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
-            })}\n`;
+            : `${JSON.stringify(runtimeResultObject)}\n`;
           if (runtimeResultMode === "symlink" && runtimeCells.length === 1) {
             await writeFile(path.join(cellDir, "runtime-result-target.json"), runtimeResult, "utf8");
             await symlink(
@@ -1451,6 +1523,18 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     );
     assert.equal(faulted.cacheEvidence.offlineBeforeCells, true, runtimeResultMode);
   }
+  for (const runtimeMemoryMode of ["missing", "missing-field", "wrong"]) {
+    const faulted = await scenario({ runtimeMemoryMode });
+    assert.equal(faulted.runtimeCells.length, 1, runtimeMemoryMode);
+    assert.ok(faulted.result.summary.receipts.slice(8).every(
+      (outcome) => outcome.status === "failed" && outcome.receipt,
+    ), runtimeMemoryMode);
+    assert.match(
+      faulted.result.summary.campaignErrors.join("\n"),
+      /runtime-result evidence failed after cell flux1-dev-q8.*request memory strategy/,
+      runtimeMemoryMode,
+    );
+  }
   const runtimeHashFault = await scenario({ cellFault: { stage: "runtimeResultHash" } });
   assert.equal(runtimeHashFault.runtimeCells.length, 1);
   assert.ok(runtimeHashFault.result.summary.receipts.slice(8).every(
@@ -1496,6 +1580,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   );
   const providerFailureReceipt = providerFailed.continuationReceipts[0];
   assert.equal(providerFailureReceipt.authorityLifecycle.providerExecution, "failed");
+  assert.equal(providerFailureReceipt.authorityLifecycle.requestMemoryStrategy, null);
   assert.equal(
     providerFailureReceipt.authorityLifecycle.derivedAfter[0].derivedDisposition,
     "provider-failed-empty",
@@ -1505,8 +1590,18 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(providerFailureReceipt.authorityLifecycle.staged[0].derivedNamespaces.length, 1);
   assert.equal(providerFailureReceipt.authorityLifecycle.released[0].derivedRemoved, true);
   assert.equal(providerFailed.cacheEvidence.derivedSidecarLifecycle.afterCells[0].providerExecution, "failed");
+  assert.equal(
+    providerFailed.cacheEvidence.derivedSidecarLifecycle.afterCells[0].requestMemoryStrategy,
+    null,
+  );
   const forgedCompletedProvider = structuredClone(providerFailureReceipt);
   forgedCompletedProvider.authorityLifecycle.providerExecution = "completed";
+  forgedCompletedProvider.authorityLifecycle.requestMemoryStrategy = {
+    strategy: "default-resident",
+    requestMemoryPresent: false,
+    stageResidency: false,
+    streamTransformerBlocks: false,
+  };
   assert.throws(
     () => validateReceipt(
       forgedCompletedProvider,
@@ -1595,11 +1690,17 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(passed.runtimeCells.length, 12, passed.result.summary.campaignErrors.join("\n"));
   assert.equal(
     passed.continuationReceipts[0].authorityLifecycle.derivedAfter[0].derivedDisposition,
-    "bounded-transformer-sidecars",
+    "resident-empty",
   );
   assert.equal(
     passed.cacheEvidence.derivedSidecarLifecycle.afterCells[0].derivedDisposition,
-    "bounded-transformer-sidecars",
+    "resident-empty",
+  );
+  const missingCacheRequestMemory = structuredClone(passed.cacheEvidence);
+  delete missingCacheRequestMemory.derivedSidecarLifecycle.afterCells[0].requestMemoryStrategy;
+  assert.throws(
+    () => validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, missingCacheRequestMemory),
+    /required property 'requestMemoryStrategy'/,
   );
   assert.ok(
     passed.events.indexOf("execute:flux1-dev-q8")
@@ -1635,13 +1736,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(passed.result.summary.finalAuthorityLifecycle.derived.files, 0);
   assert.equal(passed.result.summary.finalAuthorityLifecycle.missingStoreAbsent, true);
 
-  const resident = await scenario({ successfulFluxDerivedMode: "resident" });
-  assert.equal(resident.runtimeCells.length, 12, resident.result.summary.campaignErrors.join("\n"));
-  assert.equal(resident.result.summary.failed, 0);
-  assert.equal(resident.result.summary.passed, 19);
-  assert.equal(resident.runtimeCells[1].id, "flux1-schnell-q4");
-  const residentReceipt = resident.continuationReceipts[0];
-  assert.equal(residentReceipt.authorityLifecycle.providerExecution, "completed");
+  const residentReceipt = passed.continuationReceipts[0];
   assert.equal(
     residentReceipt.authorityLifecycle.derivedAfter[0].derivedDisposition,
     "resident-empty",
@@ -1650,8 +1745,92 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(residentReceipt.authorityLifecycle.derivedAfter[0].inventories.length, 0);
   assert.equal(residentReceipt.authorityLifecycle.staged[0].derivedNamespaces.length, 0);
   assert.equal(residentReceipt.authorityLifecycle.released[0].derivedRemoved, true);
+
+  const bounded = await scenario({
+    successfulFluxDerivedMode: "bounded", runtimeMemoryMode: "bounded",
+  });
+  assert.equal(bounded.runtimeCells.length, 12, bounded.result.summary.campaignErrors.join("\n"));
+  assert.equal(bounded.result.summary.failed, 0);
+  assert.equal(bounded.result.summary.passed, 19);
+  assert.equal(bounded.runtimeCells[1].id, "flux1-schnell-q4");
   assert.equal(
-    resident.cacheEvidence.derivedSidecarLifecycle.afterCells[0].derivedDisposition,
+    bounded.continuationReceipts[0].authorityLifecycle.derivedAfter[0].derivedDisposition,
+    "bounded-transformer-sidecars",
+  );
+  assert.equal(
+    bounded.cacheEvidence.derivedSidecarLifecycle.afterCells[0].derivedDisposition,
+    "bounded-transformer-sidecars",
+  );
+
+  const residentReceiptWithBoundedInventory = structuredClone(residentReceipt);
+  residentReceiptWithBoundedInventory.authorityLifecycle.staged[0].derivedNamespaces =
+    structuredClone(bounded.continuationReceipts[0].authorityLifecycle.staged[0].derivedNamespaces);
+  residentReceiptWithBoundedInventory.authorityLifecycle.derivedAfter =
+    structuredClone(bounded.continuationReceipts[0].authorityLifecycle.derivedAfter);
+  assert.throws(
+    () => validateReceipt(
+      residentReceiptWithBoundedInventory,
+      passed.checked.cells[7],
+      passed.checked,
+      passed.lifecycleContext,
+    ),
+    /neither exact resident-empty nor one exact bounded/,
+  );
+  const boundedReceiptWithEmptyInventory = structuredClone(bounded.continuationReceipts[0]);
+  boundedReceiptWithEmptyInventory.authorityLifecycle.staged[0].derivedNamespaces = [];
+  boundedReceiptWithEmptyInventory.authorityLifecycle.derivedAfter =
+    structuredClone(residentReceipt.authorityLifecycle.derivedAfter);
+  assert.throws(
+    () => validateReceipt(
+      boundedReceiptWithEmptyInventory,
+      bounded.checked.cells[7],
+      bounded.checked,
+      bounded.lifecycleContext,
+    ),
+    /neither exact resident-empty nor one exact bounded/,
+  );
+
+  const residentCacheWithBoundedInventory = structuredClone(passed.cacheEvidence);
+  Object.assign(residentCacheWithBoundedInventory.derivedSidecarLifecycle.afterCells[0], {
+    derivedDisposition: "bounded-transformer-sidecars",
+    inventory: {
+      ...residentCacheWithBoundedInventory.derivedSidecarLifecycle.afterCells[0].inventory,
+      files: 494,
+      bytes: 12_573_868_032,
+      sha256: "8".repeat(64),
+    },
+  });
+  assert.throws(
+    () => validateCachePreflightEvidence(
+      residentCacheWithBoundedInventory, passed.cacheValidation,
+    ),
+    /derived Candle sidecar lifecycle inventory drifted/,
+  );
+  const boundedCacheWithEmptyInventory = structuredClone(bounded.cacheEvidence);
+  Object.assign(boundedCacheWithEmptyInventory.derivedSidecarLifecycle.afterCells[0], {
+    derivedDisposition: "resident-empty",
+    inventory: {
+      ...boundedCacheWithEmptyInventory.derivedSidecarLifecycle.afterCells[0].inventory,
+      files: 0,
+      bytes: 0,
+      sha256: createHash("sha256").digest("hex"),
+    },
+  });
+  assert.throws(
+    () => validateCachePreflightEvidence(
+      boundedCacheWithEmptyInventory, bounded.cacheValidation,
+    ),
+    /derived Candle sidecar lifecycle inventory drifted/,
+  );
+
+  const stagedResident = await scenario({ runtimeMemoryMode: "staged" });
+  assert.equal(stagedResident.runtimeCells.length, 12);
+  assert.equal(
+    stagedResident.continuationReceipts[0].authorityLifecycle.requestMemoryStrategy.strategy,
+    "staged-resident",
+  );
+  assert.equal(
+    stagedResident.continuationReceipts[0].authorityLifecycle.derivedAfter[0].derivedDisposition,
     "resident-empty",
   );
 
@@ -1816,7 +1995,11 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     { files: 493, bytes: 12_573_868_032 },
     { files: 494, bytes: 12_573_868_032 + 494 * 16_384 + 1 },
   ]) {
-    const derivedFault = await scenario({ derivedContractDrift: drift });
+    const derivedFault = await scenario({
+      derivedContractDrift: drift,
+      successfulFluxDerivedMode: "bounded",
+      runtimeMemoryMode: "bounded",
+    });
     assert.equal(derivedFault.runtimeCells.length, 1);
     assert.match(
       derivedFault.result.summary.campaignErrors.join("\n"),
@@ -1835,6 +2018,21 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.ok(strayDerived.result.summary.receipts.slice(8).every(
     (outcome) => outcome.status === "failed" && outcome.receipt,
   ));
+  for (const [label, options] of [
+    ["resident-with-sidecars", { successfulFluxDerivedMode: "bounded" }],
+    ["bounded-with-empty", { runtimeMemoryMode: "bounded" }],
+  ]) {
+    const mismatch = await scenario(options);
+    assert.equal(mismatch.runtimeCells.length, 1, label);
+    assert.match(
+      mismatch.result.summary.campaignErrors.join("\n"),
+      /derived Candle sidecar evidence failed.*FLUX derived-sidecar contract drifted/,
+      label,
+    );
+    assert.ok(mismatch.result.summary.receipts.slice(8).every(
+      (outcome) => outcome.status === "failed" && outcome.receipt,
+    ), label);
+  }
 });
 
 test("schemas, clean Node dependencies, and workflow preserve the opt-in single-job terminal contract", async () => {

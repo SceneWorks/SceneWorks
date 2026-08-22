@@ -221,11 +221,12 @@
     "sidecarSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "cellId", "providerExecution", "derivedDisposition", "inventory"],
+      "required": ["ordinal", "cellId", "providerExecution", "requestMemoryStrategy", "derivedDisposition", "inventory"],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
         "cellId": { "$ref": "#/$defs/id" },
         "providerExecution": { "enum": ["failed", "completed"] },
+        "requestMemoryStrategy": { "$ref": "#/$defs/requestMemoryStrategy" },
         "derivedDisposition": {
           "enum": [
             "not-applicable",
@@ -236,6 +237,30 @@
         },
         "inventory": { "$ref": "#/$defs/inventory" }
       }
+    },
+    "requestMemoryStrategy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "requestMemoryPresent", "stageResidency", "streamTransformerBlocks"],
+          "properties": {
+            "strategy": {
+              "enum": [
+                "not-applicable",
+                "default-resident",
+                "explicit-resident",
+                "staged-resident",
+                "bounded-transformer"
+              ]
+            },
+            "requestMemoryPresent": { "type": "boolean" },
+            "stageResidency": { "type": "boolean" },
+            "streamTransformerBlocks": { "type": "boolean" }
+          }
+        },
+        { "type": "null" }
+      ]
     },
     "physicalFile": {
       "type": "object",

@@ -249,6 +249,30 @@
         "requiredFreeBytes": { "type": "integer", "minimum": 1 }
       }
     },
+    "requestMemoryStrategy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "requestMemoryPresent", "stageResidency", "streamTransformerBlocks"],
+          "properties": {
+            "strategy": {
+              "enum": [
+                "not-applicable",
+                "default-resident",
+                "explicit-resident",
+                "staged-resident",
+                "bounded-transformer"
+              ]
+            },
+            "requestMemoryPresent": { "type": "boolean" },
+            "stageResidency": { "type": "boolean" },
+            "streamTransformerBlocks": { "type": "boolean" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
     "stagedAuthority": {
       "type": "object",
       "additionalProperties": false,
@@ -297,13 +321,14 @@
     "authorityLifecycle": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "cellId", "staged", "activeArtifactIds", "providerExecution", "verifiedBefore", "verifiedAfter", "derivedAfter", "released", "diskProbes"],
+      "required": ["ordinal", "cellId", "staged", "activeArtifactIds", "providerExecution", "requestMemoryStrategy", "verifiedBefore", "verifiedAfter", "derivedAfter", "released", "diskProbes"],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
         "cellId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
         "staged": { "type": "array", "items": { "$ref": "#/$defs/stagedAuthority" } },
         "activeArtifactIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" } },
         "providerExecution": { "enum": ["not-attempted", "failed", "completed"] },
+        "requestMemoryStrategy": { "$ref": "#/$defs/requestMemoryStrategy" },
         "verifiedBefore": { "type": "boolean" },
         "verifiedAfter": { "type": "boolean" },
         "derivedAfter": { "type": "array", "items": { "$ref": "#/$defs/derivedAuthority" } },

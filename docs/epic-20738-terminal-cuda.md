@@ -99,7 +99,10 @@ The Node controller awaits one fresh `sceneworks-worker` process for each cell w
 `--test-threads=1`; it never starts cells in parallel and exposes no per-cell dispatch input. The Rust
 entrypoint constructs the production load spec and deterministic request in reviewable code. Packed
 tier markers must agree with the requested q4/q8 directory, and runtime results must say requested
-tier equals resolved tier with `denseFallback: false`.
+tier equals resolved tier with `denseFallback: false`. The same runtime result carries a closed
+request-memory record: current FLUX cells report `default-resident`, `requestMemoryPresent: false`,
+`stageResidency: false`, and `streamTransformerBlocks: false`; non-FLUX cells report exact
+`not-applicable`.
 
 All writable cache and temporary environment variables are redirected to the current cell's scratch,
 while model roots point only at the active JIT staging roots. Every selected root and nested
@@ -112,7 +115,10 @@ transformer path, exactly one b646 component-path-derived namespace shares the a
 and must contain the reviewed bounded 494-file sidecar set. Partial, stray, multiple, wrong, or
 non-regular derived entries fail closed in either case; every non-FLUX root must stay exactly empty.
 An early provider failure may retain only its separately labeled exact-empty namespace evidence. The
-controller rehashes
+controller validates the runtime request-memory record before accepting a successful derived
+disposition: default/explicit/staged resident strategies pair only with exact empty evidence, while
+`bounded-transformer` with `streamTransformerBlocks: true` pairs only with the canonical 494-file
+namespace. A provider failure has no runtime-result strategy claim. The controller rehashes
 each selected staged authority file and every obstruction immediately before and after every cell,
 then proves exact stage/namespace absence at release and proves final staging, derived cache, and
 missing-file store emptiness. Any stage, hash, capacity, or cleanup drift quarantines later cells; the
@@ -148,7 +154,7 @@ store, exact disk plan/free floor, and the no-GPU-before-validation verdict. Its
 SHA-256 are bound from the campaign summary. Each continuation receipt binds that cell's live-set
 transition, free-space probes, pre/post immutable verification, the exact derived disposition
 (`resident-empty`, `bounded-transformer-sidecars`, `provider-failed-empty`, or `not-applicable`),
-derived inventory, and exact releases;
+its closed request-memory strategy, derived inventory, and exact releases;
 the final summary binds the complete lifecycle and empty terminal state.
 
 A cache preflight directory, write, stat, hash, schema/semantic validation, census, staging, or final
