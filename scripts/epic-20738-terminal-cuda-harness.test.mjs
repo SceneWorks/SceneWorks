@@ -372,6 +372,7 @@ function fixtureReceipt(status = "passed", cellIndex = 0) {
       derivedNamespaces: [fluxNamespace],
     }] : [],
     activeArtifactIds: [...cell.artifactIds],
+    providerExecution: "completed",
     verifiedBefore: true,
     verifiedAfter: true,
     derivedAfter: cell.artifactIds.map((artifactId) => ({
@@ -529,6 +530,16 @@ test("Draft 2020-12 schemas validate the profile and close adversarial receipt d
     assert.throws(
       () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, noErrorFile),
       /must be string/,
+    );
+
+    const missingProviderState = fixtureReceipt();
+    delete missingProviderState.authorityLifecycle.providerExecution;
+    const missingProviderStateFile = await writeReceipt(
+      "missing-provider-state.json", missingProviderState,
+    );
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingProviderStateFile),
+      /must have required property 'providerExecution'/,
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -874,6 +885,12 @@ test("b646 derived sidecars occupy one exact canonical namespace with no global 
     };
     const expected = await expectedB646DerivedNamespace(artifact, derived);
     assert.match(path.basename(expected), /^[0-9a-f]{64}$/);
+    const empty = await inspectDerivedSidecarRoot(
+      derived, expected, { materializeExactEmpty: true },
+    );
+    assert.equal(empty.namespaces.length, 1);
+    assert.equal(empty.namespaces[0].inventory.files, 0);
+    assert.equal(empty.rootInventory.files, 0);
     await mkdir(expected, { recursive: true });
     await Promise.all(Array.from({ length: 494 }, (_, index) => (
       writeFile(path.join(expected, `${String(index).padStart(3, "0")}.safetensors`), "x")
@@ -1067,6 +1084,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     preflightFault = null, cellFault = null, omitObstructions = false,
     derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
     runtimeResultMode = "valid", providerRuntimeFailureAt = null,
+    providerFailureDerivedMode = "empty",
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -1174,7 +1192,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       expectedB646DerivedNamespace: async (artifact, root) => (
         path.join(root, "candle-device-format-v1", "a".repeat(64))
       ),
-      inspectDerivedSidecarRoot: async (root, expectedNamespace) => {
+      inspectDerivedSidecarRoot: async (root, expectedNamespace, options = {}) => {
         if (!expectedNamespace) return {
           rootInventory: {
             root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
@@ -1184,11 +1202,17 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
         const id = runtimeCells.at(-1)?.id;
         assert.ok(id?.startsWith("flux1-"));
         await mkdir(expectedNamespace, { recursive: true });
+        const providerFailed = id === providerRuntimeFailureAt;
+        if (providerFailed) assert.equal(options.materializeExactEmpty, true);
         const bytes = id.endsWith("q4") ? 7_396_392_960 : 12_573_868_032;
         const inventory = {
           root: expectedNamespace,
-          files: derivedContractDrift?.files ?? 494,
-          bytes: derivedContractDrift?.bytes ?? bytes,
+          files: providerFailed
+            ? (providerFailureDerivedMode === "partial" ? 1 : 0)
+            : (derivedContractDrift?.files ?? 494),
+          bytes: providerFailed
+            ? (providerFailureDerivedMode === "partial" ? 1 : 0)
+            : (derivedContractDrift?.bytes ?? bytes),
           sha256: createHash("sha256").digest("hex"),
         };
         return {
@@ -1225,7 +1249,14 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
               denseFallback: false,
               loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
             })}\n`;
-          await writeFile(path.join(cellDir, "runtime-result.json"), runtimeResult, "utf8");
+          if (runtimeResultMode === "symlink" && runtimeCells.length === 1) {
+            await writeFile(path.join(cellDir, "runtime-result-target.json"), runtimeResult, "utf8");
+            await symlink(
+              "runtime-result-target.json", path.join(cellDir, "runtime-result.json"), "file",
+            );
+          } else {
+            await writeFile(path.join(cellDir, "runtime-result.json"), runtimeResult, "utf8");
+          }
         }
         await writeFile(path.join(cellDir, "output.bin"), "fixture", "utf8");
       },
@@ -1422,6 +1453,20 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     /cell lifecycle evidence before network-offline establishment/,
   );
 
+  const linkedRuntimeResult = await scenario({ runtimeResultMode: "symlink" });
+  assert.equal(linkedRuntimeResult.runtimeCells.length, 1);
+  assert.ok(linkedRuntimeResult.result.summary.receipts.slice(8).every(
+    (outcome) => outcome.status === "failed" && outcome.receipt,
+  ));
+  assert.match(
+    linkedRuntimeResult.result.summary.campaignErrors.join("\n"),
+    /runtime-result evidence failed after cell flux1-dev-q8.*ordinary non-reparse file/,
+  );
+  assert.match(
+    linkedRuntimeResult.result.summary.receipts[7].error,
+    /evidence tree contains a symlink or reparse point/,
+  );
+
   const providerFailed = await scenario({ providerRuntimeFailureAt: "flux1-dev-q8" });
   assert.equal(providerFailed.runtimeCells.length, 12);
   assert.equal(providerFailed.result.summary.failed, 1);
@@ -1430,6 +1475,43 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     providerFailed.result.summary.campaignErrors.some((error) => error.includes("runtime-result evidence")),
     false,
   );
+  const providerFailureReceipt = providerFailed.continuationReceipts[0];
+  assert.equal(providerFailureReceipt.authorityLifecycle.providerExecution, "failed");
+  assert.equal(providerFailureReceipt.authorityLifecycle.derivedAfter[0].files, 0);
+  assert.equal(providerFailureReceipt.authorityLifecycle.derivedAfter[0].inventories.length, 1);
+  assert.equal(providerFailureReceipt.authorityLifecycle.staged[0].derivedNamespaces.length, 1);
+  assert.equal(providerFailureReceipt.authorityLifecycle.released[0].derivedRemoved, true);
+  assert.equal(providerFailed.cacheEvidence.derivedSidecarLifecycle.afterCells[0].providerExecution, "failed");
+  const forgedCompletedProvider = structuredClone(providerFailureReceipt);
+  forgedCompletedProvider.authorityLifecycle.providerExecution = "completed";
+  assert.throws(
+    () => validateReceipt(
+      forgedCompletedProvider,
+      providerFailed.checked.cells[7],
+      providerFailed.checked,
+      providerFailed.lifecycleContext,
+    ),
+    /FLUX derived lifecycle/,
+  );
+  const missingCacheProviderState = structuredClone(providerFailed.cacheEvidence);
+  delete missingCacheProviderState.derivedSidecarLifecycle.afterCells[0].providerExecution;
+  assert.throws(
+    () => validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, missingCacheProviderState),
+    /required property 'providerExecution'/,
+  );
+
+  const providerPartial = await scenario({
+    providerRuntimeFailureAt: "flux1-dev-q8",
+    providerFailureDerivedMode: "partial",
+  });
+  assert.equal(providerPartial.runtimeCells.length, 1);
+  assert.match(
+    providerPartial.result.summary.campaignErrors.join("\n"),
+    /derived Candle sidecar evidence failed after cell flux1-dev-q8.*derived-sidecar contract drifted/,
+  );
+  assert.ok(providerPartial.result.summary.receipts.slice(8).every(
+    (outcome) => outcome.status === "failed" && outcome.receipt,
+  ));
 
   for (const cellFault of [
     { stage: "finalLog" },

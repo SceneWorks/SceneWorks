@@ -736,18 +736,31 @@ async function sha256File(file) {
 
 export async function hashedFiles(root, { exclude = new Set() } = {}) {
   const absolute = path.resolve(root);
+  const rootMetadata = await lstat(absolute);
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()
+    || comparable(await realpath(absolute)) !== comparable(absolute)) {
+    fail(`evidence root is not an ordinary non-reparse directory: ${absolute}`);
+  }
   const files = [];
   async function visit(directory) {
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       const file = path.join(directory, entry.name);
       const relative = path.relative(absolute, file).split(path.sep).join("/");
-      if (exclude.has(relative)) continue;
-      if (entry.isDirectory()) await visit(file);
-      else if (entry.isFile()) {
-        const metadata = await stat(file);
-        files.push({ path: relative, bytes: metadata.size, sha256: await sha256File(file) });
+      const metadata = await lstat(file);
+      if (entry.isSymbolicLink() || metadata.isSymbolicLink()) {
+        fail(`evidence tree contains a symlink or reparse point: ${file}`);
       }
+      if (exclude.has(relative)) {
+        if (!entry.isFile() || !metadata.isFile()) {
+          fail(`excluded evidence entry is not an ordinary regular file: ${file}`);
+        }
+        continue;
+      }
+      if (entry.isDirectory() && metadata.isDirectory()) await visit(file);
+      else if (entry.isFile() && metadata.isFile()) {
+        files.push({ path: relative, bytes: metadata.size, sha256: await sha256File(file) });
+      } else fail(`evidence tree contains a non-regular entry: ${file}`);
     }
   }
   await visit(absolute);
@@ -932,9 +945,14 @@ function validateReceiptInternal(
     const lifecycle = receipt.authorityLifecycle;
     if (lifecycle.ordinal !== receipt.cell.ordinal || lifecycle.cellId !== receipt.cell.id
       || JSON.stringify(lifecycle.activeArtifactIds) !== JSON.stringify(expectedCell.artifactIds)
+      || !new Set(["not-attempted", "failed", "completed"]).has(lifecycle.providerExecution)
       || lifecycle.staged.some((entry) => !expectedCell.artifactIds.includes(entry.artifactId))
       || lifecycle.released.some((entry) => !expectedCell.artifactIds.includes(entry.artifactId))) {
       fail("receipt authority lifecycle identity drifted");
+    }
+    if ((lifecycle.providerExecution === "not-attempted" && lifecycle.derivedAfter.length)
+      || (lifecycle.providerExecution === "failed" && receipt.status !== "failed")) {
+      fail("receipt provider execution state drifted from its outcome evidence");
     }
     for (const derived of lifecycle.derivedAfter) {
       const isFlux = derived.artifactId.startsWith("flux1-");
@@ -944,12 +962,18 @@ function validateReceiptInternal(
         ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES;
       if (isFlux) {
         const staged = lifecycle.staged.find((entry) => entry.artifactId === derived.artifactId);
-        if (derived.files !== 494 || derived.bytes < payloadFloor
-          || derived.bytes > payloadCeiling || derived.inventories.length !== 1
-          || staged?.derivedNamespaces.length !== 1
-          || comparable(derived.inventories[0].root) !== comparable(staged.derivedNamespaces[0])
-          || !/^[0-9a-f]{64}$/.test(path.basename(derived.inventories[0].root))
-          || path.basename(path.dirname(derived.inventories[0].root)) !== "candle-device-format-v1") {
+        const oneBoundNamespace = derived.inventories.length === 1
+          && staged?.derivedNamespaces.length === 1
+          && comparable(derived.inventories[0].root) === comparable(staged.derivedNamespaces[0])
+          && /^[0-9a-f]{64}$/.test(path.basename(derived.inventories[0].root))
+          && path.basename(path.dirname(derived.inventories[0].root)) === "candle-device-format-v1";
+        const exactEmptyFailure = lifecycle.providerExecution === "failed"
+          && derived.files === 0 && derived.bytes === 0 && oneBoundNamespace
+          && derived.inventories[0].files === 0 && derived.inventories[0].bytes === 0
+          && derived.inventories[0].sha256 === createHash("sha256").digest("hex");
+        const exactComplete = derived.files === 494 && derived.bytes >= payloadFloor
+          && derived.bytes <= payloadCeiling && oneBoundNamespace;
+        if (!exactEmptyFailure && !exactComplete) {
           fail("receipt FLUX derived lifecycle is not one exact bounded b646 namespace");
         }
       } else if (derived.files !== 0 || derived.bytes !== 0 || derived.inventories.length !== 0) {
@@ -986,16 +1010,19 @@ function validateReceiptInternal(
         || releasedIds.some((id) => !new Set([...startingIds, ...endingIds]).has(id))) {
         fail("receipt staged/released authorities drifted from the lifetime plan");
       }
+      const expectedDerivedIds = lifecycle.providerExecution === "not-attempted"
+        ? [] : expectedCell.artifactIds;
       if (completeLifecycle && (JSON.stringify(actualPhases) !== JSON.stringify(expectedPhases)
         || lifecycle.diskProbes.some((probe) => probe.freeBytes < requiredFreeBytes)
         || JSON.stringify(stagedIds) !== JSON.stringify(startingIds)
         || JSON.stringify(releasedIds) !== JSON.stringify(endingIds)
         || JSON.stringify(lifecycle.derivedAfter.map((entry) => entry.artifactId))
-          !== JSON.stringify(expectedCell.artifactIds))) {
+          !== JSON.stringify(expectedDerivedIds))) {
         fail("completed receipt lifecycle omitted an exact transition, probe, or derivation");
       }
     }
     if (receipt.status === "passed" && (!lifecycle.verifiedBefore || !lifecycle.verifiedAfter
+      || lifecycle.providerExecution !== "completed"
       || lifecycle.diskProbes.length < lifecycle.staged.length + 1
       || lifecycle.released.some((entry) => !entry.stageRemoved || !entry.derivedRemoved))) {
       fail("passed receipt authority lifecycle is incomplete");
@@ -1604,17 +1631,28 @@ export async function expectedB646DerivedNamespace(artifact, derivedSidecarRoot)
   return path.join(derivedSidecarRoot, "candle-device-format-v1", digest);
 }
 
-export async function inspectDerivedSidecarRoot(derivedSidecarRoot, expectedNamespace = null) {
-  const rootEntries = await readdir(derivedSidecarRoot, { withFileTypes: true });
+export async function inspectDerivedSidecarRoot(
+  derivedSidecarRoot, expectedNamespace = null, { materializeExactEmpty = false } = {},
+) {
+  let rootEntries = await readdir(derivedSidecarRoot, { withFileTypes: true });
   if (!expectedNamespace) {
     if (rootEntries.length) fail("non-FLUX derived sidecar root must be exactly empty");
     return { rootInventory: await directoryInventory(derivedSidecarRoot), namespaces: [] };
+  }
+  const expectedVersionRoot = path.join(derivedSidecarRoot, "candle-device-format-v1");
+  if (materializeExactEmpty && rootEntries.length === 0) {
+    if (comparable(path.dirname(expectedNamespace)) !== comparable(expectedVersionRoot)
+      || !/^[0-9a-f]{64}$/.test(path.basename(expectedNamespace))) {
+      fail("empty FLUX sidecar namespace target is not the exact b646 cache path");
+    }
+    await mkdir(expectedNamespace, { recursive: true });
+    rootEntries = await readdir(derivedSidecarRoot, { withFileTypes: true });
   }
   if (rootEntries.length !== 1 || rootEntries[0].name !== "candle-device-format-v1"
     || !rootEntries[0].isDirectory()) {
     fail("FLUX derived sidecar root has stray files, directories, or versions");
   }
-  const versionRoot = path.join(derivedSidecarRoot, "candle-device-format-v1");
+  const versionRoot = expectedVersionRoot;
   const versionMetadata = await lstat(versionRoot);
   if (versionMetadata.isSymbolicLink()) fail("derived sidecar version root is a reparse point");
   const namespaceEntries = await readdir(versionRoot, { withFileTypes: true });
@@ -1816,6 +1854,7 @@ function emptyAuthorityLifecycle(cell, index) {
     cellId: cell.id,
     staged: [],
     activeArtifactIds: [...cell.artifactIds],
+    providerExecution: "not-attempted",
     verifiedBefore: false,
     verifiedAfter: false,
     derivedAfter: [],
@@ -2157,9 +2196,12 @@ export function validateCachePreflightEvidence(document, {
     const payloadFloor = flux?.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032;
     const payloadCeiling = flux?.endsWith("-q4")
       ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES;
-    if (flux ? (snapshot.inventory.files !== 494
+    const emptyProviderFailure = snapshot.providerExecution === "failed"
+      && snapshot.inventory.files === 0 && snapshot.inventory.bytes === 0
+      && snapshot.inventory.sha256 === createHash("sha256").digest("hex");
+    if (flux ? (!emptyProviderFailure && (snapshot.inventory.files !== 494
         || snapshot.inventory.bytes < payloadFloor
-        || snapshot.inventory.bytes > payloadCeiling)
+        || snapshot.inventory.bytes > payloadCeiling))
       : (snapshot.inventory.files !== 0 || snapshot.inventory.bytes !== 0
         || snapshot.inventory.sha256 !== createHash("sha256").digest("hex"))) {
       fail("derived Candle sidecar lifecycle inventory drifted from the cell family contract");
@@ -2587,6 +2629,7 @@ export async function runCampaign(args, options = {}) {
       cellId: cell.id,
       staged: [],
       activeArtifactIds: [...cell.artifactIds],
+      providerExecution: "not-attempted",
       verifiedBefore: false,
       verifiedAfter: false,
       derivedAfter: [],
@@ -2749,7 +2792,9 @@ export async function runCampaign(args, options = {}) {
           runtimeScratch: cellScratch,
           derivedSidecarRoot,
         });
+        lifecycle.providerExecution = "completed";
       } catch (error) {
+        lifecycle.providerExecution = "failed";
         runtimeFailure = error;
       }
       try {
@@ -2769,6 +2814,7 @@ export async function runCampaign(args, options = {}) {
           ) : null;
         const derivedInspection = await operations.inspectDerivedSidecarRoot(
           derivedSidecarRoot, expectedNamespace,
+          { materializeExactEmpty: runtimeFailure !== null && expectedNamespace !== null },
         );
         if (fluxArtifacts.length === 1) {
           sharedArtifacts.get(fluxArtifacts[0]).derivedNamespaces.splice(
@@ -2787,10 +2833,12 @@ export async function runCampaign(args, options = {}) {
           }
           const files = inventories.reduce((sum, inventory) => sum + inventory.files, 0);
           const bytes = inventories.reduce((sum, inventory) => sum + inventory.bytes, 0);
-          if (artifactId.startsWith("flux1-") && (files !== 494
-            || bytes < (artifactId.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032)
-            || bytes > (artifactId.endsWith("-q4")
-              ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES))) {
+          const exactEmptyProviderFailure = runtimeFailure !== null
+            && files === 0 && bytes === 0 && inventories.length === 1;
+          if (artifactId.startsWith("flux1-") && !exactEmptyProviderFailure && (files !== 494
+              || bytes < (artifactId.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032)
+              || bytes > (artifactId.endsWith("-q4")
+                ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES))) {
             fail(`FLUX derived-sidecar contract drifted for ${artifactId}: ${files} files/${bytes} bytes`);
           }
           if (!artifactId.startsWith("flux1-") && (files !== 0 || bytes !== 0)) {
@@ -2801,6 +2849,7 @@ export async function runCampaign(args, options = {}) {
         derivedSidecarLifecycle.afterCells.push({
           ordinal: index + 1,
           cellId: cell.id,
+          providerExecution: lifecycle.providerExecution,
           inventory: derivedInspection.rootInventory,
         });
       } catch (error) {
@@ -2813,6 +2862,10 @@ export async function runCampaign(args, options = {}) {
       try {
         const runtimeResultPath = path.join(cellDir, "runtime-result.json");
         await invokeFault(fault, "runtimeResultRead", index);
+        const linkMetadata = await lstat(runtimeResultPath);
+        if (!linkMetadata.isFile() || linkMetadata.isSymbolicLink()) {
+          fail(`runtime-result is not an ordinary non-reparse file for ${cell.id}`);
+        }
         const before = await stat(runtimeResultPath);
         const runtimeResultBytes = await readFile(runtimeResultPath);
         await invokeFault(fault, "runtimeResultHash", index);

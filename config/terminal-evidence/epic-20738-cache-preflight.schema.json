@@ -221,10 +221,11 @@
     "sidecarSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "cellId", "inventory"],
+      "required": ["ordinal", "cellId", "providerExecution", "inventory"],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
         "cellId": { "$ref": "#/$defs/id" },
+        "providerExecution": { "enum": ["failed", "completed"] },
         "inventory": { "$ref": "#/$defs/inventory" }
       }
     },
