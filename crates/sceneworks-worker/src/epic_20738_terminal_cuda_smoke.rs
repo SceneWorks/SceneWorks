@@ -126,6 +126,10 @@ fn request_memory_strategy_value(
         }),
         Some(memory) => {
             let strategy = if memory.stream_transformer_blocks {
+                assert!(
+                    memory.stage_residency,
+                    "bounded-transformer terminal memory requires staged residency"
+                );
                 "bounded-transformer"
             } else if memory.stage_residency {
                 "staged-resident"
@@ -891,6 +895,18 @@ mod cpu_contract_tests {
                 "stageResidency": true,
                 "streamTransformerBlocks": true,
             })
+        );
+        let streamed_without_staging = gen_core::GenerationMemory {
+            stage_residency: false,
+            stream_transformer_blocks: true,
+            ..Default::default()
+        };
+        assert!(
+            std::panic::catch_unwind(|| {
+                request_memory_strategy_value(true, Some(&streamed_without_staging))
+            })
+            .is_err(),
+            "bounded-transformer evidence must reject streaming without staged residency"
         );
     }
 

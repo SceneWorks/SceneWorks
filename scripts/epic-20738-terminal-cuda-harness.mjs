@@ -314,8 +314,7 @@ function validateRequestMemoryStrategy(strategy, cell) {
   if (exact("default-resident", false, false, false)
     || exact("explicit-resident", true, false, false)
     || exact("staged-resident", true, true, false)
-    || (strategy.strategy === "bounded-transformer" && strategy.requestMemoryPresent
-      && strategy.streamTransformerBlocks)) {
+    || exact("bounded-transformer", true, true, true)) {
     return strategy;
   }
   fail(`${cell.id} FLUX request memory strategy is not an exact supported policy`);

@@ -295,6 +295,20 @@ test("all 19 cells require the exact family loadSpec quant policy", () => {
       },
     };
     assert.equal(validateRuntimeResult(valid, cell), valid, cell.id);
+    if (cell.engineId.startsWith("flux1_")) {
+      const streamedWithoutStaging = structuredClone(valid);
+      streamedWithoutStaging.requestMemoryStrategy = {
+        strategy: "bounded-transformer",
+        requestMemoryPresent: true,
+        stageResidency: false,
+        streamTransformerBlocks: true,
+      };
+      assert.throws(
+        () => validateRuntimeResult(streamedWithoutStaging, cell),
+        /request memory strategy/,
+        `${cell.id} must reject streamed memory without staged residency`,
+      );
+    }
     const missing = { ...valid };
     delete missing.loadSpecQuantBits;
     assert.throws(() => validateRuntimeResult(missing, cell), /loadSpecQuantBits/, cell.id);
@@ -1313,6 +1327,11 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
             requestMemoryPresent: true,
             stageResidency: true,
             streamTransformerBlocks: false,
+          } : runtimeMemoryMode === "bounded-no-stage" ? {
+            strategy: "bounded-transformer",
+            requestMemoryPresent: true,
+            stageResidency: false,
+            streamTransformerBlocks: true,
           } : runtimeMemoryMode === "wrong" ? {
             strategy: "bounded-transformer",
             requestMemoryPresent: true,
@@ -1523,7 +1542,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     );
     assert.equal(faulted.cacheEvidence.offlineBeforeCells, true, runtimeResultMode);
   }
-  for (const runtimeMemoryMode of ["missing", "missing-field", "wrong"]) {
+  for (const runtimeMemoryMode of ["missing", "missing-field", "wrong", "bounded-no-stage"]) {
     const faulted = await scenario({ runtimeMemoryMode });
     assert.equal(faulted.runtimeCells.length, 1, runtimeMemoryMode);
     assert.ok(faulted.result.summary.receipts.slice(8).every(
@@ -1760,6 +1779,36 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(
     bounded.cacheEvidence.derivedSidecarLifecycle.afterCells[0].derivedDisposition,
     "bounded-transformer-sidecars",
+  );
+
+  const boundedReceiptWithoutStaging = structuredClone(bounded.continuationReceipts[0]);
+  boundedReceiptWithoutStaging.authorityLifecycle.requestMemoryStrategy.stageResidency = false;
+  assert.throws(
+    () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, boundedReceiptWithoutStaging),
+    /must be equal to constant/,
+  );
+  assert.throws(
+    () => validateReceipt(
+      boundedReceiptWithoutStaging,
+      bounded.checked.cells[7],
+      bounded.checked,
+      bounded.lifecycleContext,
+    ),
+    /request memory strategy/,
+  );
+
+  const boundedCacheWithoutStaging = structuredClone(bounded.cacheEvidence);
+  boundedCacheWithoutStaging.derivedSidecarLifecycle.afterCells[0]
+    .requestMemoryStrategy.stageResidency = false;
+  assert.throws(
+    () => validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, boundedCacheWithoutStaging),
+    /must be equal to constant/,
+  );
+  assert.throws(
+    () => validateCachePreflightEvidence(
+      boundedCacheWithoutStaging, bounded.cacheValidation,
+    ),
+    /request memory strategy|must be equal to constant/,
   );
 
   const residentReceiptWithBoundedInventory = structuredClone(residentReceipt);

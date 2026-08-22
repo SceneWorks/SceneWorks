@@ -117,8 +117,9 @@ non-regular derived entries fail closed in either case; every non-FLUX root must
 An early provider failure may retain only its separately labeled exact-empty namespace evidence. The
 controller validates the runtime request-memory record before accepting a successful derived
 disposition: default/explicit/staged resident strategies pair only with exact empty evidence, while
-`bounded-transformer` with `streamTransformerBlocks: true` pairs only with the canonical 494-file
-namespace. A provider failure has no runtime-result strategy claim. The controller rehashes
+`bounded-transformer` requires the exact present/staged/streamed tuple (`true/true/true`) and pairs
+only with the canonical 494-file namespace. Streamed-without-staged residency is invalid. A provider
+failure has no runtime-result strategy claim. The controller rehashes
 each selected staged authority file and every obstruction immediately before and after every cell,
 then proves exact stage/namespace absence at release and proves final staging, derived cache, and
 missing-file store emptiness. Any stage, hash, capacity, or cleanup drift quarantines later cells; the

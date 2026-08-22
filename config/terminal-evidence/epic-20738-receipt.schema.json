@@ -268,7 +268,35 @@
             "requestMemoryPresent": { "type": "boolean" },
             "stageResidency": { "type": "boolean" },
             "streamTransformerBlocks": { "type": "boolean" }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "streamTransformerBlocks": { "const": true } },
+                "required": ["streamTransformerBlocks"]
+              },
+              "then": {
+                "properties": {
+                  "strategy": { "const": "bounded-transformer" },
+                  "requestMemoryPresent": { "const": true },
+                  "stageResidency": { "const": true }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "strategy": { "const": "bounded-transformer" } },
+                "required": ["strategy"]
+              },
+              "then": {
+                "properties": {
+                  "requestMemoryPresent": { "const": true },
+                  "stageResidency": { "const": true },
+                  "streamTransformerBlocks": { "const": true }
+                }
+              }
+            }
+          ]
         },
         { "type": "null" }
       ]
