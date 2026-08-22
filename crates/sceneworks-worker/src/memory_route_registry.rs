@@ -125,11 +125,11 @@ impl MemoryRouteMode {
             .find(|candidate| candidate.as_str() == mode)
     }
 
-    /// Preserve the public FLUX.2 Klein `reference` compatibility spelling while keeping the
+    /// Preserve the public FLUX.2 `reference` compatibility spelling while keeping the
     /// normalization route-local. Other providers must opt into their own public mode aliases
     /// instead of silently inheriting this image-to-image coordinate.
     pub fn from_mlx_request(provider: &str, mode: &str) -> Option<Self> {
-        if provider == "flux2_klein_9b" && mode == "reference" {
+        if matches!(provider, "flux2_klein_9b" | "flux2_dev") && mode == "reference" {
             Some(Self::ImageToImage)
         } else {
             Self::from_request(mode)
@@ -426,6 +426,18 @@ const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
 ];
 const FLUX2_KLEIN_BASE_MODES: &[MemoryRouteMode] =
     &[MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage];
+/// FLUX.2 Dev's three installed MLX tiers. NVFP4 belongs to the Candle family surface only.
+const FLUX2_DEV_TIERS: &[MemoryRouteTier] = &[
+    MemoryRouteTier::Bf16,
+    MemoryRouteTier::Q4,
+    MemoryRouteTier::Q8,
+];
+const FLUX2_DEV_EDIT_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::EditImage,
+    MemoryRouteMode::ImageToImage,
+    MemoryRouteMode::CharacterImage,
+    MemoryRouteMode::StyleVariations,
+];
 const KOLORS_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::TextToImage,
     MemoryRouteMode::StyleVariations,
@@ -569,6 +581,36 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: ALL_TIERS,
         modes: CHARACTER_ONLY,
         load_profiles: IDENTITY_ONLY,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    // SC-20794: base, multi-reference edit, and Fun-Controlnet-Union are distinct MLX providers.
+    // Their public mode/reference/control-load axes must remain separate; no rung transfers across
+    // these sibling routes merely because they share the FLUX.2 Dev family.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux2_dev",
+        tiers: FLUX2_DEV_TIERS,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux2_dev_edit",
+        tiers: FLUX2_DEV_TIERS,
+        modes: FLUX2_DEV_EDIT_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "flux2_dev_control",
+        tiers: FLUX2_DEV_TIERS,
+        modes: TEXT_ONLY,
+        load_profiles: SINGLE_CONTROL,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -1133,6 +1175,16 @@ fn expected_provider_mode(
             | MemoryRouteMode::EditImage
             | MemoryRouteMode::CharacterImage,
         ) if (1..=8).contains(&context.reference_count) => "edit_image",
+        (
+            "flux2_dev_edit",
+            MemoryRouteMode::StyleVariations
+            | MemoryRouteMode::EditImage
+            | MemoryRouteMode::ImageToImage
+            | MemoryRouteMode::CharacterImage,
+        ) if (2..=8).contains(&context.reference_count) => "edit_image",
+        ("flux2_dev_control", MemoryRouteMode::TextToImage) if context.reference_count == 1 => {
+            "text_to_image"
+        }
         (_, MemoryRouteMode::EditImage) => "edit_image",
         (_, MemoryRouteMode::CharacterImage) if context.reference_count == 1 => "image_to_image",
         (_, MemoryRouteMode::TextToImage) if context.reference_count == 1 => "image_to_image",
@@ -4974,8 +5026,87 @@ mod tests {
         );
         assert_eq!(
             MemoryRouteMode::from_mlx_request("flux2_dev", "reference"),
-            None,
-            "unrelated providers cannot inherit the Klein compatibility alias"
+            Some(MemoryRouteMode::ImageToImage),
+            "Dev owns the same public reference alias, but must opt into it explicitly"
+        );
+    }
+
+    #[test]
+    fn flux2_dev_mlx_rules_cover_only_exact_base_edit_and_control_coordinates() {
+        let witnesses = deferred_route_witnesses();
+        let dev = witnesses
+            .iter()
+            .filter(|witness| {
+                witness.backend == MemoryRouteBackend::Mlx
+                    && matches!(
+                        witness.provider,
+                        "flux2_dev" | "flux2_dev_edit" | "flux2_dev_control"
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert!(!dev.is_empty());
+        assert!(dev.iter().all(|witness| {
+            matches!(
+                witness.tier,
+                MemoryRouteTier::Bf16 | MemoryRouteTier::Q4 | MemoryRouteTier::Q8
+            )
+        }));
+        assert!(!dev
+            .iter()
+            .any(|witness| witness.tier == MemoryRouteTier::Nvfp4));
+        assert!(dev.iter().any(|witness| {
+            witness.provider == "flux2_dev"
+                && witness.mode == MemoryRouteMode::TextToImage
+                && witness.load_profile == MemoryRouteLoadProfile::Plain
+        }));
+        assert!(dev.iter().any(|witness| {
+            witness.provider == "flux2_dev_edit"
+                && witness.mode == MemoryRouteMode::ImageToImage
+                && witness.load_profile == MemoryRouteLoadProfile::Plain
+        }));
+        assert!(dev.iter().any(|witness| {
+            witness.provider == "flux2_dev_control"
+                && witness.mode == MemoryRouteMode::TextToImage
+                && witness.load_profile == MemoryRouteLoadProfile::SingleControl
+        }));
+        assert_eq!(
+            expected_provider_mode(
+                "flux2_dev_control",
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+            ),
+            "text_to_image",
+            "the control map is one geometry image, not an image-to-image route"
+        );
+        assert_eq!(
+            expected_provider_mode(
+                "flux2_dev_edit",
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::CharacterImage,
+                    reference_count: 2,
+                    use_pid: false,
+                    has_phases: false,
+                },
+            ),
+            "edit_image",
+            "multi-reference Dev edits cannot be mislabelled as base image-to-image"
+        );
+        assert_ne!(
+            expected_provider_mode(
+                "flux2_dev_edit",
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::CharacterImage,
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+            ),
+            "edit_image",
+            "the editor's two-reference lower bound must fail closed"
         );
     }
 
