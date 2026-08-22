@@ -1182,10 +1182,17 @@ test("the exact packaged Candle video curve retires only the zero-curve gap", ()
   const detached = JSON.parse(wrongProvider.videoMemoryCurvesData);
   detached.curves.find((curve) => curve.backend === "candle").provider = "foreign_provider";
   wrongProvider.videoMemoryCurvesData = `${JSON.stringify(detached, null, 2)}\n`;
+  const wrongProviderInventory = buildInventory(wrongProvider);
   assert.equal(
-    buildInventory(wrongProvider).summary.byMechanism.video_memory_curve_bundle,
+    wrongProviderInventory.summary.byMechanism.video_memory_curve_bundle,
     0,
     "a lane tag alone is insufficient; the curve must match the routed model/provider identity",
+  );
+  assert.ok(
+    wrongProviderInventory.knownGaps.some(
+      (gap) => gap.id === "zero-candle-video-memory-curves-packaged",
+    ),
+    "a foreign Candle provider must restore the exact usable-route gap, not retire it by lane tag",
   );
 });
 

@@ -238,10 +238,6 @@ export function leastSquares(rows, targets) {
  * This is not coefficient clamping: the coefficients that remain active are refit on their face.
  */
 export function nonNegativeLeastSquares(rows, targets) {
-  const unconstrained = leastSquares(rows, targets);
-  if (unconstrained?.every((value) => Number.isFinite(value) && value >= 0)) {
-    return unconstrained;
-  }
   if (
     rows.length === 0 ||
     rows.length !== targets.length ||
@@ -257,6 +253,11 @@ export function nonNegativeLeastSquares(rows, targets) {
   }
   const width = rows[0].length;
   if (width === 0 || width > 30) return null;
+  // Identifiability belongs to the complete declared form. A singular full design cannot be
+  // laundered into an apparently valid lower-dimensional boundary fit by the active-set search.
+  const unconstrained = leastSquares(rows, targets);
+  if (!unconstrained || unconstrained.some((value) => !Number.isFinite(value))) return null;
+  if (unconstrained.every((value) => value >= 0)) return unconstrained;
   let best = null;
   for (let mask = 0; mask < 2 ** width; mask += 1) {
     const active = Array.from({ length: width }, (_, index) => index).filter(

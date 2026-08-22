@@ -1991,7 +1991,11 @@ export function buildInventory(bodies) {
  * Structural gaps this inventory records but does NOT close, each with the story that owns it.
  * Recorded in the artifact rather than in prose so a later slice can assert on them mechanically.
  */
-function knownGaps({ curveLanes }) {
+function knownGaps({ curveLanes, routes }) {
+  const usableRoutedCandleCurve = routes.some(
+    (route) =>
+      route.modality === "video" && route.mechanisms.includes("video_memory_curve_bundle"),
+  );
   return [
     {
       id: "measured-flag-is-a-bare-boolean",
@@ -2004,7 +2008,7 @@ function knownGaps({ curveLanes }) {
         "boolean cannot distinguish a fitted curve from a single measured point from a declared floor.",
       paths: ["config/manifests/builtin.models.jsonc"],
     },
-    ...(curveLanes.has("candle")
+    ...(usableRoutedCandleCurve
       ? []
       : [
           {
@@ -2015,7 +2019,7 @@ function knownGaps({ curveLanes }) {
               "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign " +
               `lane, but the packaged curve data covers ${JSON.stringify(
                 Object.fromEntries([...curveLanes.entries()].sort()),
-              )} â€” there are no candle curves at all. Optimized Candle candidates are therefore ` +
+              )} without an exact usable routed Candle model/provider intersection. Optimized Candle candidates are therefore ` +
               "Unverified; the seven legacy ceilings and Bernini's T2V structural pre-load floor remain " +
               "the only source-backed resident admission inputs.",
             paths: ["docs/generated/video-memory-curves.json"],

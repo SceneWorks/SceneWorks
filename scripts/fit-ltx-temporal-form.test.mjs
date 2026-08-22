@@ -1103,7 +1103,7 @@ test("cross NNLS preserves valid OLS bytes and refits the active boundary instea
   assert.ok(constrained.every((coefficient) => coefficient >= 0));
 });
 
-test("cross NNLS searches every active set and breaks exact ties by stable mask order", () => {
+test("cross NNLS searches every active set and is deterministic on a full-rank boundary", () => {
   const rows = [
     [1, 0, 0],
     [1, 1, 0],
@@ -1117,10 +1117,30 @@ test("cross NNLS searches every active set and breaks exact ties by stable mask 
     "the optimum is the intercept+third-column face, not the first non-negative partial fit",
   );
 
+  const fullRankBoundaryRows = [[2, 1, 1], [0, 1, 0], [-1, 1, -1], [1, -2, 2]];
+  const fullRankBoundaryTargets = [1, -2, -1, 2];
+  assert.ok(leastSquares(fullRankBoundaryRows, fullRankBoundaryTargets));
   assert.deepEqual(
-    nonNegativeLeastSquares([[1, 1]], [1]),
-    [1, 0],
-    "equal single-column faces choose the lower active-set mask deterministically",
+    nonNegativeLeastSquares(fullRankBoundaryRows, fullRankBoundaryTargets),
+    [0, 0, 1],
+    "the valid full-rank boundary fit is exact",
+  );
+  assert.deepEqual(
+    nonNegativeLeastSquares(fullRankBoundaryRows, fullRankBoundaryTargets),
+    nonNegativeLeastSquares(fullRankBoundaryRows, fullRankBoundaryTargets),
+    "the valid full-rank boundary fit is deterministic",
+  );
+  assert.equal(
+    nonNegativeLeastSquares([], []),
+    null,
+    "an empty design must fail closed before ordinary least squares reads row zero",
+  );
+  const oneAreaRows = [[1, 1, 1], [1, 1, 2], [1, 1, 3]];
+  assert.equal(leastSquares(oneAreaRows, [3, 2, 1]), null, "the fixture must be singular");
+  assert.equal(
+    nonNegativeLeastSquares(oneAreaRows, [3, 2, 1]),
+    null,
+    "a one-area design must not publish a lower-dimensional active-face fit",
   );
   assert.equal(
     nonNegativeLeastSquares([[1, Number.NaN]], [1]),
