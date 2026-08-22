@@ -68,6 +68,20 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         Some("provider_video_mode:no_audio"),
         "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
     );
+
+    input.enhance_prompt = true;
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer+provider_video_mode:no_audio"),
+        "enhancer and provider mode remain separate exact identity axes"
+    );
+
+    input.video_mode = None;
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer"),
+        "removing the request-only mode must not erase the loaded enhancer axis"
+    );
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
