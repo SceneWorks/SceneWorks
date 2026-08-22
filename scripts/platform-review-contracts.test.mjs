@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
+import { win32 as windowsPath } from "node:path";
 import test from "node:test";
 
 import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
@@ -752,8 +753,10 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
     "$event.sequentialCapable -ne $true",
     "$event.oldPlan -ne 'resident'",
     "$event.selectedPlan -ne 'sequential'",
-    "$event.widenedResidentPeakGb -ne 24.232",
-    "$event.widenedSequentialPeakGb -ne 21.216",
+    "$peakToleranceGb = 0.000000001",
+    "[Math]::Abs($value - $Expected) -lt $peakToleranceGb",
+    "-not (Test-Sc19054Peak $event.widenedResidentPeakGb 24.232)",
+    "-not (Test-Sc19054Peak $event.widenedSequentialPeakGb 21.216)",
     "$receipt.runtime.stageResidency -ne $true",
     "$receipt.runtime.backend -ne 'candle'",
     "$receipt.runtime.vramCapGb -ne 24",
@@ -771,7 +774,22 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
     /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance \}\}/,
   );
   assert.match(cleanup, /\$env:SC19054_EVIDENCE_DIR/);
-  assert.match(cleanup, /StartsWith\('sc19054-flux-acceptance-'\)/);
+  for (const body of [seal, cleanup]) {
+    assert.match(body, /\[string\]::Equals\(\$parent, \$tempRoot, \[StringComparison\]::OrdinalIgnoreCase\)/);
+    assert.match(body, /\^sc19054-flux-acceptance-\[0-9\]\+-\[0-9\]\+\$/);
+    assert.match(body, /\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/);
+    assert.match(
+      body,
+      /Join-Path \$env:RUNNER_TEMP "sc19054-flux-acceptance-\$env:GITHUB_RUN_ID-\$env:GITHUB_RUN_ATTEMPT"/,
+    );
+    assert.match(body, /\[string\]::Equals\(\$evidence, \$expectedEvidence, \[StringComparison\]::OrdinalIgnoreCase\)/);
+    assert.doesNotMatch(body, /\.StartsWith\(/, `${context}: scratch trust must use exact canonical parent/path equality`);
+  }
+  assert.match(
+    seal,
+    /Get-ChildItem -LiteralPath \$env:RUNNER_TEMP -Directory -Force[\s\S]*Where-Object \{ \$_.Name -match '\^sc19054-flux-acceptance-\[0-9\]\+-\[0-9\]\+\$' \}[\s\S]*Remove-Item -LiteralPath \$stale -Recurse -Force/,
+    `${context}: the next exact dispatch must reclaim only bounded prior SC-19054 scratch`,
+  );
 
   for (const exact of [
     'const MODEL_ID: &str = "flux_schnell";',
@@ -829,6 +847,14 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
     ["hardcoded sequential capability", "rust", "admission_contract(descriptor.capabilities.supports_sequential_offload)", "admission_contract(true)"],
     ["disconnected admission", "rust", "let execution = acceptance_execution(&root, admission);", "let execution = acceptance_execution(&root, admission_contract(true));"],
     ["request drops selected memory", "rust", "memory: Some(execution.memory)", "memory: None"],
+    ["removed peak tolerance", "workflow", "$peakToleranceGb = 0.000000001", "$peakToleranceGb = 0"],
+    ["broadened peak tolerance", "workflow", "$peakToleranceGb = 0.000000001", "$peakToleranceGb = 0.000001"],
+    ["resident peak unchecked", "workflow", "-not (Test-Sc19054Peak $event.widenedResidentPeakGb 24.232)", "$false"],
+    ["sequential peak unchecked", "workflow", "-not (Test-Sc19054Peak $event.widenedSequentialPeakGb 21.216)", "$false"],
+    ["cleanup admits nested paths", "workflow", "-not [string]::Equals($parent, $tempRoot, [StringComparison]::OrdinalIgnoreCase) -or", "$false -or"],
+    ["cleanup admits near-name paths", "workflow", "^sc19054-flux-acceptance-[0-9]+-[0-9]+$", "^sc19054-flux-acceptance-"],
+    ["cleanup follows reparse points", "workflow", ".Attributes -band [System.IO.FileAttributes]::ReparsePoint", ".Attributes -band [System.IO.FileAttributes]::Normal"],
+    ["cleanup accepts a wrong attempt", "workflow", "[string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)", "$true"],
   ];
   for (const [name, key, from, to] of mutations) {
     const mutated = { ...documents, [key]: documents[key].replaceAll(from, to) };
@@ -856,6 +882,44 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
     /bounded evidence path must reach GITHUB_ENV/,
     "cleanup must retain the attempt path when the first failable seal check aborts",
   );
+
+  // The exact failed Windows receipt is inside the Rust contract's strict 1e-9 GiB delta, while
+  // the boundary and anything beyond it remain hard failures. This pins the numeric policy
+  // independently of the PowerShell spelling above.
+  const withinPeakTolerance = (actual, expected) =>
+    Number.isFinite(actual) && Math.abs(actual - expected) < 0.000000001;
+  assert.ok(withinPeakTolerance(24.23200000077486, 24.232));
+  assert.ok(withinPeakTolerance(21.216000000946224, 21.216));
+  assert.equal(withinPeakTolerance(24.232000001, 24.232), false);
+  assert.equal(withinPeakTolerance(24.2320000011, 24.232), false);
+  assert.equal(withinPeakTolerance(Number.NaN, 24.232), false);
+
+  // Independent Windows-path model of the production guard: canonical prefix plus exact parent
+  // prevents both prefix siblings and nested deletions; the closed leaf grammar excludes caches
+  // and lookalikes. The first case is the exact path the failed always-cleanup rejected.
+  const isBoundedScratch = (candidate, runnerTemp) => {
+    const resolved = windowsPath.resolve(candidate);
+    const tempRoot = windowsPath.resolve(runnerTemp).replace(/[\\/]+$/, "");
+    return (
+      windowsPath.dirname(resolved).toLowerCase() === tempRoot.toLowerCase() &&
+      /^sc19054-flux-acceptance-[0-9]+-[0-9]+$/.test(windowsPath.basename(resolved))
+    );
+  };
+  const runnerTemp = "D:\\actions-runner-2\\_work\\_temp";
+  const failedAttempt = `${runnerTemp}\\sc19054-flux-acceptance-32551460830-1`;
+  assert.ok(
+    isBoundedScratch(failedAttempt, runnerTemp),
+  );
+  assert.equal(isBoundedScratch(`${runnerTemp}\\nested\\sc19054-flux-acceptance-1-1`, runnerTemp), false);
+  assert.equal(isBoundedScratch(`${runnerTemp}-other\\sc19054-flux-acceptance-1-1`, runnerTemp), false);
+  assert.equal(isBoundedScratch(`${runnerTemp}\\sc19054-flux-acceptance-1-1-cache`, runnerTemp), false);
+  assert.equal(isBoundedScratch(`${runnerTemp}\\sc19057-wan-capture-32551460830-1`, runnerTemp), false);
+  assert.equal(isBoundedScratch("C:\\Users\\Michael\\.cache\\huggingface", runnerTemp), false);
+  const isExactAttempt = (candidate, runId, attempt) =>
+    windowsPath.resolve(candidate).toLowerCase() ===
+    windowsPath.resolve(runnerTemp, `sc19054-flux-acceptance-${runId}-${attempt}`).toLowerCase();
+  assert.equal(isExactAttempt(failedAttempt, "32551460830", "1"), true);
+  assert.equal(isExactAttempt(failedAttempt, "32551460830", "2"), false);
 });
 
 // sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With

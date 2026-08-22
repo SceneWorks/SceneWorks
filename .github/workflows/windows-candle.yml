@@ -953,6 +953,42 @@ jobs:
           # Export the bounded attempt path before any check or mkdir can fail. The always upload
           # and cleanup steps must still be able to find scratch left by an interrupted seal.
           "SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          function Resolve-Sc19054ScratchPath([string]$Candidate, [string]$RunnerTemp) {
+            if ([string]::IsNullOrWhiteSpace($Candidate) -or [string]::IsNullOrWhiteSpace($RunnerTemp)) {
+              throw 'SC-19054 scratch validation requires a candidate and RUNNER_TEMP'
+            }
+            $resolved = [System.IO.Path]::GetFullPath($Candidate)
+            $trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+            $tempRoot = [System.IO.Path]::GetFullPath($RunnerTemp).TrimEnd($trimChars)
+            $parent = [System.IO.Path]::GetDirectoryName($resolved)
+            $leaf = [System.IO.Path]::GetFileName($resolved)
+            if (-not [string]::Equals($parent, $tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                $leaf -notmatch '^sc19054-flux-acceptance-[0-9]+-[0-9]+$') {
+              throw "refusing an untrusted SC-19054 scratch path: $resolved"
+            }
+            if ((Test-Path -LiteralPath $resolved) -and
+                ((Get-Item -LiteralPath $resolved -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+              throw "refusing an SC-19054 scratch reparse point: $resolved"
+            }
+            return $resolved
+          }
+          $evidence = Resolve-Sc19054ScratchPath $evidence $env:RUNNER_TEMP
+          $expectedEvidence = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:RUNNER_TEMP "sc19054-flux-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT")
+          )
+          if (-not [string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "SC-19054 evidence path does not match this exact run attempt: $evidence"
+          }
+          # A failed always-cleanup used to strand one exact attempt directory. Reclaim only direct
+          # RUNNER_TEMP children with the complete SC-19054 run/attempt shape; model and Cargo
+          # caches cannot match this namespace or parent constraint.
+          Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Directory -Force |
+            Where-Object { $_.Name -match '^sc19054-flux-acceptance-[0-9]+-[0-9]+$' } |
+            ForEach-Object {
+              $stale = Resolve-Sc19054ScratchPath $_.FullName $env:RUNNER_TEMP
+              Write-Host "Removing stale SC-19054 scratch: $stale"
+              Remove-Item -LiteralPath $stale -Recurse -Force
+            }
           if (Test-Path -LiteralPath $evidence) {
             throw "refusing stale SC-19054 evidence directory: $evidence"
           }
@@ -1031,12 +1067,24 @@ jobs:
           $events = @(Select-String -LiteralPath $logPath -Pattern '^SC19054_ADMISSION_EVENT=(\{.*\})$')
           if ($events.Count -ne 1) { throw "expected exactly one admission event, found $($events.Count)" }
           $event = $events[0].Matches[0].Groups[1].Value | ConvertFrom-Json
+          # The Rust acceptance contract already allows strictly less than 1e-9 GiB of arithmetic
+          # delta. Preserve that same narrow boundary through JSON/PowerShell deserialization: the
+          # failed receipt's larger delta was 9.46224e-10 GiB, while 1e-9 or more remains a failure.
+          $peakToleranceGb = 0.000000001
+          function Test-Sc19054Peak([object]$Actual, [double]$Expected) {
+            if ($null -eq $Actual) { return $false }
+            $value = [double]$Actual
+            return (-not [double]::IsNaN($value) -and
+                    -not [double]::IsInfinity($value) -and
+                    [Math]::Abs($value - $Expected) -lt $peakToleranceGb)
+          }
           if ($event.event -ne 'sc19054_candle_admission_selected' -or
               $event.modelId -ne 'flux_schnell' -or $event.engineId -ne 'flux1_schnell' -or
               $event.tier -ne 'q4' -or $event.geometry.width -ne 1024 -or $event.geometry.height -ne 1024 -or
               $event.budgetGb -ne 24 -or $event.sequentialCapable -ne $true -or
               $event.oldPlan -ne 'resident' -or $event.selectedPlan -ne 'sequential' -or
-              $event.widenedResidentPeakGb -ne 24.232 -or $event.widenedSequentialPeakGb -ne 21.216) {
+              -not (Test-Sc19054Peak $event.widenedResidentPeakGb 24.232) -or
+              -not (Test-Sc19054Peak $event.widenedSequentialPeakGb 21.216)) {
             throw "SC-19054 admission event does not match the exact acceptance cell: $($event | ConvertTo-Json -Compress -Depth 5)"
           }
           $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
@@ -1073,11 +1121,28 @@ jobs:
         shell: powershell
         run: |
           if (-not $env:SC19054_EVIDENCE_DIR -or -not $env:RUNNER_TEMP) { exit 0 }
-          $evidence = [System.IO.Path]::GetFullPath($env:SC19054_EVIDENCE_DIR)
-          $temp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\\') + '\\'
-          if (-not $evidence.StartsWith($temp, [StringComparison]::OrdinalIgnoreCase) -or
-              -not (Split-Path -Leaf $evidence).StartsWith('sc19054-flux-acceptance-')) {
-            throw "refusing to clean an untrusted SC-19054 path: $evidence"
+          function Resolve-Sc19054ScratchPath([string]$Candidate, [string]$RunnerTemp) {
+            $resolved = [System.IO.Path]::GetFullPath($Candidate)
+            $trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+            $tempRoot = [System.IO.Path]::GetFullPath($RunnerTemp).TrimEnd($trimChars)
+            $parent = [System.IO.Path]::GetDirectoryName($resolved)
+            $leaf = [System.IO.Path]::GetFileName($resolved)
+            if (-not [string]::Equals($parent, $tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                $leaf -notmatch '^sc19054-flux-acceptance-[0-9]+-[0-9]+$') {
+              throw "refusing to clean an untrusted SC-19054 path: $resolved"
+            }
+            if ((Test-Path -LiteralPath $resolved) -and
+                ((Get-Item -LiteralPath $resolved -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+              throw "refusing to clean an SC-19054 reparse point: $resolved"
+            }
+            return $resolved
+          }
+          $evidence = Resolve-Sc19054ScratchPath $env:SC19054_EVIDENCE_DIR $env:RUNNER_TEMP
+          $expectedEvidence = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:RUNNER_TEMP "sc19054-flux-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT")
+          )
+          if (-not [string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "refusing to clean an SC-19054 path from another run attempt: $evidence"
           }
           if (Test-Path -LiteralPath $evidence) { Remove-Item -LiteralPath $evidence -Recurse -Force }
       # sc-17592, the off-Mac mirror of macos-mlx.yml's MLX step. THE ONLY PR LANE THAT CAN PRODUCE
