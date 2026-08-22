@@ -741,7 +741,7 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
                 "guidance,",
                 "preview,",
                 "&cancel,",
-                "generate_with_scope(",
+                "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
             ],
         ),
         _ => false,
@@ -4071,6 +4071,17 @@ mod tests {
         assert!(
             !imported_preview_sink("mage-flow", &without_mage_scope),
             "Mage preview support must remain bound to the request-scoped production generator",
+        );
+
+        let crossed_mage_request = normalized_mage.replacen(
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut unrelated_request,",
+            1,
+        );
+        assert_ne!(crossed_mage_request, normalized_mage);
+        assert!(
+            !imported_preview_sink("mage-flow", &crossed_mage_request),
+            "Mage preview support must not borrow a scope that generates another request",
         );
     }
 
