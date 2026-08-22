@@ -3,7 +3,7 @@
 This is the source-level and decision-diff record for the integrated feature head. It is deliberately
 not a claim that SC-19059 is complete. The CPU-only acceptance pass can close generator provenance,
 exercise the promotion plumbing, and enumerate what the repository proves. Real Candle capture,
-CUDA-linked capability resolution, privileged workflows, and the remaining D2/D3/C3 decisions below
+CUDA-linked capability resolution, privileged workflows, and the remaining D3/C3 decisions below
 remain terminal gates.
 
 ## Frozen integration point
@@ -128,7 +128,7 @@ generated known-gap entry. The inventory is not empty.
 | ID | Residual | Effect | Minimum honest disposition |
 | --- | --- | --- | --- |
 | D1 | `video_memory_curves::VideoPhaseCurve::evaluate` is a second affine evaluator outside `estimate_synthesis`. | It associates `pixels / 1e6` before multiplication, adds a phase residual, rejects zero pixels/frames, and ceils GiB to bytes. The shared evaluator uses a deliberately different floating-point association and has different boundary semantics. Mechanical unification would change decisions. | **Owner-approved intentional cross-crate typed residual.** Keep its existing tests and semantics; do not describe it as duplicate arithmetic. |
-| D2 | `KreaTurboPhasePeaks::peak_gb` and `estimate_synthesis::binding_phase` disagree on NaN. | `f64::max` discards a NaN operand while the argmax can keep a first-position NaN as the binding label. Numeric strings reach this path through `payload::json_f64` without a finite guard, so peak and label can disagree. | Prefer a finite guard when constructing the triple, or specify one fail-closed NaN rule and record its decision diff. |
+| D2 | `KreaTurboPhasePeaks::peak_gb` and `estimate_synthesis::binding_phase` differ mathematically on NaN. | **Resolved at the record boundary:** `krea_record_phase_peaks` now rejects any non-finite text, denoise, or decode value before either reduction runs. Valid finite inputs retain byte-identical peak and binding behavior; constructor and end-to-end malformed-record tests pin first/middle/last rejection and Unverified fallback. | **Resolved by narrow non-finite record-phase rejection.** The generic binding helper and `json_f64` remain unchanged. |
 | D3 | The Krea Turbo entry point checks the area hull but not the voxel hull. | It is inert for today's image-only `frames = 1` manifest, but a future temporal or tighter-voxel declaration could be admitted under a contract the generic mechanism would refuse. | Specify whether the entry point is permanently image-only or adopt the full generic hull conjunct with a decision ledger. |
 | D4 | MLX's 18 GiB activation allowance previously supplied Candle video floor candidates. | Candle no longer synthesizes an optimized candidate when no exact Candle fitted curve exists. It reaches the selector as Unverified; the seven legacy pre-load ceilings remain numerically unchanged. | **Resolved by approved lane separation.** No MLX allowance is consumed by Candle. |
 | D5 | Candle scalar fallback previously inferred measurement provenance from its container key. | Every shipped scalar container is Candle-tagged. Missing or foreign third-party tags submit no shared candidate and preserve the approved legacy resident execution. | **Resolved by explicit provenance plus Unverified fallback.** C3's evidence-class granularity remains separate. |
@@ -143,8 +143,8 @@ For D1, the capability choices are concrete and incompatible:
 3. Retain both evaluators and approve D1 as an intentional cross-crate residual, with tests pinning
    the semantic differences so neither is later described as pure duplication.
 
-Michael selected option 3 for D1 in Shortcut activities 20987/20988. D2 and D3 remain genuine
-product decisions and are not changed by this slice.
+Michael selected option 3 for D1 in Shortcut activities 20987/20988. D2 is resolved by the narrow
+record-construction guard above; D3 remains a genuine product decision and is not changed by this slice.
 
 ### Capability, evidence, and coverage residuals
 
@@ -224,7 +224,7 @@ the full ledger must be rerun at the final head.
 
 ## Remaining terminal gates
 
-- Owner disposition remains required only for D2, D3, and C3. D1, D4, D5, route-level C1, and
+- Owner disposition remains required only for D3 and C3. D1, D2, D4, D5, route-level C1, and
   Bernini C2 are resolved by the approved policy; the truthful divergence inventory remains
   non-empty because 17 conditioned image-lane bindings and the explicitly retained residuals are
   still reported.

@@ -246,18 +246,14 @@ impl KreaTurboPhasePeaks {
     /// sc-19058 folded the phase CURVES onto the shared mechanism but deliberately left this `max`
     /// chain here, unlike its sibling [`Self::binding_phase`] just below, which delegates.
     ///
-    /// The two rules disagree on NaN and only one of them is shareable. `f64::max` returns the
-    /// non-NaN operand, so a NaN phase is discarded and this reports a finite peak from another
-    /// phase; [`crate::estimate_synthesis::binding_phase`] seeds on `conditioning` and compares
-    /// with `>=`, so a NaN in FIRST position is never displaced and does claim the label. Routing
-    /// this through the shared argmax would therefore have changed what a NaN triple predicts —
-    /// a decision change on the one route epic 19048 R6 holds to byte-identity.
-    ///
-    /// The disagreement is reachable, not hypothetical: [`krea_record_phase_peaks`] builds a triple
-    /// from `predictedPhasesGb` through `json_f64` with no finite guard, and `json_f64` accepts the
-    /// string `"NaN"`. The full note, and why the repair belongs at the triple's construction rather
-    /// than inside a shared argmax several lanes call with non-NaN-able integers, is on
-    /// [`crate::estimate_synthesis::binding_phase`].
+    /// The two rules differ mathematically on NaN: `f64::max` discards a NaN operand while
+    /// [`crate::estimate_synthesis::binding_phase`] can retain a first-position NaN as the label.
+    /// D2 resolves that mismatch at the narrow record boundary: [`krea_record_phase_peaks`] rejects
+    /// every non-finite phase before constructing this type. Curve-produced triples likewise pass
+    /// their finite coefficient/evaluation checks, so production reaches both reducers only with
+    /// finite values and valid-input behavior stays byte-identical. The generic binding helper and
+    /// `json_f64` deliberately remain unchanged; constructor and end-to-end malformed-record tests
+    /// pin the fail-closed boundary here.
     pub(crate) fn peak_gb(self) -> f64 {
         self.text_gb.max(self.denoise_gb).max(self.decode_gb)
     }
