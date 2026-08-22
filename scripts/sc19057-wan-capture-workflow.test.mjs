@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const WORKFLOW_URL = new URL("../.github/workflows/windows-candle.yml", import.meta.url);
+const INVENTORY_URL = new URL("./inventory-sc19057-wan-artifact.mjs", import.meta.url);
 
 function stepBody(workflow, name) {
   const start = workflow.indexOf(`      - name: ${name}\n`);
@@ -21,6 +22,25 @@ function dispatchInputNames(workflow) {
 
 function escaped(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function assertInventorySourceContract(source) {
+  assert.match(source, /export const SC19057_WAN_TOTAL_BYTES = 17_338_835_457/);
+  assert.match(source, /export const SC19057_WAN_FILES = Object\.freeze\(\{/);
+  assert.match(source, /const physicalPath = await realpath\(logicalPath\)/);
+  assert.match(source, /const physicalMetadata = await stat\(physicalPath\)/);
+  assert.match(source, /if \(logicalMetadata\.isSymbolicLink\(\)\)/);
+  assert.match(source, /!isInside\(canonicalBlobsRoot, physicalPath\)/);
+  assert.match(source, /!samePath\(path\.dirname\(physicalPath\), canonicalBlobsRoot\)/);
+  assert.match(source, /path\.basename\(physicalPath\)\.toLowerCase\(\) !== expectedObject/);
+  assert.match(source, /seenPhysicalPaths\.has\(pathKey\(physicalPath\)\)/);
+  assert.match(source, /seenPhysicalPaths\.add\(pathKey\(physicalPath\)\)/);
+  assert.match(source, /physicalMetadata\.size !== expectedBytes/);
+  assert.match(source, /hashFile\(physicalPath, physicalMetadata\.size\)/);
+  assert.match(source, /expectedObject\.length === 64 \? hashes\.sha256 : hashes\.gitBlob/);
+  assert.match(source, /status: "STARTED"/);
+  assert.match(source, /status: "PASS"/);
+  assert.match(source, /status: "FAIL"/);
 }
 
 function assertWorkflowContract(workflow) {
@@ -73,10 +93,17 @@ function assertWorkflowContract(workflow) {
   ]) assert.match(stepBody(workflow, name), exactGate, `${name} must remain dispatch-only`);
 
   const inventory = stepBody(workflow, "Inventory the exact SC-19057 Wan q4 artifact");
-  assert.match(inventory, /\$files\.Count -ne 25/);
-  assert.match(inventory, /\$total -ne 17338835457/);
-  assert.match(inventory, /Get-FileHash -Algorithm SHA256/);
-  assert.match(inventory, /wan-q4-artifact-inventory\.json/);
+  assert.match(inventory, /New-Item -ItemType Directory -Force -Path \$evidence/);
+  assert.match(inventory, /wan-q4-inventory-preflight\.json/);
+  assert.match(inventory, /SC19057_EVIDENCE_DIR=\$evidence/);
+  assert.match(inventory, /node scripts\\inventory-sc19057-wan-artifact\.mjs --root "\$env:SCENEWORKS_PROVISIONED_ROOT" --evidence "\$evidence"/);
+  const directoryAt = inventory.indexOf("New-Item -ItemType Directory -Force -Path $evidence");
+  const preflightAt = inventory.indexOf("wan-q4-inventory-preflight.json");
+  const exportAt = inventory.indexOf("SC19057_EVIDENCE_DIR=$evidence");
+  const inventoryAt = inventory.indexOf("node scripts\\inventory-sc19057-wan-artifact.mjs");
+  assert.ok(directoryAt >= 0 && directoryAt < preflightAt, "evidence directory must precede the initial receipt");
+  assert.ok(preflightAt < inventoryAt, "initial receipt must precede every artifact inventory gate");
+  assert.ok(exportAt < inventoryAt, "always-upload evidence path must be exported before inventory can fail");
 
   const checkout = stepBody(workflow, "Check out the exact inference reference source");
   assert.match(checkout, /inputs\.run_five_rung_reference \|\| inputs\.run_sc19057_wan_capture/);
@@ -134,6 +161,7 @@ function assertWorkflowContract(workflow) {
 
 test("windows-candle exposes one exact mutually-exclusive manual SC-19057 mode", async () => {
   assertWorkflowContract(await readFile(WORKFLOW_URL, "utf8"));
+  assertInventorySourceContract(await readFile(INVENTORY_URL, "utf8"));
 });
 
 test("the workflow contract kills routing artifact capture and cleanup disconnects", async () => {
@@ -146,8 +174,9 @@ test("the workflow contract kills routing artifact capture and cleanup disconnec
     ["wrong inference pin", (text) => text.replaceAll("4013049764172ee7dc707101c7da8c83c1483f2d", "a".repeat(40))],
     ["wrong artifact repo", (text) => text.replaceAll("SceneWorks/wan2.2-ti2v-5b-candle", "SceneWorks/lookalike")],
     ["wrong artifact revision", (text) => text.replaceAll("9b173dc8660334a87a11e67de58939afe68f8cb2", "b".repeat(40))],
-    ["wrong artifact count", (text) => text.replace("$files.Count -ne 25", "$files.Count -ne 24")],
-    ["wrong artifact bytes", (text) => text.replace("$total -ne 17338835457", "$total -ne 1")],
+    ["missing early inventory receipt", (text) => text.replace("wan-q4-inventory-preflight.json", "late-only.json")],
+    ["missing early evidence export", (text) => text.replace("SC19057_EVIDENCE_DIR=$evidence", "SC19057_EVIDENCE_DIR=late")],
+    ["disconnected resolved inventory", (text) => text.replace("node scripts\\inventory-sc19057-wan-artifact.mjs", "node scripts\\unsafe-link-length.mjs")],
     ["non-release adapter", (text) => text.replaceAll("cargo build --release --locked", "cargo build --locked")],
     ["missing fresh isolation", (text) => text.replace("            --fresh-per-case `\n", "")],
     ["missing 6/6 validator", (text) => text.replace("validate-sc19057-wan-capture.mjs", "accept-any-capture.mjs")],
@@ -157,5 +186,23 @@ test("the workflow contract kills routing artifact capture and cleanup disconnec
   ];
   for (const [label, mutate] of mutations) {
     assert.throws(() => assertWorkflowContract(mutate(workflow)), undefined, label);
+  }
+});
+
+test("the source contract kills link-metadata, escape, duplicate, hash, and early-receipt mutations", async () => {
+  const source = await readFile(INVENTORY_URL, "utf8");
+  const mutations = [
+    ["link metadata bytes", (text) => text.replace("physicalMetadata.size !== expectedBytes", "logicalMetadata.size !== expectedBytes")],
+    ["unresolved hashing", (text) => text.replace("hashFile(physicalPath, physicalMetadata.size)", "hashFile(logicalPath, logicalMetadata.size)")],
+    ["outside blob root", (text) => text.replace("!isInside(canonicalBlobsRoot, physicalPath)", "false")],
+    ["nested lookalike blob root", (text) => text.replace("!samePath(path.dirname(physicalPath), canonicalBlobsRoot)", "false")],
+    ["wrong content object", (text) => text.replace("path.basename(physicalPath).toLowerCase() !== expectedObject", "false")],
+    ["duplicate resolved file", (text) => text.replace("seenPhysicalPaths.has(pathKey(physicalPath))", "false")],
+    ["no content hash authority", (text) => text.replace("expectedObject.length === 64 ? hashes.sha256 : hashes.gitBlob", "expectedObject")],
+    ["no started receipt", (text) => text.replace('status: "STARTED"', 'status: "UNKNOWN"')],
+    ["no failure receipt", (text) => text.replace('status: "FAIL"', 'status: "UNKNOWN"')],
+  ];
+  for (const [label, mutate] of mutations) {
+    assert.throws(() => assertInventorySourceContract(mutate(source)), undefined, label);
   }
 });

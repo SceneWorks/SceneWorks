@@ -757,33 +757,23 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
         shell: powershell
         run: |
-          $root = (Resolve-Path -LiteralPath $env:SCENEWORKS_PROVISIONED_ROOT).Path
-          $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName)
-          $total = ($files | Measure-Object -Property Length -Sum).Sum
-          if ($files.Count -ne 25) {
-            throw "SC-19057's immutable q4 artifact must contain exactly 25 files, found $($files.Count)"
-          }
-          if ($total -ne 17338835457) {
-            throw "SC-19057's immutable q4 artifact must contain exactly 17,338,835,457 bytes, found $total"
-          }
           $evidence = Join-Path $env:RUNNER_TEMP "sc-19057-wan-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
           New-Item -ItemType Directory -Force -Path $evidence | Out-Null
-          $inventory = foreach ($file in $files) {
-            [ordered]@{
-              path = $file.FullName.Substring($root.Length).TrimStart('\').Replace('\', '/')
-              bytes = $file.Length
-              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-            }
-          }
           [ordered]@{
+            schemaVersion = 1
+            story = 'SC-19057'
             repository = 'SceneWorks/wan2.2-ti2v-5b-candle'
             revision = '9b173dc8660334a87a11e67de58939afe68f8cb2'
             variant = 'q4'
-            fileCount = $files.Count
-            totalBytes = $total
-            files = @($inventory)
-          } | ConvertTo-Json -Depth 5 | Out-File -LiteralPath (Join-Path $evidence 'wan-q4-artifact-inventory.json') -Encoding utf8
+            status = 'STARTED'
+            runnerName = $env:RUNNER_NAME
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            head = $env:GITHUB_SHA
+          } | ConvertTo-Json -Depth 3 | Out-File -LiteralPath (Join-Path $evidence 'wan-q4-inventory-preflight.json') -Encoding utf8
           "SC19057_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          node scripts\inventory-sc19057-wan-artifact.mjs --root "$env:SCENEWORKS_PROVISIONED_ROOT" --evidence "$evidence"
+          if ($LASTEXITCODE -ne 0) { throw "SC-19057 exact artifact inventory failed with exit code $LASTEXITCODE" }
       # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
       # PATH, so cargo/rustc/clippy never dispatch through the fragile
       # %USERPROFILE%\.cargo\bin proxies (0-byte symlinks -> rustup.exe that go dangling
