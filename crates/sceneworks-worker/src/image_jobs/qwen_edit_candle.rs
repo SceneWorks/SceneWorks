@@ -227,31 +227,54 @@ fn qwen_edit_artifact_recipe_is_certified(
     tier: &str,
     lightning_lora: Option<&Path>,
 ) -> bool {
+    let expected_quant = match tier {
+        "bf16" => None,
+        "q4" => Some(gen_core::Quant::Q4),
+        "q8" => Some(gen_core::Quant::Q8),
+        _ => return false,
+    };
     if !matches!(
         model_id,
         "qwen_image_edit_2511" | "qwen_image_edit_2511_lightning"
     ) || manifest.get("id").and_then(Value::as_str) != Some(model_id)
         || spec.resolved_route.as_deref() != Some(model_id)
+        || spec.quantize != expected_quant
         || !qwen_manifest_has_exact_base_download(manifest, tier)
         || !candle_certified_load_spec(QWEN_EDIT_PROVIDER_ID, settings, spec, manifest, tier)
+        || !spec.adapters.iter().all(|adapter| {
+            matches!(spec.prepared_file_pin_for(&adapter.path), Ok(Some(_)))
+                && adapter.scale.is_finite()
+                && adapter.pass_scales.is_none()
+                && adapter.moe_expert.is_none()
+        })
     {
         return false;
     }
 
     match (is_qwen_edit_lightning(model_id), lightning_lora) {
-        (false, None) => true,
-        (true, Some(path)) => {
-            spec.adapters.first().is_some_and(|adapter| {
-                adapter.path == path
-                    && adapter.scale.to_bits() == 1.0f32.to_bits()
-                    && matches!(adapter.kind, AdapterKind::Lora)
-            }) && candle_certified_hf_artifact_path(
+        (false, None) => !spec.adapters.iter().any(|adapter| {
+            candle_certified_hf_artifact_path(
                 settings,
                 QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO,
                 QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION,
                 Path::new(QWEN_EDIT_CANDLE_LIGHTNING_LORA_FILE),
-                path,
+                &adapter.path,
             )
+        }),
+        (true, Some(path)) => {
+            let [adapter] = spec.adapters.as_slice() else {
+                return false;
+            };
+            (adapter.path == path
+                && adapter.scale.to_bits() == 1.0f32.to_bits()
+                && matches!(adapter.kind, AdapterKind::Lora))
+                && candle_certified_hf_artifact_path(
+                    settings,
+                    QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO,
+                    QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION,
+                    Path::new(QWEN_EDIT_CANDLE_LIGHTNING_LORA_FILE),
+                    path,
+                )
         }
         _ => false,
     }
@@ -754,11 +777,16 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         .cloned()
         .map(|path| AdapterSpec::new(path, 1.0, AdapterKind::Lora))
         .collect();
-    // User LoRA/LoKr-family adapters (sc-10271/sc-18477): installed alongside any built-in
-    // distill LoRA, mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at
-    // load. The SDXL, FLUX.2, and Z-Image candle edit lanes now resolve and install their request
-    // adapter stacks too; each lane retains its own strict family/shape validation.
+    // User LoRA/LoKr-family adapters (sc-10271/sc-18477) remain available on the plain 2511 route.
+    // Lightning is a sealed one-adapter recipe: stacking a user adapter would create a distinct
+    // artifact that cannot borrow the built-in distill's memory evidence.
     let user_adapters = resolve_adapters(request, settings)?;
+    if lightning && !user_adapters.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Qwen Edit Lightning accepts only its pinned built-in 4-step distillation LoRA; user adapters require the plain qwen_image_edit_2511 route."
+                .to_owned(),
+        ));
+    }
     adapters.extend(user_adapters.iter().cloned());
     let adapter_count = adapters.len();
     let pose_inputs = qwen_edit_candle_pose_count(request)
@@ -786,13 +814,20 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let work = qwen_edit_candle_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
-    let prepared_provider_spec = attach_manifest_text_encoder(
+    let mut prepared_provider_spec = attach_manifest_text_encoder(
         load_spec(qwen_base.clone(), None, adapters.clone(), None)
             .with_resolved_route(request.model.clone()),
         "qwen_image_edit",
         request,
         settings,
     )?;
+    prepared_provider_spec
+        .prepare_file_sources()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Qwen Edit could not retain the exact adapter file receipts: {error}"
+            ))
+        })?;
 
     // Request-scoped admission for the Qwen-Image-Edit lane. The shared memory selector exclusively
     // chooses Resident or an optimized rung from the exact artifact/provider/request identity. The
@@ -817,6 +852,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     // The reclaimable high-water is still recorded after an admit (`note_loaded_peak` below).
     let mut generation_memory: Option<gen_core::GenerationMemory> = None;
     let mut memory_context: Option<gen_core::MemoryRunContext> = None;
+    let mut provider_load_spec: Option<gen_core::LoadSpec> = None;
     let use_sequential = {
         // sc-13534: key the budget off the tier `resolve_qwen_edit_candle_base` ACTUALLY landed on, not
         // the bits the request asked for — this lane now grows the tier layout the old `nvfp4 = false`
@@ -955,6 +991,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         };
         generation_memory = evaluation.memory;
         memory_context = Some(evaluation.context.clone());
+        provider_load_spec = Some(strategy_spec.clone());
         raw_settings.insert(
             "memoryStrategy".to_owned(),
             Value::String(format!("{:?}", evaluation.context.selection.strategy)),
@@ -1023,6 +1060,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     };
     apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
     let memory_context = memory_context.expect("selected Qwen strategy has a run context");
+    let provider_load_spec = provider_load_spec.expect("selected Qwen strategy has a load spec");
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -1038,7 +1076,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                     // each request below so one loaded provider can serve both residency modes.
                     offload_policy: gen_core::OffloadPolicy::Resident,
                 },
-                &prepared_provider_spec,
+                &provider_load_spec,
                 &memory_context,
             )
             .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
@@ -1399,6 +1437,7 @@ mod qwen_edit_tier_reconcile_tests {
         base_manifest["id"] = json!("qwen_image_edit_2511");
         let base_request = request("qwen_image_edit_2511", base_manifest, json!({}));
         let base_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
+            .with_quant(gen_core::Quant::Q4)
             .with_resolved_route("qwen_image_edit_2511");
         assert!(qwen_edit_artifact_recipe_is_certified(
             &settings,
@@ -1432,6 +1471,7 @@ mod qwen_edit_tier_reconcile_tests {
                 gen_core::WeightsSource::Dir(path) => path.clone(),
                 gen_core::WeightsSource::File(_) => unreachable!(),
             }))
+            .with_quant(gen_core::Quant::Q4)
             .with_resolved_route("qwen_image_edit_2509");
         assert!(!qwen_edit_artifact_recipe_is_certified(
             &settings,
@@ -1465,17 +1505,43 @@ mod qwen_edit_tier_reconcile_tests {
             lightning_manifest,
             json!({}),
         );
-        let lightning_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base))
+        let mut lightning_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base))
+            .with_quant(gen_core::Quant::Q4)
             .with_resolved_route("qwen_image_edit_2511_lightning")
             .with_adapters(vec![AdapterSpec::new(
                 lightning.clone(),
                 1.0,
                 AdapterKind::Lora,
             )]);
+        assert!(!qwen_edit_artifact_recipe_is_certified(
+            &settings,
+            "qwen_image_edit_2511_lightning",
+            &lightning_spec,
+            &lightning_request.model_manifest_entry,
+            "q4",
+            Some(&lightning),
+        ));
+        lightning_spec
+            .prepare_file_sources()
+            .expect("pin Lightning receipt");
         assert!(qwen_edit_artifact_recipe_is_certified(
             &settings,
             "qwen_image_edit_2511_lightning",
             &lightning_spec,
+            &lightning_request.model_manifest_entry,
+            "q4",
+            Some(&lightning),
+        ));
+        let mut multiple = lightning_spec.clone();
+        let user = data.path().join("user.safetensors");
+        std::fs::write(&user, b"user").expect("user adapter");
+        multiple
+            .adapters
+            .push(AdapterSpec::new(user, 1.0, AdapterKind::Lora));
+        assert!(!qwen_edit_artifact_recipe_is_certified(
+            &settings,
+            "qwen_image_edit_2511_lightning",
+            &multiple,
             &lightning_request.model_manifest_entry,
             "q4",
             Some(&lightning),

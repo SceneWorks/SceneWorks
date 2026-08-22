@@ -1151,10 +1151,15 @@ fn expected_provider_mode(
     context: MemoryRouteRequestContext,
 ) -> &'static str {
     match (runtime_provider, context.mode) {
-        ("qwen_image_edit", MemoryRouteMode::EditImage | MemoryRouteMode::CharacterImage)
+        ("qwen_image_edit", MemoryRouteMode::EditImage)
             if (1..=5).contains(&context.reference_count) =>
         {
             "edit_image"
+        }
+        ("qwen_image_edit", MemoryRouteMode::CharacterImage)
+            if (1..=5).contains(&context.reference_count) =>
+        {
+            "character_image"
         }
         (
             "flux1_schnell" | "flux1_dev",
@@ -1374,7 +1379,7 @@ fn request_strategy_context_matches(
         .ok_or(())?;
     if !matches!(
         provider_mode,
-        "text_to_image" | "image_to_image" | "edit_image"
+        "text_to_image" | "image_to_image" | "edit_image" | "character_image"
     ) {
         return Err(());
     }
@@ -5662,7 +5667,11 @@ mod tests {
                         provider_mode,
                         provider_overlay,
                         ..
-                    } if provider_mode == "edit_image"
+                    } if provider_mode == if mode == MemoryRouteMode::CharacterImage {
+                        "character_image"
+                    } else {
+                        "edit_image"
+                    }
                         && provider_overlay.as_deref() == expected_overlay
                 ));
             }

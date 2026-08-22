@@ -3557,8 +3557,15 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     );
     assert!(
         qwen_stream.contains("QwenEdit::load_with_memory_context(")
+            && qwen_stream.contains("&provider_load_spec,")
             && qwen_stream.contains("model.generate_with_memory_context("),
-        "Qwen admission context must remain provider-owned across load and generation"
+        "Qwen admission context and its exact tier/load receipt must remain provider-owned across load and generation"
+    );
+    assert!(
+        qwen_stream.contains("let mut prepared_provider_spec =")
+            && qwen_stream.contains(".prepare_file_sources()")
+            && qwen_stream.contains("lightning && !user_adapters.is_empty()"),
+        "Qwen adapter files must be pinned once and Lightning must remain a sealed one-adapter recipe"
     );
     assert!(
         qwen_stream.contains("memoryArtifactCertified")
