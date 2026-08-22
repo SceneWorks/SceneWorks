@@ -5,14 +5,15 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schemaVersion", "profile", "status", "error", "downloadEvidenceSha256",
-    "expectedArtifactIds", "sourceCacheRoot", "campaignStagingRoot", "derivedSidecarRoot",
-    "frozenMissingFiles", "sidecarObstructions", "reusedFiles", "downloadedFiles", "phases",
-    "derivedSidecarLifecycle", "offlineBeforeCells"
+    "schemaVersion", "profile", "evidencePhase", "status", "error", "downloadEvidenceSha256",
+    "expectedArtifactIds", "sourceCacheRoot", "campaignStagingRoot", "derivedSidecarRoot", "missingFileStore",
+    "frozenMissingFiles", "sidecarObstructions", "reusedFiles", "downloadedFiles", "networkDownloadCount", "phases",
+    "lifetimePlan", "diskPlan", "derivedSidecarLifecycle", "offlineBeforeCells"
   ],
   "properties": {
     "schemaVersion": { "const": 1 },
     "profile": { "const": "epic-20738-candle-cuda-terminal-v1" },
+    "evidencePhase": { "enum": ["initial", "final"] },
     "status": { "enum": ["passed", "failed"] },
     "error": { "type": ["string", "null"] },
     "downloadEvidenceSha256": { "$ref": "#/$defs/sha256" },
@@ -25,10 +26,12 @@
     "sourceCacheRoot": { "type": "string", "minLength": 1 },
     "campaignStagingRoot": { "type": "string", "minLength": 1 },
     "derivedSidecarRoot": { "type": "string", "minLength": 1 },
+    "missingFileStore": { "type": "string", "minLength": 1 },
     "frozenMissingFiles": { "type": "array", "items": { "$ref": "#/$defs/missingFile" } },
     "sidecarObstructions": { "type": "array", "items": { "$ref": "#/$defs/obstruction" } },
     "reusedFiles": { "type": "array", "items": { "$ref": "#/$defs/artifactFile" } },
     "downloadedFiles": { "type": "array", "items": { "$ref": "#/$defs/downloadedArtifactFile" } },
+    "networkDownloadCount": { "type": "integer", "minimum": 0, "maximum": 1 },
     "phases": {
       "type": "object",
       "additionalProperties": false,
@@ -39,6 +42,11 @@
         "finalOffline": { "type": "array", "items": { "$ref": "#/$defs/finalOffline" } }
       }
     },
+    "lifetimePlan": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/lifetime" }
+    },
+    "diskPlan": { "oneOf": [{ "$ref": "#/$defs/diskPlan" }, { "type": "null" }] },
     "derivedSidecarLifecycle": {
       "type": "object",
       "additionalProperties": false,
@@ -61,8 +69,7 @@
       },
       "else": {
         "properties": {
-          "error": { "type": "string", "minLength": 1 },
-          "offlineBeforeCells": { "const": false }
+          "error": { "type": "string", "minLength": 1 }
         }
       }
     }
@@ -214,11 +221,92 @@
     "sidecarSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "cellId", "inventory"],
+      "required": ["ordinal", "cellId", "providerExecution", "inventory"],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
         "cellId": { "$ref": "#/$defs/id" },
+        "providerExecution": { "enum": ["failed", "completed"] },
         "inventory": { "$ref": "#/$defs/inventory" }
+      }
+    },
+    "physicalFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "bytes", "persistent"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "persistent": { "type": "boolean" }
+      }
+    },
+    "lifetime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "role", "firstOrdinal", "lastOrdinal", "sourceBytes", "expectedFiles", "physicalFiles"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/id" },
+        "role": { "type": "string", "minLength": 1 },
+        "firstOrdinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "lastOrdinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "sourceBytes": { "type": "integer", "minimum": 1 },
+        "expectedFiles": { "type": "integer", "minimum": 1 },
+        "physicalFiles": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/physicalFile" } }
+      }
+    },
+    "diskCell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "artifactIds", "stagedBytes", "sidecarReserveBytes", "modelAndSidecarBytes", "requiredAdditionalBytes"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "artifactIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "stagedBytes": { "type": "integer", "minimum": 1 },
+        "sidecarReserveBytes": { "type": "integer", "minimum": 0 },
+        "modelAndSidecarBytes": { "type": "integer", "minimum": 1 },
+        "requiredAdditionalBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "diskPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freeBytes", "persistentMissingBytes", "nonModelReserveBytes", "nonModelPaths",
+        "legacyNaiveLinkLengthSourceBytes", "reviewedAllAtOnceSourceBytes",
+        "reviewedJitSourcePeakBytes", "logicalSourceBytes", "allAtOnceSourceBytes",
+        "allAtOnceRequiredBytes", "peakOrdinal", "peakArtifactIds", "peakStagedBytes",
+        "peakSidecarReserveBytes", "peakModelAndSidecarBytes", "peakRequiredAdditionalBytes", "admitted", "cells"
+      ],
+      "properties": {
+        "freeBytes": { "type": "integer", "minimum": 0 },
+        "persistentMissingBytes": { "type": "integer", "minimum": 0 },
+        "nonModelReserveBytes": { "type": "integer", "minimum": 1 },
+        "nonModelPaths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "path"],
+            "properties": {
+              "kind": { "enum": ["cargoTarget", "cargoHome", "campaignOutput", "pythonVenv"] },
+              "path": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "legacyNaiveLinkLengthSourceBytes": { "type": "integer", "minimum": 1 },
+        "reviewedAllAtOnceSourceBytes": { "type": "integer", "minimum": 1 },
+        "reviewedJitSourcePeakBytes": { "type": "integer", "minimum": 1 },
+        "logicalSourceBytes": { "type": "integer", "minimum": 1 },
+        "allAtOnceSourceBytes": { "type": "integer", "minimum": 1 },
+        "allAtOnceRequiredBytes": { "type": "integer", "minimum": 1 },
+        "peakOrdinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "peakArtifactIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "peakStagedBytes": { "type": "integer", "minimum": 1 },
+        "peakSidecarReserveBytes": { "type": "integer", "minimum": 0 },
+        "peakModelAndSidecarBytes": { "type": "integer", "minimum": 1 },
+        "peakRequiredAdditionalBytes": { "type": "integer", "minimum": 1 },
+        "admitted": { "type": "boolean" },
+        "cells": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/diskCell" } }
       }
     }
   }

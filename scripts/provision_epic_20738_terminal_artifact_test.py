@@ -167,9 +167,9 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             }])
 
     def test_staging_copies_hits_once_and_downloads_only_the_reviewed_missing_file(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staged:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as stored:
             cache = Path(directory).resolve()
-            staging = Path(staged).resolve()
+            missing_store = Path(stored).resolve()
             snapshot = self.flux_snapshot(cache)
             incomplete = snapshot.parents[1] / "blobs" / (("c" * 64) + ".incomplete")
             incomplete.parent.mkdir(exist_ok=True)
@@ -207,11 +207,14 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                 self.assertEqual(kwargs["filename"], "q8/transformer/model.safetensors")
                 self.assertEqual(kwargs["revision"], self.flux_request()["revision"])
                 self.assertEqual(kwargs["repo_type"], "model")
-                self.assertEqual(Path(kwargs["cache_dir"]), staging / ".hf-network-staging")
+                self.assertEqual(Path(kwargs["cache_dir"]), missing_store / ".hf-network-staging")
                 self.assertFalse(kwargs["token"])
                 self.assertFalse(kwargs["force_download"])
                 self.assertFalse(kwargs["local_files_only"])
                 target = Path(kwargs["local_dir"]) / kwargs["filename"]
+                metadata_dir = Path(kwargs["local_dir"]) / ".cache" / "huggingface"
+                metadata_dir.mkdir(parents=True)
+                (metadata_dir / "download-metadata").write_text("untrusted downloader state")
                 target.write_bytes(payload)
                 return str(target)
 
@@ -222,10 +225,17 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                 hf_hub_download=download,
             )
             with mock.patch.dict(sys.modules, {"huggingface_hub": fake_hf}):
-                result = MODULE.stage_artifact(
-                    self.flux_request(), cache, staging, True
+                downloaded = MODULE.download_reviewed_missing(
+                    self.flux_request(), cache, missing_store
                 )
+            result = MODULE.stage_artifact(
+                self.flux_request(), cache, missing_store, missing_store
+            )
             self.assertEqual(len(calls), 1)
+            self.assertFalse(
+                (missing_store / "models--SceneWorks--flux1-schnell-mlx" / "snapshots"
+                 / self.flux_request()["revision"] / ".cache").exists()
+            )
             self.assertEqual(
                 result["downloadedFiles"],
                 [{
@@ -238,9 +248,22 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             )
             self.assertEqual(incomplete.read_bytes(), b"partial", "helper never selects partial blobs itself")
             self.assertFalse((snapshot / "q8/transformer/model.safetensors").exists())
-            offline = MODULE.resolve_cached_artifact(self.flux_request(), staging)
+            self.assertEqual(downloaded["downloadedFiles"][0]["path"], "transformer/model.safetensors")
+            self.assertEqual(result["downloadedFiles"][0]["path"], "transformer/model.safetensors")
+            self.assertEqual(
+                {key: value for key, value in downloaded["downloadedFiles"][0].items() if key != "path"},
+                {key: value for key, value in result["downloadedFiles"][0].items() if key != "path"},
+            )
+            offline = MODULE.resolve_cached_artifact(self.flux_request(), missing_store)
             self.assertEqual(offline["downloadedFiles"], [])
             self.assertTrue(offline["complete"])
+            stored_target = (
+                missing_store / "models--SceneWorks--flux1-schnell-mlx" / "snapshots"
+                / self.flux_request()["revision"] / "q8/transformer/model.safetensors"
+            )
+            stored_target.write_bytes(b"tampered")
+            with self.assertRaisesRegex(RuntimeError, "missing-file store failed exact identity"):
+                MODULE.stage_artifact(self.flux_request(), cache, missing_store, missing_store)
 
     def test_staging_never_downloads_or_overwrites_a_valid_cache_hit(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staged:
@@ -256,13 +279,20 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             )
             with mock.patch.dict(sys.modules, {"huggingface_hub": fake_hf}):
                 result = MODULE.stage_artifact(
-                    self.flux_request(), cache, staging, False
+                    self.flux_request(), cache, staging, None
                 )
             called.assert_not_called()
             self.assertEqual(result["downloadedFiles"], [])
             self.assertEqual(target.read_bytes(), b"already valid")
-            with self.assertRaisesRegex(RuntimeError, "refusing to overwrite staged cache file"):
-                MODULE.stage_artifact(self.flux_request(), cache, staging, False)
+            repeated = MODULE.stage_artifact(self.flux_request(), cache, staging, None)
+            self.assertEqual(repeated["reusedFiles"], result["reusedFiles"])
+            staged_target = (
+                staging / "models--SceneWorks--flux1-schnell-mlx" / "snapshots"
+                / self.flux_request()["revision"] / "q8/transformer/model.safetensors"
+            )
+            staged_target.write_bytes(b"drift")
+            with self.assertRaisesRegex(RuntimeError, "refusing to overwrite non-identical"):
+                MODULE.stage_artifact(self.flux_request(), cache, staging, None)
 
     def test_network_flag_rejects_unapproved_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staged:
@@ -271,9 +301,9 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             snapshot = self.cache_snapshot(cache)
             (snapshot / "q4" / "weights.safetensors").write_bytes(b"weights")
             with self.assertRaisesRegex(
-                RuntimeError, "network staging requires exactly the sole reviewed missing filename"
+                RuntimeError, "network fill requires exactly the sole reviewed missing filename"
             ):
-                MODULE.stage_artifact(self.request(), cache, staging, True)
+                MODULE.download_reviewed_missing(self.request(), cache, staging)
 
     def test_request_rejects_unreviewed_floating_or_escaping_fields(self) -> None:
         self.assertEqual(self.parse(self.request())["allowPatterns"], ["q4/*"])
