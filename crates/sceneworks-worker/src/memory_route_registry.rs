@@ -702,6 +702,36 @@ const RULES: &[MemoryRouteRule] = &[
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
+        provider: "anima_base",
+        // The published Candle install is dense bf16.  Q4/Q8 remain unavailable on this backend,
+        // and LoRA/LoKr spans Anima's conditioner/DiT staging boundary, so neither is allowed to
+        // borrow the plain bf16 staged-residency evidence.
+        tiers: BF16_ONLY,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "anima_aesthetic",
+        tiers: BF16_ONLY,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "anima_turbo",
+        tiers: BF16_ONLY,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
         provider: "z_image",
         tiers: ALL_TIERS,
         modes: TEXT_AND_STYLE,
