@@ -209,7 +209,7 @@ test("windows-candle enforces GitHub's current 25-input workflow_dispatch ceilin
     (_, index) => `      mutation_input_${index}:\n        type: boolean\n        default: false\n`,
   ).join("");
   const overLimit = workflow.replace("      run_sc19057_wan_capture:\n", `${extra}      run_sc19057_wan_capture:\n`);
-  assert.throws(() => assertDispatchInputLimit(overLimit), /at most 25 inputs, found 36/);
+  assert.throws(() => assertDispatchInputLimit(overLimit), /at most 25 inputs, found 37/);
 });
 
 test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
@@ -574,10 +574,19 @@ const COMPILE_CHAIN_STEPS = [
 // The ORDERED view of the job's steps. `stepBody()` above finds one step by name; this keeps
 // position, and keeps the `uses:`-only steps (checkout, prepare-rust-runner) that have no name at
 // all and so are invisible to `stepBody`.
-function jobSteps(workflow) {
-  const start = workflow.indexOf("\n    steps:\n");
-  assert.ok(start >= 0, "windows-candle.yml must keep a steps: block");
-  const body = workflow.slice(start);
+function jobBody(workflow, name) {
+  const start = workflow.indexOf(`\n  ${name}:\n`);
+  assert.ok(start >= 0, `windows-candle.yml must keep a ${name} job`);
+  const contentStart = workflow.indexOf("\n", start + 1) + 1;
+  const next = workflow.slice(contentStart).search(/^ {2}[a-zA-Z0-9_-]+:\n/m);
+  return workflow.slice(start, next === -1 ? undefined : contentStart + next);
+}
+
+function jobSteps(workflow, name = "candle-worker") {
+  const job = jobBody(workflow, name);
+  const start = job.indexOf("\n    steps:\n");
+  assert.ok(start >= 0, `${name} must keep a steps: block`);
+  const body = job.slice(start);
   const steps = [];
   const marker = "\n      - ";
   for (let at = body.indexOf(marker); at !== -1; ) {
@@ -777,6 +786,15 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
   for (const body of [seal, cleanup]) {
     assert.match(body, /\[string\]::Equals\(\$parent, \$tempRoot, \[StringComparison\]::OrdinalIgnoreCase\)/);
     assert.match(body, /\^sc19054-flux-acceptance-\[0-9\]\+-\[0-9\]\+\$/);
+    assert.match(
+      body,
+      /Join-Path \$env:RUNNER_TEMP "sc19054-flux-acceptance-\$env:GITHUB_RUN_ID-\$env:GITHUB_RUN_ATTEMPT"/,
+    );
+    assert.match(body, /\[string\]::Equals\(\$evidence, \$expectedEvidence, \[StringComparison\]::OrdinalIgnoreCase\)/);
+    assert.doesNotMatch(body, /\.StartsWith\(/, `${context}: scratch trust must use exact canonical parent/path equality`);
+  }
+  {
+    const body = cleanup;
     assert.ok(
       (body.match(/\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/g) ?? []).length >= 3,
       `${context}: cleanup must reject root, direct-child, and output-child reparse points`,
@@ -785,24 +803,13 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
     assert.match(body, /\$rootFiles = @\('identity\.json', 'model-files\.json', 'acceptance\.log', 'SHA256SUMS\.txt'\)/);
     assert.match(body, /\$outputFiles = @\('sc19054-flux-acceptance\.json', 'sc19054-flux-schnell-q4-1024\.png'\)/);
     assert.doesNotMatch(body, /Remove-Item[^\n]*-Recurse/, `${context}: deletion must be inventoried and non-recursive`);
-    assert.match(
-      body,
-      /Join-Path \$env:RUNNER_TEMP "sc19054-flux-acceptance-\$env:GITHUB_RUN_ID-\$env:GITHUB_RUN_ATTEMPT"/,
-    );
-    assert.match(body, /\[string\]::Equals\(\$evidence, \$expectedEvidence, \[StringComparison\]::OrdinalIgnoreCase\)/);
-    assert.doesNotMatch(body, /\.StartsWith\(/, `${context}: scratch trust must use exact canonical parent/path equality`);
   }
-  assert.match(
-    seal,
-    /Join-Path \$env:RUNNER_TEMP 'sc19054-flux-acceptance-32551460830-1'/,
-    `${context}: the next dispatch must reclaim only the one uploaded completed residue`,
-  );
-  assert.match(seal, /Remove-Sc19054ScratchTree \$completedResidue/);
   assert.doesNotMatch(
     seal,
     /Get-ChildItem -LiteralPath \$env:RUNNER_TEMP/,
     `${context}: cleanup must never enumerate concurrent SC-19054 sibling attempts`,
   );
+  assert.doesNotMatch(seal, /32551460830-1/, `${context}: one-shot recovery must not ride a real render`);
   assert.match(cleanup, /Remove-Sc19054ScratchTree \$evidence/);
 
   for (const exact of [
@@ -870,7 +877,6 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
     ["cleanup follows reparse points", "workflow", ".Attributes -band [System.IO.FileAttributes]::ReparsePoint", ".Attributes -band [System.IO.FileAttributes]::Normal"],
     ["cleanup admits a nested output directory", "workflow", "$child.PSIsContainer -or $outputFiles -notcontains $child.Name", "$false -or $outputFiles -notcontains $child.Name"],
     ["cleanup deletes recursively", "workflow", "Remove-Item -LiteralPath $ScratchPath -Force", "Remove-Item -LiteralPath $ScratchPath -Recurse -Force"],
-    ["cleanup sweeps another completed attempt", "workflow", "sc19054-flux-acceptance-32551460830-1", "sc19054-flux-acceptance-32551460831-1"],
     ["cleanup accepts a wrong attempt", "workflow", "[string]::Equals($evidence, $expectedEvidence, [StringComparison]::OrdinalIgnoreCase)", "$true"],
   ];
   for (const [name, key, from, to] of mutations) {
@@ -973,6 +979,201 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
     false,
     "a nested reparse escape must fail the complete inventory before any deletion",
   );
+});
+
+function assertSc19054ResidueCleanupContract(workflow, context = "SC-19054 residue cleanup") {
+  const input = "cleanup_sc19054_completed_residue";
+  const literalTarget = "D:\\actions-runner-2\\_work\\_temp\\sc19054-flux-acceptance-32551460830-1";
+  const { names, defaults } = dispatchInputs(workflow);
+  assert.ok(names.includes(input), `${context}: one-shot boolean input is missing`);
+  assert.equal(defaults[input], "false", `${context}: one-shot input must default false`);
+  assert.equal(
+    names.filter((name) => /^cleanup_sc19054_/.test(name)).length,
+    1,
+    `${context}: cleanup must not accept a caller-selected target or run`,
+  );
+
+  const job = jobBody(workflow, "sc19054-completed-residue-cleanup");
+  assert.match(
+    job,
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.cleanup_sc19054_completed_residue \}\}/,
+  );
+  assert.match(job, /runs-on: \$\{\{ fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/);
+  assert.match(job, /timeout-minutes: 10/);
+  assert.doesNotMatch(job, /actions\/checkout|\bcargo\b|nvidia-smi|snapshot_download|SCENEWORKS_PROVISIONED_ROOT/);
+  assert.match(
+    jobBody(workflow, "candle-worker"),
+    /if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.cleanup_sc19054_completed_residue\)/,
+    `${context}: cleanup-only dispatch must not enter the build/real-weight job`,
+  );
+
+  const inspect = stepBody(workflow, "Inspect and remove the exact completed SC-19054 residue");
+  assert.ok(inspect.includes(`$literalTarget = '${literalTarget}'`), `${context}: exact literal target drifted`);
+  assert.doesNotMatch(
+    inspect,
+    /inputs\.(?:provision_cache_dir|cleanup_path|cleanup_target|cleanup_run|cleanup_attempt)|PROVISION_CACHE_DIR_INPUT/,
+  );
+  for (const mode of [
+    "PROVISION_SNAPSHOT",
+    "RUN_FIVE_RUNG_REFERENCE",
+    "RUN_LTX_EROS_ACCEPTANCE",
+    "RUN_SC19054_FLUX_ACCEPTANCE",
+    "RUN_SC19057_WAN_CAPTURE",
+  ]) {
+    assert.match(inspect, new RegExp(`if \\(\\$env:${mode} -eq 'true'\\) \\{ \\$conflicts \\+=`));
+  }
+  assert.match(inspect, /if \(\$conflicts\.Count -ne 0\)/);
+  assert.match(inspect, /cleanup_sc19054_completed_residue is mutually exclusive with/);
+  assert.match(inspect, /Get-Item -LiteralPath \$LiteralPath -Force -ErrorAction Stop/);
+  assert.match(inspect, /catch \[System\.Management\.Automation\.ItemNotFoundException\]/);
+  assert.match(
+    inspect,
+    /\$allowedRunners = @\('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4'\)/,
+  );
+  assert.match(inspect, /if \(\$allowedRunners -notcontains \$env:RUNNER_NAME\)/);
+  assert.match(inspect, /\$literalParent = 'D:\\actions-runner-2\\_work\\_temp'/);
+  assert.match(inspect, /\$parent = Get-Item -LiteralPath \$literalParent -Force -ErrorAction Stop/);
+  assert.match(inspect, /-not \$parent\.PSIsContainer/);
+  assert.match(
+    inspect,
+    /\$parent\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/,
+  );
+  assert.match(inspect, /\[string\]::Equals\(\$targetParent, \$literalParent, \[StringComparison\]::OrdinalIgnoreCase\)/);
+  assert.doesNotMatch(inspect, /\[string\]::Equals\(\$runnerTemp, \$literalParent/);
+  const expectedFiles = new Map([
+    ["acceptance.log", "9d4d19d054ba14145b3dd763d56a920beac28e8b125fa9d83441fe197cbd89c1"],
+    ["identity.json", "c90ffcc57588a282c2eab446dc094d775b658bb9fac0510446b5b9da1923201c"],
+    ["model-files.json", "1c1c78f8809d7b47484df8b095851473153b40a9b4ebf03c9452eae230e64be6"],
+    [
+      "output/sc19054-flux-acceptance.json",
+      "32fe5e0d826055bacb0134da007ff8c3b13f837fb45168c85470833409474c63",
+    ],
+    [
+      "output/sc19054-flux-schnell-q4-1024.png",
+      "e20f14aabb66e3f07bdee5f4eee1c183eaaebe91eff39fd4b57d19508473fc62",
+    ],
+  ]);
+  for (const [path, digest] of expectedFiles) {
+    assert.ok(
+      inspect.includes(`'${path}' = '${digest}'`),
+      `${context}: authoritative artifact digest drifted for ${path}`,
+    );
+  }
+  assert.match(inspect, /\$rootFiles = @\('acceptance\.log', 'identity\.json', 'model-files\.json'\)/);
+  assert.match(inspect, /\$outputFiles = @\('sc19054-flux-acceptance\.json', 'sc19054-flux-schnell-q4-1024\.png'\)/);
+  assert.doesNotMatch(inspect, /SHA256SUMS\.txt/);
+  assert.match(inspect, /if \(\$rootEntries\.Count -ne 4\)/);
+  assert.match(inspect, /if \(\$outputEntries\.Count -ne 2\)/);
+  assert.match(inspect, /if \(\$actualFiles\.Count -ne \$expectedFiles\.Count\)/);
+  assert.match(inspect, /foreach \(\$expectedPath in \$expectedFiles\.Keys\)/);
+  assert.match(inspect, /if \(\$actualFiles -notcontains \$expectedPath\)/);
+  assert.ok(
+    (inspect.match(/\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint/g) ?? []).length >= 4,
+    `${context}: parent, root, direct-child, and output-child reparse points must all be rejected`,
+  );
+  assert.match(inspect, /\$child\.PSIsContainer -or \$outputFiles -notcontains \$child\.Name/);
+  assert.match(inspect, /Get-FileHash -LiteralPath \$child\.FullName -Algorithm SHA256/);
+  assert.match(inspect, /Get-FileHash -LiteralPath \$item\.FullName -Algorithm SHA256/);
+  assert.match(inspect, /\$relative = "output\/\$\(\$child\.Name\)"/);
+  assert.match(inspect, /path = \$relative/);
+  assert.match(inspect, /bytes = \$child\.Length/);
+  assert.match(inspect, /sha256 = \(Get-FileHash/);
+  assert.ok(
+    inspect.indexOf("Get-FileHash") < inspect.indexOf("Remove-Item"),
+    `${context}: inventory hashes must be sealed before deletion begins`,
+  );
+  assert.ok(
+    inspect.indexOf("$allowedRunners") < inspect.indexOf("$root = Get-Sc19054ResidueRoot"),
+    `${context}: runner authentication must precede both deletion and an absent-target PASS`,
+  );
+  assert.ok(
+    inspect.indexOf("$parent = Get-Item") < inspect.indexOf("$root = Get-Sc19054ResidueRoot"),
+    `${context}: literal-parent authentication must precede both deletion and an absent-target PASS`,
+  );
+  assert.doesNotMatch(inspect, /Remove-Item[^\n]*-Recurse/);
+  assert.match(inspect, /foreach \(\$child in \$outputEntries\) \{\s*Remove-Item -LiteralPath \$child\.FullName -Force/);
+  assert.match(inspect, /Remove-Item -LiteralPath \$target -Force/);
+  for (const field of [
+    "preExisted",
+    "inventory",
+    "removedEntries",
+    "removalPerformed",
+    "postAbsent",
+    "runner",
+    "revision",
+    "runId",
+    "runAttempt",
+    "verdict",
+  ]) {
+    assert.match(inspect, new RegExp(`\\b${field}\\b`), `${context}: receipt lost ${field}`);
+  }
+  assert.match(inspect, /finally \{[\s\S]*ConvertTo-Json -Depth 8[\s\S]*Set-Content -LiteralPath \$receiptPath/);
+  assert.match(inspect, /\$targetReceipt\.inventory = @\(\$inventory \| Sort-Object path\)/);
+  assert.match(inspect, /\$targetReceipt\.removedEntries = @\(\$removedEntries\)/);
+  assert.match(inspect, /\$targetReceipt\.postAbsent = \$null -eq \(Get-Sc19054ResidueRoot \$target\)/);
+
+  const upload = stepBody(workflow, "Upload the one-shot SC-19054 cleanup receipt");
+  assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(upload, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
+  assert.match(upload, /path: \$\{\{ env\.SC19054_RESIDUE_RECEIPT \}\}/);
+  assert.match(upload, /if-no-files-found: error/);
+  assert.match(upload, /retention-days: 30/);
+
+  const verify = stepBody(workflow, "Verify the exact SC-19054 residue is absent");
+  assert.ok(verify.includes(`$target = '${literalTarget}'`), `${context}: post-upload verifier target drifted`);
+  assert.match(verify, /Get-Item -LiteralPath \$target -Force -ErrorAction Stop/);
+  assert.match(verify, /catch \[System\.Management\.Automation\.ItemNotFoundException\]/);
+  assert.match(verify, /\$receipt\.verdict -ne 'PASS' -or \$receipt\.target\.postAbsent -ne \$true/);
+
+  const receiptCleanup = stepBody(workflow, "Remove the uploaded SC-19054 cleanup receipt scratch");
+  assert.match(receiptCleanup, /Join-Path \$env:RUNNER_TEMP "sc19054-residue-cleanup-\$env:GITHUB_RUN_ID-\$env:GITHUB_RUN_ATTEMPT\.json"/);
+  assert.match(receiptCleanup, /\[string\]::Equals\(\$actual, \$expected, \[StringComparison\]::OrdinalIgnoreCase\)/);
+  assert.doesNotMatch(receiptCleanup, /-Recurse|\.StartsWith\(/);
+
+  assert.match(workflow, /follow-up PR[\s\S]*remove this input, job, and its mutation-sensitive contract/);
+  const realSeal = stepBody(workflow, "Seal the SC-19054 FLUX acceptance identity");
+  assert.doesNotMatch(realSeal, /32551460830-1|completedResidue/);
+}
+
+test("SC-19054 exposes one exact cleanup-only residue recovery with a sealed receipt", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assertSc19054ResidueCleanupContract(workflow);
+});
+
+test("SC-19054 cleanup-only recovery contract kills unsafe routing, inventory, and deletion mutations", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const mutations = [
+    ["caller-selected target", "$literalTarget = 'D:\\actions-runner-2\\_work\\_temp\\sc19054-flux-acceptance-32551460830-1'", "$literalTarget = '${{ inputs.provision_cache_dir }}'"],
+    ["wrong completed attempt", "sc19054-flux-acceptance-32551460830-1", "sc19054-flux-acceptance-32551460831-1"],
+    ["real-weights-only listener", "fromJSON('[\"self-hosted\",\"Windows\",\"X64\",\"cuda\"]')", "fromJSON('[\"self-hosted\",\"Windows\",\"X64\",\"cuda\",\"real-weights\"]')"],
+    ["build job also runs", "!(github.event_name == 'workflow_dispatch' && inputs.cleanup_sc19054_completed_residue)", "true"],
+    ["provisioning conflict omitted", "if ($env:PROVISION_SNAPSHOT -eq 'true')", "if ($false)"],
+    ["real capture conflict omitted", "if ($env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true')", "if ($false)"],
+    ["runner allowlist widened", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4')", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4', '*')"],
+    ["runner allowlist incomplete", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4')", "@('cuda-windows', 'cuda-windows-2', 'cuda-windows-3')"],
+    ["literal parent lookup omitted", "$parent = Get-Item -LiteralPath $literalParent -Force -ErrorAction Stop", "$parent = [pscustomobject]@{ PSIsContainer = $true; Attributes = [System.IO.FileAttributes]::Normal }"],
+    ["literal parent reparse accepted", "$parent.Attributes -band [System.IO.FileAttributes]::ReparsePoint", "$parent.Attributes -band [System.IO.FileAttributes]::Normal"],
+    ["root-parent binding removed", "[string]::Equals($targetParent, $literalParent, [StringComparison]::OrdinalIgnoreCase)", "$true"],
+    ["filesystem errors treated as absence", "Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop", "Get-Item -LiteralPath $LiteralPath -Force -ErrorAction SilentlyContinue"],
+    ["reparse checks disabled", ".Attributes -band [System.IO.FileAttributes]::ReparsePoint", ".Attributes -band [System.IO.FileAttributes]::Normal"],
+    ["nested output directory accepted", "$child.PSIsContainer -or $outputFiles -notcontains $child.Name", "$false -or $outputFiles -notcontains $child.Name"],
+    ["root inventory incomplete", "$rootEntries.Count -ne 4", "$rootEntries.Count -ne 3"],
+    ["output inventory incomplete", "$outputEntries.Count -ne 2", "$outputEntries.Count -ne 1"],
+    ["extra checksum inventory accepted", "$rootFiles = @('acceptance.log', 'identity.json', 'model-files.json')", "$rootFiles = @('acceptance.log', 'identity.json', 'model-files.json', 'SHA256SUMS.txt')"],
+    ["authoritative hash changed", "9d4d19d054ba14145b3dd763d56a920beac28e8b125fa9d83441fe197cbd89c1", "0000000000000000000000000000000000000000000000000000000000000000"],
+    ["authoritative hash missing", "                'model-files.json' = '1c1c78f8809d7b47484df8b095851473153b40a9b4ebf03c9452eae230e64be6'\n", ""],
+    ["recursive residue deletion", "Remove-Item -LiteralPath $target -Force", "Remove-Item -LiteralPath $target -Recurse -Force"],
+    ["file hashes omitted", "Get-FileHash -LiteralPath $child.FullName -Algorithm SHA256", "Write-Output $child.FullName"],
+    ["post-absence not checked", "$targetReceipt.postAbsent = $null -eq (Get-Sc19054ResidueRoot $target)", "$targetReceipt.postAbsent = $true"],
+    ["receipt upload not always", "name: Upload the one-shot SC-19054 cleanup receipt\n        if: ${{ always() }}", "name: Upload the one-shot SC-19054 cleanup receipt\n        if: ${{ success() }}"],
+    ["receipt cleanup recursive", "Remove-Item -LiteralPath $actual -Force", "Remove-Item -LiteralPath $actual -Recurse -Force"],
+    ["removal plan deleted", "follow-up PR\n  # must remove this input, job, and its mutation-sensitive contract", "follow-up work may retain the hook"],
+  ];
+  for (const [name, from, to] of mutations) {
+    const mutated = workflow.replaceAll(from, to);
+    assert.notEqual(mutated, workflow, `${name}: mutation did not apply`);
+    assert.throws(() => assertSc19054ResidueCleanupContract(mutated, name), undefined, name);
+  }
 });
 
 // sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With
