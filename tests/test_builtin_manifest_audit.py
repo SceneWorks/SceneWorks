@@ -721,6 +721,32 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_memory_request_provider_mode_schema_admits_public_character_image():
+    """SC-20798: provider-owned Character routes keep their public typed coordinate."""
+    schema = _load_schema(SCHEMA_PATH)
+    provider_modes = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            properties = value.get("properties", {})
+            if "providerMode" in properties:
+                provider_modes.append(properties["providerMode"])
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(schema)
+    assert len(provider_modes) == 1
+    assert provider_modes[0]["enum"] == [
+        "text_to_image",
+        "image_to_image",
+        "edit_image",
+        "character_image",
+    ]
+
+
 def test_memory_declaration_withhold_is_authorable_on_both_backends():
     """sc-20246: the withhold the declaration projector honors must pass the authoring schema.
 

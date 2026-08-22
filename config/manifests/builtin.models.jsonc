@@ -3168,13 +3168,13 @@
       // `sequentialPeakGb` = SEQUENTIAL residency (the ~16 GB dense bf16 Qwen2.5-VL text encoder — loaded
       // f32, ~32 GB — plus the VAE encoder DROPPED after they encode the reference, before the MMDiT
       // loads, sc-10968) — always lower, and the resident/sequential pixels are byte-identical (q8 md5
-      // 5b7ae2ee…, bf16 md5 4b53dc72…). The edit fit-gate (qwen_edit_candle.rs, sc-10968) compares the
-      // resident peak against free VRAM to choose sequential-offload vs reject, then (sc-10856) REJECTS if
-      // even the sequential peak won't fit rather than run into a reactive OOM. q4 resident/sequential
+      // 5b7ae2ee…, bf16 md5 4b53dc72…). SC-20798 keeps these legacy peaks as sizing/accounting inputs;
+      // the shared selector now exclusively grants Resident or an optimized rung from exact evidence.
+      // q4 resident/sequential
       // from the sc-10968 GPU A/B (56.7 / 36.9); q8 (69.0 / 39.3) + bf16 (81.7 / 52.2) measured here. bf16
       // is the dense 5-shard DiT + dense f32 TE (81.7 GB resident) — it fits a 96 GB card but overflows
-      // the epic's small-card targets even sequentially, so the gate rejects it there. minMemoryGb 59
-      // gates the DEFAULT (q4) tier (resident 56.7 GB).
+      // the epic's small-card targets even sequentially. minMemoryGb 59 remains the catalog floor for
+      // the DEFAULT (q4) tier (resident 56.7 GB), not an independent strategy authority.
       //
       // sc-13534: these rows only DESCRIBE what the candle lane loads as of that story. They were always
       // measured against the staged `SceneWorks/qwen-image-edit-2511-mlx` tier subdirs below, but until
@@ -3182,7 +3182,7 @@
       // snapshot instead — a repo no `downloads` entry here ever fetches (so the lane was unreachable on
       // a stock install) and, where a dev box happened to have it cached, a DENSE bf16 load budgeted
       // against the q4 row: a ~25 GB under-prediction. The lane now descends into the tier subdir via
-      // `standard_tier_subdir` (like the `qwen_image` txt2img sibling) and the fit-gate keys off the
+      // `standard_tier_subdir` (like the `qwen_image` txt2img sibling) and the admission budget keys off the
       // RESOLVED dir (`gate_tier_key`), so the tier that loads is the tier that is budgeted. Keep that
       // true when re-measuring: a row here is only honest if the lane can actually resolve that subdir.
       "candle": {
@@ -3206,49 +3206,24 @@
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 36.9, "q8": 39.3, "bf16": 52.2 },
         "measured": true,
-        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
-        // Engine-derived rung x tier coverage for qwen_image_edit.
-        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
-        // hand edits inside this region are overwritten.
+        // SC-20798: exact request-owned Candle declaration. Edit and Character remain distinct
+        // provider coordinates with one to five references. Adapter loads intentionally omit
+        // transformer streaming because their materialized stack is not reopenable.
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "qwen_image_edit",
           "implementations": [
-            {
-              "rung": "staged_residency",
-              "tiers": ["bf16", "q8", "q4"],
-              "modes": ["edit_image", "character_image"],
-              "overlays": ["none"],
-              "loadProfiles": ["plain"],
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
-            },
-            {
-              "rung": "bounded_decode",
-              "tiers": ["bf16", "q8", "q4"],
-              "modes": ["edit_image", "character_image"],
-              "overlays": ["none"],
-              "loadProfiles": ["plain"],
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
-            },
-            {
-              "rung": "bounded_attention",
-              "tiers": ["bf16", "q8", "q4"],
-              "modes": ["edit_image", "character_image"],
-              "overlays": ["none"],
-              "loadProfiles": ["plain"],
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
-            },
-            {
-              "rung": "bounded_transformer_residency",
-              "tiers": ["bf16", "q8", "q4"],
-              "modes": ["edit_image", "character_image"],
-              "overlays": ["none"],
-              "loadProfiles": ["plain"],
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
-            }
+            {"rung":"resident","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"bounded_decode","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,448,384,320,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"bounded_attention","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864},"parameterRanges":{"decodeTileEdges":[768,640,512,448,384,320,256],"decodeOverlaps":[64],"attentionChunkSizes":[67108864]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"bounded_transformer_residency","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention","bounded_transformer_residency"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864,"transformerWindowSize":1,"transformerWindowComponent":"Dit"},"parameterRanges":{"decodeTileEdges":[768,640,512,448,384,320,256],"decodeOverlaps":[64],"attentionChunkSizes":[67108864],"transformerWindowSizes":[1,2,4,8,15,30],"transformerWindowComponents":["Dit"]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"bounded_decode","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,448,384,320,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"bounded_attention","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864},"parameterRanges":{"decodeTileEdges":[768,640,512,448,384,320,256],"decodeOverlaps":[64],"attentionChunkSizes":[67108864]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"}
           ]
         }
-        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Qwen Image Edit (2511)",
@@ -3421,12 +3396,12 @@
       // harness (qwen_edit_probed_generate_for_offload_ab + QWEN_EDIT_LIGHTNING=1, device-level idle-gated
       // GPU 0 peak), pointed at each staged SceneWorks/qwen-image-edit-2511-mlx tier + the staged lightx2v
       // distill LoRA. Resident/sequential pixels byte-identical per tier (q4 md5 08385ae1, q8 e78141a8, bf16
-      // ea51b237). The edit fit-gate (qwen_edit_candle.rs, sc-10968) reads vramGbByTier vs free VRAM to choose
-      // sequential-offload vs reject; minMemoryGb 59 gates the DEFAULT (q4) tier (resident 57.0).
+      // ea51b237). SC-20798 keeps these peaks as shared-selector sizing/accounting inputs only;
+      // minMemoryGb 59 remains the catalog floor for the DEFAULT (q4) tier (resident 57.0).
       //
       // sc-13534: same reconciliation as `qwen_image_edit_2511` above (shared checkpoint, shared lane) —
       // the candle lane resolved the upstream dense snapshot rather than these staged tier subdirs until
-      // that story pointed it at `standard_tier_subdir` and keyed the fit-gate off the resolved dir.
+      // that story pointed it at `standard_tier_subdir` and keyed admission sizing off the resolved dir.
       "candle": {
         "supportsSequentialOffload": true,
         "memoryStrategyCapabilities": {
@@ -3443,7 +3418,19 @@
         "vramGbByTier": { "q4": 57.0, "q8": 65.8, "bf16": 87.4 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 33.1, "q8": 39.3, "bf16": 53.2 },
-        "measured": true
+        "measured": true,
+        // The built-in Lightning distill is an exact pinned LoRA recipe. Its load profile is always
+        // `lora`, including when no user adapter is present, so transformer streaming stays Missing.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_edit",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"bounded_decode","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,448,384,320,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"},
+            {"rung":"bounded_attention","fingerprint":"qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2","tiers":["bf16","q4","q8"],"modes":["edit_image","character_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"edit_image","providerMode":"edit_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"character_image","referenceCounts":[1,2,3,4,5],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864},"parameterRanges":{"decodeTileEdges":[768,640,512,448,384,320,256],"decodeOverlaps":[64],"attentionChunkSizes":[67108864]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"}
+          ]
+        }
       },
       "ui": {
         "label": "Qwen Image Edit (2511) Lightning",

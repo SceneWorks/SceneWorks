@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b364ba428693984dd1ea5843ce5b3ee0451669a342b9feafe1fb265219ab0344",
+    "sceneWorksRevision": "source-tree:6881f70de96ac938a4a97073b52a217931ec67f9d1de98c541e971b84b54ccdf",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "487f2035f90acd98afd87c4e018314a95619a78f40499f54863944e05e193b0b"
+        "sha256": "cb0c972a490a49fd631930a1f20ccc16efae4d74bbb366c139e36ddd00385b41"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -172,12 +172,12 @@
       "image": 53,
       "video": 10
     },
-    "cells": 8785,
+    "cells": 8755,
     "publishedCells": 163,
-    "elidedCells": 8622,
+    "elidedCells": 8592,
     "elidedByState": {
-      "Implemented/unverified": 2778,
-      "Missing": 5844
+      "Implemented/unverified": 2754,
+      "Missing": 5838
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -3001,8 +3001,7 @@
           ],
           "overlays": [
             "identity",
-            "lora",
-            "none"
+            "lora"
           ],
           "rungs": [
             "resident",
@@ -11910,28 +11909,27 @@
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 12,
+      "elided": 11,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
+        "Implemented/unverified": 6,
         "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "character_image": 6,
-          "edit_image": 6
+          "character_image": 3,
+          "edit_image": 3
         },
         "overlay": {
           "identity": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 6
         }
       }
     },
@@ -11939,28 +11937,27 @@
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 12,
+      "elided": 11,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
+        "Implemented/unverified": 6,
         "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "character_image": 6,
-          "edit_image": 6
+          "character_image": 3,
+          "edit_image": 3
         },
         "overlay": {
           "identity": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 6
         }
       }
     },
@@ -11968,52 +11965,51 @@
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 0,
-      "elided": 18,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 18
+        "Missing": 12
       }
     },
     {
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 18,
+      "elided": 11,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 18
+        "Implemented/unverified": 12
       }
     },
     {
       "modelId": "qwen_image_edit_2511_lightning",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 18,
+      "coordinates": 12,
       "published": 1,
-      "elided": 17,
-      "implemented": 12,
+      "elided": 11,
+      "implemented": 6,
       "states": {
-        "Implemented/unverified": 12,
+        "Implemented/unverified": 6,
         "Missing": 6
       },
       "implementedBy": {
         "tier": {
-          "bf16": 4,
-          "q4": 4,
-          "q8": 4
+          "bf16": 2,
+          "q4": 2,
+          "q8": 2
         },
         "mode": {
-          "character_image": 6,
-          "edit_image": 6
+          "character_image": 3,
+          "edit_image": 3
         },
         "overlay": {
           "identity": 0,
-          "lora": 6,
-          "none": 6
+          "lora": 6
         }
       }
     },
@@ -23483,7 +23479,26 @@
         ]
       },
       "strategyParameters": {
-        "attentionChunkSize": 67108864
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
       },
       "engagedRungs": [
         "resident",
@@ -23497,13 +23512,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "51b035200af3b9269ff5b7049381a047c5fc07968ba6a600b15021bc07404779",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyCapabilities/bounded_attention"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23534,7 +23549,21 @@
       },
       "strategyParameters": {
         "decodeTileEdge": 512,
-        "decodeOverlap": 64
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
       },
       "engagedRungs": [
         "resident",
@@ -23547,13 +23576,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "91142c63ed28cee980fdb29d03c19f388fe14d2199631750886464ef7fc78a9a",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/memoryStrategyCapabilities/bounded_decode"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23582,7 +23611,9 @@
           "720x1280"
         ]
       },
-      "strategyParameters": {},
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
       "engagedRungs": [
         "resident"
       ],
@@ -23592,13 +23623,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8c2dabc7a9bbf430287dfcedb95c2d4c1c6c76774dfed78646de6bf0dd93254a",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23628,11 +23659,7 @@
         ]
       },
       "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
+        "publishedRanges": {}
       },
       "engagedRungs": [
         "resident",
@@ -23644,13 +23671,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4a850dff8e57d22876fe25008c9f9f22db58c3f81340557c96712f310826a2c3",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23680,7 +23707,26 @@
         ]
       },
       "strategyParameters": {
-        "attentionChunkSize": 67108864
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
       },
       "engagedRungs": [
         "resident",
@@ -23694,13 +23740,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "583500077064edc633ecb5066a146981c4ccd56dbd64124a72ddda25d17ff0e8",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyCapabilities/bounded_attention"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23731,7 +23777,21 @@
       },
       "strategyParameters": {
         "decodeTileEdge": 512,
-        "decodeOverlap": 64
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
       },
       "engagedRungs": [
         "resident",
@@ -23744,13 +23804,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f062e108d28f8bc672a7bb9a08d713c56db4a117912752302afbae9e0202c8f2",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyCapabilities/bounded_decode"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23780,8 +23840,39 @@
         ]
       },
       "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
         "transformerWindowSize": 1,
-        "transformerWindowComponent": "Dit"
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            768,
+            640,
+            512,
+            448,
+            384,
+            320,
+            256
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1,
+            2,
+            4,
+            8,
+            15,
+            30
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
       },
       "engagedRungs": [
         "resident",
@@ -23796,7 +23887,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9d40d3191452e85f065204d20e426daaaacd3d0a1d7cbba94561ea51219534bd",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "rung4Survey": {
@@ -23810,7 +23901,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/memoryStrategyCapabilities/bounded_transformer_residency"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23839,7 +23930,9 @@
           "720x1280"
         ]
       },
-      "strategyParameters": {},
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
       "engagedRungs": [
         "resident"
       ],
@@ -23849,13 +23942,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "76806dd02428e32be4a9f851b5a44fff9ea7205b91844b92505e47c1d2cda609",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],
@@ -23885,11 +23978,7 @@
         ]
       },
       "strategyParameters": {
-        "phaseOrder": [
-          "conditioning",
-          "denoise",
-          "decode"
-        ]
+        "publishedRanges": {}
       },
       "engagedRungs": [
         "resident",
@@ -23901,13 +23990,13 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "dcecb766dec9356e169d56bffe50196459a3ddd912ba032d56e2e320a9930849",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle"
+            "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "historicalVerification": [],

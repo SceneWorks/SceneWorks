@@ -1256,7 +1256,7 @@
                             "additionalProperties": false,
                             "properties": {
                               "mode": { "type": "string", "minLength": 1 },
-                              "providerMode": { "enum": ["text_to_image", "image_to_image", "edit_image"] },
+                              "providerMode": { "enum": ["text_to_image", "image_to_image", "edit_image", "character_image"] },
                               "referenceCounts": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 0 } },
                               "pid": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "boolean" } },
                               "hasPhases": { "type": "boolean" }

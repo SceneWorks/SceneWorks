@@ -1245,6 +1245,18 @@ mod tests {
         assert_eq!(ordinary.mode, MemoryMode::TextToImage);
         assert_eq!(ordinary.scope_key, "text_to_image");
         assert_eq!(ordinary.calibration_key, "text_to_image");
+
+        let qwen_character = request_mode_with_provider_override(
+            "qwen_image_edit",
+            "character_image",
+            Some("character_image"),
+        );
+        assert_eq!(
+            qwen_character.mode,
+            MemoryMode::Other("character_image".to_owned())
+        );
+        assert_eq!(qwen_character.scope_key, "character_image");
+        assert_eq!(qwen_character.calibration_key, "character_image");
     }
 
     #[test]
