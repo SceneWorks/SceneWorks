@@ -74,6 +74,7 @@ function assertProviderTransportSourceContract(source) {
   assert.match(source, /canonicalRoot = await realpath\(root\)/);
   assert.match(source, /isWithin\(canonicalRoot, canonicalCommandFile\)/);
   assert.match(source, /!Array\.isArray\(parsed\) \|\| parsed\.length !== 1/);
+  assert.match(source, /parsed\[0\]\.includes\("\\0"\)/);
   assert.match(source, /path\.isAbsolute\(parsed\[0\]\)/);
   assert.match(source, /lstat\(commandPath\)/);
   assert.match(source, /realpath\(commandPath\)/);
@@ -83,6 +84,10 @@ function assertProviderTransportSourceContract(source) {
   assert.match(source, /indexes\.length > 1/);
   assert.match(source, /candidate\.startsWith\("--"\)/);
   assert.match(source, /Boolean\(inline\) === Boolean\(file\)/);
+  assert.match(
+    source,
+    /const providerCommand = await providerCommandFromArgs\([\s\S]*?const output = await runProviderPlan\(\{\s*config:[\s\S]*?providerCommand,\s*sceneWorksRepo,\s*inferenceRepo,/,
+  );
 }
 
 function assertWorkflowContract(workflow) {
@@ -269,6 +274,7 @@ test("the harness source contract kills provider schema path and identity bypass
     ["linked command parent", (text) => text.replace("!sameFilesystemPath(canonicalCommandFile, commandFile)", "false")],
     ["lexical forbidden root", (text) => text.replace("isWithin(canonicalRoot, canonicalCommandFile)", "isWithin(root, commandFile)")],
     ["multiple argv", (text) => text.replace("parsed.length !== 1", "parsed.length === 0")],
+    ["NUL argv", (text) => text.replace('parsed[0].includes("\\0")', "false")],
     ["relative executable", (text) => text.replace("!path.isAbsolute(parsed[0])", "false")],
     ["unresolved identity", (text) => text.replace("realpath(commandPath)", "commandPath")],
     ["lexical identity alias", (text) => text.replace("!sameFilesystemPath(commandPath, expectedPath)", "false")],
@@ -277,6 +283,8 @@ test("the harness source contract kills provider schema path and identity bypass
     ["duplicate flags", (text) => text.replace("indexes.length > 1", "false")],
     ["missing flag value", (text) => text.replace('candidate.startsWith("--")', "false")],
     ["ambiguous provider modes", (text) => text.replace("Boolean(inline) === Boolean(file)", "false")],
+    ["provider command disconnected", (text) => text.replace("      providerCommand,\n      sceneWorksRepo,", "      providerCommand: [],\n      sceneWorksRepo,")],
+    ["provider command substituted", (text) => text.replace("      providerCommand,\n      sceneWorksRepo,", "      providerCommand: [process.execPath],\n      sceneWorksRepo,")],
   ];
   for (const [label, mutate] of mutations) {
     assert.throws(() => assertProviderTransportSourceContract(mutate(source)), undefined, label);

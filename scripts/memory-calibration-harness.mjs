@@ -1864,6 +1864,9 @@ export async function readExactProviderCommandFile(
     fail("provider command file must contain exactly one argv string");
   }
   text(parsed[0], "provider command file argv[0]");
+  if (parsed[0].includes("\0")) {
+    fail("provider command file argv[0] must not contain NUL bytes");
+  }
   if (!path.isAbsolute(parsed[0])) {
     fail("provider command file argv[0] must be an absolute executable path");
   }
