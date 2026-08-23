@@ -19533,6 +19533,9 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "KreaMultiPhase",
         // Imported / in-place external bases: a single user-supplied checkpoint.
         "KreaImported",
+        // Plan-driven checkpoint (sc-20634): one plan-resolved primary file + the family's resident
+        // base components, loaded by the registry-bound provider; no second network.
+        "CheckpointPlan",
         "MageFinetuned",
         "SdxlImported",
         "ZimageComfyui",
@@ -19605,6 +19608,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "MageFinetuned",
             "mage_finetuned.rs",
             include_str!("mage_finetuned.rs"),
+            "admit_candle_load_spec_floor(",
+        ),
+        (
+            "CheckpointPlan",
+            "checkpoint_plan.rs",
+            include_str!("checkpoint_plan.rs"),
             "admit_candle_load_spec_floor(",
         ),
         (
@@ -19681,6 +19690,11 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "KreaImported",
             "krea_imported.rs",
             include_str!("krea_imported.rs"),
+        ),
+        (
+            "CheckpointPlan",
+            "checkpoint_plan.rs",
+            include_str!("checkpoint_plan.rs"),
         ),
         (
             "ZimageComfyui",
@@ -20124,4 +20138,652 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
         "the Step arm is the POST that carries the parked frame"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Plan-driven checkpoint route (epic 20398, sc-20634)
+// ---------------------------------------------------------------------------------------------
+
+/// Shared fixture for the plan-driven route: an isolated HF hub carrying a complete
+/// `SceneWorks/krea-2-turbo-mlx` dense `bf16/` base tier (the shared components a bare transformer
+/// plan needs), a linked library root holding a tiny Krea-2-native safetensors, and that file
+/// compiled into a persisted plan under `settings.data_dir`.
+// The fixture and its helpers serve the macOS route probes below (`resolve_image_route` is the
+// MLX test-facing probe); the candle twin of the route is typechecked by `rust:check:candle` and
+// exercised on the Windows candle lane through the shared `checkpoint_plan.rs` handler.
+#[cfg(target_os = "macos")]
+struct CheckpointPlanFixture {
+    _data: tempfile::TempDir,
+    _library: tempfile::TempDir,
+    _hf: EnvVars,
+    settings: Settings,
+    library_dir: PathBuf,
+    base_tier: PathBuf,
+    store: sceneworks_core::checkpoint_plan_store::CheckpointPlanStore,
+    root_id: String,
+}
+
+#[cfg(target_os = "macos")]
+fn write_tiny_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
+    let mut header = serde_json::Map::new();
+    let mut offset = 0_u64;
+    for (name, dtype) in entries {
+        let width = match *dtype {
+            "F16" | "BF16" => 2,
+            "F32" => 4,
+            _ => 1,
+        };
+        header.insert(
+            (*name).to_owned(),
+            json!({"dtype": dtype, "shape": [1], "data_offsets": [offset, offset + width]}),
+        );
+        offset += width;
+    }
+    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(encoded);
+    bytes.resize(bytes.len() + offset as usize, fill);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+fn krea_native_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
+        ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+        ("model.diffusion_model.first.weight", "BF16"),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+impl CheckpointPlanFixture {
+    fn new(label: &str, with_base_tier: bool) -> Self {
+        let data = tempfile::Builder::new()
+            .prefix(&format!("plan-route-{label}-data-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let library = tempfile::Builder::new()
+            .prefix(&format!("plan-route-{label}-lib-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let hub = data.path().join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+        let hf = isolate_hf_hub_cache_to(&hub);
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let repo_dir = hub.join("models--SceneWorks--krea-2-turbo-mlx");
+        let base_tier = repo_dir.join("snapshots").join(revision).join("bf16");
+        if with_base_tier {
+            for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
+                std::fs::create_dir_all(base_tier.join(sub)).unwrap();
+            }
+            std::fs::write(base_tier.join("transformer/config.json"), b"{}").unwrap();
+            std::fs::write(base_tier.join("text_encoder/model.safetensors"), b"te").unwrap();
+            std::fs::write(
+                base_tier.join("vae/diffusion_pytorch_model.safetensors"),
+                b"vae",
+            )
+            .unwrap();
+            std::fs::write(base_tier.join("tokenizer/tokenizer.json"), b"{}").unwrap();
+            std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+            std::fs::write(repo_dir.join("refs/main"), revision).unwrap();
+        }
+        let mut settings = Settings::from_env();
+        settings.data_dir = data.path().to_path_buf();
+        settings.external_model_roots = Vec::new();
+        let library_dir = std::fs::canonicalize(library.path()).unwrap();
+        let store =
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+        let root_id = store.approve_root(&library_dir).unwrap().root_id;
+        Self {
+            _data: data,
+            _library: library,
+            _hf: hf,
+            settings,
+            library_dir,
+            base_tier,
+            store,
+            root_id,
+        }
+    }
+
+    fn compile(&self, relative_path: &str, entries: &[(&str, &str)]) -> String {
+        write_tiny_safetensors(&self.library_dir.join(relative_path), entries, 0x5a);
+        self.store
+            .compile_linked(&self.root_id, relative_path)
+            .unwrap()
+            .checkpoint_id
+    }
+
+    fn plan_backed_request(&self, checkpoint_id: &str, extra: Value) -> ImageRequest {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "linked_kreamania",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "linked_kreamania",
+                "catalogScope": "user",
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                payload[key] = value.clone();
+            }
+        }
+        request(payload)
+    }
+}
+
+/// Single-claim conformance (sc-20634): a plan-backed entry is claimed by the plan-driven route and
+/// declined by the legacy imported Krea lane; a legacy `paths.model` entry is claimed by the legacy
+/// lane and never by the plan route; an entry carrying both is owned by the plan route alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
+    let fx = CheckpointPlanFixture::new("claim", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let plan_backed = fx.plan_backed_request(&checkpoint_id, json!({}));
+
+    assert_eq!(
+        resolve_image_route(&plan_backed, &fx.settings),
+        Some(ImageRoute::CheckpointPlan),
+        "a plan-backed entry takes the plan-driven route"
+    );
+    assert!(
+        !krea_imported_available(&plan_backed, &fx.settings),
+        "the legacy imported lane must decline a plan-backed entry"
+    );
+    assert!(prepare_krea_imported_sources(&plan_backed, &fx.settings)
+        .unwrap()
+        .is_none());
+    let prepared = prepare_checkpoint_plan_sources(&plan_backed, &fx.settings)
+        .unwrap()
+        .expect("plan-backed entry prepares");
+    assert_eq!(prepared.checkpoint_id, checkpoint_id);
+    assert_eq!(prepared.descriptor.id, "krea_2_turbo");
+    assert_eq!(prepared.descriptor.family, "krea_2");
+    assert_eq!(
+        prepared.source,
+        gen_core::ImportedModelSource::TransformerFile
+    );
+    assert_eq!(
+        prepared.primary.loader_path(),
+        fx.library_dir.join("kreamania.safetensors")
+    );
+    assert_eq!(
+        prepared.components,
+        vec![(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(fx.base_tier.clone())
+        )]
+    );
+    // The spec the route loads is the exact spec the legacy lane builds for the same file + base:
+    // primary File + the named base component, nothing else.
+    let spec = checkpoint_plan_load_spec(&prepared, None).unwrap();
+    let legacy_spec = LoadSpec::new(WeightsSource::File(
+        fx.library_dir.join("kreamania.safetensors"),
+    ))
+    .with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(fx.base_tier.clone()),
+    );
+    assert_eq!(spec.weights, legacy_spec.weights);
+    assert_eq!(spec.components, legacy_spec.components);
+    assert!(spec.quantize.is_none());
+    assert!(spec.prepared_file_pins().is_finalized());
+    assert_eq!(spec.prepared_file_pins().len(), 1);
+
+    // The legacy shape: an app-managed install dir holding the lone checkpoint, no `importPlan`.
+    let install = fx.settings.data_dir.join("models/imports/kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        install.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert_eq!(
+        resolve_image_route(&legacy, &fx.settings),
+        Some(ImageRoute::KreaImported),
+        "the legacy lane still serves `paths.model` installs beside the plan route"
+    );
+    assert!(
+        prepare_checkpoint_plan_sources(&legacy, &fx.settings)
+            .unwrap()
+            .is_none(),
+        "the plan route never claims a legacy entry"
+    );
+
+    // Both markers on one entry: the plan route owns it, the legacy resolver declines it outright.
+    let both = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "importPlan": { "checkpointId": checkpoint_id },
+            "paths": { "model": install.to_str().unwrap() }
+        }}),
+    );
+    assert_eq!(
+        resolve_image_route(&both, &fx.settings),
+        Some(ImageRoute::CheckpointPlan)
+    );
+    assert!(resolve_imported_krea_dit_pin(&both, &fx.settings)
+        .unwrap()
+        .is_none());
+    assert!(prepare_krea_imported_control_sources(&both, &fx.settings)
+        .unwrap()
+        .is_none());
+}
+
+/// Every plan-route refusal is typed and raised before any loader is constructed (sc-20634):
+/// unknown checkpoint, drifted source, missing source, a family without an adapter binding on this
+/// backend, a missing required component, and an operation the skeleton does not serve.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_route_refuses_before_load_with_typed_diagnostics() {
+    let fx = CheckpointPlanFixture::new("refuse", true);
+    let refusal = |request: &ImageRequest, settings: &Settings| -> String {
+        match prepare_checkpoint_plan_sources(request, settings) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+            Ok(prepared) => panic!(
+                "expected a refusal, got {:?}",
+                prepared.map(|sources| sources.checkpoint_id)
+            ),
+        }
+    };
+
+    // Unknown checkpoint identity.
+    let unknown = fx.plan_backed_request("linked/root-nope/missing.safetensors", json!({}));
+    let message = refusal(&unknown, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:unknown-checkpoint]"),
+        "{message}"
+    );
+
+    // Drifted source (same size, different bytes) refuses with the expected/actual digests.
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let file = fx.library_dir.join("kreamania.safetensors");
+    let original = std::fs::read(&file).unwrap();
+    let mut mutated = original.clone();
+    let last = mutated.len() - 1;
+    mutated[last] ^= 0xff;
+    std::fs::write(&file, &mutated).unwrap();
+    let drifted = fx.plan_backed_request(&checkpoint_id, json!({}));
+    let message = refusal(&drifted, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:source-drifted]") && message.contains("rescan"),
+        "{message}"
+    );
+    std::fs::write(&file, &original).unwrap();
+    assert!(prepare_checkpoint_plan_sources(&drifted, &fx.settings)
+        .unwrap()
+        .is_some());
+
+    // Missing source.
+    std::fs::remove_file(&file).unwrap();
+    let message = refusal(&drifted, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:source-missing]"),
+        "{message}"
+    );
+
+    // A family the inspector knows but no MLX adapter binds (Z-Image is Candle-only): refused at
+    // the registry authority, before any base/component resolution.
+    let zimage_id = fx.compile(
+        "zimage.safetensors",
+        &[
+            ("noise_refiner.0.attention.qkv.weight", "BF16"),
+            ("context_refiner.0.attention.qkv.weight", "BF16"),
+        ],
+    );
+    let zimage = fx.plan_backed_request(&zimage_id, json!({}));
+    let message = refusal(&zimage, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:no-adapter-binding]") && message.contains("z-image"),
+        "{message}"
+    );
+
+    // An operation the skeleton does not serve refuses loudly instead of falling through.
+    let compiled = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let edit = fx.plan_backed_request(
+        &compiled,
+        json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
+    );
+    let message = refusal(&edit, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:unsupported-operation]"),
+        "{message}"
+    );
+}
+
+/// Missing required component (sc-20634): the provider declares `base_snapshot`, the family's
+/// resident base tier is not installed, so the route refuses with the install-the-base diagnostic
+/// before any load. Its own test: the fixture holds the crate-wide env lock (non-reentrant), so a
+/// second isolated hub cannot coexist with the one above.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_route_refuses_when_the_family_base_tier_is_not_installed() {
+    let bare = CheckpointPlanFixture::new("refuse-nobase", false);
+    let bare_id = bare.compile("kreamania.safetensors", &krea_native_entries());
+    let bare_request = bare.plan_backed_request(&bare_id, json!({}));
+    let message = match prepare_checkpoint_plan_sources(&bare_request, &bare.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(prepared) => panic!(
+            "a missing base tier must refuse, got {:?}",
+            prepared.map(|sources| sources.checkpoint_id)
+        ),
+    };
+    assert!(
+        message.contains("install the Krea 2 (Turbo) base model first"),
+        "missing base tier must surface the install-the-base refusal: {message}"
+    );
+}
+
+/// The plan's primary layer selection is role-driven and fail-closed (sc-20634): a plan without a
+/// transformer/fused-checkpoint layer is a typed missing-component refusal, two primaries are
+/// ambiguous, and exactly one maps to the registry source shape it implies.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+    };
+    use sceneworks_core::checkpoint_plan_store::{ResolvedCheckpointV1, ResolvedLayerV1};
+
+    let resolved = |roles: &[&str]| -> ResolvedCheckpointV1 {
+        let layers: Vec<ImportLayerV1> = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| ImportLayerV1 {
+                layer_id: format!("artifact:{index}-{role}.safetensors"),
+                role: (*role).to_owned(),
+                target_path: format!("{index}-{role}.safetensors"),
+                source: SourceLocatorV1::linked(
+                    "root-test",
+                    format!("{index}-{role}.safetensors"),
+                    "0".repeat(64),
+                )
+                .unwrap(),
+            })
+            .collect();
+        let plan = ImportPlanV1::new("plan-test", "krea_2", layers.clone()).unwrap();
+        let record = CheckpointCatalogRecordV1::from_plan("linked/root-test/x", &plan).unwrap();
+        ResolvedCheckpointV1 {
+            checkpoint_id: "linked/root-test/x".to_owned(),
+            record,
+            layers: plan
+                .layers
+                .iter()
+                .cloned()
+                .map(|layer| ResolvedLayerV1 {
+                    path: PathBuf::from("/library").join(&layer.target_path),
+                    layer,
+                    rehashed: false,
+                })
+                .collect(),
+            plan,
+        }
+    };
+
+    let transformer_only = resolved(&["transformer"]);
+    let (source, layer) = checkpoint_plan_primary_layer(&transformer_only).unwrap();
+    assert_eq!(source, gen_core::ImportedModelSource::TransformerFile);
+    assert_eq!(layer.layer.role, "transformer");
+    let fused_only = resolved(&["checkpoint"]);
+    let (source, _) = checkpoint_plan_primary_layer(&fused_only).unwrap();
+    assert_eq!(source, gen_core::ImportedModelSource::FusedCheckpoint);
+
+    let missing = checkpoint_plan_primary_layer(&resolved(&["vae", "text_encoder"]))
+        .expect_err("no primary layer must refuse");
+    assert!(
+        missing
+            .to_string()
+            .contains("[checkpoint-plan:missing-component]"),
+        "{missing}"
+    );
+    let ambiguous = checkpoint_plan_primary_layer(&resolved(&["transformer", "transformer"]))
+        .expect_err("two primaries must refuse");
+    assert!(
+        ambiguous
+            .to_string()
+            .contains("[checkpoint-plan:ambiguous-component]"),
+        "{ambiguous}"
+    );
+    let mixed = checkpoint_plan_primary_layer(&resolved(&["transformer", "checkpoint"]))
+        .expect_err("a transformer beside a fused checkpoint must refuse");
+    assert!(
+        mixed
+            .to_string()
+            .contains("[checkpoint-plan:ambiguous-component]"),
+        "{mixed}"
+    );
+}
+
+/// Real-weight fixed-seed parity for the universal-import walking skeleton (sc-20634): the SAME
+/// community Krea 2 dense DiT (`kreamania_variant5`), the SAME seed/size/steps, rendered once
+/// through today's `KreaImported` lane (an app-managed install dir) and once through the
+/// plan-driven route (approved linked root → compiled `ImportPlanV1` → `CheckpointPlan` route →
+/// registry-bound `krea_2_turbo` provider). The two images must be byte-identical. The plan
+/// compile is the real full-content inspection of the 26 GB file, and the route's resolve
+/// re-verifies the source before the load.
+///
+/// ```text
+/// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
+/// # defaults: KREA_STEPS=2 KREA_W=512 KREA_H=512 KREA_SEED=42  KREA_OUT_DIR=/tmp/checkpoint_plan_parity
+/// cargo test -p sceneworks-worker --release checkpoint_plan_route_mlx_gpu_parity -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight MLX parity; needs the ~26 GB community Krea 2 DiT + the SceneWorks/krea-2-turbo-mlx bf16 base cached + an Apple-Silicon Mac"]
+fn checkpoint_plan_route_mlx_gpu_parity() {
+    use crate::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
+    use sha2::{Digest, Sha256};
+
+    let home = std::env::var("HOME").expect("HOME");
+    let dit_src = PathBuf::from(env_or(
+        "KREA_IMPORTED_DIT",
+        &format!("{home}/models/kreamania_variant5.safetensors"),
+    ));
+    assert!(
+        dit_src.is_file(),
+        "imported DiT not found at {} — set KREA_IMPORTED_DIT",
+        dit_src.display()
+    );
+    let library_dir = std::fs::canonicalize(dit_src.parent().expect("DiT parent")).unwrap();
+    let file_name = dit_src
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("utf-8 file name")
+        .to_owned();
+
+    let data_dir = tempfile::Builder::new()
+        .prefix(&format!("checkpoint-plan-parity-{}-", std::process::id()))
+        .tempdir()
+        .expect("data dir");
+    let real_hub = PathBuf::from(format!("{home}/.cache/huggingface/hub"));
+    let _hf = isolate_hf_hub_cache_to(&real_hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    settings.external_model_roots.push(library_dir.clone());
+
+    let steps: u32 = env_or("KREA_STEPS", "2").parse().expect("KREA_STEPS");
+    let w: u32 = env_or("KREA_W", "512").parse().expect("KREA_W");
+    let h: u32 = env_or("KREA_H", "512").parse().expect("KREA_H");
+    let seed: u64 = env_or("KREA_SEED", "42").parse().expect("KREA_SEED");
+    let prompt = env_or(
+        "KREA_PROMPT",
+        "a photorealistic portrait of a red fox sitting in a sunlit autumn forest, sharp focus, \
+         shallow depth of field",
+    );
+    let out_dir = PathBuf::from(env_or("KREA_OUT_DIR", "/tmp/checkpoint_plan_parity"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    // ---- PLAN: approve the library root, compile the linked checkpoint, route through the plan ----
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let root = store
+        .approve_root(&library_dir)
+        .expect("approve library root");
+    let compile_started = std::time::Instant::now();
+    let compiled = store
+        .compile_linked(&root.root_id, &file_name)
+        .expect("compile the linked Krea 2 checkpoint");
+    eprintln!(
+        "COMPILE checkpoint_id={} plan_id={} family={} layers={} semantic_digest={} seconds={:.1}",
+        compiled.checkpoint_id,
+        compiled.plan.plan_id,
+        compiled.plan.family,
+        compiled.plan.layers.len(),
+        compiled.record.plan.semantic_digest,
+        compile_started.elapsed().as_secs_f64()
+    );
+    assert_eq!(compiled.plan.family, "krea_2");
+    let plan_request = request(json!({
+        "projectId": "p",
+        "model": "linked_kreamania_v5",
+        "prompt": prompt,
+        "width": w, "height": h,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "importPlan": { "checkpointId": compiled.checkpoint_id }
+        }
+    }));
+    assert_eq!(
+        resolve_image_route(&plan_request, &settings),
+        Some(ImageRoute::CheckpointPlan),
+        "ROUTE EVIDENCE: a plan-backed krea_2 t2i job takes the plan-driven route"
+    );
+    let prepared = prepare_checkpoint_plan_sources(&plan_request, &settings)
+        .expect("prepare ok")
+        .expect("plan route prepares");
+    assert_eq!(prepared.descriptor.id, "krea_2_turbo");
+    assert_eq!(
+        prepared.primary.loader_path(),
+        library_dir.join(&file_name).as_path()
+    );
+    let plan_spec = checkpoint_plan_load_spec(&prepared, None).expect("plan load spec");
+    let plan_spec =
+        crate::mlx_fit_gate::apply_residency_policy(plan_spec, prepared.descriptor.id).unwrap();
+
+    // ---- LEGACY: today's KreaImported lane over an app-managed install dir (the S0c shape) ----
+    let install_dir = data_dir.path().join("models/imports/kreamania_v5");
+    std::fs::create_dir_all(&install_dir).expect("install dir");
+    std::os::unix::fs::symlink(&dit_src, install_dir.join(&file_name)).expect("symlink DiT");
+    let legacy_request = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania_v5",
+        "prompt": prompt,
+        "width": w, "height": h,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "paths": { "model": install_dir.to_str().unwrap() }
+        }
+    }));
+    assert_eq!(
+        resolve_image_route(&legacy_request, &settings),
+        Some(ImageRoute::KreaImported),
+        "ROUTE EVIDENCE: the legacy install-dir job still takes the bespoke imported lane"
+    );
+    let legacy_dit = resolve_imported_krea_dit(&legacy_request, &settings)
+        .expect("resolve ok")
+        .expect("legacy DiT resolves");
+    let base = resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base");
+    assert_eq!(
+        prepared.components,
+        vec![(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(base.clone())
+        )],
+        "both routes pair the DiT with the same resident base tier"
+    );
+    let legacy_spec = LoadSpec::new(WeightsSource::File(legacy_dit.clone())).with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(base.clone()),
+    );
+
+    let make_req = || GenerationRequest {
+        prompt: prompt.clone(),
+        width: w,
+        height: h,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(steps),
+        guidance: None,
+        ..Default::default()
+    };
+    let render = |label: &str, spec: &LoadSpec| -> (Image, String) {
+        mlx_rs::memory::clear_cache();
+        let started = std::time::Instant::now();
+        let generator = crate::inference_runtime::load("krea_2_turbo", spec)
+            .unwrap_or_else(|error| panic!("[{label}] load: {error}"));
+        let load_seconds = started.elapsed().as_secs_f64();
+        let output = generator
+            .generate(&make_req(), &mut |_| {})
+            .unwrap_or_else(|error| panic!("[{label}] generate: {error}"));
+        let image = match output {
+            GenerationOutput::Images(mut images) => images.pop().expect("one image"),
+            other => panic!("expected Images, got {other:?}"),
+        };
+        assert_eq!((image.width, image.height), (w, h));
+        let std = image_std(&image);
+        assert!(
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
+            "[{label}] degenerate render"
+        );
+        let sha = format!("{:x}", Sha256::digest(&image.pixels));
+        let png = out_dir.join(format!("{label}.png"));
+        save_png(&image, &png);
+        eprintln!(
+            "RESULT label={label} geometry={w}x{h} steps={steps} seed={seed} pixel_sha256={sha} \
+             std={std:.3} load_seconds={load_seconds:.2} total_seconds={:.2} output={}",
+            started.elapsed().as_secs_f64(),
+            png.display()
+        );
+        drop(generator);
+        mlx_rs::memory::clear_cache();
+        (image, sha)
+    };
+
+    let (legacy_image, legacy_sha) = render("legacy_krea_imported", &legacy_spec);
+    let (plan_image, plan_sha) = render("plan_driven_route", &plan_spec);
+    let byte_delta = legacy_image
+        .pixels
+        .iter()
+        .zip(&plan_image.pixels)
+        .filter(|(left, right)| left != right)
+        .count();
+    eprintln!(
+        "PARITY lhs=legacy_krea_imported rhs=plan_driven_route byte_delta={byte_delta} \
+         legacy_sha256={legacy_sha} plan_sha256={plan_sha}"
+    );
+    assert_eq!(
+        legacy_image.pixels, plan_image.pixels,
+        "plan-driven route must be byte-identical to today's Krea path at a fixed seed \
+         (legacy {legacy_sha}, plan {plan_sha}, {byte_delta} differing bytes)"
+    );
+    assert_eq!(legacy_sha, plan_sha);
 }

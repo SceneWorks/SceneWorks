@@ -172,6 +172,11 @@ fn resolve_imported_krea_dit_pin(
     {
         return Ok(None);
     }
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven route;
+    // this bespoke lane never also claims it, so one entry has exactly one owner.
+    if request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
     // A builtin Krea engine id (in `MODEL_TABLE`) loads from its snapshot turnkey via the normal MLX
     // lane — never through the single-file entrypoint. Leaving those to the existing path is what keeps
     // builtin Krea rendering byte-identical (S0c requirement #3).
