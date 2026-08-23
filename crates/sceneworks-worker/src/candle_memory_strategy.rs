@@ -1222,14 +1222,23 @@ pub(crate) fn evaluate_shared_image(
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let (contract_override, provider_overlay_override, provider_mode_override) =
         if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::Eligible {
-            let mode =
-                crate::memory_route_registry::MemoryRouteMode::from_request(request_mode_value);
+            let Some(mode) =
+                crate::memory_route_registry::MemoryRouteMode::from_request(request_mode_value)
+            else {
+                return Ok(None);
+            };
             let Some(contract) = crate::memory_route_registry::declared_candle_selector_contract(
                 engine_id,
                 Some(tier_key),
-                mode,
+                Some(mode),
                 manifest,
                 spec,
+                crate::memory_route_registry::MemoryRouteRequestContext {
+                    mode,
+                    reference_count: geometry.reference_count,
+                    use_pid,
+                    has_phases: request_has_phases,
+                },
             ) else {
                 return Ok(None);
             };
@@ -2907,48 +2916,53 @@ mod tests {
         for provider in ["sana_1600m", "sana_sprint_1600m"] {
             let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-sana-dense")))
                 .with_resolved_route(provider);
-            let evaluate =
-                |mode: &str, reference_count: u32, multipass: bool, free_gb: f64, contract| {
-                    evaluate_shared_image_inner(
-                        provider,
-                        provider,
-                        &spec,
-                        true,
-                        &manifest,
-                        "bf16",
-                        mode,
-                        None,
-                        None,
-                        MemoryGeometry {
-                            reference_count,
-                            ..geometry
-                        },
-                        reference_count == 1,
-                        false,
-                        multipass,
-                        false,
-                        Some(VramBudget {
-                            free_gb,
-                            total_gb: 48.0,
-                        }),
-                        None,
-                        0,
-                        MemoryCacheState::Cold,
-                        None,
-                        Some(contract),
-                        Some(SANA_REQUEST_EVIDENCE_REVISION),
-                    )
-                };
+            let evaluate = |mode: &str,
+                            reference_count: u32,
+                            multipass: bool,
+                            request_has_phases: bool,
+                            free_gb: f64,
+                            contract| {
+                evaluate_shared_image_inner(
+                    provider,
+                    provider,
+                    &spec,
+                    true,
+                    &manifest,
+                    "bf16",
+                    mode,
+                    None,
+                    None,
+                    MemoryGeometry {
+                        reference_count,
+                        ..geometry
+                    },
+                    reference_count == 1,
+                    false,
+                    multipass,
+                    request_has_phases,
+                    Some(VramBudget {
+                        free_gb,
+                        total_gb: 48.0,
+                    }),
+                    None,
+                    0,
+                    MemoryCacheState::Cold,
+                    None,
+                    Some(contract),
+                    Some(SANA_REQUEST_EVIDENCE_REVISION),
+                )
+            };
 
-            for (mode, references, multipass) in [
-                ("text_to_image", 0, false),
-                ("image_to_image", 1, false),
-                ("image_to_image", 1, true),
+            for (mode, references, multipass, request_has_phases) in [
+                ("text_to_image", 0, false, false),
+                ("image_to_image", 1, false, false),
+                ("image_to_image", 1, true, true),
             ] {
                 let evaluation = evaluate(
                     mode,
                     references,
                     multipass,
+                    request_has_phases,
                     15.0,
                     sana_probe_contract(provider),
                 )
@@ -2959,27 +2973,33 @@ mod tests {
                     MemoryStrategy::StagedResidency
                 );
                 assert_eq!(evaluation.context.geometry.reference_count, references);
+                assert_eq!(evaluation.context.has_phases, request_has_phases);
                 assert_eq!(
                     evaluation.context.evidence_revision,
                     SANA_REQUEST_EVIDENCE_REVISION
                 );
             }
 
-            let no_fit = evaluate(
+            let no_fit = match evaluate(
                 "text_to_image",
                 0,
                 false,
+                false,
                 14.0,
                 sana_probe_contract(provider),
-            )
-            .expect_err("a budget below the receipt-derived staged floor must refuse");
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("a budget below the receipt-derived staged floor must refuse"),
+            };
             assert!(no_fit.to_string().contains("no exact resident or staged"));
 
             let mut crossed = sana_probe_contract(provider);
             crossed.calibration.as_mut().unwrap().fingerprint =
                 "sana-candle-dense-crossed-full-ladder-v1".to_owned();
-            let crossed = evaluate("text_to_image", 0, false, 15.0, crossed)
-                .expect_err("crossed Base/Sprint identity must refuse before selection");
+            let crossed = match evaluate("text_to_image", 0, false, false, 15.0, crossed) {
+                Err(error) => error,
+                Ok(_) => panic!("crossed Base/Sprint identity must refuse before selection"),
+            };
             assert!(crossed.to_string().contains("crossed SANA physical facts"));
         }
     }

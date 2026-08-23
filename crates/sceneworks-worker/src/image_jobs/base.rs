@@ -10649,7 +10649,7 @@ async fn generate_candle_stream(
         reference_count > 0,
         use_pid && hires_fix.is_none(),
         hires_fix.is_some(),
-        false,
+        hires_fix.is_some(),
         budget,
         shared_predicted_peak_gb,
         shared_runtime_overlay_bytes,
@@ -10659,7 +10659,7 @@ async fn generate_candle_stream(
             gen_core::MemoryCacheState::Cold
         },
     )?;
-    let mut first_pass_shared_memory = if hires_fix.is_some()
+    let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
             engine_id,
             "ideogram_4" | "ideogram_4_turbo" | "sana_1600m" | "sana_sprint_1600m"

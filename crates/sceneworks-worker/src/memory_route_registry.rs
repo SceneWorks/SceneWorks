@@ -864,7 +864,7 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: BF16_ONLY,
         modes: SANA_MODES,
         load_profiles: PLAIN,
-        requires_sequential_selection: false,
+        requires_sequential_selection: true,
         legacy_shaping: false,
     },
     MemoryRouteRule {
@@ -873,7 +873,7 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: BF16_ONLY,
         modes: SANA_MODES,
         load_profiles: PLAIN,
-        requires_sequential_selection: false,
+        requires_sequential_selection: true,
         legacy_shaping: false,
     },
     // SC-20788: all three Chroma turnkey routes expose the same exact request-scoped Candle
@@ -1301,8 +1301,37 @@ fn mlx_request_implementation_matches(
     context: MemoryRouteRequestContext,
     requires_request_context: bool,
 ) -> Result<bool, ()> {
-    let selector_matches =
-        implementation_declares_selector(implementation, contract_provider, selector)?;
+    let implementation_object = implementation.as_object().ok_or(())?;
+    if implementation_object.get("requestContexts").is_none() {
+        if requires_request_context {
+            return Err(());
+        }
+        // Legacy BTR declarations predate load-profile/source/provider-overlay request ownership.
+        // Preserve their established selector-only predicate exactly.
+        return implementation_declares_selector(implementation, contract_provider, selector);
+    }
+    let static_axes_match = request_implementation_static_axes_match(
+        implementation,
+        contract_provider,
+        selector,
+        spec,
+        Some("bounded_transformer_residency"),
+    )?;
+    let context_matches = request_implementation_context_matches(
+        implementation,
+        contract_provider,
+        context,
+        requires_request_context,
+    )?;
+    Ok(static_axes_match && context_matches)
+}
+
+fn request_implementation_context_matches(
+    implementation: &Value,
+    contract_provider: &str,
+    context: MemoryRouteRequestContext,
+    requires_request_context: bool,
+) -> Result<bool, ()> {
     let implementation = implementation.as_object().ok_or(())?;
     let Some(request_contexts) = implementation.get("requestContexts") else {
         if requires_request_context {
@@ -1310,12 +1339,62 @@ fn mlx_request_implementation_matches(
         }
         // Existing declaration-owned routes predate the request-context schema. Their exact
         // provider/tier/mode/overlay/source predicate remains authoritative and unchanged.
-        return Ok(selector_matches);
+        return Ok(true);
     };
     let runtime_provider = implementation_runtime_provider(implementation, contract_provider)?;
-    if runtime_provider != selector.provider {
+    let request_contexts = request_contexts.as_array().ok_or(())?;
+    let matches = request_contexts
+        .iter()
+        .map(|request_context| {
+            request_strategy_provider_mode_is_exact(request_context, runtime_provider)?;
+            request_strategy_context_matches(request_context, context)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let matching = request_contexts
+        .iter()
+        .zip(matches)
+        .filter_map(|(request_context, matched)| matched.then_some(request_context))
+        .collect::<Vec<_>>();
+    let [matching] = matching.as_slice() else {
+        return Ok(false);
+    };
+    let expected_provider_mode = expected_provider_mode(runtime_provider, context);
+    Ok(matching.get("providerMode").and_then(Value::as_str) == Some(expected_provider_mode))
+}
+
+fn request_implementation_static_axes_match(
+    implementation: &Value,
+    contract_provider: &str,
+    selector: MemoryRouteSelector,
+    spec: &LoadSpec,
+    expected_rung: Option<&str>,
+) -> Result<bool, ()> {
+    let implementation = implementation.as_object().ok_or(())?;
+    let rung = implementation_rung(implementation)?;
+    let runtime_provider = implementation_runtime_provider(implementation, contract_provider)?;
+    if runtime_provider != selector.provider
+        || expected_rung.is_some_and(|expected| rung != expected)
+    {
         return Ok(false);
     }
+    let tier_matches = closed_array_contains(
+        implementation,
+        "tiers",
+        selector.tier,
+        MemoryRouteTier::from_str,
+    )?;
+    let mode_matches = closed_array_contains(
+        implementation,
+        "modes",
+        selector.mode,
+        MemoryRouteMode::from_manifest,
+    )?;
+    let overlay_matches = closed_array_contains(
+        implementation,
+        "overlays",
+        selector.overlay,
+        MemoryRouteOverlay::from_str,
+    )?;
     let Some(load_profile) = MemoryRouteLoadProfile::from_spec(spec) else {
         return Ok(false);
     };
@@ -1362,31 +1441,12 @@ fn mlx_request_implementation_matches(
             )
         })
         .ok_or(())?;
-    let request_contexts = request_contexts.as_array().ok_or(())?;
-    let matches = request_contexts
-        .iter()
-        .map(|request_context| {
-            request_strategy_provider_mode_is_exact(request_context, runtime_provider)?;
-            request_strategy_context_matches(request_context, context)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !selector_matches
-        || !load_profile_matches
-        || !source_kind_matches
-        || declared_provider_overlay != expected_provider_overlay
-    {
-        return Ok(false);
-    }
-    let matching = request_contexts
-        .iter()
-        .zip(matches)
-        .filter_map(|(request_context, matched)| matched.then_some(request_context))
-        .collect::<Vec<_>>();
-    let [matching] = matching.as_slice() else {
-        return Ok(false);
-    };
-    let expected_provider_mode = expected_provider_mode(runtime_provider, context);
-    Ok(matching.get("providerMode").and_then(Value::as_str) == Some(expected_provider_mode))
+    Ok(tier_matches
+        && mode_matches
+        && overlay_matches
+        && load_profile_matches
+        && source_kind_matches
+        && declared_provider_overlay == expected_provider_overlay)
 }
 
 fn expected_provider_mode(
@@ -1860,6 +1920,47 @@ fn manifest_declares_selector(
                     == Ok(true)
             })
         })
+}
+
+/// Require every declaration row at one exact static coordinate to carry the same singular typed
+/// request identity. The selector may choose any rung after admission, so validating only the BTR or
+/// staged row would let a lower rung borrow authority from a sibling whose request surface differs.
+fn manifest_declares_selector_for_request(
+    manifest: &JsonObject<String, Value>,
+    selector: MemoryRouteSelector,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> Result<bool, ()> {
+    if context.mode != selector.mode || context.use_pid != spec.pid.is_some() {
+        return Ok(false);
+    }
+    let contract = manifest_contract(manifest, selector.backend).ok_or(())?;
+    let contract_provider = contract.get("provider").and_then(Value::as_str).ok_or(())?;
+    let implementations = contract
+        .get("implementations")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    let mut relevant = 0_usize;
+    for implementation in implementations {
+        if request_implementation_static_axes_match(
+            implementation,
+            contract_provider,
+            selector,
+            spec,
+            None,
+        )? {
+            relevant += 1;
+            if !request_implementation_context_matches(
+                implementation,
+                contract_provider,
+                context,
+                true,
+            )? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(relevant > 0)
 }
 
 /// Whether the exact manifest row declares staged residency in the same request as rung 4.
@@ -2423,23 +2524,47 @@ pub fn declared_candle_selector_contract(
     mode: Option<MemoryRouteMode>,
     manifest: &JsonObject<String, Value>,
     spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> Option<gen_core::MemoryProviderContract> {
+    declared_candle_selector_contract_with(
+        runtime_provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        context,
+        |candidate| {
+            crate::inference_runtime::media()
+                .memory_strategy_contract(runtime_provider, candidate)
+                .ok()
+                .flatten()
+        },
+    )
+}
+
+fn declared_candle_selector_contract_with(
+    runtime_provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+    provider_contract: impl FnOnce(&LoadSpec) -> Option<gen_core::MemoryProviderContract>,
 ) -> Option<gen_core::MemoryProviderContract> {
     if spec.load_shape_declaration_result != LoadShapeDeclarationResult::Eligible {
         return None;
     }
     let mut contract = None;
-    let revalidated = evaluate_declared_candle_load_shape_with(
+    let revalidated = evaluate_declared_candle_load_shape_for_request_with(
         runtime_provider,
         resolved_tier,
         mode,
         manifest,
         spec.clone(),
         false,
+        Some(context),
         |candidate| {
-            contract = crate::inference_runtime::media()
-                .memory_strategy_contract(runtime_provider, candidate)
-                .ok()
-                .flatten();
+            contract = provider_contract(candidate);
             contract.as_ref().is_some_and(|contract| {
                 contract
                     .capability(MemoryStrategy::BoundedTransformerResidency)
@@ -2461,6 +2586,29 @@ fn evaluate_declared_candle_load_shape_with(
     manifest: &JsonObject<String, Value>,
     spec: LoadSpec,
     sequential_selected: bool,
+    provider_implements: impl FnOnce(&LoadSpec) -> bool,
+) -> LoadSpec {
+    evaluate_declared_candle_load_shape_for_request_with(
+        runtime_provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        sequential_selected,
+        None,
+        provider_implements,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_declared_candle_load_shape_for_request_with(
+    runtime_provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+    sequential_selected: bool,
+    request_context: Option<MemoryRouteRequestContext>,
     provider_implements: impl FnOnce(&LoadSpec) -> bool,
 ) -> LoadSpec {
     match has_relevant_btr_declaration(manifest, MemoryRouteBackend::Candle) {
@@ -2496,6 +2644,11 @@ fn evaluate_declared_candle_load_shape_with(
         load_profile,
     };
     if selector.provider.is_empty() || !matches!(spec.weights, WeightsSource::Dir(_)) {
+        return spec.with_refused_load_shape_declaration();
+    }
+    if request_context.is_some_and(|context| {
+        manifest_declares_selector_for_request(manifest, selector, &spec, context) != Ok(true)
+    }) {
         return spec.with_refused_load_shape_declaration();
     }
     let matching = matching_rules(selector)
@@ -7289,6 +7442,32 @@ mod tests {
                 .iter()
                 .all(|row| row["tiers"] == serde_json::json!(["bf16"])
                     && row["fingerprint"] == fingerprint));
+            let hires_contexts = serde_json::json!([
+                {
+                    "mode": "text_to_image",
+                    "providerMode": "text_to_image",
+                    "referenceCounts": [0],
+                    "pid": [false],
+                    "hasPhases": false
+                },
+                {
+                    "mode": "image_to_image",
+                    "providerMode": "image_to_image",
+                    "referenceCounts": [1],
+                    "pid": [false],
+                    "hasPhases": false
+                },
+                {
+                    "mode": "image_to_image",
+                    "providerMode": "image_to_image",
+                    "referenceCounts": [1],
+                    "pid": [false],
+                    "hasPhases": true
+                }
+            ]);
+            assert!(rows
+                .iter()
+                .all(|row| row["requestContexts"] == hires_contexts));
             let off_mac = manifest["downloads"]
                 .as_array()
                 .unwrap()
@@ -7307,9 +7486,10 @@ mod tests {
                 "immutable-dense",
             )))
             .with_resolved_route(provider);
-            for (mode, references) in [
-                (MemoryRouteMode::TextToImage, 0),
-                (MemoryRouteMode::ImageToImage, 1),
+            for (mode, references, has_phases) in [
+                (MemoryRouteMode::TextToImage, 0, false),
+                (MemoryRouteMode::ImageToImage, 1, false),
+                (MemoryRouteMode::ImageToImage, 1, true),
             ] {
                 let result = declared_candle_request_strategy_contract_with(
                     provider,
@@ -7320,13 +7500,97 @@ mod tests {
                         mode,
                         reference_count: references,
                         use_pid: false,
-                        has_phases: false,
+                        has_phases,
                     },
                     |_| Some(sana_contract(provider)),
                 );
                 assert!(
                     matches!(&result, DeclaredCandleStrategyContract::Applied { .. }),
                     "{provider} {mode:?}"
+                );
+            }
+
+            let eligible = evaluate_declared_candle_load_shape_with(
+                provider,
+                Some("bf16"),
+                Some(MemoryRouteMode::ImageToImage),
+                &manifest,
+                plain.clone(),
+                false,
+                |_| true,
+            );
+            assert_eq!(
+                eligible.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Eligible,
+                "SANA must defer Sequential to the request-authoritative selector"
+            );
+            assert_eq!(eligible.load_shape, LoadShape::EagerMaterialization);
+            let first_pass = MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
+            };
+            let final_pass = MemoryRouteRequestContext {
+                mode: MemoryRouteMode::ImageToImage,
+                reference_count: 1,
+                use_pid: false,
+                has_phases: true,
+            };
+            for context in [first_pass, final_pass] {
+                let provider_calls = std::cell::Cell::new(0_u32);
+                let selected = declared_candle_selector_contract_with(
+                    provider,
+                    Some("bf16"),
+                    Some(context.mode),
+                    &manifest,
+                    &eligible,
+                    context,
+                    |_| {
+                        provider_calls.set(provider_calls.get() + 1);
+                        Some(sana_contract(provider))
+                    },
+                );
+                assert!(
+                    selected.is_some(),
+                    "{provider} must admit {context:?}; provider calls={}",
+                    provider_calls.get()
+                );
+                assert_eq!(provider_calls.get(), 1);
+            }
+
+            let mut missing_final = manifest.clone();
+            for row in missing_final["candle"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .unwrap()
+            {
+                row["requestContexts"].as_array_mut().unwrap().pop();
+            }
+            let mut crossed_final = manifest.clone();
+            crossed_final["candle"]["memoryStrategyContract"]["implementations"][2]
+                ["requestContexts"][2]["referenceCounts"] = serde_json::json!([0]);
+            for (label, crossed) in [
+                ("missing-final", &missing_final),
+                ("crossed-final", &crossed_final),
+            ] {
+                let provider_calls = std::cell::Cell::new(0_u32);
+                let selected = declared_candle_selector_contract_with(
+                    provider,
+                    Some("bf16"),
+                    Some(final_pass.mode),
+                    crossed,
+                    &eligible,
+                    final_pass,
+                    |_| {
+                        provider_calls.set(provider_calls.get() + 1);
+                        Some(sana_contract(provider))
+                    },
+                );
+                assert!(selected.is_none(), "{provider} accepted {label}");
+                assert_eq!(
+                    provider_calls.get(),
+                    0,
+                    "missing/crossed Hires-final rows must refuse before loader construction"
                 );
             }
             assert!(matches!(

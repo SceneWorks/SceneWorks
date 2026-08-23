@@ -16786,6 +16786,7 @@ fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
 fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
     let source = include_str!("base.rs");
     let selector = include_str!("../candle_memory_strategy.rs");
+    let registry = include_str!("../memory_route_registry.rs");
     for required in [
         "SANA_CANDLE_DIFFUSERS_REVISION",
         "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
@@ -16822,25 +16823,52 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         .expect("end final-pass admission")
         .0;
     assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
+    let final_selector = source
+        .split_once("let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(")
+        .expect("final-pass selector")
+        .1
+        .split_once("let first_pass_shared_memory")
+        .expect("end final-pass selector")
+        .0;
+    assert!(
+        final_selector.contains("hires_fix.is_some(),\n        hires_fix.is_some(),"),
+        "SANA Hires final pass must carry worker multipass and typed hasPhases authority"
+    );
     let first_mode = source
-        .split_once("let mut first_pass_shared_memory = if hires_fix.is_some()")
+        .split_once("let first_pass_shared_memory = if hires_fix.is_some()")
         .expect("first-pass admission")
         .1
         .split_once("if let Some(evaluation) = shared_memory")
         .expect("end first-pass admission")
         .0;
     assert!(first_mode.contains("sana_1600m") && first_mode.contains("shared_request_mode"));
+    assert!(
+        first_mode.contains("use_pid,\n            false,\n            false,"),
+        "SANA Hires first pass must retain its independent non-phase request context"
+    );
     for marker in [
         "fn is_sana(",
         "|| is_sana(engine_id)",
         "worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id)",
         "validate_sana_asset_facts(engine_id, &contract)",
         "SANA_PHYSICAL_RECEIPT_PREFIX",
+        "declared_candle_selector_contract(",
+        "reference_count: geometry.reference_count",
+        "has_phases: request_has_phases",
         "sana_dense_receipts_admit_t2i_i2i_and_hires_but_refuse_crossed_or_no_fit",
     ] {
         assert!(
             selector.contains(marker),
             "SANA shared selector omitted {marker}"
+        );
+    }
+    for marker in [
+        "manifest_declares_selector_for_request",
+        "missing/crossed Hires-final rows must refuse before loader construction",
+    ] {
+        assert!(
+            registry.contains(marker),
+            "SANA route registry omitted {marker}"
         );
     }
 }
