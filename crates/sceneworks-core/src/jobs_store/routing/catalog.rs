@@ -1387,6 +1387,35 @@ pub fn checkpoint_plan_checkpoint_id(entry: &Map<String, Value>) -> Option<&str>
         .filter(|id| !id.is_empty())
 }
 
+/// The installed/linked path a bespoke imported lane loads from, in the order the entry may spell
+/// it. `None` when every spelling is absent or blank.
+///
+/// Shared with the worker's plan-driven route (sc-20636), which uses it to decide whether a
+/// plan-backed entry ALSO has a bespoke family lane behind it - so admission here and the route
+/// decision there agree on what "has an installed path" means.
+pub fn imported_entry_installed_path(entry: &Map<String, Value>) -> Option<&str> {
+    entry
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            entry
+                .get("paths")
+                .and_then(Value::as_object)
+                .and_then(|paths| paths.get("model"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| entry.get("installedPath").and_then(Value::as_str))
+        .or_else(|| {
+            entry
+                .get("source")
+                .and_then(Value::as_object)
+                .and_then(|source| source.get("path"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
 fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
     match entry.get("importSourceShape").and_then(Value::as_str) {
         Some(
@@ -1508,26 +1537,7 @@ pub fn imported_image_request_provider_eligible(
     // plan-backed entry (epic 20398, sc-20634) — the persisted checkpoint identity the worker's
     // plan-driven route resolves through the checkpoint plan store. Either is a claim that the
     // worker then verifies fail-closed; neither is consumed for loading here.
-    let has_nonempty_path = entry
-        .get("modelPath")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            entry
-                .get("paths")
-                .and_then(Value::as_object)
-                .and_then(|paths| paths.get("model"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| entry.get("installedPath").and_then(Value::as_str))
-        .or_else(|| {
-            entry
-                .get("source")
-                .and_then(Value::as_object)
-                .and_then(|source| source.get("path"))
-                .and_then(Value::as_str)
-        })
-        .map(str::trim)
-        .is_some_and(|path| !path.is_empty());
+    let has_nonempty_path = imported_entry_installed_path(entry).is_some();
     if !has_nonempty_path && checkpoint_plan_checkpoint_id(entry).is_none() {
         return false;
     }

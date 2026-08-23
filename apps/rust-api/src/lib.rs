@@ -185,11 +185,12 @@ use dto::{
     FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
     ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
     LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
-    ModelImportRequest, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
-    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
-    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
-    StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
-    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    ModelImportRequest, ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest,
+    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
+    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
+    SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
+    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
+    VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The single model-source seam every job-creation path calls (sc-19708): generic carrier

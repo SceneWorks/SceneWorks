@@ -1146,9 +1146,85 @@ pub(crate) struct ModelConvertRequest {
     pub(crate) quantize_group_size: Option<u32>,
 }
 
+/// Which ownership mode an import installs under (epic 20398).
+///
+/// Only `managed` — SceneWorks copies the bytes into its own storage and owns their lifecycle — is
+/// served by this route, and it is the default, so every request that predates the field (and every
+/// legacy flat `repo`/`sourceUrl`/`sourcePath` body) normalises to it. Linked ownership references
+/// a user's library in place and is compiled by
+/// `sceneworks_core::checkpoint_plan_store::compile_linked` against an APPROVED root, which is a
+/// different operation with a different trust boundary — it never arrives as an import job, so an
+/// unknown or `linked` value is refused here rather than silently treated as managed (E7).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum OwnershipModeV1 {
+    #[default]
+    Managed,
+}
+
+/// The discriminated import source (epic 20398, sc-20636). One variant per managed source, so a
+/// request states which source it is instead of the server inferring it from which of three
+/// mutually-exclusive flat fields happens to be set.
+///
+/// The legacy flat fields on [`ModelImportRequest`] remain accepted and normalise onto exactly
+/// these variants, so both spellings reach the same ingest.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum ModelImportSourceV1 {
+    /// A file uploaded in the same multipart request. The staged path is filled in server-side from
+    /// the `file` part and is never accepted from client JSON.
+    #[serde(rename_all = "camelCase")]
+    Upload {
+        #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+        staged_path: Option<String>,
+    },
+    /// A copy of a file or directory the user already has in an app-managed root. The source is
+    /// only ever read.
+    #[serde(rename_all = "camelCase")]
+    LocalPath { path: String },
+    /// A plain download URL. A stored credential matching its host is applied by the worker.
+    #[serde(rename_all = "camelCase")]
+    Url {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256: Option<String>,
+    },
+    /// A Hugging Face repo snapshot.
+    #[serde(rename_all = "camelCase")]
+    HuggingFace {
+        repo: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
+        #[serde(default)]
+        files: Vec<String>,
+    },
+    /// A Civitai download. Distinct from [`Self::Url`] only in what it RECORDS: the model version
+    /// and file identities Civitai assigns, so the install's provenance names the exact artifact
+    /// rather than just a URL that may be re-pointed. The transfer itself is the same
+    /// credential-attaching URL download — Civitai has no separate download stack.
+    #[serde(rename_all = "camelCase")]
+    Civitai {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_version_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256: Option<String>,
+    },
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelImportRequest {
+    /// Absent means `managed`: a client that predates the field gets the ownership every import
+    /// already had.
+    #[serde(default)]
+    pub(crate) ownership_mode: OwnershipModeV1,
+    /// The discriminated source. When absent, the flat `repo`/`sourceUrl`/`sourcePath` fields below
+    /// are normalised into one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<ModelImportSourceV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

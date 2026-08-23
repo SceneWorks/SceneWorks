@@ -21107,6 +21107,9 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
                 checkpoint_id: checkpoint_id.clone(),
                 record,
                 plan,
+                // Not re-derived for a reused persisted plan: this fixture only needs the plan
+                // itself, and duplicate reporting is covered by `tests/checkpoint_ingest.rs`.
+                duplicate_checkpoint_ids: Vec::new(),
             }
         }
         Err(_) => store
@@ -21332,4 +21335,154 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
          (legacy {legacy_sha}, plan {plan_sha}, {byte_delta} differing bytes)"
     );
     assert_eq!(legacy_sha, plan_sha);
+}
+
+/// sc-20636: importing a model under managed ownership must not REMOVE a capability the entry had.
+///
+/// A managed install carries `importPlan.checkpointId` AND `paths.model`. The plan-driven skeleton
+/// serves plain text-to-image only, so the claim is per-request: this route takes the shapes it
+/// serves and the family's bespoke lane keeps the rest. Exactly one lane owns each request, and a
+/// LINKED entry — which has no bespoke lane — still refuses loudly.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_serve() {
+    let fx = CheckpointPlanFixture::new("managed-claim", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // The managed shape: the plan identity plus the SceneWorks-owned install the import wrote.
+    let install = fx.settings.data_dir.join("models/imports/kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        install.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let managed = |extra: Value| -> ImageRequest {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "managed_kreamania",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "managed_kreamania",
+                "catalogScope": "user",
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "importPlan": { "checkpointId": checkpoint_id },
+                "paths": { "model": install.to_str().unwrap() }
+            }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                payload[key] = value.clone();
+            }
+        }
+        request(payload)
+    };
+
+    // Plain text-to-image: the plan route owns it, and the bespoke lane declines.
+    let plain = managed(json!({}));
+    assert_eq!(
+        resolve_image_route(&plain, &fx.settings),
+        Some(ImageRoute::CheckpointPlan)
+    );
+    assert!(!krea_imported_available(&plain, &fx.settings));
+
+    // Edit: the plan route DECLINES (it has no edit surface yet) and the bespoke lane claims it, so
+    // the capability the entry had before it was plan-backed survives.
+    let edit = managed(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }));
+    assert!(
+        prepare_checkpoint_plan_sources(&edit, &fx.settings)
+            .unwrap()
+            .is_none(),
+        "an edit on a managed entry must not be claimed by the plan route"
+    );
+    assert!(
+        !matches!(
+            resolve_image_route(&edit, &fx.settings),
+            Some(ImageRoute::CheckpointPlan)
+        ),
+        "the plan route must not own an edit request"
+    );
+    assert!(
+        krea_imported_available(&edit, &fx.settings),
+        "the family's bespoke lane keeps the shapes the plan route does not serve"
+    );
+
+    // A LoRA on a managed entry: same rule.
+    let with_lora = managed(json!({ "loras": [{ "id": "style", "weight": 0.8 }] }));
+    assert!(prepare_checkpoint_plan_sources(&with_lora, &fx.settings)
+        .unwrap()
+        .is_none());
+    assert!(krea_imported_available(&with_lora, &fx.settings));
+
+    // The same unsupported shape on a LINKED entry — no installed path, so no other lane — still
+    // refuses loudly rather than silently falling through to the stub.
+    let linked_edit = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
+    );
+    let message = match prepare_checkpoint_plan_sources(&linked_edit, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(prepared) => panic!(
+            "a linked entry with no bespoke lane must refuse, got {:?}",
+            prepared.map(|sources| sources.checkpoint_id)
+        ),
+    };
+    assert!(
+        message.starts_with("[checkpoint-plan:unsupported-operation]"),
+        "{message}"
+    );
+
+    // Integrity refusals are NEVER declined, even for a managed entry with a bespoke lane: falling
+    // back to a lane that would load the very bytes the plan rejected is a silent substitution.
+    let file = fx.library_dir.join("kreamania.safetensors");
+    let original = std::fs::read(&file).unwrap();
+    let mut mutated = original.clone();
+    let last = mutated.len() - 1;
+    mutated[last] ^= 0xff;
+    std::fs::write(&file, &mutated).unwrap();
+    let message = match prepare_checkpoint_plan_sources(&plain, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(prepared) => panic!(
+            "drifted bytes must refuse even with a bespoke lane present, got {:?}",
+            prepared.map(|sources| sources.checkpoint_id)
+        ),
+    };
+    assert!(
+        message.starts_with("[checkpoint-plan:source-drifted]"),
+        "{message}"
+    );
+    std::fs::write(&file, &original).unwrap();
+
+    // A family with no adapter binding on this backend is a route-capability refusal, so a managed
+    // entry declines to its bespoke lane there too.
+    let zimage_id = fx.compile(
+        "zimage.safetensors",
+        &[
+            ("noise_refiner.0.attention.qkv.weight", "BF16"),
+            ("context_refiner.0.attention.qkv.weight", "BF16"),
+        ],
+    );
+    let zimage_managed = request(json!({
+        "projectId": "p",
+        "model": "managed_zimage",
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "id": "managed_zimage",
+            "catalogScope": "user",
+            "family": "z-image",
+            "importSourceShape": "transformer_file",
+            "importPlan": { "checkpointId": zimage_id },
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert!(
+        prepare_checkpoint_plan_sources(&zimage_managed, &fx.settings)
+            .unwrap()
+            .is_none(),
+        "an unbound family on a managed entry declines to its bespoke lane"
+    );
 }

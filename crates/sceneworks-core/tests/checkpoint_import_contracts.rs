@@ -323,6 +323,7 @@ fn managed(install_id: &str, path: &str) -> SourceLocatorV1 {
         ManagedProvenanceV1 {
             source: "huggingface".to_owned(),
             reference: Some("org/model@rev".to_owned()),
+            ..ManagedProvenanceV1::default()
         },
     )
     .expect("valid managed locator")
@@ -371,9 +372,29 @@ fn linked_and_managed_copies_have_the_same_semantic_plan_but_different_bindings(
         linked_reference.source_binding_identity,
         managed_reference.source_binding_identity
     );
+    // sc-20636: the semantic digest excludes `planId`. The inspector derives a plan id from the
+    // checkpoint id, which encodes ownership, so a plan id in the semantic form made two copies of
+    // identical bytes — one linked, one managed — carry DIFFERENT "locator-independent" digests.
+    // Pinned as a differently-named plan over the same layers so a reintroduction reds here.
+    let renamed_plan = ImportPlanV1::new(
+        "checkpoint-plan-deadbeef",
+        &linked_plan.family,
+        linked_plan.layers.clone(),
+    )
+    .expect("valid import plan");
+    assert_eq!(
+        renamed_plan.semantic_digest().unwrap(),
+        linked_plan.semantic_digest().unwrap(),
+        "the plan id is a document name, not content, and must not reach the semantic digest"
+    );
+    assert_ne!(
+        renamed_plan.source_binding_identity().unwrap(),
+        linked_plan.source_binding_identity().unwrap(),
+        "the source binding still binds the exact document"
+    );
     assert_eq!(
         linked_plan.semantic_digest().unwrap(),
-        "sha256:d224a8484eaa43937759d190ff91a6de912585505b459602a61e2150d914bef5"
+        "sha256:11406d061fa8c81e6bac300bd946a3990b89556878d8fd5d66a15cc2e96c2f52"
     );
     assert_eq!(
         linked_plan.source_binding_identity().unwrap(),
@@ -2292,6 +2313,7 @@ fn constructors_and_every_publication_surface_reject_manual_invalid_state() {
     let invalid_provenance = ManagedProvenanceV1 {
         source: " ".to_owned(),
         reference: None,
+        ..ManagedProvenanceV1::default()
     };
     assert!(invalid_provenance.validate().is_err());
     assert!(!serialization_error(&invalid_provenance).is_empty());
