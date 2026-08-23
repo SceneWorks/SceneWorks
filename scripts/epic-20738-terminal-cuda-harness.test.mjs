@@ -32,10 +32,12 @@ import {
   runCampaign,
   safeRemoveTree,
   importSparseRecovery,
+  importPass18Recovery,
   importRecoveryContinuation,
   selectImportedPrefix,
   selectRecoveryContinuation,
   selectSparseRecovery,
+  selectPass18Recovery,
   validateCampaignPaths,
   validateCachePreflightEvidence,
   validateDocumentWithSchema,
@@ -1479,6 +1481,190 @@ async function writeSparseRecoveryCandidate(root) {
   return { candidate, evidence, metadata, summary };
 }
 
+async function writePass18RecoveryCandidate(root) {
+  const sparseRoot = path.join(path.dirname(root), `${path.basename(root)}-sparse-source`);
+  await mkdir(sparseRoot);
+  await writeSparseRecoveryCandidate(sparseRoot);
+  const selectedSparse = await selectSparseRecovery(sparseRoot, profile());
+  const candidate = path.join(root, "9498929065");
+  const evidence = path.join(candidate, "evidence");
+  await mkdir(evidence, { recursive: true });
+  const imported = await importSparseRecovery(selectedSparse, evidence);
+  const metadata = {
+    artifactId: "9498929065",
+    artifactName: "sc-20945-epic-20738-655414ef3e4dec1fe9142901caea538e73ac1490-32655428377-1",
+    artifactSize: 16_071_005,
+    artifactDigest: "sha256:fae791001dd4e2015ce0567290b9b0a1d67de9e503712d2b9a60a0f9af07ec9c",
+    runId: "32655428377",
+    runAttempt: "1",
+    headSha: "655414ef3e4dec1fe9142901caea538e73ac1490",
+    inferenceSha: "b646a6f89ba9f6b07efe53dd583d8a42e21e9871",
+    profile: PROFILE_NAME,
+    cellSemanticsSha256: "2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1",
+    artifactSemanticsSha256: "1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255",
+  };
+  await writeFile(path.join(candidate, "artifact-metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+
+  const checked = profile();
+  const rootReceipts = [];
+  for (const ordinal of [14, 18, 19]) {
+    const index = ordinal - 1;
+    const cell = checked.cells[index];
+    const ordinalName = `${String(ordinal).padStart(2, "0")}-${cell.id}`;
+    const cellDir = path.join(evidence, ordinalName);
+    await mkdir(cellDir);
+    await writeFile(path.join(cellDir, "cell.json"), `{"id":"${cell.id}"}\n`);
+    if (ordinal !== 14) await writeFile(path.join(cellDir, "runtime-result.json"), "{}\n");
+    await writeFile(path.join(cellDir, "controller.log"), `audited ${cell.id}\n`);
+    const receipt = fixtureReceipt(ordinal === 14 ? "failed" : "passed", index, checked);
+    receipt.repositories.sceneworks.sha = metadata.headSha;
+    receipt.repositories.inference.sha = metadata.inferenceSha;
+    receipt.execution.headSha = metadata.headSha;
+    receipt.execution.runId = metadata.runId;
+    receipt.execution.runAttempt = metadata.runAttempt;
+    if (ordinal === 14) {
+      receipt.authorityLifecycle.providerExecution = "failed";
+      receipt.authorityLifecycle.requestMemoryStrategy = null;
+    }
+    const starting = ordinal === 14 ? cell.artifactIds
+      : ordinal === 18 ? cell.artifactIds : ["illustrious-v2-q4"];
+    receipt.authorityLifecycle.diskProbes = [
+      ...starting.map((artifactId) => ({
+        phase: `before-stage:${artifactId}`, ordinal, root: "fixture",
+        freeBytes: 128 * 1024 ** 3, requiredFreeBytes: 106_929_602_242,
+      })),
+      {
+        phase: "before-execution", ordinal, root: "fixture",
+        freeBytes: 128 * 1024 ** 3, requiredFreeBytes: 106_929_602_242,
+      },
+    ];
+    const files = await hashedFiles(cellDir);
+    receipt.inputs = files.filter((file) => file.path === "cell.json");
+    receipt.outputs = files.filter((file) => file.path === "runtime-result.json");
+    receipt.logs = files.filter((file) => file.path === "controller.log");
+    await writeFile(path.join(cellDir, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+    rootReceipts.push({ cell, ordinal, ordinalName, receipt });
+  }
+  await writeFile(path.join(evidence, "cache-preflight-initial.json"), "{}\n");
+  await writeFile(path.join(evidence, "cache-preflight.json"), "{}\n");
+  const cacheBytes = await readFile(path.join(evidence, "cache-preflight.json"));
+  const outcomes = [
+    ...imported.outcomes,
+    ...rootReceipts.map(({ cell, ordinalName, receipt }) => ({
+      id: cell.id, status: receipt.status, receipt: `${ordinalName}/receipt.json`,
+      error: receipt.error, source: "continuation",
+    })),
+  ].sort((left, right) => (
+    checked.cells.findIndex((cell) => cell.id === left.id)
+      - checked.cells.findIndex((cell) => cell.id === right.id)
+  ));
+  const empty = createHash("sha256").digest("hex");
+  const summary = {
+    schemaVersion: 1,
+    profile: PROFILE_NAME,
+    repositories: {
+      sceneworks: { sha: metadata.headSha, clean: true },
+      inference: { sha: metadata.inferenceSha, clean: true },
+    },
+    execution: {
+      runId: metadata.runId, runAttempt: metadata.runAttempt, headSha: metadata.headSha,
+      headRef: "refs/heads/feature/sc-20738-candle-cuda-parity",
+      workflow: "Windows Candle worker", runnerName: "cuda-windows",
+      runnerOs: "Windows", runnerArch: "X64",
+    },
+    receipts: outcomes,
+    lineage: {
+      imported: imported.lineage,
+      continuation: {
+        runId: metadata.runId, runAttempt: metadata.runAttempt, headSha: metadata.headSha,
+        inferenceSha: metadata.inferenceSha,
+        profileCellSemanticsSha256: metadata.cellSemanticsSha256,
+        profileArtifactSemanticsSha256: metadata.artifactSemanticsSha256,
+        executionOrdinals: [14, 18, 19],
+      },
+    },
+    cachePreflight: {
+      path: "cache-preflight.json", bytes: cacheBytes.length,
+      sha256: createHash("sha256").update(cacheBytes).digest("hex"),
+    },
+    authorityLifecycle: rootReceipts.map(({ receipt }) => receipt.authorityLifecycle),
+    diskFreeProbes: rootReceipts.flatMap(({ receipt }) => receipt.authorityLifecycle.diskProbes),
+    finalAuthorityLifecycle: {
+      stage: { root: "fixture-stage", files: 0, bytes: 0, sha256: empty },
+      derived: { root: "fixture-derived", files: 0, bytes: 0, sha256: empty },
+      derivedNamespaces: [], missingStoreAbsent: true,
+    },
+    passed: 18,
+    failed: 1,
+    campaignErrors: [],
+  };
+  await writeFile(path.join(evidence, "campaign-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+  return { candidate, evidence, metadata, summary };
+}
+
+test("18-PASS recovery imports authentic PASS ordinals and keeps failed LTX cell 14 quarantined", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-21306-pass18-recovery-"));
+  const skipCache = async () => {};
+  try {
+    const validRoot = path.join(temporary, "valid");
+    await mkdir(validRoot);
+    const fixture = await writePass18RecoveryCandidate(validRoot);
+    const selected = await selectPass18Recovery(validRoot, profile(), { validateCacheEvidence: skipCache });
+    assert.deepEqual(
+      selected.receipts.map(({ cell }) => profile().cells.findIndex((row) => row.id === cell.id) + 1),
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19],
+    );
+    assert.deepEqual(selected.failures.map(({ ordinal }) => ordinal), [14]);
+    const output = path.join(temporary, "output");
+    await mkdir(output);
+    const imported = await importPass18Recovery(selected, output);
+    assert.equal(imported.outcomes.length, 18);
+    assert.deepEqual(imported.lineage.executionOrdinals, [14]);
+    assert.equal((await readdir(path.join(output, "_imported-prefix"))).includes("14-ltx-2-3-q8"), false);
+
+    for (const [label, mutate, pattern] of [
+      ["metadata", async (candidate) => {
+        const file = path.join(candidate, "artifact-metadata.json");
+        const value = JSON.parse(await readFile(file));
+        value.artifactDigest = `sha256:${"0".repeat(64)}`;
+        await writeFile(file, JSON.stringify(value));
+      }, /artifact 9498929065/],
+      ["pass-rehash", async (candidate) => {
+        await writeFile(path.join(candidate, "evidence", "18-illustrious-v1-openpose", "controller.log"), "tampered\n");
+      }, /rehash/],
+      ["failed-promoted", async (candidate) => {
+        const file = path.join(candidate, "evidence", "14-ltx-2-3-q8", "receipt.json");
+        const value = JSON.parse(await readFile(file));
+        value.status = "passed";
+        value.error = null;
+        await writeFile(file, JSON.stringify(value));
+      }, /fewer than 1 items|exact audited FAILED/],
+      ["summary-promoted", async (candidate) => {
+        const file = path.join(candidate, "evidence", "campaign-summary.json");
+        const value = JSON.parse(await readFile(file));
+        value.receipts[13].status = "passed";
+        await writeFile(file, JSON.stringify(value));
+      }, /path.source.status/],
+      ["historical-pin", async (candidate) => {
+        const file = path.join(candidate, "artifact-metadata.json");
+        const value = JSON.parse(await readFile(file));
+        value.inferenceSha = "31e02510ad6e9e1a3c3d205058576329d724c60d";
+        await writeFile(file, JSON.stringify(value));
+      }, /artifact 9498929065/],
+    ]) {
+      const root = path.join(temporary, label);
+      await mkdir(root);
+      await cp(fixture.candidate, path.join(root, "9498929065"), { recursive: true });
+      await mutate(path.join(root, "9498929065"));
+      await assert.rejects(
+        selectPass18Recovery(root, profile(), { validateCacheEvidence: skipCache }), pattern, label,
+      );
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("sparse recovery imports only per-cell-compatible PASS receipts and quarantines 14, 18, and 19", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-21306-sparse-recovery-"));
   try {
@@ -2167,7 +2353,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
     runtimeResultMode = "valid", providerRuntimeFailureAt = null,
     providerFailureDerivedMode = "empty", successfulFluxDerivedMode = "resident",
-    runtimeMemoryMode = "current", sparse = false, illustriousHydration = null,
+    runtimeMemoryMode = "current", sparse = false, pass18 = false, illustriousHydration = null,
     prefixCandidates = null,
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
@@ -2476,8 +2662,8 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       runId: "continuation", runAttempt: "1", headSha: "3".repeat(40), headRef: "refs/heads/continuation",
       workflow: "fixture", runnerName: "fixture-runner", runnerOs: "Windows", runnerArch: "X64",
     };
-    const selectedExecutionOrdinals = sparse
-      ? [14, 18, 19] : Array.from({ length: 12 }, (_, index) => index + 8);
+    const selectedExecutionOrdinals = pass18 ? [14]
+      : sparse ? [14, 18, 19] : Array.from({ length: 12 }, (_, index) => index + 8);
     const selectedExecutionSet = new Set(selectedExecutionOrdinals);
     const importedPrefix = {
       lineage: { kind: "fixture-prefix" },
@@ -2880,6 +3066,19 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       "sdxl-tokenizer-bigg", "sdxl-vae-fix",
     ],
   );
+
+  const pass18 = await scenario({ pass18: true, illustriousHydration: "present" });
+  assert.deepEqual(pass18.runtimeCells.map(({ id }) => id), ["ltx-2-3-q8"]);
+  assert.deepEqual(pass18.events.filter((event) => event.startsWith("audit:")), [
+    "audit:ltx23-q8", "audit:ltx23-gemma",
+  ]);
+  assert.equal(pass18.events.some((event) => event.startsWith("download:")), false);
+  assert.deepEqual(pass18.cacheEvidence.diskPlan.cells.map(({ ordinal }) => ordinal), [14]);
+  assert.equal(pass18.cacheEvidence.lifetimePlan.length, 2);
+  assert.equal(pass18.cacheEvidence.diskPlan.logicalSourceBytes, 56_156_615_634);
+  assert.equal(pass18.cacheEvidence.diskPlan.peakModelAndSidecarBytes, 56_156_615_634);
+  assert.equal(pass18.cacheEvidence.diskPlan.peakRequiredAdditionalBytes, 106_929_602_242);
+  assert.deepEqual(pass18.result.summary.lineage.continuation.executionOrdinals, [14]);
 
   const archivedCandidates = await mkdtemp(path.join(tmpdir(), "sc-21306-run-campaign-legacy-"));
   try {
@@ -3403,10 +3602,10 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /HF_HUB_OFFLINE: "1"/);
   assert.match(terminalBlock, /TRANSFORMERS_OFFLINE: "1"/);
   assert.match(terminalBlock, /actions\/artifacts\/\$artifactId/);
-  assert.match(terminalBlock, /9492288293[\s\S]*?15452320[\s\S]*?dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724/);
+  assert.match(terminalBlock, /9498929065[\s\S]*?16071005[\s\S]*?fae791001dd4e2015ce0567290b9b0a1d67de9e503712d2b9a60a0f9af07ec9c/);
   assert.match(terminalBlock, /\$artifact\.expired[\s\S]*?\$artifact\.size_in_bytes[\s\S]*?\$artifact\.digest/);
   assert.match(terminalBlock, /gh run download \$runId --name \$artifactName --dir \$evidence/);
-  assert.match(terminalBlock, /43c718b7e9a852bd5029448d18841fed0f508c3a/);
+  assert.match(terminalBlock, /655414ef3e4dec1fe9142901caea538e73ac1490/);
   assert.doesNotMatch(terminalBlock, /snapshot_download/);
   assert.match(terminalBlock, /python -m venv \$venv/);
   assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);
@@ -3417,9 +3616,11 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.doesNotMatch(terminalBlock, /q8\/transformer\/model\.safetensors/);
   const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
   assert.match(controller, /SPARSE_EXECUTION_ORDINALS = \[14, 18, 19\][\s\S]*?SPARSE_REMAINING_AUTHORITIES = 8[\s\S]*?SPARSE_REMAINING_FILES = 70/);
+  assert.match(controller, /PASS18_EXECUTION_ORDINALS = \[14\][\s\S]*?PASS18_REMAINING_AUTHORITIES = 2[\s\S]*?PASS18_REMAINING_FILES = 28/);
   assert.match(controller, /stale cell-10 sentinel/);
   assert.match(controller, /selectRecoveryContinuation[\s\S]*?importRecoveryContinuation/);
   assert.match(controller, /selectSparseRecovery[\s\S]*?importSparseRecovery/);
+  assert.match(controller, /selectPass18Recovery[\s\S]*?importPass18Recovery/);
   assert.doesNotMatch(controller, /JSON\.stringify\(staged\.downloadedFiles/);
   assert.match(controller, /async function downloadReviewedMissing[\s\S]*?HF_HUB_OFFLINE: "0"/);
   assert.match(controller, /async function stageArtifact[\s\S]*?HF_HUB_OFFLINE: "1"/);

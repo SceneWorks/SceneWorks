@@ -5,13 +5,11 @@ SC-20945 adds one deliberately opt-in terminal evidence profile to
 The profile stays off on pushes, pull requests, and ordinary manual runs. Run it once only after the
 epic's SceneWorks and inference heads are final, clean, reviewed, and pin-matched.
 
-SC-21306's reviewed recovery is deliberately sparse. It accepts only exact GitHub artifact
-`9492288293` from run `32628540694`, validates that artifact under its frozen legacy profile, and
-rehashes all receipt evidence. It imports only PASS cells whose individual semantic tuples are
-unchanged: ordinals 1-13 and 15-17. The legacy LTX failure at ordinal 14 and the two Illustrious
-failures at ordinals 18-19 are quarantined, never promoted. Only ordinals `[14, 18, 19]` execute
-under the corrected profile. The summary retains the complete prior lineage and the explicit sparse
-execution list; it never represents the segments as one run.
+SC-21306's current recovery accepts only exact GitHub artifact `9498929065` from run `32655428377`.
+It revalidates and imports the authentic PASS ordinals 1-13 and 15-19, retains their complete prior
+lineage, and quarantines the failed LTX receipt at ordinal 14. Only ordinal `[14]` executes with the
+corrected inference pin. The earlier `9492288293` 16-PASS route remains a separately frozen legacy
+compatibility path; no receipt or provenance is rewritten across either boundary.
 
 ## Frozen scope
 
@@ -162,7 +160,20 @@ persisted inputs, outputs, and logs. Receipts also bind:
 - workflow run, head, attempt, runner OS/architecture/name, system-memory identity, GPU index/PCI
   identity/UUID/compute capability/driver/total memory, and raw VRAM samples.
 
-The controller accepts exactly one candidate for artifact `9492288293`, size 15,452,320 bytes,
+The current controller accepts exactly one candidate for artifact `9498929065`, size 16,071,005
+bytes, GitHub digest
+`sha256:fae791001dd4e2015ce0567290b9b0a1d67de9e503712d2b9a60a0f9af07ec9c`, SceneWorks head
+`655414ef3e4dec1fe9142901caea538e73ac1490`, run `32655428377`, attempt 1, and historical source
+inference pin `b646a6f89ba9f6b07efe53dd583d8a42e21e9871`. Its cell and artifact semantic digests are
+`2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1` and
+`1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255`. The importer rehashes all
+18 PASS receipts and the failed cell-14 receipt, validates both current cache phases and exact prior
+lineage, and refuses any attempt to promote failed cell 14. Its successor executes only cell 14 with
+the two LTX authorities (28 files, 56,156,615,634 source bytes) and the reviewed
+106,929,602,242-byte disk floor.
+
+The preserved legacy controller accepts exactly one candidate for artifact `9492288293`, size
+15,452,320 bytes,
 GitHub digest `sha256:dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724`,
 SceneWorks head `43c718b7e9a852bd5029448d18841fed0f508c3a`, and inference pin
 `b646a6f89ba9f6b07efe53dd583d8a42e21e9871`. Its source cell digest is the legacy
@@ -222,7 +233,7 @@ cargo fmt --all -- --check
 The hardware test is `#[ignore]`d, test-only, Candle-only, and additionally refuses to run unless the
 workflow-only `SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA=1` opt-in is present.
 
-## Independently audited promotion outcome
+## Prior independently audited promotion outcome
 
 The promotion authority is GitHub Actions run `32628540694`, attempt 1, exact SceneWorks head
 `43c718b7e9a852bd5029448d18841fed0f508c3a`, artifact

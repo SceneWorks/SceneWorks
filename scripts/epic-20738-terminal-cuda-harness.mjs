@@ -52,7 +52,8 @@ const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "1e98392f71b1ad3d10d4bf18a6f23a497f5f
 const LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256 = "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932";
 const LEGACY_ARTIFACT_SEMANTICS_SHA256 = "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e";
 const LEGACY_SCENEWORKS_HEAD = "8886a9e69f26beec05688c81b414859bd102f6d0";
-const FROZEN_INFERENCE_PIN = "b646a6f89ba9f6b07efe53dd583d8a42e21e9871";
+const FROZEN_INFERENCE_PIN = "31e02510ad6e9e1a3c3d205058576329d724c60d";
+const HISTORICAL_INFERENCE_PIN = "b646a6f89ba9f6b07efe53dd583d8a42e21e9871";
 const LTX_CURRENT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_APPROVED_PARENT_REVISION = "254989c3ca7ee691187647f350b112c0c448789d";
 const ILLUSTRIOUS_V1_LEGACY_REVISION = "c5a92a902dd4e6ee99c2a57981ecf66209905dd1";
@@ -108,6 +109,21 @@ const SPARSE_REMAINING_ARTIFACT_IDS = [
   "ltx23-q8", "ltx23-gemma", "illustrious-v1-q4", "sdxl-openpose",
   "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix", "illustrious-v2-q4",
 ];
+const PASS18_RECOVERY_ARTIFACT_ID = "9498929065";
+const PASS18_RECOVERY_ARTIFACT_NAME = "sc-20945-epic-20738-655414ef3e4dec1fe9142901caea538e73ac1490-32655428377-1";
+const PASS18_RECOVERY_ARTIFACT_SIZE = 16_071_005;
+const PASS18_RECOVERY_ARTIFACT_DIGEST = "sha256:fae791001dd4e2015ce0567290b9b0a1d67de9e503712d2b9a60a0f9af07ec9c";
+const PASS18_RECOVERY_RUN_ID = "32655428377";
+const PASS18_RECOVERY_RUN_ATTEMPT = "1";
+const PASS18_RECOVERY_SCENEWORKS_HEAD = "655414ef3e4dec1fe9142901caea538e73ac1490";
+const PASS18_EXECUTION_ORDINALS = [14];
+const PASS18_IMPORTED_ORDINALS = [
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19,
+];
+const PASS18_REMAINING_ARTIFACT_IDS = ["ltx23-q8", "ltx23-gemma"];
+const PASS18_REMAINING_AUTHORITIES = 2;
+const PASS18_REMAINING_FILES = 28;
+const PASS18_REMAINING_SOURCE_BYTES = 56_156_615_634;
 const RECOVERY_ORIGINAL_ARTIFACT_ID = "9477529627";
 const RECOVERY_ORIGINAL_ARTIFACT_NAME = "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1";
 const RECOVERY_ORIGINAL_ARTIFACT_DIGEST = "sha256:f3164a32a485fdedd671f4e11f30038213d30a7eb2b541bda90bef30e63188f3";
@@ -1498,7 +1514,7 @@ async function validatePrefixCandidate(candidate, currentProfile) {
     || metadata.artifactName !== `${PREFIX_ARTIFACT}${metadata.runId}-${metadata.runAttempt}`
     || !/^sha256:[0-9a-f]{64}$/.test(metadata.artifactDigest)
     || metadata.headSha !== LEGACY_SCENEWORKS_HEAD
-    || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    || metadata.inferenceSha !== HISTORICAL_INFERENCE_PIN
     || metadata.profile !== PROFILE_NAME
     || metadata.cellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
     || metadata.artifactSemanticsSha256 !== LEGACY_ARTIFACT_SEMANTICS_SHA256) {
@@ -1524,7 +1540,7 @@ async function validatePrefixCandidate(candidate, currentProfile) {
       || receipt.cell?.ordinal !== index + 1
       || receipt.cell?.id !== cell.id
       || receipt.repositories?.sceneworks?.sha !== LEGACY_SCENEWORKS_HEAD
-      || receipt.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+      || receipt.repositories?.inference?.sha !== HISTORICAL_INFERENCE_PIN
       || receipt.execution?.headSha !== LEGACY_SCENEWORKS_HEAD
       || receipt.execution?.runId !== metadata.runId
       || receipt.execution?.runAttempt !== metadata.runAttempt) {
@@ -1569,7 +1585,7 @@ async function validatePrefixCandidate(candidate, currentProfile) {
     || boundaryReceipt.cell?.ordinal !== boundaryIndex + 1
     || boundaryReceipt.cell?.id !== boundaryCell.id
     || boundaryReceipt.repositories?.sceneworks?.sha !== LEGACY_SCENEWORKS_HEAD
-    || boundaryReceipt.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || boundaryReceipt.repositories?.inference?.sha !== HISTORICAL_INFERENCE_PIN
     || boundaryReceipt.execution?.headSha !== LEGACY_SCENEWORKS_HEAD
     || boundaryReceipt.execution?.runId !== metadata.runId
     || boundaryReceipt.execution?.runAttempt !== metadata.runAttempt) {
@@ -1701,7 +1717,7 @@ export async function importPrefixEvidence(prefix, output) {
 function validateRecoveryReceiptProvenance(receipt, cell, { headSha, runId, runAttempt }, label) {
   if (receipt.cell?.ordinal !== cell.ordinal || receipt.cell?.id !== cell.id
     || receipt.repositories?.sceneworks?.sha !== headSha || receipt.repositories?.sceneworks?.clean !== true
-    || receipt.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN || receipt.repositories?.inference?.clean !== true
+    || receipt.repositories?.inference?.sha !== HISTORICAL_INFERENCE_PIN || receipt.repositories?.inference?.clean !== true
     || receipt.execution?.headSha !== headSha || receipt.execution?.runId !== runId
     || receipt.execution?.runAttempt !== runAttempt) {
     fail(`${label} is not bound to its exact audited provenance`);
@@ -1735,7 +1751,7 @@ function expectedRecoveryOriginalLineage() {
     sourceRunId: "32570707303",
     sourceRunAttempt: "1",
     sourceHeadSha: LEGACY_SCENEWORKS_HEAD,
-    sourceInferenceSha: FROZEN_INFERENCE_PIN,
+    sourceInferenceSha: HISTORICAL_INFERENCE_PIN,
     sourceProfile: PROFILE_NAME,
     sourceCellSemanticsSha256: LEGACY_CELL_SEMANTICS_SHA256,
     sourceArtifactSemanticsSha256: LEGACY_ARTIFACT_SEMANTICS_SHA256,
@@ -1791,7 +1807,7 @@ function validateRecoveryMetadata(metadata) {
   if (metadata.artifactId !== RECOVERY_ARTIFACT_ID || metadata.artifactName !== RECOVERY_ARTIFACT_NAME
     || metadata.artifactSize !== RECOVERY_ARTIFACT_SIZE || metadata.artifactDigest !== RECOVERY_ARTIFACT_DIGEST
     || metadata.runId !== RECOVERY_RUN_ID || metadata.runAttempt !== RECOVERY_RUN_ATTEMPT
-    || metadata.headSha !== RECOVERY_SCENEWORKS_HEAD || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    || metadata.headSha !== RECOVERY_SCENEWORKS_HEAD || metadata.inferenceSha !== HISTORICAL_INFERENCE_PIN
     || metadata.profile !== PROFILE_NAME || metadata.cellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
     || metadata.artifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256) {
     fail("recovery artifact metadata does not bind the audited partial run");
@@ -1907,7 +1923,7 @@ function validateRecoverySummary(summary, currentProfile, metadata) {
   exactKeys(summary.execution, ["runId", "runAttempt", "headSha", "headRef", "workflow", "runnerName", "runnerOs", "runnerArch"], "recovery campaign summary execution");
   if (summary.schemaVersion !== 1 || summary.profile !== PROFILE_NAME
     || summary.repositories.sceneworks.sha !== metadata.headSha || summary.repositories.sceneworks.clean !== true
-    || summary.repositories.inference.sha !== FROZEN_INFERENCE_PIN || summary.repositories.inference.clean !== true
+    || summary.repositories.inference.sha !== HISTORICAL_INFERENCE_PIN || summary.repositories.inference.clean !== true
     || summary.execution.runId !== metadata.runId || summary.execution.runAttempt !== metadata.runAttempt
     || summary.execution.headSha !== metadata.headSha || summary.execution.headRef !== "refs/heads/feature/sc-20738-candle-cuda-parity"
     || summary.execution.workflow !== "Windows Candle worker" || summary.execution.runnerName !== "cuda-windows-2"
@@ -2028,7 +2044,7 @@ export async function selectRecoveryContinuation(prefixCandidates, currentProfil
     || summary.lineage?.continuation?.runId !== metadata.runId
     || summary.lineage?.continuation?.runAttempt !== metadata.runAttempt
     || summary.lineage?.continuation?.headSha !== metadata.headSha
-    || summary.lineage?.continuation?.inferenceSha !== FROZEN_INFERENCE_PIN
+    || summary.lineage?.continuation?.inferenceSha !== HISTORICAL_INFERENCE_PIN
     || summary.lineage?.continuation?.profileCellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
     || summary.lineage?.continuation?.profileArtifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256
     || summary.lineage?.continuation?.startOrdinal !== IMPORTED_PREFIX_CELLS + 1) {
@@ -2120,7 +2136,7 @@ function expectedSparseSourceLineage() {
       sourceRunId: RECOVERY_RUN_ID,
       sourceRunAttempt: RECOVERY_RUN_ATTEMPT,
       sourceHeadSha: RECOVERY_SCENEWORKS_HEAD,
-      sourceInferenceSha: FROZEN_INFERENCE_PIN,
+      sourceInferenceSha: HISTORICAL_INFERENCE_PIN,
       sourceProfile: PROFILE_NAME,
       sourceCellSemanticsSha256: LEGACY_CELL_SEMANTICS_SHA256,
       sourceArtifactSemanticsSha256: LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256,
@@ -2154,7 +2170,7 @@ function validateSparseRecoveryMetadata(metadata) {
     || metadata.runId !== SPARSE_RECOVERY_RUN_ID
     || metadata.runAttempt !== SPARSE_RECOVERY_RUN_ATTEMPT
     || metadata.headSha !== SPARSE_RECOVERY_SCENEWORKS_HEAD
-    || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    || metadata.inferenceSha !== HISTORICAL_INFERENCE_PIN
     || metadata.profile !== PROFILE_NAME
     || metadata.cellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
     || metadata.artifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256) {
@@ -2238,7 +2254,7 @@ function validateSparseRecoverySummary(summary, legacyProfile, metadata) {
   if (summary.schemaVersion !== 1 || summary.profile !== PROFILE_NAME
     || summary.repositories?.sceneworks?.sha !== metadata.headSha
     || summary.repositories.sceneworks.clean !== true
-    || summary.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || summary.repositories?.inference?.sha !== HISTORICAL_INFERENCE_PIN
     || summary.repositories.inference.clean !== true
     || summary.execution?.runId !== metadata.runId
     || summary.execution?.runAttempt !== metadata.runAttempt
@@ -2278,7 +2294,7 @@ function validateSparseRecoverySummary(summary, legacyProfile, metadata) {
     || summary.lineage?.continuation?.runId !== metadata.runId
     || summary.lineage?.continuation?.runAttempt !== metadata.runAttempt
     || summary.lineage?.continuation?.headSha !== metadata.headSha
-    || summary.lineage?.continuation?.inferenceSha !== FROZEN_INFERENCE_PIN
+    || summary.lineage?.continuation?.inferenceSha !== HISTORICAL_INFERENCE_PIN
     || summary.lineage?.continuation?.profileCellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
     || summary.lineage?.continuation?.profileArtifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256
     || summary.lineage?.continuation?.startOrdinal !== 10) {
@@ -2440,6 +2456,318 @@ export async function importSparseRecovery(prefix, output) {
     outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
       id: cell.id, status: "passed", receipt: `_imported-prefix/${ordinalName}/receipt.json`,
       error: null, emergencyReceiptError: null, source: "imported-sparse-recovery",
+    })),
+  };
+}
+
+function validatePass18RecoveryMetadata(metadata) {
+  exactKeys(metadata, [
+    "artifactId", "artifactName", "artifactSize", "artifactDigest", "runId", "runAttempt", "headSha",
+    "inferenceSha", "profile", "cellSemanticsSha256", "artifactSemanticsSha256",
+  ], "18-PASS recovery artifact metadata");
+  if (metadata.artifactId !== PASS18_RECOVERY_ARTIFACT_ID
+    || metadata.artifactName !== PASS18_RECOVERY_ARTIFACT_NAME
+    || metadata.artifactSize !== PASS18_RECOVERY_ARTIFACT_SIZE
+    || metadata.artifactDigest !== PASS18_RECOVERY_ARTIFACT_DIGEST
+    || metadata.runId !== PASS18_RECOVERY_RUN_ID
+    || metadata.runAttempt !== PASS18_RECOVERY_RUN_ATTEMPT
+    || metadata.headSha !== PASS18_RECOVERY_SCENEWORKS_HEAD
+    || metadata.inferenceSha !== HISTORICAL_INFERENCE_PIN
+    || metadata.profile !== PROFILE_NAME
+    || metadata.cellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || metadata.artifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256) {
+    fail("18-PASS recovery metadata does not bind exact artifact 9498929065");
+  }
+}
+
+function validatePass18ImportedLineage(lineage, currentProfile) {
+  const compatibility = SPARSE_IMPORTED_ORDINALS.map((ordinal) => ({
+    ordinal,
+    cellId: currentProfile.cells[ordinal - 1].id,
+    cellSemanticsSha256: canonicalSha256(currentProfile.cells[ordinal - 1]),
+  }));
+  if (lineage?.kind !== "sparse-pass-recovery"
+    || lineage.sourceArtifactId !== SPARSE_RECOVERY_ARTIFACT_ID
+    || lineage.sourceArtifactName !== SPARSE_RECOVERY_ARTIFACT_NAME
+    || lineage.sourceArtifactSize !== SPARSE_RECOVERY_ARTIFACT_SIZE
+    || lineage.sourceArtifactDigest !== SPARSE_RECOVERY_ARTIFACT_DIGEST
+    || lineage.sourceRunId !== SPARSE_RECOVERY_RUN_ID
+    || lineage.sourceRunAttempt !== SPARSE_RECOVERY_RUN_ATTEMPT
+    || lineage.sourceHeadSha !== SPARSE_RECOVERY_SCENEWORKS_HEAD
+    || lineage.sourceInferenceSha !== HISTORICAL_INFERENCE_PIN
+    || lineage.sourceProfile !== PROFILE_NAME
+    || lineage.sourceCellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
+    || lineage.targetCellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || lineage.sourceArtifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256
+    || JSON.stringify(lineage.importedOrdinals) !== JSON.stringify(SPARSE_IMPORTED_ORDINALS)
+    || JSON.stringify(lineage.executionOrdinals) !== JSON.stringify(SPARSE_EXECUTION_ORDINALS)
+    || canonicalSha256(lineage.compatibility) !== canonicalSha256(compatibility)
+    || canonicalSha256(lineage.quarantinedFailures) !== canonicalSha256(
+      SPARSE_EXECUTION_ORDINALS.map((ordinal) => ({
+        ordinal, cellId: currentProfile.cells[ordinal - 1].id,
+        path: `${String(ordinal).padStart(2, "0")}-${currentProfile.cells[ordinal - 1].id}/receipt.json`,
+        status: "failed",
+      })),
+    )
+    || canonicalSha256(lineage.priorLineage?.imported) !== canonicalSha256(expectedSparseSourceLineage())
+    || lineage.priorLineage?.continuation?.runId !== SPARSE_RECOVERY_RUN_ID
+    || lineage.priorLineage?.continuation?.runAttempt !== SPARSE_RECOVERY_RUN_ATTEMPT
+    || lineage.priorLineage?.continuation?.headSha !== SPARSE_RECOVERY_SCENEWORKS_HEAD
+    || lineage.priorLineage?.continuation?.inferenceSha !== HISTORICAL_INFERENCE_PIN
+    || lineage.priorLineage?.continuation?.profileCellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
+    || lineage.priorLineage?.continuation?.profileArtifactSemanticsSha256
+      !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256
+    || lineage.priorLineage?.continuation?.startOrdinal !== 10) {
+    fail("18-PASS recovery prior sparse lineage drifted from exact artifact 9492288293");
+  }
+}
+
+export async function validatePass18RecoveryCacheEvidence(evidenceRoot, currentProfile, summary) {
+  const executionOrdinals = SPARSE_EXECUTION_ORDINALS;
+  const expectedArtifactIds = [...new Set(executionOrdinals.flatMap(
+    (ordinal) => currentProfile.cells[ordinal - 1].artifactIds,
+  ))];
+  const evidenceBytes = await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8");
+  const { artifactExpectedFiles, downloadEvidenceSha256 } =
+    expectedCurrentArtifactFilesFromEvidenceBytes(currentProfile, evidenceBytes);
+  for (const filename of ["cache-preflight-initial.json", "cache-preflight.json"]) {
+    const file = path.join(evidenceRoot, filename);
+    const document = JSON.parse(await readFile(file, "utf8"));
+    validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
+    validateCachePreflightEvidence(document, {
+      remainingArtifactIds: expectedArtifactIds,
+      artifactExpectedFiles,
+      downloadEvidenceSha256,
+      guard: { cacheRoot: document.sourceCacheRoot },
+      stagingRoot: document.campaignStagingRoot,
+      derivedSidecarRoot: document.derivedSidecarRoot,
+      missingStore: document.missingFileStore,
+      expectedNonModelPaths: document.diskPlan?.nonModelPaths ?? [],
+      profile: currentProfile,
+      executionOrdinals,
+    });
+    if (document.status !== "passed" || document.error !== null
+      || document.offlineBeforeCells !== true || document.networkDownloadCount !== 32
+      || document.downloadedFiles.reduce((sum, row) => sum + row.bytes, 0) !== 7_823_307_202
+      || document.diskPlan?.preHydrationJitSourcePeakBytes !== PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES
+      || document.diskPlan?.reviewedJitSourcePeakBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
+      || document.diskPlan?.peakRequiredAdditionalBytes !== REVIEWED_FREE_FLOOR_BYTES
+      || document.evidencePhase !== (filename.includes("initial") ? "initial" : "final")) {
+      fail(`18-PASS recovery ${filename} is not the exact current passing cache phase`);
+    }
+  }
+  const final = path.join(evidenceRoot, "cache-preflight.json");
+  const bytes = await stat(final);
+  if (summary.cachePreflight?.path !== "cache-preflight.json"
+    || summary.cachePreflight.bytes !== bytes.size
+    || summary.cachePreflight.sha256 !== await sha256File(final)) {
+    fail("18-PASS recovery summary cache-preflight hash drifted");
+  }
+}
+
+export function validatePass18RecoverySummary(summary, currentProfile, metadata) {
+  exactKeys(summary, [
+    "schemaVersion", "profile", "repositories", "execution", "receipts", "lineage", "cachePreflight",
+    "authorityLifecycle", "diskFreeProbes", "finalAuthorityLifecycle", "passed", "failed", "campaignErrors",
+  ], "18-PASS recovery campaign summary");
+  if (summary.schemaVersion !== 1 || summary.profile !== PROFILE_NAME
+    || summary.repositories?.sceneworks?.sha !== metadata.headSha
+    || summary.repositories.sceneworks.clean !== true
+    || summary.repositories?.inference?.sha !== HISTORICAL_INFERENCE_PIN
+    || summary.repositories.inference.clean !== true
+    || summary.execution?.runId !== metadata.runId
+    || summary.execution?.runAttempt !== metadata.runAttempt
+    || summary.execution?.headSha !== metadata.headSha
+    || summary.execution?.headRef !== "refs/heads/feature/sc-20738-candle-cuda-parity"
+    || summary.execution?.workflow !== "Windows Candle worker"
+    || summary.execution?.runnerName !== "cuda-windows"
+    || summary.execution?.runnerOs !== "Windows" || summary.execution?.runnerArch !== "X64"
+    || !Array.isArray(summary.receipts) || summary.receipts.length !== currentProfile.cells.length
+    || summary.passed !== PASS18_IMPORTED_ORDINALS.length || summary.failed !== 1
+    || !Array.isArray(summary.campaignErrors) || summary.campaignErrors.length !== 0
+    || !Array.isArray(summary.authorityLifecycle) || summary.authorityLifecycle.length !== 3
+    || !Array.isArray(summary.diskFreeProbes) || summary.diskFreeProbes.length !== 11) {
+    fail("18-PASS recovery summary does not bind the audited 18-PASS/1-failure run");
+  }
+  const imported = new Set(SPARSE_IMPORTED_ORDINALS);
+  for (let index = 0; index < currentProfile.cells.length; index += 1) {
+    const ordinal = index + 1;
+    const cell = currentProfile.cells[index];
+    const ordinalName = `${String(ordinal).padStart(2, "0")}-${cell.id}`;
+    const row = summary.receipts[index];
+    const expectedStatus = ordinal === PASS18_EXECUTION_ORDINALS[0] ? "failed" : "passed";
+    const expectedPath = imported.has(ordinal)
+      ? `_imported-prefix/${ordinalName}/receipt.json` : `${ordinalName}/receipt.json`;
+    const expectedSource = ordinal <= 17 && ordinal !== 14
+      ? "imported-sparse-recovery" : "continuation";
+    if (row?.id !== cell.id || row.status !== expectedStatus || row.receipt !== expectedPath
+      || row.source !== expectedSource
+      || (expectedStatus === "passed" ? row.error !== null
+        : typeof row.error !== "string" || row.error.length === 0)) {
+      fail(`18-PASS recovery summary receipt ${ordinalName} drifted from exact path/source/status`);
+    }
+  }
+  validatePass18ImportedLineage(summary.lineage?.imported, currentProfile);
+  if (summary.lineage?.continuation?.runId !== metadata.runId
+    || summary.lineage?.continuation?.runAttempt !== metadata.runAttempt
+    || summary.lineage?.continuation?.headSha !== metadata.headSha
+    || summary.lineage?.continuation?.inferenceSha !== HISTORICAL_INFERENCE_PIN
+    || summary.lineage?.continuation?.profileCellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || summary.lineage?.continuation?.profileArtifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256
+    || JSON.stringify(summary.lineage?.continuation?.executionOrdinals)
+      !== JSON.stringify(SPARSE_EXECUTION_ORDINALS)) {
+    fail("18-PASS recovery continuation lineage drifted from the exact audited run");
+  }
+  const empty = createHash("sha256").digest("hex");
+  if (summary.finalAuthorityLifecycle?.stage?.files !== 0
+    || summary.finalAuthorityLifecycle?.stage?.bytes !== 0
+    || summary.finalAuthorityLifecycle?.stage?.sha256 !== empty
+    || summary.finalAuthorityLifecycle?.derived?.files !== 0
+    || summary.finalAuthorityLifecycle?.derived?.bytes !== 0
+    || summary.finalAuthorityLifecycle?.derived?.sha256 !== empty
+    || summary.finalAuthorityLifecycle?.derivedNamespaces?.length !== 0
+    || summary.finalAuthorityLifecycle?.missingStoreAbsent !== true) {
+    fail("18-PASS recovery final authority cleanup is not exact and empty");
+  }
+}
+
+export async function selectPass18Recovery(
+  prefixCandidates, currentProfile, { validateCacheEvidence = validatePass18RecoveryCacheEvidence } = {},
+) {
+  validateProfile(currentProfile);
+  const root = path.resolve(prefixCandidates);
+  const entries = await readdir(root, { withFileTypes: true });
+  if (entries.length !== 1 || !entries[0].isDirectory() || entries[0].isSymbolicLink()) {
+    fail("expected exactly one exact 18-PASS recovery artifact candidate");
+  }
+  const candidate = path.join(root, entries[0].name);
+  const metadata = JSON.parse(await readFile(path.join(candidate, "artifact-metadata.json"), "utf8"));
+  validatePass18RecoveryMetadata(metadata);
+  const evidenceRoot = path.join(candidate, "evidence");
+  const files = await ordinaryTreeFiles(evidenceRoot);
+  const rootOrdinals = SPARSE_EXECUTION_ORDINALS.map((ordinal) => (
+    `${String(ordinal).padStart(2, "0")}-${EXPECTED_CELLS[ordinal - 1]}`
+  ));
+  const allowedTop = new Set([
+    "_imported-prefix", ...rootOrdinals,
+    "cache-preflight-initial.json", "cache-preflight.json", "campaign-summary.json",
+  ]);
+  if (files.some((file) => !allowedTop.has(path.relative(evidenceRoot, file).split(path.sep)[0]))) {
+    fail("18-PASS recovery artifact contains evidence outside the exact audited campaign");
+  }
+  const summary = JSON.parse(await readFile(path.join(evidenceRoot, "campaign-summary.json"), "utf8"));
+  validatePass18RecoverySummary(summary, currentProfile, metadata);
+  await validateCacheEvidence(evidenceRoot, currentProfile, summary);
+
+  const imported = new Set(SPARSE_IMPORTED_ORDINALS);
+  const receipts = [];
+  const failures = [];
+  const compatibility = [];
+  const archivedLifecycles = [];
+  for (let index = 0; index < currentProfile.cells.length; index += 1) {
+    const ordinal = index + 1;
+    const cell = { ...currentProfile.cells[index], ordinal };
+    const ordinalName = `${String(ordinal).padStart(2, "0")}-${cell.id}`;
+    const cellDir = path.join(evidenceRoot, ...(imported.has(ordinal)
+      ? ["_imported-prefix", ordinalName] : [ordinalName]));
+    const receipt = JSON.parse(await readFile(path.join(cellDir, "receipt.json"), "utf8"));
+    const provenance = ordinal <= IMPORTED_PREFIX_CELLS
+      ? { headSha: LEGACY_SCENEWORKS_HEAD, runId: "32570707303", runAttempt: "1" }
+      : ordinal <= RECOVERY_IMPORTED_PREFIX_CELLS
+        ? { headSha: RECOVERY_SCENEWORKS_HEAD, runId: RECOVERY_RUN_ID, runAttempt: RECOVERY_RUN_ATTEMPT }
+        : ordinal <= 17 && ordinal !== PASS18_EXECUTION_ORDINALS[0]
+          ? { headSha: SPARSE_RECOVERY_SCENEWORKS_HEAD, runId: SPARSE_RECOVERY_RUN_ID, runAttempt: SPARSE_RECOVERY_RUN_ATTEMPT }
+          : metadata;
+    validateRecoveryReceiptProvenance(receipt, cell, provenance, `18-PASS recovery receipt ${ordinalName}`);
+    if (ordinal <= IMPORTED_PREFIX_CELLS) {
+      validateTrustedLegacyImportedReceiptDocument(receipt);
+      const originalProfile = legacyPrefixProfile(currentProfile);
+      validateReceiptInternal(receipt, { ...originalProfile.cells[index], ordinal }, originalProfile, null, TRUSTED_LEGACY_IMPORT_CONTEXT);
+    } else {
+      validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+      validateReceipt(receipt, cell, currentProfile);
+    }
+    const rehashed = await evidenceFiles(cellDir);
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`18-PASS recovery receipt ${ordinalName} failed ${field} rehash`);
+      }
+    }
+    const expectedStatus = ordinal === PASS18_EXECUTION_ORDINALS[0] ? "failed" : "passed";
+    if (receipt.status !== expectedStatus) {
+      fail(`18-PASS recovery receipt ${ordinalName} is not the exact audited ${expectedStatus.toUpperCase()}`);
+    }
+    if (!imported.has(ordinal)) archivedLifecycles.push(receipt.authorityLifecycle);
+    if (expectedStatus === "failed") {
+      failures.push({ ordinal, cellId: cell.id, path: `${ordinalName}/receipt.json`, status: "failed" });
+      continue;
+    }
+    compatibility.push({
+      ordinal, cellId: cell.id, cellSemanticsSha256: canonicalSha256(currentProfile.cells[index]),
+    });
+    receipts.push({ cell: currentProfile.cells[index], ordinalName, receipt, root: cellDir });
+  }
+  if (JSON.stringify(receipts.map(({ cell }) => currentProfile.cells.indexOf(cell) + 1))
+      !== JSON.stringify(PASS18_IMPORTED_ORDINALS)
+    || JSON.stringify(failures.map(({ ordinal }) => ordinal)) !== JSON.stringify(PASS18_EXECUTION_ORDINALS)) {
+    fail("18-PASS recovery partition drifted from [1-13,15-19]/[14]");
+  }
+  if (canonicalSha256(summary.authorityLifecycle) !== canonicalSha256(archivedLifecycles)
+    || canonicalSha256(summary.diskFreeProbes)
+      !== canonicalSha256(archivedLifecycles.flatMap((lifecycle) => lifecycle.diskProbes))) {
+    fail("18-PASS recovery summary lifecycle/probes drifted from rehashed receipts");
+  }
+  return {
+    candidate, evidenceRoot, metadata, receipts, failures, compatibility,
+    sourceLineage: summary.lineage,
+  };
+}
+
+export async function importPass18Recovery(prefix, output) {
+  const destination = path.join(output, "_imported-prefix");
+  await mkdir(destination);
+  for (const receipt of prefix.receipts) {
+    await cp(receipt.root, path.join(destination, receipt.ordinalName), {
+      recursive: true, errorOnExist: true, force: false, dereference: false,
+    });
+  }
+  await ordinaryTreeFiles(destination);
+  for (const { ordinalName, receipt } of prefix.receipts) {
+    const rehashed = await evidenceFiles(path.join(destination, ordinalName));
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`copied 18-PASS recovery ${ordinalName} failed ${field} rehash`);
+      }
+    }
+  }
+  const lineage = {
+    kind: "terminal-single-cell-recovery",
+    sourceArtifactId: prefix.metadata.artifactId,
+    sourceArtifactName: prefix.metadata.artifactName,
+    sourceArtifactSize: prefix.metadata.artifactSize,
+    sourceArtifactDigest: prefix.metadata.artifactDigest,
+    sourceRunId: prefix.metadata.runId,
+    sourceRunAttempt: prefix.metadata.runAttempt,
+    sourceHeadSha: prefix.metadata.headSha,
+    sourceInferenceSha: prefix.metadata.inferenceSha,
+    sourceProfile: prefix.metadata.profile,
+    sourceCellSemanticsSha256: prefix.metadata.cellSemanticsSha256,
+    targetCellSemanticsSha256: EXPECTED_CELL_SEMANTICS_SHA256,
+    sourceArtifactSemanticsSha256: prefix.metadata.artifactSemanticsSha256,
+    importedOrdinals: PASS18_IMPORTED_ORDINALS,
+    executionOrdinals: PASS18_EXECUTION_ORDINALS,
+    compatibility: prefix.compatibility,
+    quarantinedFailures: prefix.failures,
+    priorLineage: prefix.sourceLineage,
+  };
+  await writeFile(path.join(destination, "lineage.json"), `${JSON.stringify(lineage, null, 2)}\n`, {
+    encoding: "utf8", flag: "wx",
+  });
+  return {
+    lineage,
+    outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
+      id: cell.id, status: "passed", receipt: `_imported-prefix/${ordinalName}/receipt.json`,
+      error: null, emergencyReceiptError: null, source: "imported-pass18-recovery",
     })),
   };
 }
@@ -3323,18 +3651,24 @@ export function validateCachePreflightEvidence(document, {
         === JSON.stringify(Array.from({ length: 10 }, (_, index) => index + 10));
       const sparse = JSON.stringify(plannedExecutionOrdinals)
         === JSON.stringify(SPARSE_EXECUTION_ORDINALS);
+      const pass18 = JSON.stringify(plannedExecutionOrdinals)
+        === JSON.stringify(PASS18_EXECUTION_ORDINALS);
       if (JSON.stringify(remainingArtifactIds) !== JSON.stringify(expectedRemainingIds)
         || (startTen && (JSON.stringify(expectedRemainingIds)
           !== JSON.stringify(RECOVERY_REMAINING_ARTIFACT_IDS)
           || expectedFileCount !== RECOVERY_REMAINING_FILES))
         || (sparse && (JSON.stringify(expectedRemainingIds)
           !== JSON.stringify(SPARSE_REMAINING_ARTIFACT_IDS)
-          || expectedFileCount !== SPARSE_REMAINING_FILES))) {
+          || expectedFileCount !== SPARSE_REMAINING_FILES))
+        || (pass18 && (JSON.stringify(expectedRemainingIds)
+          !== JSON.stringify(PASS18_REMAINING_ARTIFACT_IDS)
+          || expectedFileCount !== PASS18_REMAINING_FILES))) {
         fail("passed cache preflight execution/census drifted from the reviewed profile");
       }
       const legacyEvidence = downloadEvidenceSha256 === LEGACY_DOWNLOAD_EVIDENCE_SHA256;
       const expectedSourceBytes = sparse
         ? legacyEvidence ? LEGACY_SPARSE_REMAINING_SOURCE_BYTES : SPARSE_REMAINING_SOURCE_BYTES
+        : pass18 ? PASS18_REMAINING_SOURCE_BYTES
         : startTen
           ? legacyEvidence ? LEGACY_RECOVERY_REMAINING_SOURCE_BYTES : RECOVERY_REMAINING_SOURCE_BYTES
           : legacyEvidence ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
@@ -3564,10 +3898,14 @@ export async function runCampaign(args, options = {}) {
   const allOrdinals = profile.cells.map((_, index) => index + 1);
   const legacyContinuationOrdinals = allOrdinals.slice(IMPORTED_PREFIX_CELLS);
   const requestedOrdinals = options.executionOrdinals ?? (options.importedPrefix
-    ? legacyContinuationOrdinals : SPARSE_EXECUTION_ORDINALS);
+    ? legacyContinuationOrdinals : PASS18_EXECUTION_ORDINALS);
   const executionOrdinals = exactExecutionOrdinals(profile, requestedOrdinals);
   let imported = { lineage: null, outcomes: [] };
-  if (JSON.stringify(executionOrdinals) === JSON.stringify(SPARSE_EXECUTION_ORDINALS)) {
+  if (JSON.stringify(executionOrdinals) === JSON.stringify(PASS18_EXECUTION_ORDINALS)) {
+    const selected = options.prefixSelection
+      ?? await selectPass18Recovery(prefixCandidates, profile);
+    imported = options.importedPrefix ?? await importPass18Recovery(selected, output);
+  } else if (JSON.stringify(executionOrdinals) === JSON.stringify(SPARSE_EXECUTION_ORDINALS)) {
     const selected = options.prefixSelection
       ?? await selectSparseRecovery(prefixCandidates, profile);
     imported = options.importedPrefix ?? await importSparseRecovery(selected, output);
@@ -3604,6 +3942,13 @@ export async function runCampaign(args, options = {}) {
       || remainingArtifactIds.length !== SPARSE_REMAINING_AUTHORITIES
       || remainingFileCount !== SPARSE_REMAINING_FILES)) {
     fail(`sparse recovery scope drifted: expected ${SPARSE_REMAINING_AUTHORITIES} authorities / ${SPARSE_REMAINING_FILES} files`);
+  }
+  if (downloadEvidenceSha256 === CURRENT_DOWNLOAD_EVIDENCE_SHA256
+    && JSON.stringify(executionOrdinals) === JSON.stringify(PASS18_EXECUTION_ORDINALS)
+    && (JSON.stringify(remainingArtifactIds) !== JSON.stringify(PASS18_REMAINING_ARTIFACT_IDS)
+      || remainingArtifactIds.length !== PASS18_REMAINING_AUTHORITIES
+      || remainingFileCount !== PASS18_REMAINING_FILES)) {
+    fail(`18-PASS recovery scope drifted: expected ${PASS18_REMAINING_AUTHORITIES} authorities / ${PASS18_REMAINING_FILES} files`);
   }
   const sourceAudits = new Map();
   const cacheProvisioning = { sourceCensus: [], staging: [], finalOffline: [] };
@@ -4532,6 +4877,10 @@ async function main() {
       offlineBeforeCells: false,
     });
     const profile = validateProfile(loadProfile(profilePath));
+    const pins = inferencePins(await readFile("Cargo.toml", "utf8"));
+    if (pins.length !== 1 || pins[0] !== FROZEN_INFERENCE_PIN) {
+      fail("terminal SceneWorks manifests do not bind the corrected frozen inference pin");
+    }
     const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
     validateManifestAuthorities(profile, manifest);
     const downloadEvidenceBytes = await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8");
