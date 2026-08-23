@@ -5317,6 +5317,37 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
             {
                 te_bytes = te_bytes.saturating_add(component_bytes);
             }
+            // A component staged from OUTSIDE a `Dir` weights root SUPERSEDES any identically named
+            // subtree INSIDE that root: the loader reads the staged copy, so the in-root copy is dead
+            // weight the `sum_safetensors_bytes(dir)` above already (wrongly) counted. Subtract it.
+            //
+            // MiniMax-H3 is the motivating case (sc-17137). `spec.weights` is the shared UPSTREAM
+            // snapshot — the VAEs and tokenizer a render genuinely loads — but that same snapshot also
+            // carries the dense `transformer/`, `transformer_ref/` and `text_encoder/`, ~180 GB a
+            // q4/q8 render never touches because the tiered DiT (`components["transformer"]`) and the
+            // packed encoder (`components["text_encoder"]`) are staged in from `SceneWorks/
+            // minimax-h3-mlx`. Without this subtraction the flat sum quotes ~250 GB for a model whose
+            // real q4 resident set is ~55 GB, so a 128 GB Mac refuses a model that fits with room to
+            // spare. The `<name>_ref` sibling covers a DiT split into base/reference partitions (the
+            // reference partition is likewise staged from the tier repo, so the upstream copy is dead).
+            //
+            // No-op for every model whose weights dir has no subdir named like a staged component —
+            // i.e. whose `spec.weights` IS its DiT rather than a companion root — so it cannot move any
+            // other model's admission. Exact cancellation: the subtree scan re-walks the same files the
+            // whole-tree scan counted (`sum_safetensors_bytes` dedups by canonical dir per call).
+            if let WeightsSource::Dir(root) = &spec.weights {
+                let superseded = sum_safetensors_bytes(&root.join(component_id)).saturating_add(
+                    sum_safetensors_bytes(&root.join(format!("{component_id}_ref"))),
+                );
+                total_bytes = total_bytes.saturating_sub(superseded);
+                // The dir scan measured the DENSE upstream encoder into `te_bytes`; once superseded,
+                // the resident (and sequential-droppable) text encoder is the staged packed one. Keep
+                // the `Σweights − te` staged peak coherent rather than subtracting bytes no longer
+                // resident. Guarded to the packed-TE component key MiniMax-H3 stages (sc-19120).
+                if superseded > 0 && component_id == "text_encoder" {
+                    te_bytes = component_bytes;
+                }
+            }
         }
     }
     // The optional selected encoder is a typed source, not a named component. Include its exact
@@ -15988,6 +16019,79 @@ mod tests {
             }),
         );
         assert_eq!(projected_te, 450);
+    }
+
+    /// sc-17137 — MiniMax-H3's INVERTED staging must not price the dense upstream it supersedes.
+    ///
+    /// Unlike Mage-Flow (weights dir = the tier DiT, TE/VAE staged on top), MiniMax-H3 points
+    /// `spec.weights` at the SHARED UPSTREAM snapshot and stages the tiered DiT and packed encoder in
+    /// as `components["transformer"]` / `components["text_encoder"]` from a different repo
+    /// (`video_load_spec`, sc-19508 / sc-19120). That upstream snapshot also physically carries the
+    /// DENSE `transformer/`, `transformer_ref/` and `text_encoder/`, which a q4/q8 render never loads.
+    /// The flat `sum_safetensors_bytes(weights)` counted all three — quoting ~250 GB (dense 62+62+62 +
+    /// VAEs 11 + staged 18+18) for a model whose real q4 resident set is ~65 GB, so a 128 GB Mac
+    /// refused a model that fits with room to spare (the sc-17137 first-run report). The staged
+    /// components must SUPERSEDE the same-named upstream subtrees, ref partition included.
+    #[test]
+    fn minimax_h3_shared_root_does_not_price_the_dense_partitions_the_tier_supersedes() {
+        use crate::test_fixture_disk::create_sparse_weights;
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        let fixture = tempfile::tempdir().expect("minimax fixture");
+        // The shared UPSTREAM snapshot `spec.weights` points at: the VAEs a render loads, PLUS the
+        // dense DiT partitions and dense encoder the tiered load never touches.
+        let base = fixture.path().join("upstream");
+        create_sparse_weights(&base.join("transformer/model.safetensors"), 62 * GIB);
+        create_sparse_weights(&base.join("transformer_ref/model.safetensors"), 62 * GIB);
+        create_sparse_weights(&base.join("text_encoder/model.safetensors"), 62 * GIB);
+        create_sparse_weights(&base.join("vae/model.safetensors"), 10 * GIB);
+        create_sparse_weights(&base.join("audio_vae/model.safetensors"), GIB);
+        // The per-tier rehost the DiT and packed encoder are staged from (a DIFFERENT root).
+        let tier = fixture.path().join("tier/q4");
+        create_sparse_weights(&tier.join("transformer/model.safetensors"), 18 * GIB);
+        create_sparse_weights(&tier.join("text_encoder/model.safetensors"), 18 * GIB);
+
+        let spec = LoadSpec::new(WeightsSource::Dir(base))
+            .with_component("transformer", WeightsSource::Dir(tier.join("transformer")))
+            .with_component(
+                "text_encoder",
+                WeightsSource::Dir(tier.join("text_encoder")),
+            );
+
+        let (total, te, _) = spec_component_bytes("minimax_h3", &spec);
+        // Only what the tiered render actually loads: the two VAEs from upstream plus the staged DiT
+        // and packed encoder. The dense 62+62+62 GiB of superseded transformer / transformer_ref /
+        // encoder is gone.
+        assert_eq!(
+            total,
+            (10 + 1 + 18 + 18) * GIB,
+            "the dense upstream partitions the tier supersedes must not be priced"
+        );
+        // The resident (sequential-droppable) encoder is the staged packed one, not the dense subtree
+        // the dir scan measured — registry-free, so it holds on every platform.
+        assert_eq!(
+            te,
+            18 * GIB,
+            "te must follow the staged packed encoder, not the dense upstream"
+        );
+
+        // The admission flip this fixes: 47 GiB weights + 18 headroom = 65 fits a 128 GB Mac as
+        // Resident; pricing the dense partitions (the pre-fix sum) is what forced the Reject.
+        let budget = Some(MlxMemoryBudget { total_gb: 128.0 });
+        assert!(
+            !matches!(
+                decide_residency(total, te, budget, true),
+                ResidencyOutcome::Reject { .. }
+            ),
+            "the real q4 footprint fits 128 GB — the gate must stop refusing it"
+        );
+        assert!(
+            matches!(
+                decide_residency((62 * 3 + 11 + 36) * GIB, 62 * GIB, budget, true),
+                ResidencyOutcome::Reject { .. }
+            ),
+            "guard: the pre-fix sum (dense partitions included) is what over-rejected"
+        );
     }
 
     /// sc-15154 — the Mage q4 admit boundary, from the REAL published install sizes.
