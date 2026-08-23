@@ -265,6 +265,15 @@ describe("App - the one-time embedded-workflow choice (sc-16390)", () => {
 
     await click(buttonNamed("Go to settings"));
     await settle();
+    // SimpleSettings arms its Sharing focus in a `setTimeout(0)` MACROTASK, and `settle()` only
+    // drains microtasks and lazy-screen imports — whether the timer had fired by now depended on
+    // how many event-loop turns the lazy imports happened to take, which the sc-17137 main sync
+    // tightened into a visible race. Grant the timer its turn explicitly instead of relying on it.
+    await act(async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 1);
+      });
+    });
 
     await expect(gate).resolves.toBe(false);
     expect(document.body.querySelector(".su-group-title")?.textContent).toBe("Appearance");

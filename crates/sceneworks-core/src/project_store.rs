@@ -1896,24 +1896,36 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
-        if !content_type.starts_with("image/") && !content_type.starts_with("video/") {
+        if !content_type.starts_with("image/")
+            && !content_type.starts_with("video/")
+            && !content_type.starts_with("audio/")
+        {
             return Err(ProjectStoreError::BadRequest(
-                "Only image and video uploads are supported".to_owned(),
+                "Only image, video and audio uploads are supported".to_owned(),
             ));
         }
 
+        // sc-18650: audio is normalized by a DIFFERENT rule than image/video, so it is dispatched
+        // here rather than folded into `normalize_image_upload` (which passes every non-image
+        // through untouched). See `normalize_audio_upload` for why an uploaded clip is always
+        // converted rather than stored as sent.
+        //
         // sc-6143: transcode a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless
         // PNG before storing, so every downstream decode site, thumbnail, and preview reads a format
         // it supports. Supported formats and videos pass through unchanged.
-        let normalized = normalize_image_upload(
-            &upload.source_path,
-            &content_type,
-            &upload.filename,
-            &upload_dir,
-            // sc-15949: a shared image may carry the sanitized recipe that made it. Read it from
-            // the bytes the user handed us, before any transcode can strip it.
-            WorkflowScan::Read,
-        )?;
+        let normalized = if content_type.starts_with("audio/") {
+            normalize_audio_upload(&upload.source_path, &upload_dir)?
+        } else {
+            normalize_image_upload(
+                &upload.source_path,
+                &content_type,
+                &upload.filename,
+                &upload_dir,
+                // sc-15949: a shared image may carry the sanitized recipe that made it. Read it from
+                // the bytes the user handed us, before any transcode can strip it.
+                WorkflowScan::Read,
+            )?
+        };
         let content_type = normalized.content_type.clone();
 
         let asset_id = format!("asset_{}", random_hex(16)?);
@@ -1940,24 +1952,41 @@ impl ProjectStore {
             })
             .to_owned();
 
+        let media_type = media_type_for_mime(&content_type)?;
+        let mut file = json!({
+            "path": media_rel,
+            "mimeType": content_type,
+            "width": Value::Null,
+            "height": Value::Null,
+            "duration": Value::Null,
+            "fps": Value::Null
+        });
+        // An audio upload's `file` block additionally carries the clip facts the audio tile, the
+        // transport and the waveform all read — the SAME three fields `build_audio_sidecar_parts`
+        // writes for an Audio Studio render, so the two doors an audio asset can come through
+        // produce one shape (sc-18650). Without them the tile renders `0:00` and the waveform has
+        // nothing to size against.
+        //
+        // MEASURED off the stored WAV, never trusted from the upload: the transcode above is what
+        // decided them. They are added only for audio, so no image/video sidecar grows a key.
+        if media_type == "audio" {
+            if let Some(facts) = wav_facts(&media_path) {
+                file["duration"] = json!(facts.duration_secs);
+                file["sampleRate"] = json!(facts.sample_rate);
+                file["channels"] = json!(facts.channels);
+            }
+        }
         let mut asset = json!({
             "schemaVersion": 1,
             "id": asset_id,
             "projectId": project_id,
             "generationSetId": Value::Null,
-            "type": media_type_for_mime(&content_type)?,
+            "type": media_type,
             "displayName": display_name,
             "createdAt": created_at,
             // Manual imports are Library media in their own right (sc-2024).
             "origin": "upload",
-            "file": {
-                "path": media_rel,
-                "mimeType": content_type,
-                "width": Value::Null,
-                "height": Value::Null,
-                "duration": Value::Null,
-                "fps": Value::Null
-            },
+            "file": file,
             "status": {
                 "favorite": false,
                 "rating": 0,
@@ -4787,7 +4816,14 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
     // The list-valued source ids are parents too — mv2v's clips, the reference-driven modes'
     // subject images, and ads2v's reference video. Without them those modes' provenance names
     // only a subset of what the clip was actually derived from (sc-12345).
-    let list_source_keys = ["sourceClipAssetIds", "referenceAssetIds"];
+    // sc-17160 adds the audio references: media the clip was genuinely derived from, so leaving
+    // them out would name only a subset of its provenance — the same gap sc-12345 closed for the
+    // clip and image lists.
+    let list_source_keys = [
+        "sourceClipAssetIds",
+        "referenceAssetIds",
+        "referenceAudioAssetIds",
+    ];
     let parents: Vec<Value> = source_keys
         .iter()
         .chain(std::iter::once(&"referenceClipAssetId"))
@@ -4817,7 +4853,7 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         Some(value) if !value.is_null() => value.clone(),
         _ => get(requested),
     };
-    let file = json!({
+    let mut file = json!({
         "path": get("mediaPath"),
         "mimeType": get("mimeType"),
         "width": get("width"),
@@ -4826,6 +4862,19 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "fps": measured("encodedFps", "fps"),
         "frameCount": fact.get("encodedFrameCount").cloned().unwrap_or(Value::Null),
     });
+    // sc-19577: whether the mp4 carries a soundtrack, measured off what the worker actually MUXED.
+    //
+    // Written ONLY when the fact carries it, and deliberately not defaulted to `false`. Every asset
+    // generated before sc-19577 has no such fact, and a `false` there would be a fresh claim that
+    // those clips are silent — which for the LTX renders among them is untrue. Absent means UNKNOWN
+    // and the UI shows nothing; `false` means measured-and-silent. Same shape `frameCount` would
+    // have needed had a wrong default been possible for it.
+    if let (Some(has_audio), Some(object)) = (
+        fact.get("hasAudio").filter(|value| value.is_boolean()),
+        file.as_object_mut(),
+    ) {
+        object.insert("hasAudio".to_owned(), has_audio.clone());
+    }
     // ...whereas `normalizedSettings` is the REPLAY record: the knobs the user picked off the
     // model's `limits.durations` / `limits.fps` menus, which "re-run this generation" (sc-12324 /
     // sc-12345) rebuilds the payload from. It must round-trip the ask, not the measurement.
@@ -4845,6 +4894,9 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "fitMode": get("fitMode"),
         "sourceClipAssetIds": list_or_empty("sourceClipAssetIds"),
         "referenceAssetIds": list_or_empty("referenceAssetIds"),
+        // sc-17160. `list_or_empty` keeps the array shape on facts written before this key
+        // existed, so the replay reader never distinguishes "absent" from "empty".
+        "referenceAudioAssetIds": list_or_empty("referenceAudioAssetIds"),
         "referenceClipAssetId": get("referenceClipAssetId"),
         "characterId": get("characterId"),
         "characterLookId": get("characterLookId"),
@@ -5106,6 +5158,125 @@ fn normalize_image_upload(
         extension: ".png".to_owned(),
         transcoded_temp: Some(temp_png),
         workflow,
+    })
+}
+
+/// Normalize an audio upload to the canonical PCM-16 RIFF/WAVE the product can actually read back
+/// (sc-18650), ALWAYS — there is no pass-through branch.
+///
+/// The rule is deliberately unlike [`normalize_image_upload`]'s, where an already-decodable PNG or
+/// JPEG is stored byte-for-byte. Audio has exactly one reader,
+/// `sceneworks_worker::audio_jobs::read_wav_pcm16`, and it accepts exactly one encoding, so
+/// "already supported" is a much narrower set than "already audio": a 24-bit WAV, a float WAV, or a
+/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Sniffing for that narrow set and
+/// branching would mean the conversion path only ran for some inputs — the shape of latent bug this
+/// story exists to remove — for a saving of one ffmpeg pass on a file measured in megabytes.
+///
+/// A conversion failure is a `BadRequest`: the caller named a file that is not decodable audio (or
+/// carries no audio stream), which is a fact about the upload, not about the host. The one host-shaped
+/// failure — no reachable ffmpeg — is reported through the same error with ffmpeg's own message, which
+/// says so.
+fn normalize_audio_upload(
+    source_path: &Path,
+    work_dir: &Path,
+) -> ProjectStoreResult<NormalizedUpload> {
+    let temp_wav = work_dir.join(format!("upload-transcode-{}.wav", random_hex(8)?));
+    crate::media_convert::transcode_to_wav_pcm16(source_path, &temp_wav).map_err(|error| {
+        let _ = fs::remove_file(&temp_wav);
+        ProjectStoreError::BadRequest(format!(
+            "Could not convert the uploaded audio to a supported format: {error}"
+        ))
+    })?;
+    Ok(NormalizedUpload {
+        source_path: temp_wav.clone(),
+        content_type: "audio/wav".to_owned(),
+        extension: ".wav".to_owned(),
+        transcoded_temp: Some(temp_wav),
+        // An audio file carries no SceneWorks workflow chunk — that envelope is a PNG ancillary
+        // chunk, and nothing writes an audio equivalent.
+        workflow: None,
+    })
+}
+
+/// The clip facts a stored PCM WAV declares in its own header: rate, channel count, and the duration
+/// those two plus the `data` chunk length imply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WavFacts {
+    sample_rate: u32,
+    channels: u16,
+    duration_secs: f64,
+}
+
+/// Read [`WavFacts`] out of a RIFF/WAVE header, or `None` if the file is not one this product wrote.
+///
+/// Header-only: it walks the chunk list for `fmt ` and `data` and reads the `data` chunk's declared
+/// LENGTH, never its bytes, so a 200 MB clip costs one small read. It is intentionally NOT a second
+/// `read_wav_pcm16` — that one lives in the worker, decodes samples, and answers a different
+/// question. This one answers "what does the sidecar record about this file", which the store has to
+/// answer without linking a decoder.
+fn wav_facts(path: &Path) -> Option<WavFacts> {
+    // The fixed prelude plus the largest offset read below (`fmt `'s 16-byte body).
+    let mut head = vec![0u8; 4096];
+    let read = {
+        use std::io::Read;
+        let mut file = fs::File::open(path).ok()?;
+        let mut filled = 0usize;
+        loop {
+            match file.read(&mut head[filled..]) {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(_) => return None,
+            }
+            if filled == head.len() {
+                break;
+            }
+        }
+        filled
+    };
+    let bytes = &head[..read];
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let le16 = |offset: usize| u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+    let le32 = |offset: usize| {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    };
+    let mut position = 12usize;
+    let mut format: Option<(u16, u32, u16)> = None; // (channels, sample_rate, bits)
+    let mut data_len: Option<u32> = None;
+    while position + 8 <= bytes.len() {
+        let id = &bytes[position..position + 4];
+        let size = le32(position + 4);
+        let body = position + 8;
+        if id == b"fmt " && size >= 16 && body + 16 <= bytes.len() {
+            format = Some((le16(body + 2), le32(body + 4), le16(body + 14)));
+        } else if id == b"data" {
+            data_len = Some(size);
+            break;
+        }
+        // RIFF chunks are word-aligned: an odd body is followed by a pad byte.
+        position = body + size as usize + (size as usize & 1);
+    }
+    let (channels, sample_rate, bits) = format?;
+    if channels == 0 || sample_rate == 0 || bits == 0 {
+        return None;
+    }
+    let frame_bytes = u32::from(channels) * u32::from(bits) / 8;
+    let duration_secs = match (data_len, frame_bytes) {
+        (Some(len), frame) if frame > 0 => f64::from(len / frame) / f64::from(sample_rate),
+        _ => 0.0,
+    };
+    Some(WavFacts {
+        sample_rate,
+        channels,
+        // Three decimals, the precision `build_render_asset` and the audio sidecar already record
+        // durations at.
+        duration_secs: (duration_secs * 1000.0).round() / 1000.0,
     })
 }
 
@@ -5686,6 +5857,9 @@ fn safe_filename(value: &str, fallback: &str) -> String {
     }
 }
 
+/// The sidecar `type` an upload's mime maps to. `"audio"` since sc-18650 — the same string
+/// `build_generated_asset_sidecar` dispatches on for an Audio Studio render, so an imported clip and
+/// a rendered one are one asset kind rather than two.
 fn media_type_for_mime(mime_type: &str) -> ProjectStoreResult<&'static str> {
     if mime_type.starts_with("image/") {
         return Ok("image");
@@ -5693,8 +5867,11 @@ fn media_type_for_mime(mime_type: &str) -> ProjectStoreResult<&'static str> {
     if mime_type.starts_with("video/") {
         return Ok("video");
     }
+    if mime_type.starts_with("audio/") {
+        return Ok("audio");
+    }
     Err(ProjectStoreError::BadRequest(
-        "Only image and video uploads are supported".to_owned(),
+        "Only image, video and audio uploads are supported".to_owned(),
     ))
 }
 
@@ -5729,12 +5906,19 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
 /// document/script extension.
 ///
 /// Every extension here re-derives, through `guess_mime_from_filename`, to a mime that starts with
-/// `image/` or `video/` and is NOT `image/svg+xml` — the property the tests pin.
+/// `image/`, `video/` or `audio/` and is NOT `image/svg+xml` — the property the tests pin.
+///
+/// `wav` is the only audio entry and that is not an oversight (sc-18650): `normalize_audio_upload`
+/// converts EVERY audio upload to PCM-16 RIFF/WAVE, so `.wav` is the only extension an audio asset
+/// is ever stored under. An `.mp3` is admitted at the door and stored `.wav`; the source extension
+/// never reaches the filesystem, so it never needs to be on this list.
 const SAFE_UPLOAD_EXTENSIONS: &[&str] = &[
     // Raster images (SVG deliberately omitted — it is script-capable).
     "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic",
     "heif", // Video.
-    "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp", "3g2",
+    "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp",
+    "3g2", // Audio: the single canonical stored form.
+    "wav",
 ];
 
 /// True when `extension` (no leading dot, already lowercased) is an allow-listed media extension
@@ -9136,6 +9320,69 @@ mod tests {
         assert_eq!(asset["file"]["frameCount"], Value::Null);
     }
 
+    /// sc-19577: `file.hasAudio` is THREE-STATE, and each state is asserted against a fact that
+    /// genuinely has it.
+    ///
+    /// This is the acute case for the sc-19488 "a test asserting a default passes whether or not the
+    /// code ran" trap: `true` alone would pass against a hard-coded `true`, and `false` alone against
+    /// an omission. So all three facts are built and all three outcomes pinned:
+    ///
+    /// * a render that produced audio → `true`;
+    /// * a render that produced none → `false` (NOT absent — "measured, and silent" is a fact);
+    /// * a fact written before sc-19577 → ABSENT (NOT `false` — claiming an LTX clip from last month
+    ///   is silent is a fresh lie about a file on disk).
+    #[test]
+    fn video_sidecar_records_the_muxed_soundtrack_as_three_distinct_states() {
+        let fact = |audio: Option<bool>| {
+            let mut fact = json!({
+                "type": "video",
+                "assetId": "asset-av",
+                "mediaPath": "assets/videos/av.mp4",
+                "mimeType": "video/mp4",
+                "width": 1344, "height": 768, "duration": 5.1667, "fps": 24,
+                "encodedFrameCount": 124, "encodedDuration": 5.1667, "encodedFps": 24,
+                "quality": "balanced", "family": "minimax-h3",
+                "seed": 7, "displayName": "AV", "createdAt": "2026-08-15T00:00:00Z",
+                "mode": "text_to_video", "model": "minimax_h3", "adapter": "mlx_minimax_h3",
+                "prompt": "a lighthouse keeper hums", "negativePrompt": "", "loras": [],
+                "rawAdapterSettings": {},
+                "timelineContext": {},
+            });
+            if let (Some(audio), Some(object)) = (audio, fact.as_object_mut()) {
+                object.insert("hasAudio".to_owned(), json!(audio));
+            }
+            build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact)
+        };
+
+        assert_eq!(fact(Some(true))["file"]["hasAudio"], json!(true));
+        assert_eq!(
+            fact(Some(false))["file"]["hasAudio"],
+            json!(false),
+            "a render that produced no audio must record that it did not — the SAME model id \
+             produces both, so the record is the only place the difference lives"
+        );
+        assert!(
+            fact(None)["file"].get("hasAudio").is_none(),
+            "a pre-sc-19577 fact must leave the key ABSENT; defaulting it to false would claim \
+             every existing LTX render is silent"
+        );
+
+        // A non-boolean `hasAudio` is not a measurement and must not be carried through as one.
+        let mut junk = json!({
+            "type": "video", "assetId": "a", "mediaPath": "assets/videos/j.mp4",
+            "mimeType": "video/mp4", "width": 16, "height": 16, "duration": 1.0, "fps": 24,
+            "quality": "balanced", "family": "ltx", "seed": 1, "displayName": "J",
+            "createdAt": "2026-08-15T00:00:00Z", "mode": "text_to_video", "model": "ltx_2_3",
+            "adapter": "mlx_ltx", "prompt": "j", "negativePrompt": "", "loras": [],
+            "rawAdapterSettings": {}, "timelineContext": {},
+        });
+        junk.as_object_mut()
+            .expect("object")
+            .insert("hasAudio".to_owned(), json!("yes"));
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &junk);
+        assert!(asset["file"].get("hasAudio").is_none());
+    }
+
     /// sc-12345: the fit and the list-valued source ids survive onto `recipe.normalizedSettings`
     /// so the sc-12324 replay can rebuild the form, and every source asset lands in
     /// `lineage.parents` — not just the singular ones. ads2v is the densest mode.
@@ -9201,8 +9448,31 @@ mod tests {
         let old_normalized = &old["recipe"]["normalizedSettings"];
         assert_eq!(old_normalized["referenceAssetIds"], json!([]));
         assert_eq!(old_normalized["sourceClipAssetIds"], json!([]));
+        assert_eq!(old_normalized["referenceAudioAssetIds"], json!([]));
         assert_eq!(old_normalized["fitMode"], Value::Null);
         assert_eq!(old["lineage"]["parents"], json!([]));
+
+        // sc-17160: the audio references replay and count as parents for the same reason the
+        // image and clip lists do — a re-run that omits them renders the same prompt with its
+        // audio conditioning silently gone, which is invisible in the output.
+        let ref2va = json!({
+            "type": "video",
+            "assetId": "asset-ref2va",
+            "mediaPath": "assets/videos/ref2va.mp4",
+            "mimeType": "video/mp4",
+            "mode": "reference_to_video", "model": "minimax_h3",
+            "referenceAssetIds": ["ref-1"],
+            "referenceAudioAssetIds": ["voice-1", "music-1"],
+        });
+        let multimodal = build_generated_asset_sidecar("project-1", "job-4", "genset-1", &ref2va);
+        assert_eq!(
+            multimodal["recipe"]["normalizedSettings"]["referenceAudioAssetIds"],
+            json!(["voice-1", "music-1"])
+        );
+        assert_eq!(
+            multimodal["lineage"]["parents"],
+            json!(["ref-1", "voice-1", "music-1"])
+        );
     }
 
     #[test]
@@ -11050,13 +11320,15 @@ mod tests {
         );
         // SVG is script-capable and deliberately excluded, so it never survives as `.svg`.
         assert_eq!(upload_extension("logo.svg", "image/svg+xml"), ".bin");
-        // Every allow-listed extension re-derives to an inert image/video serve mime — never
+        // Every allow-listed extension re-derives to an inert image/video/audio serve mime — never
         // `text/html` or `image/svg+xml` — which is the property `project_file` relies on.
         for extension in SAFE_UPLOAD_EXTENSIONS {
             let mime = guess_mime_from_filename(&format!("stored.{extension}"))
                 .unwrap_or_else(|| format!("no mime for .{extension}"));
             assert!(
-                mime.starts_with("image/") || mime.starts_with("video/"),
+                mime.starts_with("image/")
+                    || mime.starts_with("video/")
+                    || mime.starts_with("audio/"),
                 ".{extension} serves inert media mime, got {mime}"
             );
             assert_ne!(mime, "image/svg+xml", ".{extension} must not serve svg");
@@ -11127,6 +11399,145 @@ mod tests {
         assert!(webm_rel.ends_with(".webm"), "webm kept, got {webm_rel}");
         let webm_served = store.project_file(&project.id, webm_rel).expect("serves");
         assert_eq!(webm_served.content_type, "video/webm");
+    }
+
+    /// A minimal RIFF/WAVE file carrying `samples` frames of 32-bit FLOAT PCM (`audioFormat = 3`).
+    ///
+    /// Float on purpose: it is a perfectly ordinary `.wav` that `read_wav_pcm16` REFUSES ("must be
+    /// PCM 16-bit"), so a store that admitted audio without converting it would produce an asset
+    /// the product cannot read. It is the cheapest fixture that proves the conversion RAN rather
+    /// than that the bytes were copied.
+    #[cfg(test)]
+    fn float_wav(sample_rate: u32, channels: u16, samples: usize) -> Vec<u8> {
+        let bits = 32u16;
+        let block_align = channels * bits / 8;
+        let data_len = samples * usize::from(block_align);
+        let mut wav = Vec::with_capacity(44 + data_len);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes()); // WAVE_FORMAT_IEEE_FLOAT
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * u32::from(block_align)).to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for index in 0..samples {
+            let value = ((index % 64) as f32 / 64.0) - 0.5;
+            wav.extend_from_slice(&value.to_le_bytes());
+        }
+        wav
+    }
+
+    /// sc-18650: an AUDIO upload is admitted, typed `audio`, normalized to the PCM-16 RIFF/WAVE the
+    /// product's only audio decoder reads, and carries the clip facts an Audio Studio render does.
+    ///
+    /// This is the whole reason the reference-audio picker's dropzone existed with a zero success
+    /// rate: `import_asset` refused everything but `image/`+`video/`, so a user handed
+    /// "Could not import the selected audio file." for every file they chose. Each assertion below
+    /// is one link in the chain that had to hold for that dropzone to mean anything.
+    ///
+    /// Soft-skips where no ffmpeg is reachable, the same posture as the sibling transcode test —
+    /// there is no `sips` equivalent for audio, so ffmpeg is the only converter on every platform.
+    #[test]
+    fn import_asset_admits_audio_and_normalizes_it_to_pcm16_wav() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Audio").expect("project creates");
+
+        let source = temp_dir.path().join("upload-take");
+        std::fs::write(&source, float_wav(24_000, 1, 6_000)).expect("source writes");
+        // `content_type: None` drives the `guess_mime_from_filename` path — the shape a browser
+        // produces when it reports `application/octet-stream` for a media file it does not know.
+        let imported = match store.import_asset(
+            &project.id,
+            UploadAsset {
+                filename: "take.wav".to_owned(),
+                content_type: None,
+                source_path: source,
+                source_asset_id: None,
+                provenance: None,
+            },
+        ) {
+            Ok(asset) => asset,
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("ffmpeg") {
+                    println!("sc-18650: no ffmpeg reachable on this host ({message}); skipping");
+                    return;
+                }
+                panic!("an audio upload must import: {message}");
+            }
+        };
+
+        // 1. It is an AUDIO asset, the same kind an Audio Studio render produces — so it appears in
+        //    `VideoStudio`'s `assets.filter((asset) => asset.type === "audio")` and satisfies the
+        //    picker's `assetCanRenderAsAudio`.
+        assert_eq!(imported["type"], json!("audio"));
+        assert_eq!(imported["origin"], json!("upload"));
+        assert_eq!(imported["file"]["mimeType"], json!("audio/wav"));
+
+        // 2. It is stored under an allow-listed extension and SERVES an inert audio mime, the
+        //    sc-8872 property every upload has to keep.
+        let rel = imported["file"]["path"].as_str().expect("path");
+        assert!(rel.ends_with(".wav"), "audio stores as .wav, got {rel}");
+        let served = store.project_file(&project.id, rel).expect("serves");
+        assert!(
+            served.content_type.starts_with("audio/"),
+            "an audio asset serves an audio mime, got {}",
+            served.content_type
+        );
+
+        // 3. The stored bytes are PCM 16-bit — the source was 32-bit float, which `read_wav_pcm16`
+        //    refuses. A store that copied the upload through would fail here, and only here.
+        let stored = std::fs::read(Path::new(&project.path).join(rel)).expect("stored reads");
+        assert_eq!(&stored[0..4], b"RIFF");
+        assert_eq!(&stored[8..12], b"WAVE");
+        assert_eq!(
+            u16::from_le_bytes([stored[20], stored[21]]),
+            1,
+            "the stored WAV declares PCM (audioFormat 1), not the source's IEEE float"
+        );
+        assert_eq!(
+            u16::from_le_bytes([stored[34], stored[35]]),
+            16,
+            "the stored WAV is 16-bit"
+        );
+
+        // 4. The sidecar carries the clip facts the audio tile, transport and waveform read — and
+        //    they are the SOURCE's rate and layout, because the conversion normalizes the ENCODING
+        //    and nothing else.
+        assert_eq!(imported["file"]["sampleRate"], json!(24_000));
+        assert_eq!(imported["file"]["channels"], json!(1));
+        let duration = imported["file"]["duration"].as_f64().expect("duration");
+        assert!(
+            (duration - 0.25).abs() < 0.01,
+            "6000 frames @ 24 kHz is 0.25 s, got {duration}"
+        );
+
+        // 5. Everything that is not media is still refused — widening the gate must not have
+        //    turned it into "anything goes".
+        let script = temp_dir.path().join("upload-script");
+        std::fs::write(&script, b"#!/bin/sh\nrm -rf /\n").expect("source writes");
+        let refused = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "payload.sh".to_owned(),
+                    content_type: Some("text/x-shellscript".to_owned()),
+                    source_path: script,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect_err("a non-media upload is still refused");
+        assert!(
+            refused.to_string().contains("image, video and audio"),
+            "the refusal names what IS supported: {refused}"
+        );
     }
 
     /// sc-6143: a valid-but-unsupported image (BMP here) is transcoded to lossless PNG at import,

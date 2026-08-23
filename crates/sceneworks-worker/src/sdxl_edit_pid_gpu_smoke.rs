@@ -153,6 +153,7 @@ fn sdxl_edit_pid_gpu_smoke() {
         tokenizer_clip_l: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_L_DIR")),
         tokenizer_clip_bigg: WeightsSource::Dir(env_path("SDXL_TOKENIZER_CLIP_BIGG_DIR")),
         vae_fp16_fix: WeightsSource::Dir(env_path("SDXL_VAE_FP16_FIX_DIR")),
+        // The smoke drives the stock edit build — no user LoRA/LoKr stack.
         adapters: Vec::new(),
     })
     .expect("load candle SdxlEdit");

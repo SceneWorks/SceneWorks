@@ -952,6 +952,21 @@ pub(crate) struct VideoJobRequest {
     /// The worker pushes it as a second `Conditioning::VideoClip`.
     #[serde(default)]
     pub(crate) reference_clip_asset_id: Option<String>,
+    /// Reference **audio** clips for a multi-modal reference video mode (sc-17160,
+    /// MiniMax-H3 Ref2VA). The audio sibling of [`Self::reference_asset_ids`]: the worker
+    /// resolves each id through the project-scoped asset guard and pushes one
+    /// `Conditioning::ReferenceAudio` per entry.
+    ///
+    /// Serialized unconditionally, exactly like the two id lists above, so the enqueued
+    /// payload has one shape and a replay reader never has to distinguish "absent" from
+    /// "empty" (the sc-12345 lesson).
+    ///
+    /// Bounded twice: by the payload-sanity blanket `MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS`
+    /// in `validate_video_job`, and — the binding one — by the model's declared
+    /// `limits.maxReferenceAudioAssets`, which defaults to 0 so no already-shipped video
+    /// model accepts one.
+    #[serde(default)]
+    pub(crate) reference_audio_asset_ids: Vec<String>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
     #[serde(default)]
@@ -1104,6 +1119,17 @@ pub(crate) struct ModelDownloadRequest {
     /// else the first supported entry) — the back-compat single-variant behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) variant: Option<String>,
+    /// The caller asserts the user has accepted the license of the weights this request FETCHES
+    /// (sc-17227). Read by `create_model_download_job` and `create_lora_download_job`, which share
+    /// this body. Consulted when the catalog entry the path id names carries
+    /// `requiresLicenseAcknowledgment`, AND when any repo the request would queue resolves against
+    /// `license_acknowledgment_repo_index` — the same repo-keyed gate `POST /api/v1/jobs` applies,
+    /// so the typed and generic doors answer the same repo the same way. The gated repos are
+    /// PUBLIC and therefore have no credential check to fail behind. Defaults to `false`, so a
+    /// client that does not know about the field is refused rather than let through: the
+    /// acknowledgment must be affirmatively asserted, never assumed.
+    #[serde(default)]
+    pub(crate) license_acknowledged: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1144,6 +1170,14 @@ pub(crate) struct ModelImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227). Consulted only when `repo`/`sourceUrl` resolves to a catalog entry carrying
+    /// `requiresLicenseAcknowledgment` — the same repo-keyed gate `POST /api/v1/jobs` applies —
+    /// and defaults to `false` so a client that has never heard of the field is refused rather
+    /// than let through. Serialized onto the queued job (and only when true) so a retry of an
+    /// authorized import re-validates against the assertion the original request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default, skip_deserializing, skip_serializing_if = "bool_is_false")]
     pub(crate) uploaded_source_path: bool,
 }
@@ -1183,6 +1217,14 @@ pub(crate) struct LoraImportRequest {
     /// repo imports are verified automatically from HF's own per-file digests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expected_sha256: Option<String>,
+    /// The caller asserts the user has accepted the licence of the model this import FETCHES
+    /// (sc-17227) — the same field, default, and meaning as on [`ModelImportRequest`]. A LoRA
+    /// import takes a caller-supplied `repo`/`sourceUrl` and never looks it up in the LoRA catalog,
+    /// so it can name a licence-restricted MODEL repo; the gate is keyed on that repo, not on
+    /// anything the LoRA catalog declares. Serialized onto the queued job only when true, so a
+    /// retry of an authorized import re-validates against the assertion the request carried.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub(crate) license_acknowledged: bool,
     #[serde(default = "default_lora_scope")]
     pub(crate) scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

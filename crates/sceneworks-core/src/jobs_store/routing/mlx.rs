@@ -698,11 +698,23 @@ pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// the peft-LoKr-on-Wan merge has existed since sc-2393, and the old `create_video_adapter` torch
 /// gate was a routing caution, never an engine limit.
 pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    video_request_is_mlx_eligible(&job.job_type, &job.payload)
+}
+
+/// The `(job_type, payload)` form of [`video_job_is_mlx_eligible`] — the same predicate, reachable
+/// before a [`JobSnapshot`] exists (sc-19504). `create_video_job` holds exactly this pair at
+/// enqueue time and must be able to ask the REAL gate whether any lane will claim the job it is
+/// about to write; a second, re-typed copy of these rules is the false-green shape that let
+/// GH #2074 and sc-15328 ship. See [`super::gaps::video_request_is_claimable_by_any_lane`].
+pub(crate) fn video_request_is_mlx_eligible(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+) -> bool {
     // The base `video_generate` job type plus the advanced job types: the clip-conditioning
     // `video_extend` / `video_bridge` (sc-3522, LTX IC-LoRA) and `person_replace` (sc-3521 →
     // Wan-VACE). The per-model/per-mode gate below keeps each mode to its capable engines.
     if !matches!(
-        job.job_type,
+        job_type,
         JobType::VideoGenerate
             | JobType::VideoExtend
             | JobType::VideoBridge
@@ -710,7 +722,7 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     ) {
         return false;
     }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
@@ -722,12 +734,11 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     // `mode` — a missing/stale `mode` on those types must not fall through to the
     // `image_to_video` default and route incorrectly. The base `video_generate` type reads
     // the payload `mode` (default `image_to_video`, mirroring `video_request_from_job`).
-    let mode = match job.job_type {
+    let mode = match job_type {
         JobType::VideoExtend => "extend_clip",
         JobType::VideoBridge => "video_bridge",
         JobType::PersonReplace => "replace_person",
-        _ => job
-            .payload
+        _ => payload
             .get("mode")
             .and_then(Value::as_str)
             .unwrap_or("image_to_video"),
@@ -736,13 +747,11 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         return false;
     }
     if model == "wan_2_2" {
-        let has_source = job
-            .payload
+        let has_source = payload
             .get("sourceAssetId")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
-        let has_last = job
-            .payload
+        let has_last = payload
             .get("lastFrameAssetId")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty());
@@ -758,8 +767,7 @@ pub(crate) fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     }
     if matches!(model, "ltx_2_3" | "ltx_2_3_eros")
         && matches!(mode, "extend_clip" | "video_bridge" | "replace_person")
-        && !job
-            .payload
+        && !payload
             .get("loras")
             .and_then(Value::as_array)
             .is_some_and(|loras| crate::video_request::loras_contain_ltx_ic_lora(loras))
@@ -853,6 +861,58 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "krea_realtime_14b" {
         return matches!(mode, "text_to_video" | "image_to_video" | "video_to_video");
     }
+    // Wan2.2 VACE-Fun A14B (epic 3456 / sc-3458), added by sc-17159 together with its missing
+    // `VIDEO_MODEL_CAPS` row. It needs its OWN arm in BOTH directions: the generic arm below would
+    // grant it `text_to_video | image_to_video`, which this dual-expert CONTROL checkpoint does not
+    // do (its manifest deliberately advertises `replace_person` alone —
+    // `builtin_manifest_registers_the_wan_vace_fun_model` pins that), while the generic
+    // `replace_person` list names only ltx/wan_2_2 and so refused the one mode it does do.
+    if model == "wan_2_2_vace_fun_14b" {
+        return mode == "replace_person";
+    }
+    // MiniMax-H3 (epic 17137 / sc-17159). TWO ids, TWO different mode sets, and each needs its own
+    // arm for the opposite reason:
+    //
+    // * `minimax_h3` is the `transformer` checkpoint — t2va + fl2va. The generic arm below grants
+    //   `text_to_video | image_to_video` but lists only LTX + Wan TI2V-5B for `first_last_frame`,
+    //   so fl2va — a mode the manifest advertises in `capabilities` AND `ui.recommendedFor` —
+    //   would fall to `_ => false` and surface disabled in the Video Studio on the ONLY platform
+    //   this family installs on.
+    // * `minimax_h3_ref` is the `transformer_ref` checkpoint and serves Ref2VA ALONE. The generic
+    //   arm would have done the reverse damage: granted it `text_to_video | image_to_video`, which
+    //   its checkpoint does not do, while refusing `reference_to_video`, which is the only thing it
+    //   does. `image_to_video` on the reference partition is not a harmless extra — the two
+    //   partitions are separate 18.78 GB DiTs and routing a t2v request at the reference one loads
+    //   the wrong checkpoint.
+    //
+    // The mode sets are exactly each entry's declared `capabilities`, and
+    // `every_declared_video_capability_is_claimable_by_some_lane` (routing/catalog.rs) reads the
+    // shipped manifest bytes to hold that, so a capability added to either entry without an arm
+    // here is RED at the source rather than at the next user report.
+    if model == "minimax_h3" {
+        return matches!(
+            mode,
+            "text_to_video" | "image_to_video" | "first_last_frame"
+        );
+    }
+    if model == "minimax_h3_ref" {
+        // Ref2VA, ACTIVATED (sc-18650). `reference_to_video` is the ONLY mode this partition
+        // serves — the `transformer_ref` checkpoint. The route was withheld while
+        // `video_mode_conditioning_requirements` demanded `multiReference` alone (the old
+        // sc-17157 condition): the pinned engines deliberately declare the ORDERED omni-reference
+        // surface instead — `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]`, because
+        // gen-core has no heterogeneous-reference variant for this family and the request's own
+        // order carries the semantics (`mlx-gen-minimax-h3/src/model.rs`, measured at the pinned
+        // revision). sc-18650 aligned the requirement to that shipped contract
+        // (`multiReference | reference`), so the declaration here no longer makes
+        // `dump-engine-capabilities` refuse the runtime artifact.
+        //
+        // The refusals below remain load-bearing: the generic arm would grant this partition
+        // `text_to_video | image_to_video`, which its checkpoint does not do — the two partitions
+        // are separate 18.78 GB DiTs, and routing a t2v request at the reference one loads the
+        // wrong checkpoint.
+        return mode == "reference_to_video";
+    }
     match mode {
         "text_to_video" | "image_to_video" => true,
         "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
@@ -867,6 +927,11 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it
         // regardless of the user-picked replace-capable model (ltx_2_3 / ltx_2_3_eros / wan_2_2,
         // the models that advertise the capability), so admit those.
+        //
+        // `wan_2_2_vace_fun_14b` also advertises `replace_person` and was unreachable before
+        // sc-17159, but it is served by its OWN arm above rather than added here: it must NOT
+        // inherit this arm's neighbours (`text_to_video | image_to_video`), which the generic arm
+        // would otherwise hand it. (`scail2_14b` has its own arm for the same reason.)
         "replace_person" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
         _ => false,
     }

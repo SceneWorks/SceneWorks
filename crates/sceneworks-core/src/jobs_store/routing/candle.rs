@@ -617,37 +617,70 @@ fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool
 /// [`video_request_candle_vace_eligible`] (VACE modes), [`bernini_video_candle_eligible`] (Bernini),
 /// and [`scail2_animate_candle_eligible`] / [`scail2_replace_candle_eligible`].
 pub(crate) fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
+    video_request_is_candle_eligible(&job.job_type, &job.payload)
+}
+
+/// The `(job_type, payload)` form of [`video_job_is_candle_eligible`] — the same predicate,
+/// reachable before a [`JobSnapshot`] exists (sc-19504). See
+/// [`super::mlx::video_request_is_mlx_eligible`] for why the seam is shaped this way.
+pub(crate) fn video_request_is_candle_eligible(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+) -> bool {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    if candle_request_wants_torch_quantization(&job.payload) {
+    if candle_request_wants_torch_quantization(payload) {
         // `advanced.quantization` selects a Torch GGUF overlay. Native Candle tiers use
         // `mlxQuantize`; accepting this field would silently discard the user's explicit choice.
         return false;
     }
-    match job.job_type {
+    match job_type {
         // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
         // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
         JobType::VideoGenerate => {
-            video_request_candle_eligible(model, &job.payload)
-                || scail2_animate_candle_eligible(model, &job.payload)
+            video_request_candle_eligible(model, payload)
+                || scail2_animate_candle_eligible(model, payload)
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
-                || bernini_video_candle_eligible(model, &job.payload)
+                || bernini_video_candle_eligible(model, payload)
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
-            video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
-                || scail2_replace_candle_eligible(model, &job.payload)
-                || ltx_replace_candle_eligible(model, &job.payload)
+            video_request_candle_vace_eligible(model, payload, job_type)
+                || scail2_replace_candle_eligible(model, payload)
+                || ltx_replace_candle_eligible(model, payload)
         }
         // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
         JobType::VideoExtend | JobType::VideoBridge => {
-            video_request_candle_eligible(model, &job.payload)
-                || video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
+            video_request_candle_eligible(model, payload)
+                || video_request_candle_vace_eligible(model, payload, job_type)
         }
         _ => false,
     }
+}
+
+/// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the
+/// off-Mac twin of [`super::mlx::video_mode_is_mlx_eligible`] and the predicate
+/// [`super::catalog::video_model_candle_support`] maps over [`super::catalog::VIDEO_UI_MODES`]
+/// (sc-19570).
+///
+/// It is **derived, not restated**: it reconstructs the canonical minimal request for the mode
+/// ([`super::catalog::video_mode_probe_payload`]) and asks the REAL claim predicate
+/// [`video_request_is_candle_eligible`] — the same function `worker_supports_job`'s candle arm
+/// consults. A second, hand-maintained mode list here would answer with its own copy and stay green
+/// while the four underlying gates (base / VACE / SCAIL-2 / Bernini) moved, which is the shape that
+/// let the pairs sc-19570 measured ship undetected.
+///
+/// The mode is carried BOTH as the payload `mode` and through the job type
+/// ([`super::catalog::video_job_type_for_mode`]) because the underlying predicate reads it from
+/// whichever is authoritative for that shape: the advanced job types (`extend_clip` /
+/// `video_bridge` / `replace_person`) derive it from the job type and ignore the payload key, while
+/// `video_generate` reads the key.
+pub(crate) fn video_mode_is_candle_eligible(model: &str, mode: &str) -> bool {
+    let job_type = crate::jobs_store::routing::catalog::video_job_type_for_mode(mode);
+    let payload = crate::jobs_store::routing::catalog::video_mode_probe_payload(model, mode);
+    video_request_is_candle_eligible(&job_type, &payload)
 }
 
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
