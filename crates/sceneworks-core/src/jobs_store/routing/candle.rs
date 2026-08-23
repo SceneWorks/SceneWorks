@@ -905,9 +905,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
-    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; q4 is the
-    // currently proven product route, while exact q8 remains source-ready but withheld pending the
-    // terminal campaign. Other video providers remain dense and fail closed for positive requests.
+    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; terminal
+    // acceptance admits only its exact q4/q8 product packages. Other video providers remain dense
+    // and fail closed for positive requests.
     if (candle_request_wants_quant(payload) || model == "ltx_2_3")
         && !candle_video_tier_select_eligible(model, payload)
     {
@@ -922,9 +922,7 @@ enum CandleLtxTier {
     Q8,
 }
 
-/// Parse only the exact packed tiers published by the shared LTX bundle. Recognizing q8 here is
-/// source readiness, not product admission: the q8 route remains withheld until the terminal
-/// campaign advances its capability fact and closes the matching exception.
+/// Parse only the exact packed tiers published by the shared LTX bundle.
 fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
     let value = payload
         .get("advanced")
@@ -945,16 +943,16 @@ fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTi
 
 fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<String, Value>) -> bool {
     model == "ltx_2_3"
-        && candle_ltx_requested_tier(payload).is_some_and(|tier| {
-            match tier {
-                // The existing packed-q4 route is already the proven Candle baseline. Q8 is staged
-                // below the runtime descriptor fact so source plumbing cannot promote the product.
-                CandleLtxTier::Q4 => true,
-                CandleLtxTier::Q8 => {
-                    super::matrix::candle_video_descriptor_supports_quant(model, mode, "q8")
-                }
-            }
-        })
+        && matches!(
+            mode,
+            "text_to_video"
+                | "image_to_video"
+                | "first_last_frame"
+                | "extend_clip"
+                | "video_bridge"
+                | "replace_person"
+        )
+        && candle_ltx_requested_tier(payload).is_some()
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -1065,10 +1063,7 @@ fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static
     }
 }
 
-/// Source/package readiness only: the request selects one exact tier and never asks the packed
-/// provider to merge an adapter. Production routing additionally requires the pinned Candle
-/// descriptor to advertise that tier; keeping those checks separate lets an audited hosted package
-/// exist before the final runtime-facts/pin promotion without turning stale facts into a claim.
+/// The request selects one exact tier and never asks a packed provider to merge an adapter.
 pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -> bool {
     let has_adapters = payload
         .get("loras")
@@ -1082,18 +1077,20 @@ pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -
 
 /// Product admission for a source-ready SCAIL-2 tier.
 ///
-/// The repaired pinned descriptor now truthfully advertises the q4/q8 provider surface, but those
-/// two product precision cells remain deliberately sequenced behind the epic-20738 terminal
-/// acceptance campaign. Descriptor truth alone must therefore not promote an explicit packed-tier
-/// request. Dense bf16 remains the established Candle baseline; the source resolver and terminal
-/// harness can continue proving the exact q4/q8 packages without exposing them as product routes.
+/// sc-20969 terminal acceptance admits only SCAIL-2's exact shipped q4/q8/bf16 product packages.
+/// This remains separate from the adapter rule above so packed-plus-adapter combinations stay
+/// fail-closed and stale descriptor summaries cannot silently expand the product surface.
 fn scail2_candle_product_tier_eligible(
     model: &str,
     mode: &str,
     payload: &Map<String, Value>,
 ) -> bool {
-    scail2_candle_effective_tier(payload) == Some("bf16")
-        && super::matrix::candle_video_descriptor_supports_quant(model, mode, "bf16")
+    model == "scail2_14b"
+        && matches!(mode, "animate_character" | "replace_person")
+        && matches!(
+            scail2_candle_effective_tier(payload),
+            Some("q4" | "q8" | "bf16")
+        )
 }
 
 /// Candle SCAIL-2 `animate_character` eligibility (sc-6837, epic 6563). SCAIL-2 is a DISTINCT candle
@@ -1101,9 +1098,8 @@ fn scail2_candle_product_tier_eligible(
 /// the `scail2_14b` model + the `animate_character` mode + a reference character image
 /// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
 /// The exact q4/q8 hosted artifacts and dense bf16 tier are source-ready; unsupported or malformed
-/// precision requests fail closed. Production additionally keeps q4/q8 sequenced behind terminal
-/// acceptance even when the pinned descriptor advertises them. Packed tiers refuse adapters, while
-/// a dense adapter request is preserved and resolved to bf16 by the worker. Mirrors the MLX
+/// precision requests fail closed. Packed tiers refuse adapters, while a dense adapter request is
+/// preserved and resolved to bf16 by the worker. Mirrors the MLX
 /// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {

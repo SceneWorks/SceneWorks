@@ -2002,16 +2002,6 @@ fn descriptor_tier_support(
     })
 }
 
-/// Runtime-descriptor gate for a native Candle video precision request. Product routing uses this
-/// narrow reader rather than treating a hosted download as execution authority: an artifact may be
-/// source-ready before the pinned provider descriptor and calibrated catalog facts are promoted.
-/// Returning `false` on any malformed/missing runtime artifact keeps the production lane closed.
-pub(crate) fn candle_video_descriptor_supports_quant(model: &str, mode: &str, tier: &str) -> bool {
-    runtime_facts(CANDLE_RUNTIME_FACTS, "candle")
-        .ok()
-        .is_some_and(|facts| descriptor_tier_support(&facts, model, Some(mode), tier))
-}
-
 fn precision_payload(
     model: &ManifestModel,
     tier: &str,
@@ -4981,7 +4971,7 @@ mod tests {
         let expected_records = BTreeMap::from([
             (
                 "epic-9083-precision-sequencing",
-                ("epic-9083", "precision", 27usize),
+                ("epic-9083", "precision", 14usize),
             ),
             (
                 "epic-8433-krea-realtime-operation-sequencing",

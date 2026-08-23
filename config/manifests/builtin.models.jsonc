@@ -18372,7 +18372,7 @@
           "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 29728720716,
           "footprint": { "diskSizeBytes": 29728720716, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -20118,7 +20118,7 @@
       },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux use the same installable q4, q8, and bf16 package variants. Candle execution remains fail-closed until its installed capability and measured-tier data admit the selected package; the currently calibrated bf16 tier needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve). Runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give ordered reference character images and a driving video, and SCAIL-2 animates the supplied characters with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux admit the same installable q4, q8, and bf16 package variants when installed. The currently calibrated bf16 tier needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve). Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {

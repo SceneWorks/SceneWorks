@@ -19,6 +19,10 @@ use super::smoke_support::{image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
 const ENABLE_ENV: &str = "SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA";
 const CELL_ENV: &str = "SCENEWORKS_EPIC_20738_CELL_FILE";
 const OUTPUT_ENV: &str = "SCENEWORKS_EPIC_20738_OUTPUT_DIR";
+/// A leave-one-reference-out render must differ by more than serialization noise. This is deliberately
+/// tiny relative to the 0..255 pixel domain: it detects an ignored reference without inventing a
+/// quality or measured-memory floor.
+const SCAIL2_REFERENCE_DELTA_FLOOR: f64 = 1e-6;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -509,6 +513,88 @@ fn save_video_witnesses(frames: &[Image], output: &Path) {
     );
 }
 
+fn mean_video_abs_delta(baseline: &[Image], counterfactual: &[Image]) -> f64 {
+    assert_eq!(
+        baseline.len(),
+        counterfactual.len(),
+        "SCAIL2 counterfactual changed the frame count"
+    );
+    let mut total = 0_f64;
+    let mut pixels = 0_usize;
+    for (baseline, counterfactual) in baseline.iter().zip(counterfactual) {
+        assert_eq!(
+            (baseline.width, baseline.height, baseline.pixels.len()),
+            (
+                counterfactual.width,
+                counterfactual.height,
+                counterfactual.pixels.len()
+            ),
+            "SCAIL2 counterfactual changed the frame shape"
+        );
+        total += baseline
+            .pixels
+            .iter()
+            .zip(&counterfactual.pixels)
+            .map(|(left, right)| (f64::from(*left) - f64::from(*right)).abs())
+            .sum::<f64>();
+        pixels += baseline.pixels.len();
+    }
+    assert!(pixels > 0, "SCAIL2 counterfactual has no pixels");
+    total / pixels as f64
+}
+
+fn scail2_request(
+    cell: &Cell,
+    references: &[(Image, Image)],
+    driving: &[Image],
+    masks: &[Image],
+    omit_reference: Option<usize>,
+) -> GenerationRequest {
+    let mut conditioning = Vec::with_capacity(references.len() * 2 + 1);
+    for (index, (reference, mask)) in references.iter().enumerate() {
+        if omit_reference == Some(index) {
+            continue;
+        }
+        // The engine contract is order-sensitive: each Reference is immediately followed by its Mask.
+        conditioning.push(Conditioning::Reference {
+            image: reference.clone(),
+            strength: None,
+        });
+        conditioning.push(Conditioning::Mask {
+            image: mask.clone(),
+        });
+    }
+    conditioning.push(Conditioning::ControlClip {
+        frames: driving.to_vec(),
+        mask: masks.to_vec(),
+        masking_strength: 1.0,
+        start_frame: 0,
+        mode: ReplacementMode::default(),
+    });
+    GenerationRequest {
+        prompt: "the reference characters perform the driving motion".to_owned(),
+        width: cell.request.width,
+        height: cell.request.height,
+        frames: cell.request.frames,
+        fps: cell.request.fps.or(Some(16)),
+        steps: Some(cell.request.steps),
+        // Every counterfactual keeps the production request seed fixed. A delta can therefore only
+        // be attributed to omitting this exact ordered reference/mask pair.
+        seed: Some(cell.request.seed),
+        conditioning,
+        video_mode: Some("animation".to_owned()),
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
+        ..Default::default()
+    }
+}
+
+fn scail2_video_output(output: GenerationOutput, cell: &Cell) -> Vec<Image> {
+    match output {
+        GenerationOutput::Video { frames, .. } => frames,
+        other => panic!("{} expected Video, got {other:?}", cell.id),
+    }
+}
+
 fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
     let pair_count = cell.request.reference_pairs.unwrap_or(1);
     assert!((1..=6).contains(&pair_count));
@@ -517,7 +603,7 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         pair_count == 6
     );
     let frames = cell.request.frames.expect("SCAIL2 frames");
-    let mut conditioning = Vec::with_capacity(pair_count * 2 + 1);
+    let mut references = Vec::with_capacity(pair_count);
     for pair in 0..pair_count {
         // The engine contract is order-sensitive: each Reference is immediately followed by its Mask.
         let reference = pattern_image(cell.request.width, cell.request.height, pair as u8);
@@ -530,11 +616,7 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
             &mask,
             &output.join(format!("input-reference-mask-{}.png", pair + 1)),
         );
-        conditioning.push(Conditioning::Reference {
-            image: reference,
-            strength: None,
-        });
-        conditioning.push(Conditioning::Mask { image: mask });
+        references.push((reference, mask));
     }
     let driving = (0..frames)
         .map(|frame| pattern_image(cell.request.width, cell.request.height, frame as u8))
@@ -548,14 +630,8 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         &output.join("input-driving-last.png"),
     );
     save_png(&masks[0], &output.join("input-driving-mask-first.png"));
-    conditioning.push(Conditioning::ControlClip {
-        frames: driving,
-        mask: masks,
-        masking_strength: 1.0,
-        start_frame: 0,
-        mode: ReplacementMode::default(),
-    });
-    assert_eq!(conditioning.len(), pair_count * 2 + 1);
+    let request = scail2_request(cell, &references, &driving, &masks, None);
+    assert_eq!(request.conditioning.len(), pair_count * 2 + 1);
     let spec = primary_load_spec(cell, primary);
     let exact_tier_hint = match cell.requested_tier.as_str() {
         "q4" => matches!(spec.quantize.as_ref(), Some(Quant::Q4)),
@@ -568,26 +644,12 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
     );
     let generator = crate::inference_runtime::load("scail2_14b", &spec)
         .unwrap_or_else(|error| panic!("{} SCAIL2 load failed: {error}", cell.id));
-    let request = GenerationRequest {
-        prompt: "the reference characters perform the driving motion".to_owned(),
-        width: cell.request.width,
-        height: cell.request.height,
-        frames: Some(frames),
-        fps: cell.request.fps.or(Some(16)),
-        steps: Some(cell.request.steps),
-        seed: Some(cell.request.seed),
-        conditioning,
-        video_mode: Some("animation".to_owned()),
-        memory: family_generation_memory(&cell.kind, &cell.engine_id),
-        ..Default::default()
-    };
-    let output_value = generator
-        .generate(&request, &mut |_| {})
-        .expect("terminal SCAIL2 generation");
-    let output_frames = match output_value {
-        GenerationOutput::Video { frames, .. } => frames,
-        other => panic!("{} expected Video, got {other:?}", cell.id),
-    };
+    let output_frames = scail2_video_output(
+        generator
+            .generate(&request, &mut |_| {})
+            .expect("terminal SCAIL2 generation"),
+        cell,
+    );
     let (mean_std, motion) = video_stats(&output_frames);
     assert!(
         mean_std > DEGENERATE_STD_FLOOR_DEFAULT,
@@ -596,7 +658,69 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
     );
     assert!(motion > 0.01, "{} first/last frames do not move", cell.id);
     save_video_witnesses(&output_frames, output);
-    json!({ "kind": "scail2", "frames": output_frames.len(), "referencePairs": pair_count, "meanFrameStd": mean_std, "firstLastMeanAbsDelta": motion })
+    let reference_counterfactuals = if pair_count == 6 {
+        let counterfactuals = (0..6)
+            .map(|omitted| {
+                let counterfactual_request =
+                    scail2_request(cell, &references, &driving, &masks, Some(omitted));
+                assert_eq!(counterfactual_request.conditioning.len(), 11);
+                let counterfactual = scail2_video_output(
+                    generator
+                        .generate(&counterfactual_request, &mut |_| {})
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{} SCAIL2 leave-one-reference-out {} failed: {error}",
+                                cell.id,
+                                omitted + 1
+                            )
+                        }),
+                    cell,
+                );
+                let mean_abs_delta = mean_video_abs_delta(&output_frames, &counterfactual);
+                let first_frame_mean_abs_delta =
+                    mean_video_abs_delta(&output_frames[..1], &counterfactual[..1]);
+                let last_frame_mean_abs_delta = mean_video_abs_delta(
+                    &output_frames[output_frames.len() - 1..],
+                    &counterfactual[counterfactual.len() - 1..],
+                );
+                assert!(
+                    mean_abs_delta.is_finite() && mean_abs_delta > SCAIL2_REFERENCE_DELTA_FLOOR,
+                    "{} ignored ordered SCAIL2 reference {} (delta {mean_abs_delta})",
+                    cell.id,
+                    omitted + 1
+                );
+                let first = format!("counterfactual-reference-{}-first.png", omitted + 1);
+                let last = format!("counterfactual-reference-{}-last.png", omitted + 1);
+                save_png(&counterfactual[0], &output.join(&first));
+                save_png(
+                    counterfactual.last().expect("counterfactual last frame"),
+                    &output.join(&last),
+                );
+                json!({
+                    "reference": omitted + 1,
+                    "meanAbsDelta": mean_abs_delta,
+                    "firstFrameMeanAbsDelta": first_frame_mean_abs_delta,
+                    "lastFrameMeanAbsDelta": last_frame_mean_abs_delta,
+                    "witnesses": {
+                        "omittedReference": format!("input-reference-{}.png", omitted + 1),
+                        "firstFrame": first,
+                        "lastFrame": last,
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(counterfactuals)
+    } else {
+        None
+    };
+    json!({
+        "kind": "scail2",
+        "frames": output_frames.len(),
+        "referencePairs": pair_count,
+        "meanFrameStd": mean_std,
+        "firstLastMeanAbsDelta": motion,
+        "referenceCounterfactuals": reference_counterfactuals,
+    })
 }
 
 fn generate_ltx(cell: &Cell, primary: &Artifact, output: &Path) -> Value {

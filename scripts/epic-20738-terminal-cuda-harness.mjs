@@ -65,6 +65,7 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
 const REVIEWED_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
+const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
 function fail(message) {
   throw new Error(message);
@@ -286,7 +287,59 @@ export function validateRuntimeResult(runtimeResult, cell) {
     fail(`${cell.id} runtime result did not prove family loadSpecQuantBits=${expectedQuant}`);
   }
   validateRequestMemoryStrategy(runtimeResult.requestMemoryStrategy, cell);
+  validateScail2ReferenceCounterfactuals(runtimeResult.metrics, cell, "runtime result");
   return runtimeResult;
+}
+
+// The ordered six-reference cell needs causal evidence, not merely one successful render with six
+// inputs. Each same-seed leave-one-out output must have a nontrivial pixel delta and position-bound
+// witnesses. Keeping this pure makes controller/schema mutation tests exercise the evidence contract
+// without a CUDA run.
+export function validateScail2ReferenceCounterfactuals(metrics, cell, label = "metrics") {
+  const isMultiReference = cell?.kind === "scail2" && cell?.capability === "multiReference";
+  if (!isMultiReference) {
+    if (metrics?.referenceCounterfactuals != null) {
+      fail(`${cell.id} ${label} carries unreviewed SCAIL2 reference counterfactual evidence`);
+    }
+    return null;
+  }
+  object(metrics, `${cell.id} ${label}`);
+  if (metrics.kind !== "scail2" || metrics.referencePairs !== 6) {
+    fail(`${cell.id} ${label} does not bind the ordered six-reference SCAIL2 render`);
+  }
+  const counterfactuals = metrics.referenceCounterfactuals;
+  if (!Array.isArray(counterfactuals) || counterfactuals.length !== 6) {
+    fail(`${cell.id} ${label} must contain exactly six leave-one-reference-out deltas`);
+  }
+  for (const [index, evidence] of counterfactuals.entries()) {
+    const reference = index + 1;
+    object(evidence, `${cell.id} ${label} reference ${reference}`);
+    exactKeys(
+      evidence,
+      ["reference", "meanAbsDelta", "firstFrameMeanAbsDelta", "lastFrameMeanAbsDelta", "witnesses"],
+      `${cell.id} ${label} reference ${reference}`,
+    );
+    if (evidence.reference !== reference) {
+      fail(`${cell.id} ${label} references must be exactly ordered 1 through 6`);
+    }
+    if (!Number.isFinite(evidence.meanAbsDelta) || evidence.meanAbsDelta <= SCAIL2_REFERENCE_DELTA_FLOOR) {
+      fail(`${cell.id} ${label} reference ${reference} has zero, nonfinite, or trivial causal delta`);
+    }
+    if (!Number.isFinite(evidence.firstFrameMeanAbsDelta)
+      || !Number.isFinite(evidence.lastFrameMeanAbsDelta)
+      || evidence.firstFrameMeanAbsDelta < 0 || evidence.lastFrameMeanAbsDelta < 0) {
+      fail(`${cell.id} ${label} reference ${reference} has malformed frame witnesses`);
+    }
+    object(evidence.witnesses, `${cell.id} ${label} reference ${reference} witnesses`);
+    exactKeys(evidence.witnesses, ["omittedReference", "firstFrame", "lastFrame"],
+      `${cell.id} ${label} reference ${reference} witnesses`);
+    if (evidence.witnesses.omittedReference !== `input-reference-${reference}.png`
+      || evidence.witnesses.firstFrame !== `counterfactual-reference-${reference}-first.png`
+      || evidence.witnesses.lastFrame !== `counterfactual-reference-${reference}-last.png`) {
+      fail(`${cell.id} ${label} reference ${reference} witnesses are not position-bound`);
+    }
+  }
+  return counterfactuals;
 }
 
 function validateRequestMemoryStrategy(strategy, cell) {
@@ -923,6 +976,17 @@ function validateReceiptInternal(
   if (!Object.hasOwn(receipt.cell, "loadSpecQuantBits")
     || receipt.cell.loadSpecQuantBits !== expectedQuant) {
     fail(`${receipt.cell.id} receipt does not bind family loadSpecQuantBits=${expectedQuant}`);
+  }
+  const isMultiReference = expectedCell.kind === "scail2"
+    && expectedCell.capability === "multiReference";
+  if (receipt.status === "passed" && isMultiReference) {
+    validateScail2ReferenceCounterfactuals({
+      kind: "scail2",
+      referencePairs: 6,
+      referenceCounterfactuals: receipt.cell.referenceCounterfactuals,
+    }, expectedCell, "receipt");
+  } else if (Object.hasOwn(receipt.cell, "referenceCounterfactuals")) {
+    fail(`${receipt.cell.id} receipt carries counterfactual evidence outside the passed multi-reference cell`);
   }
   if (!receipt.repositories?.sceneworks?.clean || !receipt.repositories?.inference?.clean) {
     fail("receipt does not bind clean paired repositories");
@@ -2917,6 +2981,9 @@ export async function runCampaign(args, options = {}) {
           await invokeFault(fault, "runtimeResultSemantic", index);
           validateRuntimeResult(runtimeResult, cell);
           receipt.cell.loadSpecQuantBits = runtimeResult.loadSpecQuantBits;
+          if (cell.kind === "scail2" && cell.capability === "multiReference") {
+            receipt.cell.referenceCounterfactuals = structuredClone(runtimeResult.metrics.referenceCounterfactuals);
+          }
           lifecycle.requestMemoryStrategy = structuredClone(runtimeResult.requestMemoryStrategy);
         } catch (error) {
           quarantineReason = `runtime-result evidence failed after cell ${cell.id}: ${errorText(error)}`;

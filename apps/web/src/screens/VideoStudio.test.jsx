@@ -1585,7 +1585,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
-  it("offers only the accepted bf16 execution tier for Candle SCAIL-2", async () => {
+  it("offers every admitted q4/q8/bf16 execution tier for Candle SCAIL-2", async () => {
     const scail = {
       ...tieredVideoModel(["q4", "q8", "bf16"]),
       id: "scail2_14b",
@@ -1598,13 +1598,15 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
 
     expect(tierPicker()).toBeTruthy();
     expect(quantizationPicker()).toBeNull();
-    expect([...tierPicker().options].map((option) => option.value)).toEqual(["bf16"]);
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
     expect(tierPicker().value).toBe("bf16");
+    setSelect(tierPicker(), "q4");
+    await act(async () => {});
     await click(buttonWithText(container, "Render clip"));
-    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 0 });
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 4 });
   });
 
-  it("blocks Candle SCAIL-2 when only its source-ready q4/q8 packages are installed", async () => {
+  it("admits Candle SCAIL-2 q4/q8 when those exact packages are installed", async () => {
     const scail = {
       ...tieredVideoModel(["q4", "q8"]),
       id: "scail2_14b",
@@ -1615,19 +1617,13 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     const context = baseContext({ videoModels: [scail], macCapabilities: null });
     await render(context);
 
-    expect(tierPicker()).toBeNull();
+    expect(tierPicker()).toBeTruthy();
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    expect(tierPicker().value).toBe("q8");
     const renderButton = buttonWithText(container, "Render clip");
-    expect(renderButton.disabled).toBe(true);
-    expect(container.textContent).toContain(
-      "SCAIL-2 Candle generation currently requires the installed bf16 tier.",
-    );
+    expect(renderButton.disabled).toBe(false);
     await click(renderButton);
-    await act(async () => {
-      container
-        .querySelector("form")
-        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    });
-    expect(context.createVideoJob).not.toHaveBeenCalled();
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
 
     // The engine id alone never creates a selectable precision. A stale/non-matrix catalog row
     // remains picker-free and blocked instead of manufacturing a payload for an incomplete install.
@@ -1645,7 +1641,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     ["Q4", 4],
     ["Q8", 8],
   ]) {
-    it(`refuses a same-model Candle SCAIL-2 ${tier} recipe instead of silently replaying bf16`, async () => {
+    it(`replays the exact admitted Candle SCAIL-2 ${tier} recipe`, async () => {
       const context = baseContext({
         videoModels: [scailTierModel(["q4", "q8", "bf16"])],
         assets: replayAssets,
@@ -1654,33 +1650,15 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       });
       await render(context);
 
-      expect(tierPicker().value).toBe("bf16");
+      expect(tierPicker().value).toBe(tier.toLowerCase());
       const renderButton = buttonWithText(container, "Render clip");
-      expect(renderButton.disabled).toBe(true);
-      expect(container.textContent).toContain(
-        `This recipe was recorded at ${tier}`,
-      );
-      expect(container.textContent).toContain("not enabled for SCAIL-2 Candle generation");
-      await act(async () => {
-        container
-          .querySelector("form")
-          .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-      });
-      expect(context.createVideoJob).not.toHaveBeenCalled();
-
-      const useBf16 = buttonWithText(container, "Use bf16 for a new generation");
-      expect(useBf16).toBeTruthy();
-      await click(useBf16);
       expect(renderButton.disabled).toBe(false);
-      expect(container.textContent).not.toContain(
-        "not enabled for SCAIL-2 Candle generation",
-      );
       await click(renderButton);
-      expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 0 });
+      expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize });
     });
   }
 
-  it("blocks direct submit while an exact replay tier is still transitioning across backends", async () => {
+  it("submits an admitted exact replay tier while switching between native backends", async () => {
     const createVideoJob = vi.fn();
     const common = {
       videoModels: [scailTierModel(["q4", "q8", "bf16"])],
@@ -1690,12 +1668,11 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     };
     await render(baseContext({ ...common, macCapabilities: null }));
 
-    expect(tierPicker().value).toBe("bf16");
-    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+    expect(tierPicker().value).toBe("q8");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
 
-    // Make Q8 available by changing the active backend, then submit in the same turn. Availability
-    // is not selection: the replay effect has not yet written Q8 into picker state, so the previous
-    // Candle bf16 value must neither run nor be omitted from the payload.
+    // Q8 is admitted on both native backends, so the exact replay remains submit-ready during the
+    // backend transition instead of being silently downgraded to bf16.
     flushSync(() => {
       root.render(
         <AppContext.Provider value={baseContext({ ...common, macCapabilities: MAC_CAPS })}>
@@ -1706,13 +1683,13 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     container
       .querySelector("form")
       .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    expect(createVideoJob).not.toHaveBeenCalled();
+    expect(createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
 
     await act(async () => {});
     expect(tierPicker().value).toBe("q8");
     expect(buttonWithText(container, "Render clip").disabled).toBe(false);
     await click(buttonWithText(container, "Render clip"));
-    expect(createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
+    expect(createVideoJob.mock.calls[1][0].advanced).toMatchObject({ mlxQuantize: 8 });
   });
 
   it("keeps replay blocked when capability refresh removes its model and reapplies it on return", async () => {
@@ -1730,7 +1707,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
         createVideoJob,
         macCapabilities: MAC_CAPS,
         studioLaunch,
-      });
+    });
     await render(contextFor([bernini, fallback]));
     expect(tierPicker().value).toBe("q8");
 
@@ -1935,7 +1912,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     });
     await render(context);
 
-    expect(container.textContent).toContain("This recipe was recorded at Q8");
+    expect(container.textContent).not.toContain("This recipe was recorded at Q8");
     const engineSelect = [...container.querySelectorAll("label")]
       .find((label) => label.textContent.includes("Replacement engine"))
       .querySelector("select");
@@ -1968,10 +1945,9 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await render(context);
 
     expect(container.querySelector(".settings-field-model select").value).toBe("scail2_14b");
-    expect(tierPicker().value).toBe("bf16");
-    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
-    expect(container.textContent).toContain("This recipe was recorded at Q8");
-    expect(context.createVideoJob).not.toHaveBeenCalled();
+    expect(tierPicker().value).toBe("q8");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
+    expect(container.textContent).not.toContain("This recipe was recorded at Q8");
   });
 
   it("replays the exact accepted bf16 tier for Candle SCAIL-2", async () => {

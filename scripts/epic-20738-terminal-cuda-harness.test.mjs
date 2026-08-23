@@ -43,6 +43,23 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const profile = () => structuredClone(loadProfile());
 
+function scail2ReferenceCounterfactuals() {
+  return Array.from({ length: 6 }, (_, index) => {
+    const reference = index + 1;
+    return {
+      reference,
+      meanAbsDelta: reference / 100,
+      firstFrameMeanAbsDelta: reference / 200,
+      lastFrameMeanAbsDelta: reference / 300,
+      witnesses: {
+        omittedReference: `input-reference-${reference}.png`,
+        firstFrame: `counterfactual-reference-${reference}-first.png`,
+        lastFrame: `counterfactual-reference-${reference}-last.png`,
+      },
+    };
+  });
+}
+
 function fixtureSidecarObstructions(sharedArtifacts) {
   return [...sharedArtifacts.values()].flatMap((artifact) => {
     const roots = new Set([artifact.selectedRoot]);
@@ -293,6 +310,11 @@ test("all 19 cells require the exact family loadSpec quant policy", () => {
         stageResidency: false,
         streamTransformerBlocks: false,
       },
+      metrics: cell.capability === "multiReference" ? {
+        kind: "scail2",
+        referencePairs: 6,
+        referenceCounterfactuals: scail2ReferenceCounterfactuals(),
+      } : { referenceCounterfactuals: null },
     };
     assert.equal(validateRuntimeResult(valid, cell), valid, cell.id);
     if (cell.engineId.startsWith("flux1_")) {
@@ -324,6 +346,43 @@ test("all 19 cells require the exact family loadSpec quant policy", () => {
     receipt.cell.loadSpecQuantBits = expected === null ? 4 : null;
     assert.throws(() => validateReceipt(receipt, cell, checked), /loadSpecQuantBits/, cell.id);
   }
+});
+
+test("SCAIL2 six-reference causal metrics reject missing, duplicate, nonfinite, zero, and copied evidence", () => {
+  const checked = profile();
+  const cell = checked.cells.find((candidate) => candidate.capability === "multiReference");
+  const valid = {
+    requestedTier: cell.requestedTier,
+    resolvedTier: cell.requestedTier,
+    denseFallback: false,
+    loadSpecQuantBits: 4,
+    requestMemoryStrategy: {
+      strategy: "not-applicable", requestMemoryPresent: false,
+      stageResidency: false, streamTransformerBlocks: false,
+    },
+    metrics: {
+      kind: "scail2", referencePairs: 6,
+      referenceCounterfactuals: scail2ReferenceCounterfactuals(),
+    },
+  };
+  assert.doesNotThrow(() => validateRuntimeResult(valid, cell));
+  const missing = structuredClone(valid);
+  missing.metrics.referenceCounterfactuals.pop();
+  assert.throws(() => validateRuntimeResult(missing, cell), /exactly six/);
+  const duplicate = structuredClone(valid);
+  duplicate.metrics.referenceCounterfactuals[5].reference = 5;
+  assert.throws(() => validateRuntimeResult(duplicate, cell), /exactly ordered/);
+  const nonfinite = structuredClone(valid);
+  nonfinite.metrics.referenceCounterfactuals[0].meanAbsDelta = Infinity;
+  assert.throws(() => validateRuntimeResult(nonfinite, cell), /nonfinite/);
+  const zero = structuredClone(valid);
+  zero.metrics.referenceCounterfactuals[2].meanAbsDelta = 0;
+  assert.throws(() => validateRuntimeResult(zero, cell), /zero, nonfinite, or trivial/);
+  const copied = structuredClone(valid);
+  copied.metrics.referenceCounterfactuals[4].witnesses = structuredClone(
+    copied.metrics.referenceCounterfactuals[0].witnesses,
+  );
+  assert.throws(() => validateRuntimeResult(copied, cell), /position-bound/);
 });
 
 function fixtureReceipt(status = "passed", cellIndex = 0) {
@@ -372,6 +431,9 @@ function fixtureReceipt(status = "passed", cellIndex = 0) {
   receipt.inputs = [{ path: "cell.json", bytes: 7, sha256: "6".repeat(64) }];
   receipt.outputs = [{ path: "runtime-result.json", bytes: 7, sha256: "7".repeat(64) }];
   receipt.logs = [{ path: "controller.log", bytes: 7, sha256: "5".repeat(64) }];
+  if (status === "passed" && cell.capability === "multiReference") {
+    receipt.cell.referenceCounterfactuals = scail2ReferenceCounterfactuals();
+  }
   const fluxArtifact = cell.artifactIds.find((artifactId) => artifactId.startsWith("flux1-"));
   receipt.authorityLifecycle = {
     ordinal: cellIndex + 1,
@@ -523,6 +585,23 @@ test("Draft 2020-12 schemas validate the profile and close adversarial receipt d
     const wrongScailQ8File = await writeReceipt("wrong-scail-q8.json", scailQ8);
     assert.throws(
       () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, wrongScailQ8File),
+      /must be equal to constant/,
+    );
+
+    const scailMultiReference = fixtureReceipt("passed", 11);
+    const scailMultiReferenceFile = await writeReceipt("scail-multi-reference.json", scailMultiReference);
+    assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, scailMultiReferenceFile));
+    delete scailMultiReference.cell.referenceCounterfactuals;
+    const missingScailEvidenceFile = await writeReceipt("scail-multi-reference-missing.json", scailMultiReference);
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingScailEvidenceFile),
+      /must have required property 'referenceCounterfactuals'/,
+    );
+    scailMultiReference.cell.referenceCounterfactuals = scail2ReferenceCounterfactuals();
+    scailMultiReference.cell.referenceCounterfactuals[4].reference = 4;
+    const duplicateScailEvidenceFile = await writeReceipt("scail-multi-reference-duplicate.json", scailMultiReference);
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, duplicateScailEvidenceFile),
       /must be equal to constant/,
     );
 
@@ -1351,6 +1430,13 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
             denseFallback: false,
             loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
             requestMemoryStrategy,
+            ...(runtimeCell.capability === "multiReference" ? {
+              metrics: {
+                kind: "scail2",
+                referencePairs: 6,
+                referenceCounterfactuals: scail2ReferenceCounterfactuals(),
+              },
+            } : {}),
           };
           if (runtimeMemoryMode === "missing") delete runtimeResultObject.requestMemoryStrategy;
           if (runtimeMemoryMode === "missing-field") {
