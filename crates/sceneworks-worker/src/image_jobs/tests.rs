@@ -817,6 +817,7 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
         None,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         Some(HiresFixPlan {
             width: 8,
@@ -898,6 +899,7 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
         None,
         None,
         false,
+        None,
         None,
         None,
         None,
@@ -1003,6 +1005,7 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         false,
         None,
         None,
+        None,
         context,
         None,
         &PromptEnhance::default(),
@@ -1062,6 +1065,17 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     admitted.mode = gen_core::MemoryMode::ImageToImage;
     let mut first_pass = hires_first_pass_context(&admitted, 4, 4, 0);
     first_pass.mode = gen_core::MemoryMode::TextToImage;
+    let final_memory = gen_core::GenerationMemory {
+        stage_residency: true,
+        tile_vae_decode: true,
+        decode_tile_edge: Some(512),
+        decode_overlap: Some(64),
+        ..Default::default()
+    };
+    let first_memory = gen_core::GenerationMemory {
+        stage_residency: true,
+        ..Default::default()
+    };
 
     generate_one_with_hires(
         &generator,
@@ -1085,7 +1099,8 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
         None,
         false,
         None,
-        None,
+        Some(final_memory),
+        Some(first_memory),
         Some(&admitted),
         Some(&first_pass),
         &PromptEnhance::default(),
@@ -1107,6 +1122,8 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     let requests = generator.requests.lock().unwrap();
     let contexts = generator.contexts.lock().unwrap();
     assert_eq!(requests.len(), 2, "hires fix runs exactly two passes");
+    assert_eq!(requests[0].memory, Some(first_memory));
+    assert_eq!(requests[1].memory, Some(final_memory));
     assert_eq!(
         contexts.len(),
         requests.len(),
@@ -1148,6 +1165,36 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     assert_eq!(contexts[1].geometry, admitted.geometry);
     assert_eq!(contexts[0].mode, gen_core::MemoryMode::TextToImage);
     assert_eq!(contexts[1].mode, gen_core::MemoryMode::ImageToImage);
+}
+
+#[test]
+fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() {
+    let source = include_str!("base.rs");
+    let telemetry = source
+        .split_once("let passes = match hires_first_pass_memory_context.as_ref()")
+        .expect("Ideogram per-pass telemetry")
+        .1
+        .split_once("} else {")
+        .expect("end of Ideogram telemetry branch")
+        .0;
+    for required in [
+        "hires_first",
+        "hires_final",
+        "passIdentity",
+        "actualTier",
+        "physicalReceipt",
+        "referenceCount",
+        "usePid",
+        "overlay",
+        "strategy",
+        "physicalFloor",
+        "evidenceRevision",
+    ] {
+        assert!(
+            telemetry.contains(required),
+            "Ideogram telemetry must bind {required}"
+        );
+    }
 }
 
 /// Production-seam regression for the normal imported-Krea lane. This invokes the exact driver

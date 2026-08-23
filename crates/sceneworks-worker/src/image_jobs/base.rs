@@ -6657,6 +6657,7 @@ fn generate_one_with_hires(
     use_pid: bool,
     text_style_gain: Option<f32>,
     memory: Option<gen_core::GenerationMemory>,
+    hires_first_pass_memory: Option<gen_core::GenerationMemory>,
     memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     hires_first_pass_memory_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
@@ -6741,7 +6742,7 @@ fn generate_one_with_hires(
         guidance_method,
         use_pid,
         text_style_gain,
-        memory,
+        hires_first_pass_memory.or(memory),
         first_pass_context.as_ref(),
         &PromptEnhance::default(),
         gen_core::PromptEnhancementSink::default(),
@@ -8437,6 +8438,7 @@ async fn generate_stream(
                         guidance_method.as_deref(),
                         use_pid,
                         text_style_gain,
+                        Some(memory_evaluation.memory),
                         Some(memory_evaluation.memory),
                         Some(&memory_evaluation.context),
                         None,
@@ -10509,6 +10511,7 @@ async fn generate_candle_stream(
     // Reached only on the explicit-pick / ConvRot reject below (the downtier path already rejected above
     // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
     let mut generation_memory: Option<gen_core::GenerationMemory> = None;
+    let mut hires_first_pass_generation_memory: Option<gen_core::GenerationMemory> = None;
     let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
     let mut selected_memory_strategy_context: Option<gen_core::MemoryRunContext> = None;
     let mut hires_first_pass_memory_context: Option<gen_core::MemoryRunContext> = None;
@@ -10605,7 +10608,7 @@ async fn generate_candle_stream(
             reference_count,
         },
         reference_count > 0,
-        use_pid,
+        use_pid && hires_fix.is_none(),
         hires_fix.is_some(),
         false,
         budget,
@@ -10652,26 +10655,6 @@ async fn generate_candle_stream(
     } else {
         None
     };
-    if let (Some(final_pass), Some(first_pass)) = (&shared_memory, &mut first_pass_shared_memory) {
-        if final_pass.context.selection != first_pass.context.selection {
-            // The smaller first pass may independently prefer Resident while the larger refinement
-            // requires Staged. Execute both under the more conservative final-pass strategy and
-            // envelope; never weaken a final-pass selection for the first request.
-            if final_pass.context.selection.strategy == gen_core::MemoryStrategy::StagedResidency
-                && first_pass.context.selection.strategy == gen_core::MemoryStrategy::Resident
-            {
-                first_pass.context.selection = final_pass.context.selection;
-                first_pass.context.predicted_peak_bytes = final_pass.context.predicted_peak_bytes;
-                first_pass.context.optimization_authority =
-                    final_pass.context.optimization_authority;
-                first_pass.memory = final_pass.memory;
-            } else {
-                return Err(WorkerError::InvalidPayload(
-                    "Ideogram Hires passes selected crossed memory strategies".to_owned(),
-                ));
-            }
-        }
-    }
     if let Some(evaluation) = shared_memory {
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
@@ -10684,6 +10667,7 @@ async fn generate_candle_stream(
             optimized_shared_memory_context(engine_id, evaluation.context);
     }
     if let Some(evaluation) = first_pass_shared_memory {
+        hires_first_pass_generation_memory = evaluation.memory;
         ideogram_hires_first_warm_staged = evaluation.warm_staged;
         hires_first_pass_memory_context =
             optimized_shared_memory_context(engine_id, evaluation.context);
@@ -11216,7 +11200,7 @@ async fn generate_candle_stream(
                 if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
                     crate::candle_memory_strategy::bind_ideogram_cache_execution(
                         first_pass,
-                        &mut generation_memory,
+                        &mut hires_first_pass_generation_memory,
                         &mut ideogram_hires_first_warm_staged,
                         cache_state,
                         loaded_policy.offload_policy,
@@ -11232,55 +11216,88 @@ async fn generate_candle_stream(
                     gen_core::MemoryCacheState::Cold => "cold",
                     gen_core::MemoryCacheState::Warm => "warm",
                 };
-                let strategy_label = match context.selection.strategy {
-                    gen_core::MemoryStrategy::Resident => "resident",
-                    gen_core::MemoryStrategy::StagedResidency => "staged_residency",
-                    gen_core::MemoryStrategy::BoundedDecode => "bounded_decode",
-                    gen_core::MemoryStrategy::BoundedAttention => "bounded_attention",
-                    gen_core::MemoryStrategy::BoundedTransformerResidency => {
-                        "bounded_transformer_residency"
-                    }
-                };
-                let authority_label = match context.optimization_authority {
-                    gen_core::MemoryOptimizationAuthority::Resident => "resident",
-                    gen_core::MemoryOptimizationAuthority::Estimated => "estimated",
-                    gen_core::MemoryOptimizationAuthority::Calibrated => "calibrated",
-                };
-                let facts = generator
-                    .memory_strategy_contract()
-                    .map(|contract| contract.asset_facts)
-                    .ok_or_else(|| {
+                let contract = generator.memory_strategy_contract().ok_or_else(|| {
                         WorkerError::InvalidPayload(
                             "Ideogram loaded provider omitted its sealed memory contract".to_owned(),
                         )
                     })?;
-                tracing::info!(
-                    event = "image_memory_strategy_selected",
-                    route = engine_id,
-                    actual_tier = tier,
-                    strategy = strategy_label,
-                    authority = authority_label,
-                    cache_state = cache_state_label,
-                    predicted_peak_bytes = context.predicted_peak_bytes,
-                    base_bytes = facts.base_bytes,
-                    conditioning_bytes = facts.conditioning_bytes,
-                    transformer_bytes = facts.transformer_bytes,
-                    decoder_bytes = facts.decoder_bytes,
-                    overlay_bytes = facts.overlay_bytes,
-                    external_committed_bytes,
-                    evidence_revision = %context.evidence_revision,
-                    "Ideogram exact receipt-backed memory strategy selected"
-                );
-                emit_event(
-                    "image_memory_strategy_selected",
-                    serde_json::json!({
+                let facts = contract.asset_facts;
+                let physical_receipt =
+                    crate::candle_memory_strategy::ideogram_physical_receipt_identity(contract)?;
+                let passes = match hires_first_pass_memory_context.as_ref() {
+                    Some(first) => vec![("hires_first", first), ("hires_final", &*context)],
+                    None => vec![("single", &*context)],
+                };
+                for (pass_identity, pass_context) in passes {
+                    let strategy_label = match pass_context.selection.strategy {
+                        gen_core::MemoryStrategy::Resident => "resident",
+                        gen_core::MemoryStrategy::StagedResidency => "staged_residency",
+                        gen_core::MemoryStrategy::BoundedDecode => "bounded_decode",
+                        gen_core::MemoryStrategy::BoundedAttention => "bounded_attention",
+                        gen_core::MemoryStrategy::BoundedTransformerResidency => {
+                            "bounded_transformer_residency"
+                        }
+                    };
+                    let authority_label = match pass_context.optimization_authority {
+                        gen_core::MemoryOptimizationAuthority::Resident => "resident",
+                        gen_core::MemoryOptimizationAuthority::Estimated => "estimated",
+                        gen_core::MemoryOptimizationAuthority::Calibrated => "calibrated",
+                    };
+                    let carrier = match (
+                        &pass_context.mode,
+                        pass_context.geometry.reference_count,
+                    ) {
+                        (_, 0) => "prompt_only",
+                        (gen_core::MemoryMode::Edit, 2) => "reference_mask",
+                        _ => "reference",
+                    };
+                    tracing::info!(
+                        event = "image_memory_strategy_selected",
+                        route = engine_id,
+                        actual_tier = tier,
+                        pass = pass_identity,
+                        mode = pass_context.mode.as_key(),
+                        carrier,
+                        reference_count = pass_context.geometry.reference_count,
+                        use_pid = pass_context.use_pid,
+                        overlay = pass_context.overlay.as_deref().unwrap_or("none"),
+                        physical_receipt = physical_receipt.as_str(),
+                        strategy = strategy_label,
+                        authority = authority_label,
+                        cache_state = cache_state_label,
+                        predicted_peak_bytes = pass_context.predicted_peak_bytes,
+                        base_bytes = facts.base_bytes,
+                        conditioning_bytes = facts.conditioning_bytes,
+                        transformer_bytes = facts.transformer_bytes,
+                        decoder_bytes = facts.decoder_bytes,
+                        overlay_bytes = facts.overlay_bytes,
+                        external_committed_bytes,
+                        evidence_revision = %pass_context.evidence_revision,
+                        "Ideogram exact receipt-backed memory strategy selected"
+                    );
+                    emit_event(
+                        "image_memory_strategy_selected",
+                        serde_json::json!({
                         "backend": "candle",
                         "route": engine_id,
                         "actualTier": tier,
+                        "passIdentity": pass_identity,
+                        "mode": pass_context.mode.as_key(),
+                        "carrier": carrier,
+                        "referenceCount": pass_context.geometry.reference_count,
+                        "geometry": {
+                            "width": pass_context.geometry.width,
+                            "height": pass_context.geometry.height,
+                            "batch": pass_context.geometry.batch,
+                            "frames": pass_context.geometry.frames,
+                        },
+                        "usePid": pass_context.use_pid,
+                        "overlay": pass_context.overlay.clone(),
+                        "physicalReceipt": physical_receipt.clone(),
                         "strategy": strategy_label,
                         "authority": authority_label,
                         "cacheState": cache_state_label,
-                        "predictedPeakBytes": context.predicted_peak_bytes,
+                        "predictedPeakBytes": pass_context.predicted_peak_bytes,
                         "physicalFloor": {
                             "baseBytes": facts.base_bytes,
                             "conditioningBytes": facts.conditioning_bytes,
@@ -11288,9 +11305,10 @@ async fn generate_candle_stream(
                             "decoderBytes": facts.decoder_bytes,
                             "overlayBytes": facts.overlay_bytes,
                         },
-                        "evidenceRevision": context.evidence_revision,
+                        "evidenceRevision": pass_context.evidence_revision.clone(),
                     }),
-                );
+                    );
+                }
             } else {
                 warm_policy.decline(
                     crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
@@ -11342,6 +11360,7 @@ async fn generate_candle_stream(
                         use_pid,
                         text_style_gain,
                         generation_memory,
+                        hires_first_pass_generation_memory,
                         memory_strategy_context.as_ref(),
                         hires_first_pass_memory_context.as_ref(),
                         &enhance,

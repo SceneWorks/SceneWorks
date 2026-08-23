@@ -45,6 +45,7 @@ const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sh
 const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additive.sha256:";
 const IDEOGRAM_TURBO_ADAPTER_PREFIX: &str = "ideogram.turbo-time.sha256:";
 const IDEOGRAM_PID_PREFIX: &str = "ideogram.pid.flux2.sha256:";
+const IDEOGRAM_PHYSICAL_RECEIPT_PREFIX: &str = "ideogram.physical.sha256:";
 
 fn is_chroma(engine_id: &str) -> bool {
     matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
@@ -185,6 +186,7 @@ fn validate_ideogram_asset_facts(
     engine_id: &str,
     contract: &gen_core::MemoryProviderContract,
     use_pid: bool,
+    mode: &MemoryMode,
 ) -> WorkerResult<()> {
     let facts = contract.asset_facts;
     let pid_receipts = contract
@@ -192,6 +194,13 @@ fn validate_ideogram_asset_facts(
         .iter()
         .filter(|component| component.id.starts_with(IDEOGRAM_PID_PREFIX))
         .count();
+    let physical = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.id.starts_with(IDEOGRAM_PHYSICAL_RECEIPT_PREFIX))
+        .collect::<Vec<_>>();
+    let pid_shape_matches = pid_receipts == usize::from(use_pid)
+        || (!use_pid && *mode == MemoryMode::ImageToImage && pid_receipts == 1);
     let complete = facts.conditioning_bytes > 0
         && facts.transformer_bytes > 0
         && facts.decoder_bytes > 0
@@ -201,7 +210,17 @@ fn validate_ideogram_asset_facts(
                 .saturating_add(facts.transformer_bytes)
                 .saturating_add(facts.decoder_bytes)
         && contract.auxiliary_resident_bytes() == facts.overlay_bytes
-        && pid_receipts == usize::from(use_pid)
+        && pid_shape_matches
+        && matches!(physical.as_slice(), [component]
+            if component.id.len() == IDEOGRAM_PHYSICAL_RECEIPT_PREFIX.len() + 64
+                && component.id[IDEOGRAM_PHYSICAL_RECEIPT_PREFIX.len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                && component.kind == gen_core::MemoryComponentKind::TransformerSubStack(
+                    gen_core::TransformerComponent::Dit
+                )
+                && component.resident_bytes == facts.transformer_bytes
+                && component.bounded_by == Some(MemoryStrategy::BoundedTransformerResidency))
         && matches!(engine_id, "ideogram_4" | "ideogram_4_turbo");
     if !complete {
         return Err(WorkerError::InvalidPayload(
@@ -209,6 +228,30 @@ fn validate_ideogram_asset_facts(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn ideogram_physical_receipt_identity(
+    contract: &gen_core::MemoryProviderContract,
+) -> WorkerResult<String> {
+    let identities = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.id.starts_with(IDEOGRAM_PHYSICAL_RECEIPT_PREFIX))
+        .map(|component| component.id.clone())
+        .collect::<Vec<_>>();
+    match identities.as_slice() {
+        [identity]
+            if identity.len() == IDEOGRAM_PHYSICAL_RECEIPT_PREFIX.len() + 64
+                && identity[IDEOGRAM_PHYSICAL_RECEIPT_PREFIX.len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Ok(identity.clone())
+        }
+        _ => Err(WorkerError::InvalidPayload(
+            "Ideogram provider omitted its singular canonical physical receipt".to_owned(),
+        )),
+    }
 }
 
 fn chroma_base_phase_floor_bytes(contract: &gen_core::MemoryProviderContract) -> u64 {
@@ -910,6 +953,7 @@ fn memory_for_selection(
         decode_tile_edge: selection.parameters.decode_tile_edge,
         decode_overlap: selection.parameters.decode_overlap,
         chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
+        attention_chunk_size: selection.parameters.attention_chunk_size,
         stream_transformer_blocks: contract.engages(
             selection.strategy,
             MemoryStrategy::BoundedTransformerResidency,
@@ -1149,7 +1193,7 @@ fn evaluate_shared_image_inner(
         validate_chroma_asset_facts(&contract)?;
         chroma_provider_overlay_identity(&contract, provider_overlay)?
     } else if is_ideogram(engine_id) {
-        validate_ideogram_asset_facts(engine_id, &contract, use_pid)?;
+        validate_ideogram_asset_facts(engine_id, &contract, use_pid, &mode.mode)?;
         ideogram_provider_overlay_identity(engine_id, &contract, provider_overlay)?
     } else {
         provider_overlay.map(str::to_owned)
@@ -1767,7 +1811,62 @@ mod tests {
     ) -> gen_core::MemoryProviderContract {
         let mut contract = chroma_probe_contract(None, 0, 0);
         contract.provider_id = provider.to_owned();
-        let mut components = Vec::new();
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| gen_core::MemoryStrategyCapability {
+                strategy,
+                support: gen_core::MemoryStrategySupport::Implemented,
+                parameters: match strategy {
+                    MemoryStrategy::BoundedDecode => gen_core::MemoryParameterRanges {
+                        decode_tile_edges: vec![512],
+                        decode_overlaps: vec![64],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedAttention => gen_core::MemoryParameterRanges {
+                        attention_chunk_sizes: vec![64 * 1024 * 1024],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedTransformerResidency => {
+                        gen_core::MemoryParameterRanges {
+                            transformer_window_sizes: vec![4],
+                            transformer_window_components: vec![
+                                gen_core::TransformerComponent::Dit,
+                            ],
+                            ..Default::default()
+                        }
+                    }
+                    _ => Default::default(),
+                },
+            })
+            .collect();
+        contract.lifecycle.decode_tiling = true;
+        contract.lifecycle.attention_chunking = true;
+        contract.lifecycle.transformer_window_materialization = true;
+        contract.additional_prerequisites = [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ]
+        .into_iter()
+        .map(|strategy| {
+            (
+                strategy,
+                gen_core::MemoryStrategyPrerequisite::Rung {
+                    rung: MemoryStrategy::StagedResidency,
+                    scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                },
+            )
+        })
+        .collect();
+        let mut components = vec![gen_core::MemoryResidentComponent {
+            id: format!("{IDEOGRAM_PHYSICAL_RECEIPT_PREFIX}{}", "e".repeat(64)),
+            kind: gen_core::MemoryComponentKind::TransformerSubStack(
+                gen_core::TransformerComponent::Dit,
+            ),
+            resident_bytes: contract.asset_facts.transformer_bytes,
+            bounded_by: Some(MemoryStrategy::BoundedTransformerResidency),
+            residency: gen_core::MemoryComponentResidency::WholeRender,
+        }];
         if let Some(identity) = user_identity {
             components.push(gen_core::MemoryResidentComponent {
                 id: identity.to_owned(),
@@ -1797,6 +1896,7 @@ mod tests {
         }
         let overlay_bytes = components
             .iter()
+            .filter(|component| component.kind.is_auxiliary())
             .map(|component| component.resident_bytes)
             .sum();
         contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
@@ -1807,6 +1907,9 @@ mod tests {
                 gen_core::MemoryFormulaVariable::BatchCount,
                 gen_core::MemoryFormulaVariable::ConditioningTokenCount,
                 gen_core::MemoryFormulaVariable::OverlayBytes,
+                gen_core::MemoryFormulaVariable::DecodeTileArea,
+                gen_core::MemoryFormulaVariable::AttentionChunkSize,
+                gen_core::MemoryFormulaVariable::TransformerWindowSize,
             ],
             resident_components: components,
         };
@@ -2011,7 +2114,7 @@ mod tests {
             true,
             false,
             Some(VramBudget {
-                free_gb: 80.0,
+                free_gb: 64.0,
                 total_gb: 128.0,
             }),
             crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
@@ -2028,7 +2131,7 @@ mod tests {
             hires.context.selection.strategy,
             MemoryStrategy::StagedResidency
         );
-        assert_eq!(hires.context.predicted_peak_bytes, gib(58));
+        assert_eq!(hires.context.predicted_peak_bytes, gib(50));
 
         assert!(evaluate(20.0, contract.clone()).is_err());
         assert!(evaluate(
@@ -2056,6 +2159,101 @@ mod tests {
         .expect("crossed user adapter receipt must fail")
         .to_string()
         .contains("singular exact provider receipt"));
+    }
+
+    #[test]
+    fn ideogram_all_optimized_rungs_produce_the_exact_execution_controls() {
+        let contract = ideogram_probe_contract("ideogram_4", None, false, false);
+        let tier = numeric_tier("ideogram_4", "q4").expect("q4 tier");
+        let selection = |strategy, parameters| MemorySelection {
+            strategy,
+            parameters,
+            tier,
+        };
+
+        let staged = memory_for_selection(
+            &contract,
+            selection(MemoryStrategy::StagedResidency, Default::default()),
+        )
+        .expect("staged controls");
+        assert!(staged.stage_residency);
+        assert!(!staged.tile_vae_decode);
+        assert!(!staged.chunk_attention);
+        assert!(!staged.stream_transformer_blocks);
+
+        let decode = memory_for_selection(
+            &contract,
+            selection(
+                MemoryStrategy::BoundedDecode,
+                gen_core::MemoryStrategyParameters {
+                    decode_tile_edge: Some(512),
+                    decode_overlap: Some(64),
+                    ..Default::default()
+                },
+            ),
+        )
+        .expect("decode controls");
+        assert!(decode.stage_residency && decode.tile_vae_decode);
+        assert_eq!(decode.decode_tile_edge, Some(512));
+        assert_eq!(decode.decode_overlap, Some(64));
+
+        let attention = memory_for_selection(
+            &contract,
+            selection(
+                MemoryStrategy::BoundedAttention,
+                gen_core::MemoryStrategyParameters {
+                    decode_tile_edge: Some(512),
+                    decode_overlap: Some(64),
+                    attention_chunk_size: Some(64 * 1024 * 1024),
+                    ..Default::default()
+                },
+            ),
+        )
+        .expect("attention controls");
+        assert!(attention.stage_residency && attention.tile_vae_decode);
+        assert!(attention.chunk_attention);
+        assert_eq!(attention.attention_chunk_size, Some(64 * 1024 * 1024));
+
+        let transformer = memory_for_selection(
+            &contract,
+            selection(
+                MemoryStrategy::BoundedTransformerResidency,
+                gen_core::MemoryStrategyParameters {
+                    decode_tile_edge: Some(512),
+                    decode_overlap: Some(64),
+                    attention_chunk_size: Some(64 * 1024 * 1024),
+                    transformer_window_size: Some(4),
+                    transformer_window_component: Some(gen_core::TransformerComponent::Dit),
+                },
+            ),
+        )
+        .expect("transformer controls");
+        assert!(transformer.stage_residency && transformer.tile_vae_decode);
+        assert!(transformer.chunk_attention && transformer.stream_transformer_blocks);
+        assert_eq!(transformer.transformer_window_size, Some(4));
+        assert_eq!(
+            transformer.transformer_window_component,
+            Some(gen_core::TransformerComponent::Dit)
+        );
+    }
+
+    #[test]
+    fn ideogram_pid_receipt_only_allows_the_native_hires_refinement_coordinate() {
+        let contract = ideogram_probe_contract("ideogram_4", None, false, true);
+        validate_ideogram_asset_facts("ideogram_4", &contract, true, &MemoryMode::TextToImage)
+            .expect("the PiD first pass binds its receipt");
+        validate_ideogram_asset_facts("ideogram_4", &contract, false, &MemoryMode::ImageToImage)
+            .expect("the native Hires refinement retains the load's charged PiD receipt");
+        assert!(validate_ideogram_asset_facts(
+            "ideogram_4",
+            &contract,
+            false,
+            &MemoryMode::TextToImage,
+        )
+        .is_err());
+        assert!(ideogram_physical_receipt_identity(&contract)
+            .expect("physical receipt")
+            .starts_with(IDEOGRAM_PHYSICAL_RECEIPT_PREFIX));
     }
 
     #[test]

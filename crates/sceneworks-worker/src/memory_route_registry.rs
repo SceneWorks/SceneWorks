@@ -7185,6 +7185,54 @@ mod tests {
                 manifest["candle"]["memoryStrategyContract"]["exhaustive"],
                 true
             );
+            let implementations = manifest["candle"]["memoryStrategyContract"]["implementations"]
+                .as_array()
+                .expect("Ideogram implementations");
+            for (profile, overlay) in [("plain", "none"), ("lora", "lora")] {
+                for (rung, engaged) in [
+                    (
+                        "bounded_decode",
+                        vec!["resident", "staged_residency", "bounded_decode"],
+                    ),
+                    (
+                        "bounded_attention",
+                        vec![
+                            "resident",
+                            "staged_residency",
+                            "bounded_decode",
+                            "bounded_attention",
+                        ],
+                    ),
+                    (
+                        "bounded_transformer_residency",
+                        vec![
+                            "resident",
+                            "staged_residency",
+                            "bounded_decode",
+                            "bounded_attention",
+                            "bounded_transformer_residency",
+                        ],
+                    ),
+                ] {
+                    let matching =
+                        implementations
+                            .iter()
+                            .filter(|implementation| {
+                                implementation["rung"] == rung
+                                    && implementation["loadProfiles"].as_array().is_some_and(
+                                        |values| values.iter().any(|value| value == profile),
+                                    )
+                                    && implementation["overlays"].as_array().is_some_and(|values| {
+                                        values.iter().any(|value| value == overlay)
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                    let [implementation] = matching.as_slice() else {
+                        panic!("{provider}:{profile}:{rung} must have exactly one declaration");
+                    };
+                    assert_eq!(implementation["engagedRungs"], serde_json::json!(engaged));
+                }
+            }
             for tier in ["bf16", "q4", "q8"] {
                 let resident = manifest["candle"]["vramGbByTier"][tier]
                     .as_f64()
@@ -7229,6 +7277,43 @@ mod tests {
                             ),
                             "{provider}:{tier}:{profile:?}:{mode:?}:{reference_count}"
                         );
+                    }
+                    if use_pid {
+                        let native_hires_refinement =
+                            declared_candle_request_strategy_contract_with(
+                                provider,
+                                Some(tier),
+                                &manifest,
+                                &load,
+                                MemoryRouteRequestContext {
+                                    mode: MemoryRouteMode::ImageToImage,
+                                    reference_count: 1,
+                                    use_pid: false,
+                                    has_phases: false,
+                                },
+                                |_| Some(staged_contract(provider)),
+                            );
+                        assert!(matches!(
+                            native_hires_refinement,
+                            DeclaredCandleStrategyContract::Applied { provider_mode, .. }
+                                if provider_mode == "image_to_image"
+                        ));
+                        assert!(matches!(
+                            declared_candle_request_strategy_contract_with(
+                                provider,
+                                Some(tier),
+                                &manifest,
+                                &load,
+                                MemoryRouteRequestContext {
+                                    mode: MemoryRouteMode::TextToImage,
+                                    reference_count: 0,
+                                    use_pid: false,
+                                    has_phases: false,
+                                },
+                                |_| Some(staged_contract(provider)),
+                            ),
+                            DeclaredCandleStrategyContract::Refused
+                        ));
                     }
                 }
             }
