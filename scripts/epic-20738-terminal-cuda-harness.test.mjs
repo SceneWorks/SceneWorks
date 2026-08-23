@@ -11,6 +11,7 @@ import {
   PROFILE_SCHEMA_PATH,
   RECEIPT_SCHEMA_PATH,
   CACHE_PREFLIGHT_SCHEMA_PATH,
+  assertExactDownloadedFilePartition,
   authorityLifetimePlan,
   cellSemanticsSha256,
   directoryInventory,
@@ -28,7 +29,9 @@ import {
   receiptSkeleton,
   runCampaign,
   safeRemoveTree,
+  importRecoveryContinuation,
   selectImportedPrefix,
+  selectRecoveryContinuation,
   validateCampaignPaths,
   validateCachePreflightEvidence,
   validateDocumentWithSchema,
@@ -129,6 +132,31 @@ test("download evidence freezes the exact 23-authority filename census", async (
   assert.throws(
     () => expectedArtifactFilesFromEvidence(checked, missingRow),
     /missing exact authority/,
+  );
+});
+
+test("downloaded-file partition compares exact semantics but ignores object insertion order", () => {
+  const expected = [{
+    path: "transformer/model.safetensors", bytes: 200, sha256: "a".repeat(64),
+    lfsSha256: "b".repeat(64), commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+  }];
+  const reordered = [{
+    commitSha: expected[0].commitSha, lfsSha256: expected[0].lfsSha256,
+    sha256: expected[0].sha256, bytes: expected[0].bytes, path: expected[0].path,
+  }];
+  assert.doesNotThrow(() => assertExactDownloadedFilePartition(reordered, expected, "fixture"));
+  for (const field of ["path", "bytes", "sha256", "lfsSha256", "commitSha"]) {
+    const drifted = structuredClone(expected);
+    drifted[0][field] = field === "path" ? "other.safetensors"
+      : field === "bytes" ? 201 : "f".repeat(field === "commitSha" ? 40 : 64);
+    assert.throws(() => assertExactDownloadedFilePartition(drifted, expected, "fixture"), /partition/);
+  }
+  for (const malformed of [null, [], [{ ...expected[0], extra: true }], [{ ...expected[0], path: "../escape" }]]) {
+    assert.throws(() => assertExactDownloadedFilePartition(malformed, expected, "fixture"), /array|fields|malformed|partition/);
+  }
+  assert.throws(
+    () => assertExactDownloadedFilePartition([...expected, structuredClone(expected[0])], expected, "fixture"),
+    /ambiguous/,
   );
 });
 
@@ -705,7 +733,7 @@ async function writePrefixCandidate(root, candidateName = "12345") {
   const boundaryOrdinal = `${String(boundaryIndex + 1).padStart(2, "0")}-${boundaryCell.id}`;
   const boundaryDir = path.join(evidence, boundaryOrdinal);
   await mkdir(boundaryDir);
-  await writeFile(path.join(boundaryDir, "controller.log"), `starting ${boundaryCell.id}\n`, "utf8");
+  await writeFile(path.join(boundaryDir, "controller.log"), "2026-08-22T14:52:25.935Z starting flux1-dev-q8\n", "utf8");
   const boundary = receiptSkeleton({
     cell: boundaryCell,
     ordinal: boundaryIndex + 1,
@@ -774,6 +802,236 @@ async function writePrefixCandidate(root, candidateName = "12345") {
   );
   return { candidate, evidence, metadata };
 }
+
+async function writeRecoveryCandidate(root) {
+  const legacyRoot = path.join(path.dirname(root), `${path.basename(root)}-legacy-source`);
+  await mkdir(legacyRoot);
+  const legacy = await writePrefixCandidate(legacyRoot);
+  const candidate = path.join(root, "9488587517");
+  const evidence = path.join(candidate, "evidence");
+  await mkdir(evidence, { recursive: true });
+  const originalLineage = {
+    kind: "contiguous-pass-prefix",
+    sourceArtifactId: "9477529627",
+    sourceArtifactName: "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1",
+    sourceArtifactDigest: "sha256:f3164a32a485fdedd671f4e11f30038213d30a7eb2b541bda90bef30e63188f3",
+    sourceRunId: "32570707303",
+    sourceRunAttempt: "1",
+    sourceHeadSha: "8886a9e69f26beec05688c81b414859bd102f6d0",
+    sourceInferenceSha: "b646a6f89ba9f6b07efe53dd583d8a42e21e9871",
+    sourceProfile: PROFILE_NAME,
+    sourceCellSemanticsSha256: "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879",
+    sourceArtifactSemanticsSha256: "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e",
+    importedOrdinals: [1, 2, 3, 4, 5, 6, 7],
+    quarantinedBoundaryResidue: {
+      ordinal: 8, cellId: "flux1-dev-q8", path: "_imported-boundary-residue/08-flux1-dev-q8",
+      disposition: "non-executed-pre-provision-skeleton-excluded-from-prefix",
+      files: [{ path: "controller.log", bytes: 47, sha256: "6043cbeeeed54deec723c1ab5fcec6b36a8de4f7b31928c6b57222fd7dfec770" }],
+    },
+  };
+  const imported = path.join(evidence, "_imported-prefix");
+  await mkdir(imported);
+  for (let index = 0; index < 7; index += 1) {
+    const cell = profile().cells[index];
+    const ordinal = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    await cp(path.join(legacy.evidence, ordinal), path.join(imported, ordinal), { recursive: true });
+  }
+  await writeFile(path.join(imported, "lineage.json"), `${JSON.stringify(originalLineage, null, 2)}\n`);
+  await mkdir(path.join(evidence, "_imported-boundary-residue"));
+  await cp(path.join(legacy.evidence, "08-flux1-dev-q8"), path.join(evidence, "_imported-boundary-residue", "08-flux1-dev-q8"), { recursive: true });
+  const recoveryMetadata = {
+    artifactId: "9488587517",
+    artifactName: "sc-20945-epic-20738-62be42127e2b4ff07321e2c369de92fc6edef526-32616545132-1",
+    artifactSize: 4_322_200,
+    artifactDigest: "sha256:765c8f4ed419e7a7d0fbc20dcd65f5be6f0be7ce9ed9f151915208bf541692bf",
+    runId: "32616545132", runAttempt: "1", headSha: "62be42127e2b4ff07321e2c369de92fc6edef526",
+    inferenceSha: "b646a6f89ba9f6b07efe53dd583d8a42e21e9871", profile: PROFILE_NAME,
+    cellSemanticsSha256: "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879",
+    artifactSemanticsSha256: "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932",
+  };
+  await writeFile(path.join(candidate, "artifact-metadata.json"), `${JSON.stringify(recoveryMetadata, null, 2)}\n`);
+  async function writeCurrentReceipt(parent, index, status) {
+    const cell = profile().cells[index];
+    const ordinal = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    const cellDir = path.join(parent, ordinal);
+    await mkdir(cellDir, { recursive: true });
+    await writeFile(path.join(cellDir, "cell.json"), `{"id":"${cell.id}"}\n`);
+    await writeFile(path.join(cellDir, "runtime-result.json"), "{}\n");
+    await writeFile(path.join(cellDir, "controller.log"), `${status} ${cell.id}\n`);
+    const receipt = fixtureReceipt(status, index);
+    receipt.repositories.sceneworks.sha = recoveryMetadata.headSha;
+    receipt.repositories.inference.sha = recoveryMetadata.inferenceSha;
+    receipt.execution.headSha = recoveryMetadata.headSha;
+    receipt.execution.runId = recoveryMetadata.runId;
+    receipt.execution.runAttempt = recoveryMetadata.runAttempt;
+    const files = await hashedFiles(cellDir);
+    receipt.inputs = files.filter((file) => file.path === "cell.json");
+    receipt.outputs = files.filter((file) => file.path === "runtime-result.json");
+    receipt.logs = files.filter((file) => file.path === "controller.log");
+    await writeFile(path.join(cellDir, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+    return { cell, ordinal, receipt };
+  }
+  const recovered = [];
+  for (const index of [7, 8]) recovered.push(await writeCurrentReceipt(evidence, index, "passed"));
+  const staleCell = profile().cells[9];
+  const staleDir = path.join(evidence, `10-${staleCell.id}`);
+  await mkdir(staleDir);
+  await writeFile(path.join(staleDir, "controller.log"), "stale sentinel changed after receipt\n");
+  const stale = receiptSkeleton({
+    cell: staleCell, ordinal: 10,
+    repositories: { sceneworks: { sha: recoveryMetadata.headSha, clean: true }, inference: { sha: recoveryMetadata.inferenceSha, clean: true } },
+    artifacts: fixtureReceipt("failed", 9).artifacts,
+    execution: { ...fixtureReceipt("failed", 9).execution, runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha },
+    gpuIdentity: fixtureReceipt("failed", 9).hardware.gpuIdentity,
+    systemMemory: fixtureReceipt("failed", 9).hardware.systemMemory, startedAt: "2026-08-23T00:00:00.000Z",
+  });
+  stale.hardware.rawVramSamples = [{ raw: "fixture raw" }];
+  stale.logs = [{ path: "controller.log", bytes: 1, sha256: "0".repeat(64) }];
+  stale.authorityLifecycle = {
+    ordinal: 10, cellId: staleCell.id, staged: [], activeArtifactIds: [...staleCell.artifactIds],
+    providerExecution: "not-attempted", requestMemoryStrategy: null, verifiedBefore: false,
+    verifiedAfter: false, derivedAfter: [], released: [], diskProbes: [],
+  };
+  await writeFile(path.join(staleDir, "receipt.json"), `${JSON.stringify(stale, null, 2)}\n`);
+  const emergency = path.join(evidence, "_emergency");
+  const failures = [];
+  for (let index = 9; index < 19; index += 1) {
+    const row = await writeCurrentReceipt(emergency, index, "failed");
+    failures.push({ id: row.cell.id, status: "failed", receipt: `_emergency/${row.ordinal}/receipt.json` });
+  }
+  const expected = expectedArtifactFilesFromEvidence(profile(), JSON.parse(await readFile(
+    "config/download-pattern-evidence.json", "utf8",
+  )));
+  const ids = [...new Set(profile().cells.slice(7).flatMap((cell) => cell.artifactIds))];
+  const sourceBytes = new Map([
+    ["flux1-dev-q8", 18_010_071_290], ["flux1-schnell-q4", 9_611_551_284], ["flux1-schnell-q8", 17_999_175_703],
+    ["scail2-q4", 23_993_093_306], ["scail2-q8", 32_067_131_269], ["ltx23-q8", 29_728_720_716],
+    ["ltx23-gemma", 26_427_894_918], ["sdxl-base-q4", 2_703_202_068], ["sdxl-openpose", 2_502_139_104],
+    ["sdxl-tokenizer-l", 2_224_003], ["sdxl-tokenizer-bigg", 2_224_041], ["sdxl-vae-fix", 334_643_238],
+    ["realvisxl-q4", 3_911_656_467], ["realvisxl-lightning-q4", 3_911_657_599], ["illustrious-v1-q4", 3_911_656_791], ["illustrious-v2-q4", 3_911_656_467],
+  ]);
+  const downloaded = { artifactId: "flux1-schnell-q8", path: "transformer/model.safetensors", bytes: 12_637_521_668,
+    sha256: "c62fff59c0a5205204def102f5183b703ae8a8bb4b6b952c640f27e20d3e03f7", lfsSha256: "c62fff59c0a5205204def102f5183b703ae8a8bb4b6b952c640f27e20d3e03f7", commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599" };
+  const sourceCensus = ids.map((id) => {
+    const artifact = profile().artifacts[id];
+    const missingFiles = id === "flux1-schnell-q8" ? ["q8/transformer/model.safetensors"] : [];
+    const presentFiles = expected[id].filter((file) => id !== "flux1-schnell-q8" || file !== "transformer/model.safetensors");
+    const reusedTotal = sourceBytes.get(id) - (id === downloaded.artifactId ? downloaded.bytes : 0);
+    const reusedFiles = presentFiles.map((file, index) => ({ path: file, bytes: index === 0 ? reusedTotal - presentFiles.length + 1 : 1, sha256: "a".repeat(64) }));
+    return { id, repository: artifact.repository, revision: artifact.revision, subdirectory: artifact.subdirectory,
+      allowPatterns: artifact.allowPatterns, expectedFiles: expected[id], complete: missingFiles.length === 0, missingFiles, reusedFiles };
+  });
+  const stagedDownload = (({ path: file, bytes, sha256, lfsSha256, commitSha }) => ({ path: file, bytes, sha256, lfsSha256, commitSha }))(downloaded);
+  const plannedAudits = new Map(sourceCensus.map((row) => [row.id, {
+    ...row, downloadedFiles: row.id === downloaded.artifactId ? [stagedDownload] : [],
+  }]));
+  const lifetimePlan = authorityLifetimePlan(profile(), 7, plannedAudits);
+  const diskPlan = estimateJitDiskPlan(lifetimePlan, 248_674_082_816, downloaded.bytes, []);
+  const emptyInventory = { root: "fixture-derived", files: 0, bytes: 0, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" };
+  const staging = ["flux1-dev-q8", "flux1-schnell-q4"].map((id) => {
+    const row = sourceCensus.find((candidate) => candidate.id === id);
+    return { id: row.id, repository: row.repository, revision: row.revision, subdirectory: row.subdirectory,
+      allowPatterns: row.allowPatterns, expectedFiles: row.expectedFiles, reusedFiles: expected[id].map((file) => ({ path: file, bytes: 1, sha256: "a".repeat(64) })), downloadedFiles: [] };
+  });
+  const finalOffline = staging.map((row) => ({ id: row.id, repository: row.repository, revision: row.revision,
+    subdirectory: row.subdirectory, allowPatterns: row.allowPatterns, expectedFiles: row.expectedFiles,
+    inventory: { ...emptyInventory, root: `fixture-stage/${row.id}`, files: row.expectedFiles.length, bytes: row.expectedFiles.length, sha256: "a".repeat(64) } }));
+  const cacheBase = {
+    schemaVersion: 1, profile: PROFILE_NAME,
+    downloadEvidenceSha256: "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b",
+    expectedArtifactIds: ids, sourceCacheRoot: "fixture-cache", campaignStagingRoot: "fixture-stage",
+    derivedSidecarRoot: "fixture-derived", missingFileStore: "fixture-missing", frozenMissingFiles: [{ artifactId: "flux1-schnell-q8", repository: profile().artifacts["flux1-schnell-q8"].repository, revision: profile().artifacts["flux1-schnell-q8"].revision, file: "q8/transformer/model.safetensors" }],
+    sidecarObstructions: [], reusedFiles: sourceCensus.flatMap((row) => row.reusedFiles.map((file) => ({ artifactId: row.id, ...file }))),
+    downloadedFiles: [downloaded], networkDownloadCount: 1, phases: { sourceCensus, staging: [], finalOffline: [] },
+    lifetimePlan, diskPlan, derivedSidecarLifecycle: { initial: emptyInventory, afterCells: [] }, offlineBeforeCells: true,
+  };
+  const campaignError = "JIT authority stage/copy/hash failed before cell flux1-schnell-q8: Error: offline JIT stage changed the frozen download partition for flux1-schnell-q8";
+  await writeFile(path.join(evidence, "cache-preflight-initial.json"), `${JSON.stringify({ ...cacheBase, evidencePhase: "initial", status: "passed", error: null }, null, 2)}\n`);
+  await writeFile(path.join(evidence, "cache-preflight.json"), `${JSON.stringify({ ...cacheBase, evidencePhase: "final", status: "failed", error: campaignError,
+    sidecarObstructions: Array.from({ length: 16 }, (_, index) => ({ artifactIds: [ids[index]], root: `fixture-stage/${ids[index]}`, path: ".candle-device-format-v1", bytes: 75, sha256: "a".repeat(64) })),
+    phases: { sourceCensus, staging, finalOffline },
+  }, null, 2)}\n`);
+  const cacheBytes = await readFile(path.join(evidence, "cache-preflight.json"));
+  const summary = {
+    schemaVersion: 1, profile: PROFILE_NAME,
+    repositories: { sceneworks: { sha: recoveryMetadata.headSha, clean: true }, inference: { sha: recoveryMetadata.inferenceSha, clean: true } },
+    execution: { runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha,
+      headRef: "refs/heads/feature/sc-20738-candle-cuda-parity", workflow: "Windows Candle worker", runnerName: "cuda-windows-2", runnerOs: "Windows", runnerArch: "X64" },
+    receipts: [
+      ...profile().cells.slice(0, 7).map((cell, index) => ({ id: cell.id, status: "passed", receipt: `_imported-prefix/${String(index + 1).padStart(2, "0")}-${cell.id}/receipt.json`, error: null, emergencyReceiptError: null, source: "imported" })),
+      ...recovered.map((row) => ({ id: row.cell.id, status: "passed", receipt: `${row.ordinal}/receipt.json`, error: null, source: "continuation" })),
+      ...failures.map((row, index) => ({ ...row, error: index === 0 ? `cell lifecycle failed: Error: ${campaignError}` : `Error: cell ${row.id} blocked before setup, provisioning, and execution: ${campaignError}`, emergencyReceiptError: null, source: "continuation" })),
+    ],
+    lineage: {
+      imported: originalLineage,
+      continuation: {
+        runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha,
+        inferenceSha: recoveryMetadata.inferenceSha,
+        profileCellSemanticsSha256: recoveryMetadata.cellSemanticsSha256,
+        profileArtifactSemanticsSha256: recoveryMetadata.artifactSemanticsSha256, startOrdinal: 8,
+      },
+    },
+    cachePreflight: { path: "cache-preflight.json", bytes: cacheBytes.length, sha256: createHash("sha256").update(cacheBytes).digest("hex") },
+    authorityLifecycle: profile().cells.slice(7).map((cell, offset) => ({ ordinal: offset + 8, cellId: cell.id,
+      staged: offset < 2 ? [{ artifactId: cell.artifactIds[0] }] : [], activeArtifactIds: [...cell.artifactIds], providerExecution: offset < 2 ? "completed" : "not-attempted",
+      requestMemoryStrategy: offset < 2 ? { strategy: "default-resident", requestMemoryPresent: false, stageResidency: false, streamTransformerBlocks: false } : null,
+      verifiedBefore: offset < 2, verifiedAfter: offset < 2, derivedAfter: offset < 2 ? [{}] : [], released: offset < 3 ? [{}] : [], diskProbes: offset < 2 ? [{}, {}] : offset === 2 ? [{}] : [],
+    })),
+    diskFreeProbes: [["before-stage:flux1-dev-q8", 8], ["before-execution", 8], ["before-stage:flux1-schnell-q4", 9], ["before-execution", 9], ["before-stage:flux1-schnell-q8", 10]].map(([phase, ordinal]) => ({ phase, ordinal, root: "fixture", freeBytes: 100_000_000_000, requiredFreeBytes: 99_106_288_594 })),
+    finalAuthorityLifecycle: { stage: { root: "fixture", files: 0, bytes: 0, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }, derived: { root: "fixture", files: 0, bytes: 0, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }, derivedNamespaces: [], missingStoreAbsent: true },
+    passed: 9, failed: 10, campaignErrors: [campaignError],
+  };
+  await writeFile(path.join(evidence, "campaign-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+  return { candidate, evidence, summary };
+}
+
+test("recovery continuation imports only audited PASS cells and rejects ambiguity or tampering", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-21252-recovery-"));
+  try {
+    const validRoot = path.join(temporary, "valid");
+    await mkdir(validRoot);
+    const fixture = await writeRecoveryCandidate(validRoot);
+    const selected = await selectRecoveryContinuation(validRoot, profile());
+    assert.deepEqual(selected.receipts.map(({ ordinalName }) => ordinalName), [
+      "01-chroma1-base-q4", "02-chroma1-base-q8", "03-chroma1-flash-q4", "04-chroma1-flash-q8",
+      "05-chroma1-hd-q4", "06-chroma1-hd-q8", "07-flux1-dev-q4", "08-flux1-dev-q8", "09-flux1-schnell-q4",
+    ]);
+    const output = path.join(temporary, "output");
+    await mkdir(output);
+    const imported = await importRecoveryContinuation(selected, output);
+    assert.equal(imported.outcomes.length, 9);
+    assert.equal(imported.outcomes.some((outcome) => outcome.id === "flux1-schnell-q8"), false);
+    assert.equal((await readdir(path.join(output, "_imported-prefix"))).includes("10-flux1-schnell-q8"), false);
+    for (const [label, mutate, pattern] of [
+      ["metadata", async (candidate) => { const file = path.join(candidate, "artifact-metadata.json"); const value = JSON.parse(await readFile(file)); value.artifactDigest = "sha256:" + "0".repeat(64); await writeFile(file, JSON.stringify(value)); }, /metadata/],
+      ["summary", async (candidate) => { const file = path.join(candidate, "evidence", "campaign-summary.json"); const value = JSON.parse(await readFile(file)); value.passed = 8; await writeFile(file, JSON.stringify(value)); }, /summary/],
+      ["receipt", async (candidate) => { await writeFile(path.join(candidate, "evidence", "08-flux1-dev-q8", "controller.log"), "tampered\n"); }, /rehash/],
+      ["legacy-provenance", async (candidate) => { const file = path.join(candidate, "evidence", "_imported-prefix", "01-chroma1-base-q4", "receipt.json"); const value = JSON.parse(await readFile(file)); value.repositories.sceneworks.sha = "0".repeat(40); await writeFile(file, JSON.stringify(value)); }, /provenance/],
+      ["legacy-clean", async (candidate) => { const file = path.join(candidate, "evidence", "_imported-prefix", "02-chroma1-base-q8", "receipt.json"); const value = JSON.parse(await readFile(file)); value.repositories.inference.clean = false; await writeFile(file, JSON.stringify(value)); }, /provenance/],
+      ["recovery-provenance", async (candidate) => { const file = path.join(candidate, "evidence", "08-flux1-dev-q8", "receipt.json"); const value = JSON.parse(await readFile(file)); value.execution.headSha = "0".repeat(40); await writeFile(file, JSON.stringify(value)); }, /provenance/],
+      ["stale-provenance", async (candidate) => { const file = path.join(candidate, "evidence", "10-flux1-schnell-q8", "receipt.json"); const value = JSON.parse(await readFile(file)); value.execution.runAttempt = "2"; await writeFile(file, JSON.stringify(value)); }, /provenance/],
+      ["emergency-provenance", async (candidate) => { const file = path.join(candidate, "evidence", "_emergency", "11-scail2-q4", "receipt.json"); const value = JSON.parse(await readFile(file)); value.repositories.sceneworks.clean = false; await writeFile(file, JSON.stringify(value)); }, /clean/],
+      ["lineage", async (candidate) => { const file = path.join(candidate, "evidence", "_imported-prefix", "lineage.json"); const value = JSON.parse(await readFile(file)); value.quarantinedBoundaryResidue.files[0].sha256 = "0".repeat(64); await writeFile(file, JSON.stringify(value)); }, /original lineage/],
+      ["boundary", async (candidate) => { await writeFile(path.join(candidate, "evidence", "_imported-boundary-residue", "08-flux1-dev-q8", "controller.log"), "tampered\n"); }, /boundary residue/],
+      ["summary-path", async (candidate) => { const file = path.join(candidate, "evidence", "campaign-summary.json"); const value = JSON.parse(await readFile(file)); value.receipts[8].receipt = "09-flux1-schnell-q4/wrong.json"; await writeFile(file, JSON.stringify(value)); }, /path.source.status/],
+      ["summary-source", async (candidate) => { const file = path.join(candidate, "evidence", "campaign-summary.json"); const value = JSON.parse(await readFile(file)); value.receipts[7].source = "imported"; await writeFile(file, JSON.stringify(value)); }, /path.source.status/],
+      ["cache-role", async (candidate) => { const evidence = path.join(candidate, "evidence"); const initial = await readFile(path.join(evidence, "cache-preflight-initial.json")); await writeFile(path.join(evidence, "cache-preflight.json"), initial); const summaryFile = path.join(evidence, "campaign-summary.json"); const summary = JSON.parse(await readFile(summaryFile)); summary.cachePreflight.bytes = initial.length; summary.cachePreflight.sha256 = createHash("sha256").update(initial).digest("hex"); await writeFile(summaryFile, JSON.stringify(summary)); }, /cache evidence phases/],
+    ]) {
+      const root = path.join(temporary, label);
+      await mkdir(root);
+      await cp(fixture.candidate, path.join(root, "9488587517"), { recursive: true });
+      await mutate(path.join(root, "9488587517"));
+      await assert.rejects(selectRecoveryContinuation(root, profile()), pattern, label);
+    }
+    const ambiguous = path.join(temporary, "ambiguous");
+    await mkdir(ambiguous);
+    await cp(fixture.candidate, path.join(ambiguous, "9488587517"), { recursive: true });
+    await cp(fixture.candidate, path.join(ambiguous, "duplicate"), { recursive: true });
+    await assert.rejects(selectRecoveryContinuation(ambiguous, profile()), /exactly one/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
 
 test("prefix discovery accepts exactly one rehashed contiguous old-profile PASS prefix", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-prefix-"));
@@ -2301,10 +2559,11 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /--prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"/);
   assert.match(terminalBlock, /HF_HUB_OFFLINE: "1"/);
   assert.match(terminalBlock, /TRANSFORMERS_OFFLINE: "1"/);
-  assert.match(terminalBlock, /gh api "repos\/\$env:GITHUB_REPOSITORY\/actions\/artifacts\?per_page=100&page=\$page"/);
-  assert.match(terminalBlock, /gh run download \$runId --name \$artifact\.name --dir \$evidence/);
-  assert.match(terminalBlock, /artifactDigest = \[string\]\$artifact\.digest/);
-  assert.match(terminalBlock, /8886a9e69f26beec05688c81b414859bd102f6d0/);
+  assert.match(terminalBlock, /actions\/artifacts\/\$artifactId/);
+  assert.match(terminalBlock, /9488587517[\s\S]*?4322200[\s\S]*?765c8f4ed419e7a7d0fbc20dcd65f5be6f0be7ce9ed9f151915208bf541692bf/);
+  assert.match(terminalBlock, /\$artifact\.expired[\s\S]*?\$artifact\.size_in_bytes[\s\S]*?\$artifact\.digest/);
+  assert.match(terminalBlock, /gh run download \$runId --name \$artifactName --dir \$evidence/);
+  assert.match(terminalBlock, /62be42127e2b4ff07321e2c369de92fc6edef526/);
   assert.doesNotMatch(terminalBlock, /snapshot_download/);
   assert.match(terminalBlock, /python -m venv \$venv/);
   assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);
@@ -2314,6 +2573,10 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /__version__ == '0\.36\.0'/);
   assert.match(terminalBlock, /q8\/transformer\/model\.safetensors/);
   const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
+  assert.match(controller, /RECOVERY_IMPORTED_PREFIX_CELLS = 9[\s\S]*?RECOVERY_REMAINING_AUTHORITIES = 14[\s\S]*?RECOVERY_REMAINING_FILES = 160/);
+  assert.match(controller, /stale cell-10 sentinel/);
+  assert.match(controller, /selectRecoveryContinuation[\s\S]*?importRecoveryContinuation/);
+  assert.doesNotMatch(controller, /JSON\.stringify\(staged\.downloadedFiles/);
   assert.match(controller, /async function downloadReviewedMissing[\s\S]*?HF_HUB_OFFLINE: "0"/);
   assert.match(controller, /async function stageArtifact[\s\S]*?HF_HUB_OFFLINE: "1"/);
   assert.match(controller, /HF_HUB_OFFLINE: "1"[\s\S]*TRANSFORMERS_OFFLINE: "1"/);

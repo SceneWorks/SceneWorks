@@ -1191,11 +1191,12 @@ jobs:
       # source-reviewed fixed cache root is censused from checked-in immutable download evidence
       # before transfer: there is no cache input,
       # snapshot/glob/ref-main fallback, matrix, child workflow, per-cell dispatch, or secret weight
-      # path. The full 16-authority/199-file target-following census is hashed before GPU work. The
+      # path. The archived partial run's 16-authority/199-file census is revalidated before the
+      # remaining 14-authority/160-file continuation scope is admitted. The
       # sole reviewed cache miss may download only flux1-schnell-mlx@bba3ae... file
       # q8/transformer/model.safetensors into an isolated persistent campaign store, with exact commit/size/LFS-SHA
-      # verification; malformed cache partials are never resumed or renamed. Cells 1-7 are imported
-      # from exactly one uploaded contiguous PASS prefix and rehashed; cells 8-19 run as a distinct
+      # verification; malformed cache partials are never resumed or renamed. The reviewed 1-9 PASS
+      # recovery prefix is imported only from one exact archived artifact and rehashed; cells 10-19 run as a distinct
       # continuation only after the full source/download/disk plan passes and network is forced
       # offline. Authorities are copied just in time, retained only through their exact last consumer,
       # rehashed before/after use, and durably cleaned. Exact authority files exclude derivative extras;
@@ -1251,7 +1252,7 @@ jobs:
             throw 'the fixed terminal cache root must be an existing ordinary directory'
           }
           node scripts/epic-20738-terminal-cuda-harness.mjs check
-      - name: Discover the unique uploaded contiguous PASS prefix
+      - name: Discover the exact audited 1-9 recovery continuation
         id: terminal_prefix
         continue-on-error: true
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
@@ -1260,47 +1261,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $oldHead = '8886a9e69f26beec05688c81b414859bd102f6d0'
-          $prefix = "sc-20945-epic-20738-$oldHead-"
-          $root = Join-Path $env:RUNNER_TEMP "sc-20945-prefix-candidates-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $artifactId = '9488587517'
+          $artifactName = 'sc-20945-epic-20738-62be42127e2b4ff07321e2c369de92fc6edef526-32616545132-1'
+          $artifactSize = 4322200
+          $artifactDigest = 'sha256:765c8f4ed419e7a7d0fbc20dcd65f5be6f0be7ce9ed9f151915208bf541692bf'
+          $runId = '32616545132'
+          $runAttempt = '1'
+          $headSha = '62be42127e2b4ff07321e2c369de92fc6edef526'
+          $root = Join-Path $env:RUNNER_TEMP "sc-21252-recovery-candidates-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
-          $artifacts = @()
-          for ($page = 1; ; $page++) {
-            $response = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts?per_page=100&page=$page" | ConvertFrom-Json
-            if ($LASTEXITCODE -ne 0) { throw 'failed to enumerate terminal prefix artifacts' }
-            $artifacts += @($response.artifacts | Where-Object { -not $_.expired -and $_.name.StartsWith($prefix) })
-            if (@($response.artifacts).Count -lt 100) { break }
-          }
-          if ($artifacts.Count -eq 0) { throw "no uploaded terminal artifact has fixed prefix $prefix" }
-          foreach ($artifact in $artifacts) {
-            $runId = [string]$artifact.workflow_run.id
-            $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$runId" | ConvertFrom-Json
-            if ($LASTEXITCODE -ne 0) { throw "failed to inspect prefix run $runId" }
-            $attempt = [string]$run.run_attempt
-            $candidate = Join-Path $root ([string]$artifact.id)
-            $evidence = Join-Path $candidate 'evidence'
-            New-Item -ItemType Directory -Path $evidence -Force | Out-Null
-            gh run download $runId --name $artifact.name --dir $evidence
-            if ($LASTEXITCODE -ne 0) { throw "failed to download prefix artifact $($artifact.id)" }
-            $metadata = [ordered]@{
-              artifactId = [string]$artifact.id
-              artifactName = [string]$artifact.name
-              artifactDigest = [string]$artifact.digest
-              runId = $runId
-              runAttempt = $attempt
-              headSha = [string]$artifact.workflow_run.head_sha
-              inferenceSha = 'b646a6f89ba9f6b07efe53dd583d8a42e21e9871'
-              profile = 'epic-20738-candle-cuda-terminal-v1'
-              cellSemanticsSha256 = 'dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879'
-              artifactSemanticsSha256 = 'f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e'
-            } | ConvertTo-Json
-            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-            [IO.File]::WriteAllText(
-              (Join-Path $candidate 'artifact-metadata.json'),
-              $metadata + [Environment]::NewLine,
-              $utf8NoBom
-            )
-          }
+          $artifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$artifactId" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or [string]$artifact.id -ne $artifactId -or $artifact.name -ne $artifactName -or [int64]$artifact.size_in_bytes -ne $artifactSize -or [string]$artifact.digest -ne $artifactDigest -or [string]$artifact.workflow_run.id -ne $runId -or [string]$artifact.workflow_run.head_sha -ne $headSha) { throw 'audited recovery artifact identity is missing, expired, or tampered' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$runId" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [string]$run.id -ne $runId -or [string]$run.run_attempt -ne $runAttempt -or [string]$run.head_sha -ne $headSha) { throw 'audited recovery workflow run identity drifted' }
+          $candidate = Join-Path $root $artifactId
+          $evidence = Join-Path $candidate 'evidence'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          gh run download $runId --name $artifactName --dir $evidence
+          if ($LASTEXITCODE -ne 0) { throw "failed to download audited recovery artifact $artifactId" }
+          $metadata = [ordered]@{
+            artifactId = $artifactId; artifactName = $artifactName; artifactSize = $artifactSize; artifactDigest = $artifactDigest
+            runId = $runId; runAttempt = $runAttempt; headSha = $headSha
+            inferenceSha = 'b646a6f89ba9f6b07efe53dd583d8a42e21e9871'
+            profile = 'epic-20738-candle-cuda-terminal-v1'
+            cellSemanticsSha256 = 'dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879'
+            artifactSemanticsSha256 = '5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932'
+          } | ConvertTo-Json
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText((Join-Path $candidate 'artifact-metadata.json'), $metadata + [Environment]::NewLine, $utf8NoBom)
           Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_TERMINAL_PREFIX_CANDIDATES=$root"
       - name: Validate the pinned terminal artifact Python runtime
         id: terminal_python
