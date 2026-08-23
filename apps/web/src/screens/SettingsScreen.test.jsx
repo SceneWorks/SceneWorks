@@ -59,6 +59,156 @@ async function openTab(container, label) {
 const buttonByText = (container, label) =>
   [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === label);
 
+// Settings → Storage → Model library (the Hugging Face cache home). The row tells the user where
+// SceneWorks is ACTUALLY reading models from (override, else the platform default — never a bare
+// "Default location"), and Change… hands off to App's relocation sequence (sc-19709), which is
+// injected as `onChangeModelLibrary` so the screen never re-implements the two-write ordering.
+describe("SettingsScreen model library location", () => {
+  let container;
+  let root;
+  let invoke;
+  let SettingsScreen;
+  let appSettings;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    appSettings = {};
+    invoke = vi.fn(async (command) => {
+      switch (command) {
+        case "get_app_settings":
+          return appSettings;
+        case "get_storage_setup":
+          return {
+            dataDirDefault: "/Users/me/Library/Application Support/SceneWorks",
+            hfHome: appSettings.hfHome ?? null,
+            hfHomeDefault: "/Users/me/.cache/huggingface",
+            // The shell resolves what the sidecars will actually receive: ambient env, then the
+            // persisted override, then the default. The mock mirrors that (no ambient here).
+            hfHomeActive: appSettings.hfHome ?? "/Users/me/.cache/huggingface",
+            hfHomeFromEnvironment: false,
+            storageConfigured: true,
+            setupCompleted: true,
+          };
+        case "get_gpu_info":
+          return { platform: "macos", devices: [] };
+        case "list_credentials":
+          return [];
+        default:
+          return null;
+      }
+    });
+    window.__TAURI__ = { core: { invoke } };
+    vi.resetModules();
+    SettingsScreen = await loadScreen();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render(props) {
+    await renderScreen(root, SettingsScreen, props);
+    await openTab(container, "Settings");
+  }
+
+  it("shows the platform default cache home when no override is set", async () => {
+    await render({ onChangeModelLibrary: vi.fn() });
+    expect(container.textContent).toContain("Model library (Hugging Face cache)");
+    expect(container.textContent).toContain("/Users/me/.cache/huggingface");
+    expect(container.textContent).not.toContain("Default location/Users/me/.cache");
+  });
+
+  it("shows the persisted override and reveals it", async () => {
+    appSettings = { hfHome: "/Volumes/Models/huggingface" };
+    await render({ onChangeModelLibrary: vi.fn() });
+    expect(container.textContent).toContain("/Volumes/Models/huggingface");
+    const reveal = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Reveal in Finder",
+    );
+    // Data directory (disabled: no override) then the model library.
+    expect(reveal).toHaveLength(2);
+    await click(reveal[1]);
+    expect(invoke).toHaveBeenCalledWith("reveal_in_os", { path: "/Volumes/Models/huggingface" });
+  });
+
+  it("relocates through the injected sequence, re-reads settings and asks for a restart", async () => {
+    const onChangeModelLibrary = vi.fn(async () => {
+      appSettings = { hfHome: "/Volumes/Models/huggingface" };
+      return { hfHome: "/Volumes/Models/huggingface", libraryRoot: "/Volumes/Models/huggingface/hub" };
+    });
+    await render({ onChangeModelLibrary });
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    expect(change).toHaveLength(2);
+    await click(change[1]);
+    expect(onChangeModelLibrary).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("/Volumes/Models/huggingface");
+    expect(container.textContent).toContain("Model library updated — restart SceneWorks to apply.");
+  });
+
+  it("shows the refusal inline and keeps the current location when the folder is rejected", async () => {
+    const onChangeModelLibrary = vi.fn(async () => {
+      throw new Error("That folder does not contain a SceneWorks model library.");
+    });
+    await render({ onChangeModelLibrary });
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    await click(change[1]);
+    expect(container.textContent).toContain(
+      "That folder does not contain a SceneWorks model library.",
+    );
+    expect(container.textContent).toContain("/Users/me/.cache/huggingface");
+    expect(container.textContent).not.toContain("restart SceneWorks to apply");
+  });
+
+  // `tauri dev` / a shell-profile export: an ambient `HF_HOME` beats the persisted override at
+  // spawn, so the row must show the path actually in use and must not offer a change that would
+  // silently never take effect.
+  it("shows the environment-owned location and disables Change…", async () => {
+    appSettings = { hfHome: "/Volumes/Models/huggingface" };
+    const fromEnv = invoke.getMockImplementation();
+    invoke.mockImplementation(async (command) => {
+      if (command === "get_storage_setup") {
+        return {
+          ...(await fromEnv(command)),
+          hfHomeActive: "/tmp/dev-hf-home",
+          hfHomeFromEnvironment: true,
+        };
+      }
+      return fromEnv(command);
+    });
+    await render({ onChangeModelLibrary: vi.fn() });
+    expect(container.textContent).toContain("/tmp/dev-hf-home");
+    expect(container.textContent).toContain("HF_HOME");
+    expect(container.textContent).toContain("environment variable");
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    expect(change[1].disabled).toBe(true);
+  });
+
+  it("does nothing when the picker is dismissed", async () => {
+    const onChangeModelLibrary = vi.fn(async () => null);
+    await render({ onChangeModelLibrary });
+    const change = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent.trim() === "Change…",
+    );
+    await click(change[1]);
+    expect(onChangeModelLibrary).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain("restart SceneWorks to apply");
+  });
+});
+
 describe("SettingsScreen service credentials", () => {
   let container;
   let root;

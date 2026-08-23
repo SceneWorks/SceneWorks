@@ -71,6 +71,7 @@ import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
 import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
 import { ModelLibraryRestartDialog } from "./components/ModelLibraryRestartDialog.jsx";
 import {
+  adoptModelLibrary,
   createModelLibraryGate,
   fetchModelLibraryStatus,
   relocateModelLibrary,
@@ -721,45 +722,54 @@ export function App() {
   // one blocked action and resumes it at most once, so a reconnect (or an impatient second click)
   // can never turn one blocked generation into two jobs. Registered as the module-level handler so
   // every submission path — and the studios' selection check — reaches it without prop threading.
+  // The relocation sequence's three seams, built once and shared by the blocked-action prompt
+  // (below) and the Settings → Storage "Model library" control, which relocates with no blocked
+  // action to resume but with exactly the same two-write ordering and undo.
+  const modelLibraryRelocator = useMemo(
+    () => ({
+      validate: (path) => validateModelLibrary(token, path),
+      adopt: (path) => relocateModelLibrary(token, path),
+      // Durable persistence of a relocated library is desktop state: the API hands back the exact
+      // HF_HOME the shell must store, in the same field, file and normalization as the first-run
+      // storage step. Returns an undo so the gate can restore the previous location if the
+      // server's re-bind then fails — the two copies must never disagree.
+      //
+      // Fails CLOSED when the previous location cannot be read, BEFORE the first durable write:
+      // without a previous location there is no undo, so a re-bind failure afterwards would leave
+      // the shell pointed at the new library while the gate reported the previous location still
+      // in use — the disagreement this undo path exists to prevent, with the wrong message on top.
+      persist: async (target) => {
+        // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
+        // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
+        // changed, so the previous location genuinely is still in use.
+        if (!isDesktopShell || !target?.hfHome) return () => {};
+        let before = null;
+        try {
+          before = await tauriInvoke("get_storage_setup");
+        } catch (error) {
+          throw new Error(
+            `The current model library location could not be read, so nothing was changed. ${String(error)}`.trim(),
+          );
+        }
+        const previous = before?.hfHome ?? before?.hfHomeDefault ?? null;
+        if (!previous) {
+          throw new Error(
+            "The current model library location could not be read, so nothing was changed.",
+          );
+        }
+        await tauriInvoke("set_model_library", { path: target.hfHome });
+        return () => tauriInvoke("set_model_library", { path: previous });
+      },
+    }),
+    [token],
+  );
   const modelLibraryGate = useMemo(
     () =>
       createModelLibraryGate({
         probe: () => fetchModelLibraryStatus(token),
-        validate: (path) => validateModelLibrary(token, path),
-        adopt: (path) => relocateModelLibrary(token, path),
-        // Durable persistence of a relocated library is desktop state: the API hands back the exact
-        // HF_HOME the shell must store, in the same field, file and normalization as the first-run
-        // storage step. Returns an undo so the gate can restore the previous location if the
-        // server's re-bind then fails — the two copies must never disagree.
-        //
-        // Fails CLOSED when the previous location cannot be read, BEFORE the first durable write:
-        // without a previous location there is no undo, so a re-bind failure afterwards would leave
-        // the shell pointed at the new library while the gate reported the previous location still
-        // in use — the disagreement this undo path exists to prevent, with the wrong message on top.
-        persist: async (target) => {
-          // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
-          // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
-          // changed, so the previous location genuinely is still in use.
-          if (!isDesktopShell || !target?.hfHome) return () => {};
-          let before = null;
-          try {
-            before = await tauriInvoke("get_storage_setup");
-          } catch (error) {
-            throw new Error(
-              `The current model library location could not be read, so nothing was changed. ${String(error)}`.trim(),
-            );
-          }
-          const previous = before?.hfHome ?? before?.hfHomeDefault ?? null;
-          if (!previous) {
-            throw new Error(
-              "The current model library location could not be read, so nothing was changed.",
-            );
-          }
-          await tauriInvoke("set_model_library", { path: target.hfHome });
-          return () => tauriInvoke("set_model_library", { path: previous });
-        },
+        ...modelLibraryRelocator,
       }),
-    [token],
+    [token, modelLibraryRelocator],
   );
   const modelLibraryState = useSyncExternalStore(
     modelLibraryGate.subscribe,
@@ -785,7 +795,9 @@ export function App() {
     if (!picked) return;
     const adopted = await modelLibraryGate.relocate(picked);
     if (adopted?.hfHome) {
-      setModelLibraryRelocation(adopted);
+      // `droppedSubmission`: the prompt path dropped whatever the user was submitting; the restart
+      // disclosure says so. The Settings path below has no submission to drop.
+      setModelLibraryRelocation({ ...adopted, droppedSubmission: true });
       // The notice outlives the dialog, so "Later" still leaves the reason visible.
       pushNotice(
         "general",
@@ -793,6 +805,21 @@ export function App() {
       );
     }
   }, [modelLibraryGate, pushNotice]);
+  // Settings → Storage → Model library → Change…: the same relocation (validate, persist, re-bind,
+  // undo on failure) and the same restart disclosure as the prompt, with no blocked action. Resolves
+  // to the adopted target, `null` when the picker was dismissed; rejects with the user-facing
+  // message when the folder was refused or a write failed, for the Settings screen to show inline.
+  // Unlike the prompt path there is no `modelLibraryPickerOpen` bracket: that flag only pauses the
+  // gate's auto re-probe, and with no blocked action pending there is nothing a re-probe could
+  // resume behind the native dialog.
+  const changeModelLibrary = useCallback(async () => {
+    if (!isDesktopShell) return null;
+    const picked = await tauriInvoke("choose_folder").catch(() => null);
+    if (!picked) return null;
+    const adopted = await adoptModelLibrary(modelLibraryRelocator, picked);
+    setModelLibraryRelocation({ ...adopted, droppedSubmission: false });
+    return adopted;
+  }, [modelLibraryRelocator]);
   // The drop guard that stops a stray file from navigating the webview (issue #1308) is
   // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
   // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
@@ -3937,6 +3964,7 @@ export function App() {
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
+            onChangeModelLibrary={changeModelLibrary}
             onEmbedWorkflowChange={changeEmbedWorkflow}
             onSimpleDefaultChange={changeSimpleUiDefault}
             sharingFocusRequest={settingsSharingFocusRequest}
