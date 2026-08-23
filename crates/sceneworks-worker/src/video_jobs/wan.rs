@@ -1575,6 +1575,32 @@ pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
                 }
             }
         }
+        if let [(left, 0, left_strength), (right, -1, right_strength)] = clips.as_slice() {
+            if let (Some(first), Some(last)) = (left.first(), right.first()) {
+                if left
+                    .iter()
+                    .chain(right.iter())
+                    .all(|frame| frame.width == first.width && frame.height == first.height)
+                    && first.width == last.width
+                    && first.height == last.height
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        left.len(),
+                        first.width,
+                        first.height,
+                        left_strength.to_bits()
+                    ));
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:-1:strength:{:08x}",
+                        right.len(),
+                        last.width,
+                        last.height,
+                        right_strength.to_bits()
+                    ));
+                }
+            }
+        }
     }
     (!overlays.is_empty()).then(|| overlays.join("+"))
 }
