@@ -619,23 +619,65 @@ fn write_download_receipt(data_dir: &Path, repo: &str, file: &str) {
     .unwrap();
 }
 
-/// Nothing installed means nothing to relocate. Binding whatever Hugging-Face-shaped directory the
-/// operator happened to pick would be a guess, and it would silently become the identity every
-/// later install is judged against.
+/// Nothing installed means nothing can be orphaned and nothing to check a candidate against: an
+/// EMPTY directory (no `models--*` layout at all) binds as a fresh cache home, and the recorded
+/// identity is then what every later install is judged against — the Settings "change model
+/// library" path for a user who has not downloaded anything yet.
 #[test]
-fn relocation_refuses_outright_when_there_is_no_install_evidence() {
+fn relocation_binds_a_plain_directory_when_there_is_no_install_evidence() {
     let temp = TempDir::new().unwrap();
     let data = temp.path().join("data");
-    let candidate = temp.path().join("someones-cache").join("hub");
+    let candidate = temp.path().join("fresh-cache").join("hub");
     std::fs::create_dir_all(&candidate).unwrap();
-    seed_snapshot(&candidate, "someone/unrelated", "model.safetensors");
 
     let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    assert!(!store.has_install_evidence().unwrap());
+    store.validate_relocation(&candidate).unwrap();
+    let binding = store.relocate_binding(&candidate).unwrap();
+    assert_eq!(binding.canonical_path, candidate.canonicalize().unwrap());
+    assert_eq!(store.load().unwrap(), Some(binding.clone()));
     assert_eq!(
-        store.relocate_binding(&candidate).unwrap_err(),
-        LibraryRelocationError::Rejected(LibraryRelocationRejection::NoInstalledModels)
+        probe_binding(&candidate, &binding).status,
+        ExternalLibraryProbeStatus::Available
     );
-    assert!(store.load().unwrap().is_none());
+    // A later install at that root is judged against the binding just written, not a fresh one.
+    seed_snapshot(&candidate, "owner/model", "model.safetensors");
+    let (bound, probe) = store
+        .bind_or_probe_validated(
+            &candidate,
+            &[requirement("owner/model", "model.safetensors")],
+        )
+        .unwrap();
+    assert_eq!(bound.physical_identity, binding.physical_identity);
+    assert_eq!(probe.status, ExternalLibraryProbeStatus::Available);
+    assert!(store.has_install_evidence().unwrap());
+}
+
+/// The fresh-home shape: a plain folder is the cache home (its `hub` child is the library root);
+/// a folder named `hub` is the library root (its parent the home). No layout is required.
+#[test]
+fn resolve_fresh_cache_home_pairs_home_and_hub_without_a_layout() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("fresh");
+    std::fs::create_dir_all(home.join("hub")).unwrap();
+    assert_eq!(
+        resolve_fresh_cache_home(&home).unwrap(),
+        RelocationTarget {
+            library_root: home.join("hub"),
+            hf_home: home.clone(),
+        }
+    );
+    assert_eq!(
+        resolve_fresh_cache_home(&home.join("hub")).unwrap(),
+        RelocationTarget {
+            library_root: home.join("hub"),
+            hf_home: home.clone(),
+        }
+    );
+    assert_eq!(
+        resolve_fresh_cache_home(&temp.path().join("absent")).unwrap_err(),
+        LibraryRelocationRejection::NotADirectory
+    );
 }
 
 /// THE fail-open this exists to prevent. Evidence can be RECEIPTS ONLY — an install that predates

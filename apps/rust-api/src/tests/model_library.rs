@@ -360,6 +360,81 @@ async fn relocating_to_the_moved_library_adopts_it_and_names_the_home_to_persist
         .is_some_and(|root| Path::new(root) == relocated_home.join("hub")));
 }
 
+/// The Settings "change model library" path before anything is installed: with no install
+/// evidence there is nothing to protect, so an EMPTY folder is accepted as a fresh cache home — the
+/// dry run confirms it without creating anything, the adopt creates `hub` and binds it, and the
+/// response names the `HF_HOME` the shell must persist (the picked folder itself).
+#[tokio::test]
+async fn a_fresh_install_adopts_an_empty_folder_as_its_cache_home() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _env = isolate_hf_cache();
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let store = ExternalLibraryBindingStore::new(&data_dir).expect("binding store");
+    assert!(!store.has_install_evidence().expect("evidence reads"));
+    let fresh_home = temp_dir.path().join("fresh-cache");
+    std::fs::create_dir_all(&fresh_home).expect("fresh home creates");
+    let app = create_app(settings).expect("app creates");
+
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": fresh_home.to_string_lossy(), "dryRun": true }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["adopted"], false);
+    assert!(!fresh_home.join("hub").exists(), "a dry run writes nothing");
+    assert!(store.load().expect("binding reads").is_none());
+
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": fresh_home.to_string_lossy() }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["adopted"], true);
+    assert!(body["hfHome"]
+        .as_str()
+        .is_some_and(|home| Path::new(home) == fresh_home));
+    assert!(body["libraryRoot"]
+        .as_str()
+        .is_some_and(|root| Path::new(root) == fresh_home.join("hub")));
+    assert!(
+        fresh_home.join("hub").is_dir(),
+        "adopt creates the hub root"
+    );
+    let binding = store
+        .load()
+        .expect("binding reads")
+        .expect("the fresh home is bound");
+    assert_eq!(
+        binding.canonical_path,
+        fresh_home
+            .join("hub")
+            .canonicalize()
+            .expect("hub canonicalizes")
+    );
+
+    // A folder that does not exist is still refused, typed, even with nothing installed.
+    let (status, body) = request_with_peer(
+        app.clone(),
+        "POST",
+        "/api/v1/model-library/relocate",
+        json!({ "path": temp_dir.path().join("absent").to_string_lossy() }),
+        LOCAL_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["context"]["reason"], "not_a_directory");
+}
+
 /// Write a one-model manifest whose single download row is spelled out by the caller, so a test can
 /// vary exactly the declaration under test (a pinned revision, an optional co-requisite) without
 /// inheriting [`single_model_manifest`]'s fixed shape.

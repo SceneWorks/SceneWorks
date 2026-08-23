@@ -453,9 +453,11 @@ impl ExternalLibraryBindingStore {
     /// never loses installed state — it only re-points the durable identity at where the library
     /// now lives.
     ///
-    /// It fails CLOSED in both directions: a library missing any recorded install is refused, and
-    /// an installation with no evidence at all is refused outright rather than binding whatever
-    /// Hugging-Face-shaped directory it was handed.
+    /// It fails CLOSED for every installed model: a library missing any recorded install is refused.
+    /// An installation with no install evidence at all has nothing to protect and nothing to check a
+    /// candidate against, so it binds the chosen directory as-is (the Settings "change model
+    /// library" path for a user who has not downloaded anything yet) — the same choice the first-run
+    /// storage step makes, with the volume identity recorded so later installs are judged against it.
     pub fn relocate_binding(
         &self,
         library_root: &Path,
@@ -489,6 +491,15 @@ impl ExternalLibraryBindingStore {
         self.check_relocation_unlocked(library_root).map(|_| ())
     }
 
+    /// Whether this installation has any durable install evidence (validated closures or download
+    /// receipts). Decides which relocation shape applies: with evidence, the candidate must be a
+    /// library carrying every recorded model; without it, any directory is an acceptable fresh
+    /// cache home.
+    pub fn has_install_evidence(&self) -> Result<bool, ExternalLibraryError> {
+        let _lock = self.lock_shared()?;
+        Ok(!self.installed_evidence_closures()?.is_empty())
+    }
+
     fn check_relocation_unlocked(
         &self,
         library_root: &Path,
@@ -497,34 +508,33 @@ impl ExternalLibraryBindingStore {
         let closures = self
             .installed_evidence_closures()
             .map_err(LibraryRelocationError::Failed)?;
-        if closures.is_empty() {
-            return Err(LibraryRelocationError::Rejected(
-                LibraryRelocationRejection::NoInstalledModels,
-            ));
-        }
-        if !has_repository_layout(&canonical_before) {
-            return Err(LibraryRelocationError::Rejected(
-                LibraryRelocationRejection::NotAModelLibrary,
-            ));
-        }
-        let mut missing = Vec::new();
-        for closure in &closures {
-            if validate_requirements_at_root(&canonical_before, closure).is_err() {
-                missing.extend(
-                    closure
-                        .iter()
-                        .map(|requirement| requirement.repository.clone()),
-                );
+        // No evidence: nothing can be orphaned and there is nothing to check, so only the identity
+        // read below stands between the operator and the folder they chose.
+        if !closures.is_empty() {
+            if !has_repository_layout(&canonical_before) {
+                return Err(LibraryRelocationError::Rejected(
+                    LibraryRelocationRejection::NotAModelLibrary,
+                ));
             }
-        }
-        if !missing.is_empty() {
-            missing.sort();
-            missing.dedup();
-            return Err(LibraryRelocationError::Rejected(
-                LibraryRelocationRejection::MissingInstalledModels {
-                    repositories: missing,
-                },
-            ));
+            let mut missing = Vec::new();
+            for closure in &closures {
+                if validate_requirements_at_root(&canonical_before, closure).is_err() {
+                    missing.extend(
+                        closure
+                            .iter()
+                            .map(|requirement| requirement.repository.clone()),
+                    );
+                }
+            }
+            if !missing.is_empty() {
+                missing.sort();
+                missing.dedup();
+                return Err(LibraryRelocationError::Rejected(
+                    LibraryRelocationRejection::MissingInstalledModels {
+                        repositories: missing,
+                    },
+                ));
+            }
         }
         let identity_before = physical_identity(&canonical_before).map_err(|error| {
             LibraryRelocationError::Rejected(LibraryRelocationRejection::IdentityUnavailable {
@@ -923,10 +933,6 @@ pub enum LibraryRelocationRejection {
     /// The layout is right, but models this install recorded as present are not in that library.
     /// Accepting it would silently orphan installed weights, so it fails closed.
     MissingInstalledModels { repositories: Vec<String> },
-    /// This installation has no durable install evidence at all — no receipts, no validated
-    /// closures — so there is nothing to relocate and nothing to check a candidate against.
-    /// Binding an arbitrary Hugging-Face-shaped directory here would be a guess, not a relocation.
-    NoInstalledModels,
     /// The library validates, but the app cannot express it as a Hugging Face cache home: the
     /// configured root is always `<HF_HOME>/hub`, so the operator must choose the folder that
     /// CONTAINS `hub` (or the `hub` folder itself).
@@ -961,6 +967,39 @@ impl std::fmt::Display for LibraryRelocationError {
 pub struct RelocationTarget {
     pub library_root: PathBuf,
     pub hf_home: PathBuf,
+}
+
+/// Map a folder the operator picked to the pair of paths a FRESH cache home needs — the shape used
+/// when this installation has no install evidence (see
+/// [`ExternalLibraryBindingStore::has_install_evidence`]). No repository layout is required: the
+/// picked folder is the cache home (its `hub` child is the library root, created by the caller
+/// when it adopts), unless the folder is itself named `hub`, in which case its parent is the home.
+/// Everything else about the home/hub pairing matches [`resolve_relocation_target`].
+pub fn resolve_fresh_cache_home(
+    picked: &Path,
+) -> Result<RelocationTarget, LibraryRelocationRejection> {
+    let picked = absolute_lexical(picked).map_err(|_| LibraryRelocationRejection::NotADirectory)?;
+    let canonical =
+        std::fs::canonicalize(&picked).map_err(|_| LibraryRelocationRejection::NotADirectory)?;
+    if !canonical.is_dir() {
+        return Err(LibraryRelocationRejection::NotADirectory);
+    }
+    let is_hub = picked
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("hub"));
+    if is_hub {
+        return match picked.parent() {
+            Some(home) => Ok(RelocationTarget {
+                hf_home: home.to_path_buf(),
+                library_root: picked,
+            }),
+            None => Err(LibraryRelocationRejection::HubDirectoryExpected),
+        };
+    }
+    Ok(RelocationTarget {
+        library_root: picked.join("hub"),
+        hf_home: picked,
+    })
 }
 
 /// Map a folder the operator picked to the pair of paths relocation needs.

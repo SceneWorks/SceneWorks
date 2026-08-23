@@ -26,9 +26,9 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::Json;
 use sceneworks_core::model_artifacts::external_library::{
-    probe_model_source_library, resolve_relocation_target, ExternalLibraryBindingStore,
-    ExternalLibraryError, LibraryRelocationError, LibraryRelocationRejection,
-    ModelSourceLibraryStatus, RelocationTarget,
+    probe_model_source_library, resolve_fresh_cache_home, resolve_relocation_target,
+    ExternalLibraryBindingStore, ExternalLibraryError, LibraryRelocationError,
+    LibraryRelocationRejection, ModelSourceLibraryStatus, RelocationTarget,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -88,6 +88,12 @@ pub(crate) struct RelocateModelLibraryResponse {
 
 /// `POST /api/v1/model-library/relocate` — adopt a new library root without redownloading.
 ///
+/// Two shapes, decided by the installation's durable install evidence: with evidence, the picked
+/// folder must be a library carrying every recorded model (the recovery prompt's "my drive moved"
+/// case); without any, it is a fresh cache home — any existing directory, whose `hub` child is
+/// created on adopt — so the Settings "change model library" control works before the first
+/// download exactly like the first-run storage step does.
+///
 /// Local-only (see [`require_local_peer`]): it takes an absolute host path, and its typed refusals
 /// would otherwise be a filesystem-existence oracle for any token-holding LAN client — which could
 /// also re-point a shared server's library out from under everyone else.
@@ -104,19 +110,52 @@ pub(crate) async fn relocate_model_library(
     let dry_run = request.dry_run;
     let data_dir = state.settings.data_dir.clone();
     tokio::task::spawn_blocking(move || {
-        let target = resolve_relocation_target(std::path::Path::new(&picked))
-            .map_err(rejection_to_api_error)?;
         let store = ExternalLibraryBindingStore::new(&data_dir).map_err(|error| {
             relocation_failed("model library binding ledger is unavailable", &error)
         })?;
+        let has_evidence = store.has_install_evidence().map_err(|error| {
+            relocation_failed("model library install evidence could not be read", &error)
+        })?;
+        // The fresh-home shape additionally requires that no library was ever bound: evidence
+        // detection is receipt/ledger-based, so an install whose receipts became unreadable must
+        // not slide into binding an arbitrary folder — an existing binding is itself proof this
+        // installation already had a library, and the strict shape judges the candidate.
+        let bound = store
+            .load()
+            .map_err(|error| relocation_failed("model library binding could not be read", &error))?
+            .is_some();
+        let fresh = !has_evidence && !bound;
+        let target = if fresh {
+            resolve_fresh_cache_home(std::path::Path::new(&picked))
+        } else {
+            resolve_relocation_target(std::path::Path::new(&picked))
+        }
+        .map_err(rejection_to_api_error)?;
         if dry_run {
+            // A fresh home's `hub` may not exist yet (it is created on adopt), so the dry run
+            // validates the home directory itself: with no install evidence that is the same
+            // canonical-directory + volume-identity check the adopt makes, moving every ordinary
+            // refusal ahead of both durable writes. Writability of the folder is the one thing a
+            // write-free dry run cannot prove.
             store
-                .validate_relocation(&target.library_root)
+                .validate_relocation(if fresh {
+                    &target.hf_home
+                } else {
+                    &target.library_root
+                })
                 .map_err(relocation_error_to_api_error)?;
             return Ok(Json(RelocateModelLibraryResponse {
                 target,
                 adopted: false,
             }));
+        }
+        if fresh {
+            std::fs::create_dir_all(&target.library_root).map_err(|error| {
+                relocation_failed(
+                    "model library folder could not be created",
+                    &ExternalLibraryError(error.to_string()),
+                )
+            })?;
         }
         store
             .relocate_binding(&target.library_root)
@@ -193,11 +232,6 @@ fn rejection_to_api_error(rejection: LibraryRelocationRejection) -> ApiError {
              that contains them, or reconnect the original drive.",
             repositories.join(", ")
         ),
-        LibraryRelocationRejection::NoInstalledModels => {
-            "SceneWorks has no record of any installed models, so there is nothing to relocate. \
-             Reconnect the original library, or download the models you need."
-                .to_owned()
-        }
         LibraryRelocationRejection::HubDirectoryExpected => {
             "SceneWorks reads models from a `hub` folder inside the Hugging Face cache. Choose the \
              folder that contains `hub` (or the `hub` folder itself)."
