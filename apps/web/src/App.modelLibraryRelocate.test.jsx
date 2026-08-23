@@ -80,6 +80,8 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
           setupCompleted: true,
           hfHome: "/Volumes/Models/hf",
           hfHomeDefault: "/Users/me/.cache/huggingface",
+          hfHomeActive: "/Volumes/Models/hf",
+          hfHomeFromEnvironment: false,
         });
       }
       if (command === "choose_folder") return Promise.resolve("/Volumes/Models 1/hf");
@@ -210,6 +212,50 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     await settle();
     const restarts = invoke.mock.calls.filter(([command]) => command === "restart_app");
     expect(restarts).toHaveLength(1);
+  });
+
+  // The same relocation, started from Settings → Storage instead of the unavailable-library
+  // prompt: no submission was dropped, so the disclosure must not claim one was.
+  it("relocates from Settings and discloses the restart without inventing a dropped job", async () => {
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await settle();
+
+    const settingsNav = [...document.body.querySelectorAll(".nav-label")].find(
+      (item) => item.textContent === "Settings",
+    );
+    await act(async () => settingsNav.closest("button").click());
+    await settle();
+    const settingsTab = [...document.body.querySelectorAll(".mode-tab")].find(
+      (tab) => tab.textContent.trim() === "Settings",
+    );
+    await act(async () => settingsTab.click());
+    await settle();
+
+    const row = [...document.body.querySelectorAll(".settings-row-title")]
+      .find((title) => title.textContent.includes("Model library"))
+      .closest("div").parentElement;
+    const change = [...row.querySelectorAll("button")].find(
+      (item) => item.textContent.trim() === "Change…",
+    );
+    await act(async () => change.click());
+    await settle();
+
+    expect(relocateRequests).toEqual([
+      { path: "/Volumes/Models 1/hf", dryRun: true },
+      { path: "/Volumes/Models 1/hf" },
+    ]);
+    expect(invoke).toHaveBeenCalledWith("set_model_library", {
+      path: "/Volumes/Models 1/hf",
+    });
+    const disclosure = dialogs()[0];
+    expect(disclosure).toBeTruthy();
+    expect(disclosure.textContent).toContain("after it restarts");
+    expect(disclosure.textContent).toContain("/Volumes/Models 1/hf");
+    expect(disclosure.textContent).not.toContain("was not queued");
+    expect(document.body.textContent).toContain(
+      "Model library updated — restart SceneWorks to apply.",
+    );
   });
 
   it("Later dismisses the disclosure and leaves no queued generation", async () => {
