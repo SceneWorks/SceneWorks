@@ -31,6 +31,34 @@ fn is_sdxl_control_model(model: &str) -> bool {
     SDXL_CONTROL_MODELS.contains(&model)
 }
 
+fn has_material_sdxl_control_intent(advanced: &JsonObject) -> bool {
+    let poses_are_material = match advanced.get("poses") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(poses)) if poses.is_empty() => false,
+        Some(_) => true,
+    };
+    let named_control_is_material = match advanced.get("controlMode") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(mode)) => !mode.trim().is_empty(),
+        Some(_) => true,
+    };
+    poses_are_material
+        || named_control_is_material
+        || advanced
+            .get("controlImage")
+            .is_some_and(|value| !value.is_null())
+        || advanced
+            .get("controlWeights")
+            .is_some_and(|value| !value.is_null())
+}
+
+/// Illustrious remains a terminal-evidence-only OpenPose input. Its shared SDXL descriptor must not
+/// let any explicit control carrier fall through to generic T2I after the product route was removed.
+fn unsupported_illustrious_control_candidate(request: &ImageRequest) -> bool {
+    matches!(request.model.as_str(), "illustrious_xl_v1" | "illustrious_xl_v2")
+        && has_material_sdxl_control_intent(&request.advanced)
+}
+
 /// A material pose carrier on one of the exact three supported models. This deliberately does not
 /// validate or weight-gate: it wins routing first, then [`validate_sdxl_control_request`] reports a
 /// typed error for conflicts/malformed/count violations and the stream reports missing weights.
@@ -38,26 +66,7 @@ fn sdxl_control_candidate(request: &ImageRequest) -> bool {
     if !is_sdxl_control_model(&request.model) {
         return false;
     }
-    let poses_are_material = match request.advanced.get("poses") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(poses)) if poses.is_empty() => false,
-        Some(_) => true,
-    };
-    let named_control_is_material = match request.advanced.get("controlMode") {
-        None | Some(Value::Null) => false,
-        Some(Value::String(mode)) => !mode.trim().is_empty(),
-        Some(_) => true,
-    };
-    poses_are_material
-        || named_control_is_material
-        || request
-            .advanced
-            .get("controlImage")
-            .is_some_and(|value| !value.is_null())
-        || request
-            .advanced
-            .get("controlWeights")
-            .is_some_and(|value| !value.is_null())
+    has_material_sdxl_control_intent(&request.advanced)
 }
 
 fn validate_sdxl_control_backend(model: &str, backend: &str) -> WorkerResult<()> {
@@ -96,6 +105,34 @@ fn validate_sdxl_control_candle_tier(request: &ImageRequest) -> WorkerResult<()>
         "SDXL pose control on Candle is proven only for the exact q4 package; advanced.quantTier and advanced.mlxQuantize must resolve to q4"
             .to_owned(),
     ))
+}
+
+fn bind_sdxl_control_candle_q4_resolution(resolved: Option<PathBuf>) -> WorkerResult<PathBuf> {
+    match resolved {
+        Some(dir) if tier_key_from_resolved_dir(&dir) == Some("q4") => Ok(dir),
+        Some(dir) => Err(WorkerError::InvalidPayload(format!(
+            "SDXL pose control on Candle requires the exact installed q4 package, but weight resolution selected '{}'; refusing q8/bf16/root fallback",
+            dir.display()
+        ))),
+        None => Err(WorkerError::InvalidPayload(
+            "SDXL pose control on Candle requires the exact installed q4 package; no q4 weights were found"
+                .to_owned(),
+        )),
+    }
+}
+
+fn resolve_sdxl_control_candle_q4_weights_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<PathBuf> {
+    validate_sdxl_control_candle_tier(request)?;
+    // The generic standard-tier resolver intentionally falls back to any complete installed tier.
+    // Force its probe to q4, then verify the directory it actually returned before any load/admission.
+    let mut q4_request = request.clone();
+    q4_request
+        .advanced
+        .insert("mlxQuantize".to_owned(), Value::from(4));
+    bind_sdxl_control_candle_q4_resolution(resolve_weights_dir(&q4_request, settings)?)
 }
 
 fn sdxl_control_native_backend() -> &'static str {
@@ -567,16 +604,18 @@ async fn generate_sdxl_control_stream(
     // `backend` is the telemetry device label (`metal`, `cuda:0`, ...), not the provider family.
     // Select the native provider from the compiled bundle so the MLX Lightning refusal cannot be
     // bypassed by a device-specific label.
-    validate_sdxl_control_backend(&request.model, sdxl_control_native_backend())?;
-    if sdxl_control_native_backend() == "candle" {
-        validate_sdxl_control_candle_tier(request)?;
-    }
-    let weights_dir = resolve_weights_dir(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "{} weights not found for SDXL pose control",
-            request.model
-        ))
-    })?;
+    let native_backend = sdxl_control_native_backend();
+    validate_sdxl_control_backend(&request.model, native_backend)?;
+    let weights_dir = if native_backend == "candle" {
+        resolve_sdxl_control_candle_q4_weights_dir(request, settings)?
+    } else {
+        resolve_weights_dir(request, settings)?.ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{} weights not found for SDXL pose control",
+                request.model
+            ))
+        })?
+    };
     let control_weights = require_sdxl_control_weights(settings, request)?;
     let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let adapters = resolve_adapters(request, settings)?;
@@ -801,6 +840,22 @@ mod sdxl_control_tests {
             "model": "sdxl",
             "advanced": { "controlMode": "  " }
         }))));
+
+        for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
+            for advanced in [
+                json!({ "poses": "malformed" }),
+                json!({ "poses": [null] }),
+                json!({ "controlMode": "pose" }),
+                json!({ "controlMode": false }),
+                json!({ "controlImage": "asset" }),
+                json!({ "controlWeights": {} }),
+            ] {
+                assert!(unsupported_illustrious_control_candidate(&request(json!({
+                    "model": model,
+                    "advanced": advanced,
+                }))));
+            }
+        }
     }
 
     #[test]
@@ -1072,6 +1127,23 @@ mod sdxl_control_tests {
         ] {
             let request = request(json!({ "model": "sdxl", "advanced": advanced }));
             assert!(validate_sdxl_control_candle_tier(&request).is_err());
+        }
+    }
+
+    #[test]
+    fn candle_control_binds_the_resolved_directory_to_q4_without_cross_tier_fallback() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let q4 = root.path().join("q4");
+        let q8 = root.path().join("q8");
+        let bf16 = root.path().join("bf16");
+        assert_eq!(
+            bind_sdxl_control_candle_q4_resolution(Some(q4.clone())).unwrap(),
+            q4
+        );
+        for resolved in [Some(q8), Some(bf16), Some(root.path().to_path_buf()), None] {
+            let error = bind_sdxl_control_candle_q4_resolution(resolved)
+                .expect_err("missing/non-q4 resolution must fail closed");
+            assert!(error.to_string().contains("q4"), "{error}");
         }
     }
 

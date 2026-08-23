@@ -707,6 +707,22 @@ export function validateManifestAuthorities(profile, manifest) {
       if (JSON.stringify(artifact.allowPatterns) !== JSON.stringify(row.files ?? [])) {
         fail(`artifact ${id} allowPatterns are not the manifest's exact download surface`);
       }
+      if (artifact.quantizationMarker) {
+        const policies = (model.mlx?.memoryStrategyContract?.implementations ?? []).flatMap(
+          (implementation) => implementation.parameterRanges?.decodeGeometryPolicies ?? [],
+        );
+        if (policies.length === 0) {
+          fail(`artifact ${id} has no active MLX decode policy to bind to its current authority`);
+        }
+        const expectedFingerprint = `${artifact.repository}@${artifact.revision}:q4`;
+        for (const policy of policies) {
+          const active = policy.artifact;
+          if (active?.repository !== artifact.repository || active.revision !== artifact.revision
+            || active.variant !== "q4" || active.fingerprint !== expectedFingerprint) {
+            fail(`artifact ${id} active MLX memory strategy is not bound to its current authority`);
+          }
+        }
+      }
     } else if (authority.kind === "explicitPublicArtifact") {
       // The frozen profile keeps one shared authority for all five measured cells. Only the
       // independently promotable cells bind that authority to production sc-20747 soft

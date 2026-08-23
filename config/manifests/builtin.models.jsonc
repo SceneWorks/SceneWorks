@@ -13061,7 +13061,7 @@
           "footprint": { "diskSizeBytes": 167335590 }
         },
         // Generic SDXL OpenPose ControlNet (sc-20747): an OPTIONAL on-demand component shared by
-        // the exact five SDXL-family pose-control backbones on both MLX and Candle. Soft means a
+        // the exact three accepted SDXL-family pose-control backbones. Soft means a
         // missing control checkpoint never makes ordinary text/image generation look uninstalled;
         // Model Manager still provisions or repairs it alongside this base. Every base repeats this
         // identical repo/revision/file authority, while the shared HF cache stores the bytes once.
@@ -16106,9 +16106,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16181,9 +16181,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "13a01bf98edd98f8639e3a16f8e180d1eacf1bb808189fa28208a1d098fd9c19",
                     "mode": "text_to_image",
@@ -16256,9 +16256,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16331,9 +16331,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16406,9 +16406,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16481,9 +16481,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "13a01bf98edd98f8639e3a16f8e180d1eacf1bb808189fa28208a1d098fd9c19",
                     "mode": "text_to_image",
@@ -16556,9 +16556,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16631,9 +16631,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "49d6f9996d237a14412eab14ce0816f04f605fd3ca5963fb8a812e6c90309ef5",
                     "mode": "text_to_image",
@@ -16706,9 +16706,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16781,9 +16781,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "45724d4d8dd1f64ba3292a3e35ea3c9de9dd4aa0db2e78761ad8419d87e66a1d",
                     "mode": "text_to_image",
@@ -17034,9 +17034,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17109,9 +17109,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17184,9 +17184,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17259,9 +17259,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17334,9 +17334,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "4bb1345acfa410da3fed6601c0cdb9448a7cf88c4622175bcc39fac15d370fce",
                     "mode": "text_to_image",
@@ -17409,9 +17409,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17484,9 +17484,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17559,9 +17559,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17634,9 +17634,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17709,9 +17709,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",

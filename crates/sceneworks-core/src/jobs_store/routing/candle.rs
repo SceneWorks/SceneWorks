@@ -332,6 +332,12 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
         return Some(CandleImageLane::ImportedFamily);
     }
 
+    // Owned-to-reject requests are deliberately not a served lane. The scheduler claims them via
+    // `image_job_candle_pose_reject`, while the worker's reject guard runs before generic T2I.
+    if image_request_candle_pose_reject(model, &job.payload) {
+        return None;
+    }
+
     CANDLE_IMAGE_ROUTES
         .iter()
         .find(|route| route.matches(model, &job.payload))
@@ -1217,11 +1223,7 @@ pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
     SDXL_CONTROL_MODELS.contains(&model)
 }
 
-/// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
-/// scheduler predicate intentionally claims malformed/non-empty pose carriers and explicit material
-/// control intent too, before edit or IP-Adapter, so no other conditioned route can silently discard
-/// them. Missing/null/empty poses remain ordinary generation only when no other control field is set.
-pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> bool {
+fn has_material_sdxl_control_intent(payload: &Map<String, Value>) -> bool {
     let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
         return false;
     };
@@ -1243,6 +1245,14 @@ pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> boo
         || advanced
             .get("controlWeights")
             .is_some_and(|value| !value.is_null())
+}
+
+/// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
+/// scheduler predicate intentionally claims malformed/non-empty pose carriers and explicit material
+/// control intent too, before edit or IP-Adapter, so no other conditioned route can silently discard
+/// them. Missing/null/empty poses remain ordinary generation only when no other control field is set.
+pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> bool {
+    has_material_sdxl_control_intent(payload)
 }
 
 /// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle
@@ -1853,9 +1863,9 @@ pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
     CANDLE_POSE_MODELS.contains(&model)
 }
 
-/// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
+/// Material control intent on a **candle-routed model with no candle pose lane** —
 /// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything outside the wired
-/// pose families), not `edit_image` (sc-5968, epic 5483). No native lane has a pose path for these
+/// pose families) (sc-5968, epic 5483). No native lane has a control path for these
 /// models off-Mac (the historical `sdxl` adapter's OpenPose lived only in
 /// the `instantid_realvisxl` adapter), so a generic claimant could silently drop the poses and render an unconditioned T2I
 /// image. The candle worker therefore CLAIMS these (`worker_supports_job`) to REJECT them with a typed
@@ -1867,15 +1877,7 @@ pub(crate) fn image_request_candle_pose_reject(model: &str, payload: &Map<String
     if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
         return false;
     }
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_material_sdxl_control_intent(payload)
 }
 
 /// [`image_request_candle_pose_reject`] on a [`JobSnapshot`].

@@ -22,9 +22,9 @@
     "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
     "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
     "exceptionRegister": "f02f5a64205b72640699868671e5d6925281982c4934b14b3c282c4d1962fca9",
-    "manifest": "a117ee1ea0a921e3f5720b02394041a7f458a747f4090ab1557c89e10468ac3a",
+    "manifest": "328cd392e5dd5bab381dfa382f88dcc02b53e60c0d95f1761c59d0b3d78ddcbe",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
-    "routerCandle": "6825af5d693fc48e10747c2ce104698367ea5b5b661c1b0a314eb6afd73a2edb",
+    "routerCandle": "4de14a3f069d43b05390ddaf12765e72ff16e51c3f46234dcb960afafbc51704",
     "routerCatalog": "0a08189104df04729dddc8a94c210876e243afd0b03812ce6c072b3a9efe453c",
     "routerGaps": "885a73b08cd2d598d656adb15d69a2ea0a78faa0437fc3ba0e25d5f5245efcb2",
     "routerMlx": "d9bc69db199a5efe378db62d558ab134a0ee1c82da8561dbb1d0d641bd0f57cb",
@@ -48,7 +48,7 @@
     "workerDispatch": "17dc38a3d43d9ce435edab4ab67b2fad04ed083571368ea26abaf2362ef307cf",
     "workerEngineTable": "03c64b8abe9c47424d601d4def9a255ef4c9da081098d972a23925bbce16e63b",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "fa05982064de03eafb1071423e664891cf91c14f8f3ba3bd25b7b93cef185837",
+    "workerImageDispatch": "a17927dc414e9dc4c15326071a19cf4b63fa84fb631536e1206be070971ce4d6",
     "workerImageKreaImported": "0ce6e705505c9e75ead843201d2cb88f996962247b6f4b5d8e19bab326401d2c",
     "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
@@ -1762,8 +1762,8 @@
       "conditioningShape": [
         {
           "capability": "control",
-          "mlx": true,
-          "candle": true
+          "mlx": false,
+          "candle": false
         },
         {
           "capability": "mask",
@@ -1876,8 +1876,8 @@
       "conditioningShape": [
         {
           "capability": "control",
-          "mlx": true,
-          "candle": true
+          "mlx": false,
+          "candle": false
         },
         {
           "capability": "mask",

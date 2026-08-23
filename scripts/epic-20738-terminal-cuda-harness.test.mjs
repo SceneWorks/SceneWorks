@@ -162,10 +162,17 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
       [currentRevision, currentRevision, currentRevision]);
     assert.deepEqual(currentDownloads.map(({ estimatedSizeBytes }) => estimatedSizeBytes), exactSizes);
     assert.deepEqual(currentDownloads.map(({ footprint }) => footprint.diskSizeBytes), exactSizes);
-    assert.equal(JSON.stringify(model).split(`"${currentRevision}"`).length - 1, 3,
-      `${modelId} new authority may appear only in the three current download rows`);
-    assert.match(JSON.stringify(model), new RegExp(legacyRevision),
-      `${modelId} historical evidence must retain its producing revision`);
+    const policies = model.mlx.memoryStrategyContract.implementations.flatMap(
+      (implementation) => implementation.parameterRanges?.decodeGeometryPolicies ?? [],
+    );
+    assert.ok(policies.length > 0, `${modelId} must retain its active decode policies`);
+    assert.ok(policies.every(({ artifact }) => (
+      artifact.revision === currentRevision
+      && artifact.fingerprint === `${artifact.repository}@${currentRevision}:q4`
+    )), `${modelId} active memory selectors must move with the shipping authority`);
+    assert.ok(policies.flatMap(({ fixtures }) => fixtures).every(({ productionLatentProvenance }) => (
+      productionLatentProvenance.includes(legacyRevision)
+    )), `${modelId} historical calibration provenance must retain its producing revision`);
   }
 });
 
@@ -438,6 +445,25 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   assert.throws(
     () => validateManifestAuthorities(profile(), controlManifestDrift),
     /manifest authority drifted for realvisxl/,
+  );
+
+  const activeMemoryRevisionDrift = structuredClone(manifest);
+  activeMemoryRevisionDrift.models.find((model) => model.id === "illustrious_xl_v1")
+    .mlx.memoryStrategyContract.implementations[0]
+    .parameterRanges.decodeGeometryPolicies[0].artifact.revision =
+      "c5a92a902dd4e6ee99c2a57981ecf66209905dd1";
+  assert.throws(
+    () => validateManifestAuthorities(profile(), activeMemoryRevisionDrift),
+    /active MLX memory strategy is not bound to its current authority/,
+  );
+
+  const activeMemoryFingerprintDrift = structuredClone(manifest);
+  activeMemoryFingerprintDrift.models.find((model) => model.id === "illustrious_xl_v2")
+    .mlx.memoryStrategyContract.implementations[0]
+    .parameterRanges.decodeGeometryPolicies[0].artifact.fingerprint += "-mutated";
+  assert.throws(
+    () => validateManifestAuthorities(profile(), activeMemoryFingerprintDrift),
+    /active MLX memory strategy is not bound to its current authority/,
   );
 
   const duplicateControlAuthority = structuredClone(manifest);

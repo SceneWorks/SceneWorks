@@ -292,12 +292,33 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         );
     }
     for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
-        let payload = pose(model);
-        assert_eq!(
-            image_job_candle_lane(&image_generate_job(payload.clone())),
-            None
-        );
-        assert!(image_request_candle_pose_reject(model, &object(payload)));
+        for advanced in [
+            json!({ "poses": [{ "keypoints": [] }] }),
+            json!({ "poses": "malformed" }),
+            json!({ "poses": [null] }),
+            json!({ "controlMode": "pose" }),
+            json!({ "controlMode": false }),
+            json!({ "controlImage": "asset" }),
+            json!({ "controlWeights": {} }),
+        ] {
+            let payload = json!({ "model": model, "advanced": advanced });
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(payload.clone())),
+                None
+            );
+            assert!(
+                image_request_candle_pose_reject(model, &object(payload)),
+                "{model} must own every material control carrier only to reject"
+            );
+        }
+        assert!(image_request_candle_pose_reject(
+            model,
+            &object(json!({
+                "mode": "edit_image",
+                "sourceAssetId": "source_1",
+                "advanced": { "controlMode": "pose" }
+            }))
+        ));
     }
 
     // Real same-model overlaps pin the exact first-match precedence. Each tuple names the

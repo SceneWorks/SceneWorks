@@ -335,6 +335,10 @@ fn resolve_image_route_with_imported_availability(
         // IP-Adapter, and generic route. The handler validates conflicts and malformed carriers,
         // so a pose can never be silently discarded by a sibling conditioned path.
         Some(ImageRoute::SdxlControl)
+    } else if unsupported_illustrious_control_candidate(request) {
+        // Cells 18-19 remain terminal evidence rather than product authority. Claim every material
+        // control carrier on these shared-SDXL ids only to reject it before generic T2I can erase it.
+        Some(ImageRoute::PoseReject)
     } else if pulid_flux_available(request, settings) {
         Some(ImageRoute::PulidFlux)
     } else if sdxl_advanced_available(request, settings) {
@@ -1035,6 +1039,10 @@ fn resolve_candle_image_route_with_prepared_availability(
         // Same precedence as the core router: InstantID stays isolated, then generic SDXL control
         // claims every material pose carrier before edit/IP/generic routes can discard it.
         Some(CandleImageRoute::SdxlControl)
+    } else if unsupported_illustrious_control_candidate(request) {
+        // The removed Illustrious product route is still owned-to-reject for every explicit control
+        // carrier, including malformed poses and edit/reference conflicts.
+        Some(CandleImageRoute::PoseReject)
     } else if sdxl_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SdxlEdit)
     } else if matches!(

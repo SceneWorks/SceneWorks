@@ -41,7 +41,16 @@ The current Illustrious primaries select published immutable revisions
 `672e9851ede4dc856fa945649b6691975c9d74a3` (v2). Their q4 text encoder, second text encoder, and
 UNet configs must each carry the exact `bits: 4`, `group_size: 64` marker represented by the closed
 profile marker. The current download inventory is independently digest-bound as
-`1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee`.
+`1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee`. The republished
+authorities change configuration metadata only; their packed q4 component configs are bound to
+SHA-256 `f87b89e4249e027632236caba75d1140e14fd4c2ce4b4e554f2912b234e72cf9`,
+`3b96bc14843360d24e864f7d1ac6d83e95cad8f68209e7e503cefa9a4f65b18b`, and
+`aeb34c12f61f1edd9f7e17d8332f91197bacad70754bfaa450836137c40c8c4d` for the first text
+encoder, second text encoder, and UNet respectively. The q8 component config hashes are
+`c74289384c56ae6fdac29b39f01c081aa7dbd20161b371c5dc3b486fa94bf8fb`,
+`2891a3c519b99c3b5983aeee973095974f2e08df5d88e7d59c88635638fa8d6a`, and
+`379fb37b8b7a893113925439117acebc03b205615b281bcc139b7c418b26ce7f` in the same order. The
+VAE weight identities and measured decode baselines are unchanged.
 
 ## Dispatch contract
 
@@ -266,3 +275,6 @@ stores. No rerun is needed for cells 15-17: their complete receipts and independ
 stand on their own. The safest recovery is one later sparse terminal campaign containing only LTX q8
 with its fixed eight-step request and the two Illustrious q4 cells after republished packed-marker
 authorities; it must import these sixteen PASS cells rather than rerun them.
+
+This promotion closes only SC-20741, SC-20744, and SC-20748. SC-20742 remains blocked on the
+separate FLUX.2 TrueV2 authority and is not implied complete by this terminal campaign.
