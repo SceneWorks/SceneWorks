@@ -204,3 +204,65 @@ cargo fmt --all -- --check
 
 The hardware test is `#[ignore]`d, test-only, Candle-only, and additionally refuses to run unless the
 workflow-only `SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA=1` opt-in is present.
+
+## Independently audited promotion outcome
+
+The promotion authority is GitHub Actions run `32628540694`, attempt 1, exact SceneWorks head
+`43c718b7e9a852bd5029448d18841fed0f508c3a`, artifact
+`sc-20945-epic-20738-43c718b7e9a852bd5029448d18841fed0f508c3a-32628540694-1`
+(artifact id `9492288293`, 15,452,320 bytes, GitHub SHA-256
+`dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724`). The independent audit
+rehashes the original cells 1-7, recovery cells 8-9, and current cells 10-19 rather than trusting the
+campaign summary. All selected inputs, outputs, controller/runtime logs, repository heads, pins,
+runtime results, and receipts match their imported lineage and frozen profile/schema/semantic
+digests. Thirty-one output PNGs are non-degenerate, including SCAIL-2's exact six-pair
+counterfactual boundary.
+
+Exactly cells 1-13 and 15-17 are product-promotable. Receipt peaks are physical-target GPU MiB;
+manifest GiB values are MiB / 1024 rounded to three decimals, and a new default-tier blanket adds
+the worker-owned 2 GiB reserve and rounds up. FLUX keeps its older, larger 1024x1024 admission rows
+because replacing them with lower 512x512 observations would weaken an independently established
+guard.
+
+| Cells | Product cells | Receipt peaks (MiB) | Receipt-backed memory evidence |
+| --- | --- | --- | --- |
+| 1-2 | Chroma1 Base q4 / q8 | 16,676 / 25,094 | q4 16.285 / 19 GiB floor; q8 24.506 / 27 GiB floor |
+| 3-4 | Chroma1 Flash q4 / q8 | 16,676 / 23,364 | q4 16.285 / 19 GiB floor; q8 22.816 / 25 GiB floor |
+| 5-6 | Chroma1 HD q4 / q8 | 16,708 / 23,364 | q4 16.316 / 19 GiB floor; q8 22.816 / 25 GiB floor |
+| 7-8 | FLUX.1 dev q4 / q8 | 11,556 / 23,752 | terminal 11.285 / 23.195; stricter existing 24 / 34 GiB floors retained |
+| 9-10 | FLUX.1 Schnell q4 / q8 | 14,733 / 22,268 | terminal 14.388 / 21.746; stricter existing 24 / 34 GiB floors retained |
+| 11-13 | SCAIL-2 q4, q4 six-reference, q8 | 58,890 / 62,730 / 66,486 | q4 61.260 / 64 GiB floor; q8 64.928 / 67 GiB floor |
+| 15 | SDXL q4 + OpenPose | 7,171 | q4 7.003 / 10 GiB floor |
+| 16 | RealVisXL q4 + OpenPose | 9,649 | q4 9.423 / 12 GiB floor |
+| 17 | RealVisXL Lightning q4 + OpenPose | 6,915 | q4 6.753 / 9 GiB floor |
+
+Promotion deletes only the twelve proven precision exception paths: six Chroma, four FLUX.1, and
+two SCAIL-2 q4/q8 cells. The three accepted SDXL OpenPose compositions had no exception paths to
+delete; their catalog, routing, install companion, and q4-only worker validation are narrowed to
+those exact models and tier.
+
+The Chroma and OpenPose rows are deliberately not written as partial generic `candle` blocks. That
+block is both the base-route VRAM gate and the complete advertised tier axis. Chroma's previously
+established bf16 route has no terminal cell here, and the shared SDXL base routes retain independent
+q8/bf16 authority. Partial q4/q8 or q4-only ladders would make those tiers borrow a smaller default
+floor and erase them from the generated memory matrix. Chroma therefore retains its pre-existing
+base-route admission behavior, while the bespoke OpenPose route validates q4 before download/load
+and performs its existing load-exact base-plus-overlay admission. The table records the measured
+composition rows without turning them into dense or cross-tier authority.
+
+Cells 14, 18, and 19 are not promotion authority:
+
+- Cell 14 requested four LTX-2.3 q8 steps, but the immutable package has a baked fixed eight-step
+  recipe. LTX q8 returns to the epic-9083 precision exception and remains fail-closed; q4 is
+  unchanged.
+- Cells 18-19 selected Illustrious XL v1/v2 q4 authorities without the packed-quantization marker.
+  They do not authorize on-the-fly or dense fallback. Both models remain absent from the shared
+  OpenPose install/UI surface and the exact worker/router allow-list.
+
+The audit also verifies GPU index/PCI identity/UUID/driver/compute capability and confinement to the
+97,887 MiB target, cache-preflight census and capacity, JIT authority lifecycles, derived-cache
+dispositions, per-cell scratch cleanup, and final emptiness of staging, derived, and persistent-miss
+stores. No rerun is needed for cells 15-17: their complete receipts and independently hashed outputs
+stand on their own. The safest recovery is one later sparse terminal campaign containing only LTX q8
+with its fixed eight-step request and the two Illustrious q4 cells after republished packed-marker
+authorities; it must import these sixteen PASS cells rather than rerun them.

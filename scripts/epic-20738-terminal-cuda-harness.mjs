@@ -41,6 +41,11 @@ const EXPECTED_CELLS = [
 const SDXL_POSE_MODELS = [
   "sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2",
 ];
+const PROMOTED_SDXL_POSE_MODELS = [
+  "sdxl",
+  "realvisxl",
+  "realvisxl_lightning",
+];
 const EXPECTED_CELL_SEMANTICS_SHA256 = "2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1";
 const LEGACY_CELL_SEMANTICS_SHA256 = "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879";
 const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255";
@@ -703,9 +708,10 @@ export function validateManifestAuthorities(profile, manifest) {
         fail(`artifact ${id} allowPatterns are not the manifest's exact download surface`);
       }
     } else if (authority.kind === "explicitPublicArtifact") {
-      // The profile keeps one shared authority for all five cells. Bind it to the production
-      // sc-20747 soft co-requisite rows without copying those rows into a fake utility model or
-      // allowing another consumer/duplicate row to drift into the terminal campaign.
+      // The frozen profile keeps one shared authority for all five measured cells. Only the
+      // independently promotable cells bind that authority to production sc-20747 soft
+      // co-requisite rows; the two failed Illustrious cells remain explicit campaign inputs and
+      // must not acquire product manifest claims.
       const expected = {
         repository: "xinsir/controlnet-openpose-sdxl-1.0",
         revision: "23f966cd5cfdd3f7729c903e243d87152162d2b7",
@@ -720,11 +726,11 @@ export function validateManifestAuthorities(profile, manifest) {
         .filter((download) => download.componentId === "controlnet_openpose")
         .map((download) => ({ model: model.id, download })));
       const actualModels = consumers.map(({ model }) => model).sort();
-      const expectedModels = [...SDXL_POSE_MODELS].sort();
+      const expectedModels = [...PROMOTED_SDXL_POSE_MODELS].sort();
       if (JSON.stringify(actualModels) !== JSON.stringify(expectedModels)) {
-        fail(`OpenPose ControlNet manifest authority must have the exact five approved consumers`);
+        fail(`OpenPose ControlNet manifest authority must have the exact three promoted consumers`);
       }
-      for (const modelId of SDXL_POSE_MODELS) {
+      for (const modelId of PROMOTED_SDXL_POSE_MODELS) {
         const rows = consumers.filter(({ model }) => model === modelId);
         if (rows.length !== 1) {
           fail(`OpenPose ControlNet manifest authority must have exactly one row for ${modelId}`);

@@ -5401,7 +5401,7 @@ mod download_receipt_tests {
 
     /// The three descriptor-required SDXL components (CLIP-L/bigG tokenizers + fp16-fix VAE) remain
     /// Candle-only hard co-requisites on every Candle-SDXL base + InstantID. OpenPose is different: it
-    /// is one cross-platform soft install companion on exactly the five pose-capable base models.
+    /// is one cross-platform soft install companion on exactly the three accepted base models.
     /// Missing it must offer an update without making ordinary MLX or Candle generation uninstalled.
     /// Binds both contracts to the LIVE builtin manifest and install-state implementation.
     #[test]
@@ -5415,13 +5415,7 @@ mod download_receipt_tests {
                 .map(|id| (*id).to_owned())
                 .collect();
         let soft_want = BTreeSet::from(["controlnet_openpose".to_owned()]);
-        let pose_models = [
-            "sdxl",
-            "realvisxl",
-            "realvisxl_lightning",
-            "illustrious_xl_v1",
-            "illustrious_xl_v2",
-        ];
+        let pose_models = ["sdxl", "realvisxl", "realvisxl_lightning"];
 
         for model_id in [
             "sdxl",
@@ -5469,7 +5463,7 @@ mod download_receipt_tests {
                 assert_eq!(
                     ids_for(true),
                     expected_soft,
-                    "{model_id} on {os}: OpenPose must be soft, cross-platform, and limited to the five pose backbones",
+                    "{model_id} on {os}: OpenPose must be soft, cross-platform, and limited to the three accepted pose backbones",
                 );
 
                 if pose_models.contains(&model_id) {
