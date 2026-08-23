@@ -202,7 +202,7 @@ pub(crate) async fn run_model_download_job(
 
     let mut progress = DownloadProgress::new(
         repo,
-        directory_size(&repo_dir.join("blobs")).await,
+        0,
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
@@ -442,7 +442,7 @@ pub(crate) async fn run_lora_download_job(
 
     let mut progress = DownloadProgress::new(
         repo,
-        directory_size(&repo_dir.join("blobs")).await,
+        0,
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );
@@ -4029,7 +4029,7 @@ pub(crate) async fn ensure_hf_files_cached(
     if !snapshot.files.is_empty() {
         let mut progress = DownloadProgress::new(
             repo,
-            directory_size(&repo_dir.join("blobs")).await,
+            0,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
@@ -4273,7 +4273,7 @@ pub(crate) async fn run_lora_import_job(
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
             repo,
-            directory_size(&target_dir).await,
+            0,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
@@ -4687,7 +4687,7 @@ pub(crate) async fn run_model_import_job(
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
             repo,
-            directory_size(&target_dir).await,
+            0,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
