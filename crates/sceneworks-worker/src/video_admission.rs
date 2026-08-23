@@ -371,7 +371,10 @@ pub(crate) fn bernini_mv2v_clip_receipt(
 fn video_curve_overlay(overlay: Option<&str>) -> Option<String> {
     let axes = overlay?
         .split('+')
-        .filter(|axis| !axis.starts_with(BERNINI_R2V_SEAL_DOMAIN))
+        .filter(|axis| {
+            !axis.starts_with(BERNINI_R2V_SEAL_DOMAIN)
+                && !axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN)
+        })
         .collect::<Vec<_>>();
     (!axes.is_empty()).then(|| axes.join("+"))
 }

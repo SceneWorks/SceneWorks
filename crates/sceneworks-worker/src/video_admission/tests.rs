@@ -831,6 +831,27 @@ fn rv2v_conditioning() -> Vec<gen_core::Conditioning> {
     ]
 }
 
+fn mv2v_conditioning() -> Vec<gen_core::Conditioning> {
+    let first = gen_core::Image {
+        width: 848,
+        height: 480,
+        pixels: vec![7; 848 * 480 * 3],
+    };
+    let second = gen_core::Image {
+        width: 848,
+        height: 480,
+        pixels: vec![13; 848 * 480 * 3],
+    };
+    [first, second]
+        .into_iter()
+        .map(|frame| gen_core::Conditioning::VideoClip {
+            frames: vec![frame; 45],
+            frame_idx: 0,
+            strength: 1.0,
+        })
+        .collect()
+}
+
 #[test]
 fn bernini_r2v_worker_receipts_bind_backend_specific_effective_shapes() {
     let conditioning = r2v_conditioning();
@@ -875,6 +896,64 @@ fn bernini_r2v_curve_identity_reuses_shapes_while_request_seal_binds_pixels() {
         "same ordered native/effective shapes must reuse one fitted curve"
     );
     assert!(!first_curve.contains("request-seal"));
+}
+
+#[test]
+fn bernini_mv2v_curve_identity_excludes_only_the_request_seal() {
+    let first = mv2v_conditioning();
+    let mut changed_bytes = first.clone();
+    let [gen_core::Conditioning::VideoClip { frames, .. }, ..] = changed_bytes.as_mut_slice()
+    else {
+        unreachable!()
+    };
+    frames[0].pixels[0] ^= 1;
+    let mut reordered = first.clone();
+    reordered.reverse();
+    let mut different_surface = first.clone();
+    different_surface.push(first[0].clone());
+
+    let receipt = bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &first).unwrap();
+    let changed_bytes_receipt =
+        bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &changed_bytes).unwrap();
+    let reordered_receipt =
+        bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &reordered).unwrap();
+    let different_surface_receipt =
+        bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &different_surface).unwrap();
+    assert_ne!(
+        receipt, changed_bytes_receipt,
+        "full receipt binds clip bytes"
+    );
+    assert_ne!(
+        receipt, reordered_receipt,
+        "full receipt binds ordered clips"
+    );
+
+    let curve = video_curve_overlay(Some(&format!("provider_video_mode:mv2v+{receipt}"))).unwrap();
+    let changed_bytes_curve = video_curve_overlay(Some(&format!(
+        "provider_video_mode:mv2v+{changed_bytes_receipt}"
+    )))
+    .unwrap();
+    let reordered_curve = video_curve_overlay(Some(&format!(
+        "provider_video_mode:mv2v+{reordered_receipt}"
+    )))
+    .unwrap();
+    let different_surface_curve = video_curve_overlay(Some(&format!(
+        "provider_video_mode:mv2v+{different_surface_receipt}"
+    )))
+    .unwrap();
+    assert_eq!(
+        curve, changed_bytes_curve,
+        "request bytes are not a curve axis"
+    );
+    assert_eq!(
+        curve, reordered_curve,
+        "equal source surfaces reuse one curve"
+    );
+    assert_ne!(
+        curve, different_surface_curve,
+        "source count and source-ID schedule remain curve axes"
+    );
+    assert!(!curve.contains(BERNINI_MV2V_SEAL_DOMAIN));
 }
 
 #[test]
