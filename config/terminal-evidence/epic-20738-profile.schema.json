@@ -35,7 +35,27 @@
         "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
         "revision": { "$ref": "#/$defs/sha40" },
         "subdirectory": { "type": "string", "minLength": 1 },
-        "allowPatterns": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+        "allowPatterns": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "quantizationMarker": { "$ref": "#/$defs/quantizationMarker" }
+      }
+    },
+    "quantizationMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bits", "groupSize", "components"],
+      "properties": {
+        "bits": { "const": 4 },
+        "groupSize": { "const": 64 },
+        "components": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "text_encoder" },
+            { "const": "text_encoder_2" },
+            { "const": "unet" }
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        }
       }
     },
     "cell": {

@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   EVIDENCE_FILE,
+  FROZEN_LEGACY_EVIDENCE_AUTHORITIES,
   KNOWN_REPO_CONDITIONS,
   KNOWN_ZERO_MATCHES,
   argumentError,
@@ -166,8 +167,10 @@ test("the committed evidence grades the real catalog clean", async () => {
 // 97 -> 100 on the sc-17137 main sync: the MiniMax-H3 pair (sc-17158/sc-19558/sc-20267) contributes
 // three keys — the `SceneWorks/minimax-h3-mlx` tier re-host, the upstream `MiniMaxAI/MiniMax-H3`
 // shared-component co-requisite, and the raw off-Mac snapshot row — which landed on the epic
-// branch while the Xinsir authority landed on the feature; the union therefore has 100 keys.
-test("all 100 real download keys are pinned to immutable lowercase commit SHAs", async () => {
+// branch while the Xinsir authority landed on the feature; the union therefore has 100 current
+// keys. SC-21306 adds two exact historical rows for the audited artifact importer; they are not
+// manifest claims and are guarded separately against absence, identity drift, and file-census drift.
+test("all 100 current and two frozen legacy download keys use immutable commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
@@ -175,8 +178,8 @@ test("all 100 real download keys are pinned to immutable lowercase commit SHAs",
   assert.equal(keys.size, 100, "update the 100/100 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    100,
-    "the evidence census must stay aligned with the 100/100 disclosure",
+    102,
+    "the evidence census must be the 100 current claims plus two frozen importer authorities",
   );
   for (const claim of claims) {
     assert.match(
@@ -192,6 +195,36 @@ test("all 100 real download keys are pinned to immutable lowercase commit SHAs",
       `${entry.key} must not record a moving default branch`,
     );
     assert.equal(entry.key, claimKey(entry.repo, entry.revision));
+  }
+  const frozenKeys = new Set(FROZEN_LEGACY_EVIDENCE_AUTHORITIES.map(
+    ({ repo, legacyRevision }) => claimKey(repo, legacyRevision),
+  ));
+  assert.deepEqual(
+    new Set(evidence.repos.map(({ key }) => key).filter((key) => !keys.has(key))),
+    frozenKeys,
+  );
+});
+
+test("the two SC-21306 legacy evidence routes reject absence and file-census drift", async () => {
+  const input = await realInputs();
+  for (const { repo, legacyRevision, currentRevision } of FROZEN_LEGACY_EVIDENCE_AUTHORITIES) {
+    const legacyKey = claimKey(repo, legacyRevision);
+    const currentKey = claimKey(repo, currentRevision);
+    const legacy = input.evidence.repos.find(({ key }) => key === legacyKey);
+    const current = input.evidence.repos.find(({ key }) => key === currentKey);
+    assert.deepEqual(legacy.files, current.files);
+
+    const missing = structuredClone(input.evidence);
+    missing.repos = missing.repos.filter(({ key }) => key !== legacyKey);
+    assert.ok(gradeRecordedEvidence({ ...input, evidence: missing,
+      waivers: KNOWN_ZERO_MATCHES, repoConditions: KNOWN_REPO_CONDITIONS }).problems
+      .some(({ kind }) => kind === "legacy-evidence-missing"));
+
+    const drift = structuredClone(input.evidence);
+    drift.repos.find(({ key }) => key === legacyKey).files.pop();
+    assert.ok(gradeRecordedEvidence({ ...input, evidence: drift,
+      waivers: KNOWN_ZERO_MATCHES, repoConditions: KNOWN_REPO_CONDITIONS }).problems
+      .some(({ kind }) => kind === "legacy-evidence-drift"));
   }
 });
 

@@ -17,6 +17,7 @@ import {
   directoryInventory,
   expectedB646DerivedNamespace,
   expectedArtifactFilesFromEvidence,
+  expectedCurrentArtifactFilesFromEvidenceBytes,
   expectedLoadSpecQuantBits,
   estimateJitDiskPlan,
   inferencePins,
@@ -29,9 +30,11 @@ import {
   receiptSkeleton,
   runCampaign,
   safeRemoveTree,
+  importSparseRecovery,
   importRecoveryContinuation,
   selectImportedPrefix,
   selectRecoveryContinuation,
+  selectSparseRecovery,
   validateCampaignPaths,
   validateCachePreflightEvidence,
   validateDocumentWithSchema,
@@ -45,6 +48,18 @@ import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const profile = () => structuredClone(loadProfile());
+const recoveryArtifactProfile = () => {
+  const legacy = profile();
+  legacy.cells[13].request.steps = 4;
+  for (const [id, revision] of [
+    ["illustrious-v1-q4", "c5a92a902dd4e6ee99c2a57981ecf66209905dd1"],
+    ["illustrious-v2-q4", "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473"],
+  ]) {
+    legacy.artifacts[id].revision = revision;
+    delete legacy.artifacts[id].quantizationMarker;
+  }
+  return legacy;
+};
 
 function scail2ReferenceCounterfactuals() {
   return Array.from({ length: 6 }, (_, index) => {
@@ -95,7 +110,8 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
   );
   assert.equal(checked.cells.filter((cell) => cell.capability === "multiReference").length, 1);
   assert.equal(checked.cells.find((cell) => cell.capability === "multiReference").request.referencePairs, 6);
-  assert.equal(cellSemanticsSha256(checked.cells), "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879");
+  assert.equal(cellSemanticsSha256(checked.cells), "2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1");
+  assert.equal(checked.cells.find((cell) => cell.id === "ltx-2-3-q8").request.steps, 8);
   assert.doesNotMatch(JSON.stringify(checked).toLowerCase(), /anima|sana|vace|flux2|true[_-]?v2|eros/);
   assert.deepEqual(
     ["ltx23-q8", "ltx23-gemma"].map((id) => checked.artifacts[id].revision),
@@ -105,11 +121,97 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
     ],
     "terminal LTX must truthfully use the exact cached production-approved parent",
   );
+  assert.deepEqual(
+    ["illustrious-v1-q4", "illustrious-v2-q4"].map((id) => ({
+      revision: checked.artifacts[id].revision,
+      marker: checked.artifacts[id].quantizationMarker,
+    })),
+    [
+      {
+        revision: "778c3f02b7703b0c2755d0c0447592897193c6b5",
+        marker: { bits: 4, groupSize: 64, components: ["text_encoder", "text_encoder_2", "unet"] },
+      },
+      {
+        revision: "672e9851ede4dc856fa945649b6691975c9d74a3",
+        marker: { bits: 4, groupSize: 64, components: ["text_encoder", "text_encoder_2", "unet"] },
+      },
+    ],
+  );
 
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     "config/manifests/builtin.models.jsonc", "utf8",
   )));
   assert.doesNotThrow(() => validateManifestAuthorities(checked, manifest));
+  for (const [modelId, currentRevision, legacyRevision, exactSizes] of [
+    [
+      "illustrious_xl_v1",
+      "778c3f02b7703b0c2755d0c0447592897193c6b5",
+      "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+      [3_911_462_020, 5_385_646_612, 7_108_498_305],
+    ],
+    [
+      "illustrious_xl_v2",
+      "672e9851ede4dc856fa945649b6691975c9d74a3",
+      "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+      [3_911_461_696, 5_385_646_332, 7_108_498_177],
+    ],
+  ]) {
+    const model = manifest.models.find(({ id }) => id === modelId);
+    const currentDownloads = model.downloads.slice(0, 3);
+    assert.deepEqual(currentDownloads.map(({ revision }) => revision),
+      [currentRevision, currentRevision, currentRevision]);
+    assert.deepEqual(currentDownloads.map(({ estimatedSizeBytes }) => estimatedSizeBytes), exactSizes);
+    assert.deepEqual(currentDownloads.map(({ footprint }) => footprint.diskSizeBytes), exactSizes);
+    const policies = model.mlx.memoryStrategyContract.implementations.flatMap(
+      (implementation) => implementation.parameterRanges?.decodeGeometryPolicies ?? [],
+    );
+    assert.ok(policies.length > 0, `${modelId} must retain its active decode policies`);
+    assert.ok(policies.every(({ artifact }) => (
+      artifact.revision === currentRevision
+      && artifact.fingerprint === `${artifact.repository}@${currentRevision}:q4`
+    )), `${modelId} active memory selectors must move with the shipping authority`);
+    assert.ok(policies.flatMap(({ fixtures }) => fixtures).every(({ productionLatentProvenance }) => (
+      productionLatentProvenance.includes(legacyRevision)
+    )), `${modelId} historical calibration provenance must retain its producing revision`);
+  }
+});
+
+test("current and legacy Illustrious download selectors fail closed independently", async () => {
+  const checked = profile();
+  const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
+  const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
+  assert.equal(current.downloadEvidenceSha256,
+    "1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee");
+  assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
+  assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
+
+  const digestMutation = evidenceBytes.replace('"gated": false', '"gated": true');
+  assert.throws(
+    () => expectedCurrentArtifactFilesFromEvidenceBytes(checked, digestMutation),
+    /current download-pattern evidence digest drifted/,
+  );
+
+  const evidence = JSON.parse(evidenceBytes);
+  const legacy = structuredClone(checked);
+  for (const [id, revision] of [
+    ["illustrious-v1-q4", "c5a92a902dd4e6ee99c2a57981ecf66209905dd1"],
+    ["illustrious-v2-q4", "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473"],
+  ]) {
+    legacy.artifacts[id].revision = revision;
+    delete legacy.artifacts[id].quantizationMarker;
+  }
+  const legacyExpected = expectedArtifactFilesFromEvidence(legacy, evidence);
+  assert.deepEqual(legacyExpected["illustrious-v1-q4"], current.artifactExpectedFiles["illustrious-v1-q4"]);
+  assert.deepEqual(legacyExpected["illustrious-v2-q4"], current.artifactExpectedFiles["illustrious-v2-q4"]);
+
+  const missingLegacy = structuredClone(evidence);
+  missingLegacy.repos = missingLegacy.repos.filter(({ revision }) => (
+    revision !== "c5a92a902dd4e6ee99c2a57981ecf66209905dd1"
+  ));
+  assert.throws(
+    () => expectedArtifactFilesFromEvidence(legacy, missingLegacy),
+    /missing exact authority SceneWorks\/illustrious-xl-v1-mlx@c5a92a9/,
+  );
 });
 
 test("download evidence freezes the exact 23-authority filename census", async () => {
@@ -183,8 +285,8 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
     row("sdxl-base-q4", 15, 15, [file("sdxl-base-q4", 2_703_202_068)]),
     row("realvisxl-q4", 16, 16, [file("realvisxl-q4", 3_911_656_467)]),
     row("realvisxl-lightning-q4", 17, 17, [file("realvisxl-lightning-q4", 3_911_657_599)]),
-    row("illustrious-v1-q4", 18, 18, [file("illustrious-v1-q4", 3_911_656_791)]),
-    row("illustrious-v2-q4", 19, 19, [file("illustrious-v2-q4", 3_911_656_467)]),
+    row("illustrious-v1-q4", 18, 18, [file("illustrious-v1-q4", 3_911_656_986)]),
+    row("illustrious-v2-q4", 19, 19, [file("illustrious-v2-q4", 3_911_656_662)]),
     row("sdxl-openpose", 15, 19, [file("sdxl-openpose", 2_502_139_104)]),
     row("sdxl-tokenizer-l", 15, 19, [file("sdxl-tokenizer-l", 2_224_003)]),
     row("sdxl-tokenizer-bigg", 15, 19, [file("sdxl-tokenizer-bigg", 2_224_041)]),
@@ -192,11 +294,11 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
   ];
   const floor = 99_106_288_594;
   const admitted = estimateJitDiskPlan(lifetimes, floor, persistent.bytes);
-  assert.equal(admitted.logicalSourceBytes, 179_028_698_264);
-  assert.equal(admitted.allAtOnceSourceBytes, 179_028_698_264);
+  assert.equal(admitted.logicalSourceBytes, 179_028_698_654);
+  assert.equal(admitted.allAtOnceSourceBytes, 179_028_698_654);
   assert.equal(
     admitted.allAtOnceSourceBytes - admitted.legacyNaiveLinkLengthSourceBytes,
-    5_361_654_035,
+    5_361_654_425,
     "link-length accounting must never undercount followed Schnell q8 blob bytes",
   );
   assert.equal(admitted.cells.find((entry) => entry.ordinal === 8).modelAndSidecarBytes, 43_229_554_686);
@@ -225,6 +327,40 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
   assert.equal(completePlan.peakRequiredAdditionalBytes, floor);
   assert.equal(completePlan.admitted, true);
   assert.equal(estimateJitDiskPlan(completeCache, floor - 1, 0).admitted, false);
+});
+
+test("sparse execution lifetimes cover only 14, 18, and 19 while retaining shared SDXL helpers", () => {
+  const checked = profile();
+  const sourceBytes = new Map([
+    ["ltx23-q8", 29_728_720_716],
+    ["ltx23-gemma", 26_427_894_918],
+    ["illustrious-v1-q4", 3_911_656_986],
+    ["illustrious-v2-q4", 3_911_656_662],
+    ["sdxl-openpose", 2_502_139_104],
+    ["sdxl-tokenizer-l", 2_224_003],
+    ["sdxl-tokenizer-bigg", 2_224_041],
+    ["sdxl-vae-fix", 334_643_238],
+  ]);
+  const audits = new Map([...sourceBytes].map(([id, bytes]) => [id, {
+    reusedFiles: [{ path: "fixture.bin", bytes, sha256: "a".repeat(64) }],
+    downloadedFiles: [],
+    expectedFiles: ["fixture.bin"],
+  }]));
+  const lifetimes = authorityLifetimePlan(checked, [14, 18, 19], audits);
+  assert.deepEqual(lifetimes.map(({ artifactId }) => artifactId), [
+    "ltx23-q8", "ltx23-gemma", "illustrious-v1-q4", "sdxl-openpose",
+    "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix", "illustrious-v2-q4",
+  ]);
+  for (const id of ["sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix"]) {
+    const lifetime = lifetimes.find((row) => row.artifactId === id);
+    assert.equal(lifetime.firstOrdinal, 18);
+    assert.equal(lifetime.lastOrdinal, 19);
+  }
+  const plan = estimateJitDiskPlan(lifetimes, 99_106_288_594, 0);
+  assert.deepEqual(plan.cells.map(({ ordinal }) => ordinal), [14, 18, 19]);
+  assert.equal(plan.logicalSourceBytes, 66_821_159_668);
+  assert.equal(plan.peakModelAndSidecarBytes, 56_156_615_634);
+  assert.equal(plan.peakRequiredAdditionalBytes, 99_106_288_594);
 });
 
 test("profile validator rejects count, order, every semantic tuple mutation, blocked, and authority drift", async () => {
@@ -259,6 +395,16 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   steps.cells[0].request.steps += 1;
   assert.throws(() => validateProfile(steps), /semantic tuples drifted/);
 
+  for (const count of [4, 7, 9]) {
+    const ltxSteps = profile();
+    ltxSteps.cells.find((cell) => cell.id === "ltx-2-3-q8").request.steps = count;
+    assert.throws(
+      () => validateProfile(ltxSteps),
+      /semantic tuples drifted/,
+      `LTX fixed schedule mutation ${count} must fail closed`,
+    );
+  }
+
   const unreviewedKnob = profile();
   unreviewedKnob.cells[0].request.unreviewedKnob = true;
   assert.throws(() => validateProfile(unreviewedKnob), /semantic tuples drifted/);
@@ -266,6 +412,24 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   const blocked = profile();
   blocked.artifacts["scail2-q4"].repository = "SceneWorks/eros-model";
   assert.throws(() => validateProfile(blocked), /blocked surface eros/);
+
+  const illustriousRevision = profile();
+  illustriousRevision.artifacts["illustrious-v1-q4"].revision =
+    "c5a92a902dd4e6ee99c2a57981ecf66209905dd1";
+  assert.throws(() => validateProfile(illustriousRevision), /exact current revision and q4\/group-64/);
+
+  for (const mutation of [
+    (marker) => { marker.bits = 8; },
+    (marker) => { marker.groupSize = 32; },
+    (marker) => { marker.components.reverse(); },
+  ]) {
+    const illustriousMarker = profile();
+    mutation(illustriousMarker.artifacts["illustrious-v2-q4"].quantizationMarker);
+    assert.throws(
+      () => validateProfile(illustriousMarker),
+      /exact current revision and q4\/group-64/,
+    );
+  }
 
   const manifestDrift = profile();
   manifestDrift.artifacts["chroma1-base-q4"].revision = "a".repeat(40);
@@ -283,6 +447,25 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
     /manifest authority drifted for realvisxl/,
   );
 
+  const activeMemoryRevisionDrift = structuredClone(manifest);
+  activeMemoryRevisionDrift.models.find((model) => model.id === "illustrious_xl_v1")
+    .mlx.memoryStrategyContract.implementations[0]
+    .parameterRanges.decodeGeometryPolicies[0].artifact.revision =
+      "c5a92a902dd4e6ee99c2a57981ecf66209905dd1";
+  assert.throws(
+    () => validateManifestAuthorities(profile(), activeMemoryRevisionDrift),
+    /active MLX memory strategy is not bound to its current authority/,
+  );
+
+  const activeMemoryFingerprintDrift = structuredClone(manifest);
+  activeMemoryFingerprintDrift.models.find((model) => model.id === "illustrious_xl_v2")
+    .mlx.memoryStrategyContract.implementations[0]
+    .parameterRanges.decodeGeometryPolicies[0].artifact.fingerprint += "-mutated";
+  assert.throws(
+    () => validateManifestAuthorities(profile(), activeMemoryFingerprintDrift),
+    /active MLX memory strategy is not bound to its current authority/,
+  );
+
   const duplicateControlAuthority = structuredClone(manifest);
   const sdxl = duplicateControlAuthority.models.find((model) => model.id === "sdxl");
   sdxl.downloads.push(structuredClone(
@@ -290,7 +473,7 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   ));
   assert.throws(
     () => validateManifestAuthorities(profile(), duplicateControlAuthority),
-    /exact five approved consumers/,
+    /exact three promoted consumers/,
   );
 
   const extraControlConsumer = structuredClone(manifest);
@@ -299,7 +482,7 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   extraControlConsumer.models.find((model) => model.id === "flux_dev").downloads.push(extra);
   assert.throws(
     () => validateManifestAuthorities(profile(), extraControlConsumer),
-    /exact five approved consumers/,
+    /exact three promoted consumers/,
   );
 
   const artifactDefinitionDrift = profile();
@@ -413,8 +596,7 @@ test("SCAIL2 six-reference causal metrics reject missing, duplicate, nonfinite, 
   assert.throws(() => validateRuntimeResult(copied, cell), /position-bound/);
 });
 
-function fixtureReceipt(status = "passed", cellIndex = 0) {
-  const checked = profile();
+function fixtureReceipt(status = "passed", cellIndex = 0, checked = profile()) {
   const cell = checked.cells[cellIndex];
   const artifacts = cell.artifactIds.map((artifactId) => {
     const artifact = checked.artifacts[artifactId];
@@ -804,6 +986,7 @@ async function writePrefixCandidate(root, candidateName = "12345") {
 }
 
 async function writeRecoveryCandidate(root) {
+  const recoveryProfile = recoveryArtifactProfile();
   const legacyRoot = path.join(path.dirname(root), `${path.basename(root)}-legacy-source`);
   await mkdir(legacyRoot);
   const legacy = await writePrefixCandidate(legacyRoot);
@@ -832,7 +1015,7 @@ async function writeRecoveryCandidate(root) {
   const imported = path.join(evidence, "_imported-prefix");
   await mkdir(imported);
   for (let index = 0; index < 7; index += 1) {
-    const cell = profile().cells[index];
+    const cell = recoveryProfile.cells[index];
     const ordinal = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
     await cp(path.join(legacy.evidence, ordinal), path.join(imported, ordinal), { recursive: true });
   }
@@ -851,14 +1034,14 @@ async function writeRecoveryCandidate(root) {
   };
   await writeFile(path.join(candidate, "artifact-metadata.json"), `${JSON.stringify(recoveryMetadata, null, 2)}\n`);
   async function writeCurrentReceipt(parent, index, status) {
-    const cell = profile().cells[index];
+    const cell = recoveryProfile.cells[index];
     const ordinal = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
     const cellDir = path.join(parent, ordinal);
     await mkdir(cellDir, { recursive: true });
     await writeFile(path.join(cellDir, "cell.json"), `{"id":"${cell.id}"}\n`);
     await writeFile(path.join(cellDir, "runtime-result.json"), "{}\n");
     await writeFile(path.join(cellDir, "controller.log"), `${status} ${cell.id}\n`);
-    const receipt = fixtureReceipt(status, index);
+    const receipt = fixtureReceipt(status, index, recoveryProfile);
     receipt.repositories.sceneworks.sha = recoveryMetadata.headSha;
     receipt.repositories.inference.sha = recoveryMetadata.inferenceSha;
     receipt.execution.headSha = recoveryMetadata.headSha;
@@ -873,17 +1056,17 @@ async function writeRecoveryCandidate(root) {
   }
   const recovered = [];
   for (const index of [7, 8]) recovered.push(await writeCurrentReceipt(evidence, index, "passed"));
-  const staleCell = profile().cells[9];
+  const staleCell = recoveryProfile.cells[9];
   const staleDir = path.join(evidence, `10-${staleCell.id}`);
   await mkdir(staleDir);
   await writeFile(path.join(staleDir, "controller.log"), "stale sentinel changed after receipt\n");
   const stale = receiptSkeleton({
     cell: staleCell, ordinal: 10,
     repositories: { sceneworks: { sha: recoveryMetadata.headSha, clean: true }, inference: { sha: recoveryMetadata.inferenceSha, clean: true } },
-    artifacts: fixtureReceipt("failed", 9).artifacts,
-    execution: { ...fixtureReceipt("failed", 9).execution, runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha },
-    gpuIdentity: fixtureReceipt("failed", 9).hardware.gpuIdentity,
-    systemMemory: fixtureReceipt("failed", 9).hardware.systemMemory, startedAt: "2026-08-23T00:00:00.000Z",
+    artifacts: fixtureReceipt("failed", 9, recoveryProfile).artifacts,
+    execution: { ...fixtureReceipt("failed", 9, recoveryProfile).execution, runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha },
+    gpuIdentity: fixtureReceipt("failed", 9, recoveryProfile).hardware.gpuIdentity,
+    systemMemory: fixtureReceipt("failed", 9, recoveryProfile).hardware.systemMemory, startedAt: "2026-08-23T00:00:00.000Z",
   });
   stale.hardware.rawVramSamples = [{ raw: "fixture raw" }];
   stale.logs = [{ path: "controller.log", bytes: 1, sha256: "0".repeat(64) }];
@@ -899,10 +1082,10 @@ async function writeRecoveryCandidate(root) {
     const row = await writeCurrentReceipt(emergency, index, "failed");
     failures.push({ id: row.cell.id, status: "failed", receipt: `_emergency/${row.ordinal}/receipt.json` });
   }
-  const expected = expectedArtifactFilesFromEvidence(profile(), JSON.parse(await readFile(
+  const expected = expectedArtifactFilesFromEvidence(recoveryProfile, JSON.parse(await readFile(
     "config/download-pattern-evidence.json", "utf8",
   )));
-  const ids = [...new Set(profile().cells.slice(7).flatMap((cell) => cell.artifactIds))];
+  const ids = [...new Set(recoveryProfile.cells.slice(7).flatMap((cell) => cell.artifactIds))];
   const sourceBytes = new Map([
     ["flux1-dev-q8", 18_010_071_290], ["flux1-schnell-q4", 9_611_551_284], ["flux1-schnell-q8", 17_999_175_703],
     ["scail2-q4", 23_993_093_306], ["scail2-q8", 32_067_131_269], ["ltx23-q8", 29_728_720_716],
@@ -913,7 +1096,7 @@ async function writeRecoveryCandidate(root) {
   const downloaded = { artifactId: "flux1-schnell-q8", path: "transformer/model.safetensors", bytes: 12_637_521_668,
     sha256: "c62fff59c0a5205204def102f5183b703ae8a8bb4b6b952c640f27e20d3e03f7", lfsSha256: "c62fff59c0a5205204def102f5183b703ae8a8bb4b6b952c640f27e20d3e03f7", commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599" };
   const sourceCensus = ids.map((id) => {
-    const artifact = profile().artifacts[id];
+    const artifact = recoveryProfile.artifacts[id];
     const missingFiles = id === "flux1-schnell-q8" ? ["q8/transformer/model.safetensors"] : [];
     const presentFiles = expected[id].filter((file) => id !== "flux1-schnell-q8" || file !== "transformer/model.safetensors");
     const reusedTotal = sourceBytes.get(id) - (id === downloaded.artifactId ? downloaded.bytes : 0);
@@ -925,8 +1108,12 @@ async function writeRecoveryCandidate(root) {
   const plannedAudits = new Map(sourceCensus.map((row) => [row.id, {
     ...row, downloadedFiles: row.id === downloaded.artifactId ? [stagedDownload] : [],
   }]));
-  const lifetimePlan = authorityLifetimePlan(profile(), 7, plannedAudits);
-  const diskPlan = estimateJitDiskPlan(lifetimePlan, 248_674_082_816, downloaded.bytes, []);
+  const lifetimePlan = authorityLifetimePlan(
+    recoveryProfile, Array.from({ length: 12 }, (_, index) => index + 8), plannedAudits,
+  );
+  const diskPlan = estimateJitDiskPlan(
+    lifetimePlan, 248_674_082_816, downloaded.bytes, [], 179_028_698_264,
+  );
   const emptyInventory = { root: "fixture-derived", files: 0, bytes: 0, sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" };
   const staging = ["flux1-dev-q8", "flux1-schnell-q4"].map((id) => {
     const row = sourceCensus.find((candidate) => candidate.id === id);
@@ -940,7 +1127,7 @@ async function writeRecoveryCandidate(root) {
     schemaVersion: 1, profile: PROFILE_NAME,
     downloadEvidenceSha256: "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b",
     expectedArtifactIds: ids, sourceCacheRoot: "fixture-cache", campaignStagingRoot: "fixture-stage",
-    derivedSidecarRoot: "fixture-derived", missingFileStore: "fixture-missing", frozenMissingFiles: [{ artifactId: "flux1-schnell-q8", repository: profile().artifacts["flux1-schnell-q8"].repository, revision: profile().artifacts["flux1-schnell-q8"].revision, file: "q8/transformer/model.safetensors" }],
+    derivedSidecarRoot: "fixture-derived", missingFileStore: "fixture-missing", frozenMissingFiles: [{ artifactId: "flux1-schnell-q8", repository: recoveryProfile.artifacts["flux1-schnell-q8"].repository, revision: recoveryProfile.artifacts["flux1-schnell-q8"].revision, file: "q8/transformer/model.safetensors" }],
     sidecarObstructions: [], reusedFiles: sourceCensus.flatMap((row) => row.reusedFiles.map((file) => ({ artifactId: row.id, ...file }))),
     downloadedFiles: [downloaded], networkDownloadCount: 1, phases: { sourceCensus, staging: [], finalOffline: [] },
     lifetimePlan, diskPlan, derivedSidecarLifecycle: { initial: emptyInventory, afterCells: [] }, offlineBeforeCells: true,
@@ -958,7 +1145,7 @@ async function writeRecoveryCandidate(root) {
     execution: { runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha,
       headRef: "refs/heads/feature/sc-20738-candle-cuda-parity", workflow: "Windows Candle worker", runnerName: "cuda-windows-2", runnerOs: "Windows", runnerArch: "X64" },
     receipts: [
-      ...profile().cells.slice(0, 7).map((cell, index) => ({ id: cell.id, status: "passed", receipt: `_imported-prefix/${String(index + 1).padStart(2, "0")}-${cell.id}/receipt.json`, error: null, emergencyReceiptError: null, source: "imported" })),
+      ...recoveryProfile.cells.slice(0, 7).map((cell, index) => ({ id: cell.id, status: "passed", receipt: `_imported-prefix/${String(index + 1).padStart(2, "0")}-${cell.id}/receipt.json`, error: null, emergencyReceiptError: null, source: "imported" })),
       ...recovered.map((row) => ({ id: row.cell.id, status: "passed", receipt: `${row.ordinal}/receipt.json`, error: null, source: "continuation" })),
       ...failures.map((row, index) => ({ ...row, error: index === 0 ? `cell lifecycle failed: Error: ${campaignError}` : `Error: cell ${row.id} blocked before setup, provisioning, and execution: ${campaignError}`, emergencyReceiptError: null, source: "continuation" })),
     ],
@@ -972,7 +1159,7 @@ async function writeRecoveryCandidate(root) {
       },
     },
     cachePreflight: { path: "cache-preflight.json", bytes: cacheBytes.length, sha256: createHash("sha256").update(cacheBytes).digest("hex") },
-    authorityLifecycle: profile().cells.slice(7).map((cell, offset) => ({ ordinal: offset + 8, cellId: cell.id,
+    authorityLifecycle: recoveryProfile.cells.slice(7).map((cell, offset) => ({ ordinal: offset + 8, cellId: cell.id,
       staged: offset < 2 ? [{ artifactId: cell.artifactIds[0] }] : [], activeArtifactIds: [...cell.artifactIds], providerExecution: offset < 2 ? "completed" : "not-attempted",
       requestMemoryStrategy: offset < 2 ? { strategy: "default-resident", requestMemoryPresent: false, stageResidency: false, streamTransformerBlocks: false } : null,
       verifiedBefore: offset < 2, verifiedAfter: offset < 2, derivedAfter: offset < 2 ? [{}] : [], released: offset < 3 ? [{}] : [], diskProbes: offset < 2 ? [{}, {}] : offset === 2 ? [{}] : [],
@@ -984,6 +1171,309 @@ async function writeRecoveryCandidate(root) {
   await writeFile(path.join(evidence, "campaign-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
   return { candidate, evidence, summary };
 }
+
+async function writeSparseRecoveryCandidate(root) {
+  const checked = recoveryArtifactProfile();
+  const recoveryRoot = path.join(path.dirname(root), `${path.basename(root)}-recovery-source`);
+  await mkdir(recoveryRoot);
+  await writeRecoveryCandidate(recoveryRoot);
+  const selectedRecovery = await selectRecoveryContinuation(recoveryRoot, profile());
+  const candidate = path.join(root, "9492288293");
+  const evidence = path.join(candidate, "evidence");
+  await mkdir(evidence, { recursive: true });
+  const imported = await importRecoveryContinuation(selectedRecovery, evidence);
+  const metadata = {
+    artifactId: "9492288293",
+    artifactName: "sc-20945-epic-20738-43c718b7e9a852bd5029448d18841fed0f508c3a-32628540694-1",
+    artifactSize: 15_452_320,
+    artifactDigest: "sha256:dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724",
+    runId: "32628540694",
+    runAttempt: "1",
+    headSha: "43c718b7e9a852bd5029448d18841fed0f508c3a",
+    inferenceSha: "b646a6f89ba9f6b07efe53dd583d8a42e21e9871",
+    profile: PROFILE_NAME,
+    cellSemanticsSha256: "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879",
+    artifactSemanticsSha256: "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932",
+  };
+  await writeFile(path.join(candidate, "artifact-metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+
+  const rootReceipts = [];
+  for (let index = 9; index < 19; index += 1) {
+    const cell = checked.cells[index];
+    const ordinal = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    const cellDir = path.join(evidence, ordinal);
+    await mkdir(cellDir);
+    await writeFile(path.join(cellDir, "cell.json"), `{"id":"${cell.id}"}\n`);
+    await writeFile(path.join(cellDir, "runtime-result.json"), "{}\n");
+    await writeFile(path.join(cellDir, "controller.log"), `audited ${cell.id}\n`);
+    const status = [13, 17, 18].includes(index) ? "failed" : "passed";
+    const receipt = fixtureReceipt(status, index, checked);
+    receipt.repositories.sceneworks.sha = metadata.headSha;
+    receipt.repositories.inference.sha = metadata.inferenceSha;
+    receipt.execution.headSha = metadata.headSha;
+    receipt.execution.runId = metadata.runId;
+    receipt.execution.runAttempt = metadata.runAttempt;
+    const files = await hashedFiles(cellDir);
+    receipt.inputs = files.filter((file) => file.path === "cell.json");
+    receipt.outputs = files.filter((file) => file.path === "runtime-result.json");
+    receipt.logs = files.filter((file) => file.path === "controller.log");
+    await writeFile(path.join(cellDir, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+    rootReceipts.push({ cell, ordinal, receipt });
+  }
+
+  const sourceInitial = JSON.parse(await readFile(
+    path.join(selectedRecovery.evidenceRoot, "cache-preflight-initial.json"), "utf8",
+  ));
+  const executionOrdinals = Array.from({ length: 10 }, (_, index) => index + 10);
+  const ids = [...new Set(executionOrdinals.flatMap(
+    (ordinal) => checked.cells[ordinal - 1].artifactIds,
+  ))];
+  const sourceCensus = sourceInitial.phases.sourceCensus.filter((row) => ids.includes(row.id));
+  const downloadedFiles = sourceInitial.downloadedFiles.filter((file) => ids.includes(file.artifactId));
+  const audits = new Map(sourceCensus.map((row) => [row.id, {
+    ...row,
+    downloadedFiles: downloadedFiles.filter((file) => file.artifactId === row.id).map(
+      ({ artifactId, ...file }) => file,
+    ),
+  }]));
+  const lifetimePlan = authorityLifetimePlan(checked, executionOrdinals, audits);
+  const diskPlan = estimateJitDiskPlan(
+    lifetimePlan,
+    sourceInitial.diskPlan.freeBytes,
+    downloadedFiles.reduce((sum, file) => sum + file.bytes, 0),
+    sourceInitial.diskPlan.nonModelPaths,
+    179_028_698_264,
+  );
+  const emptyInventory = {
+    root: sourceInitial.derivedSidecarRoot,
+    files: 0,
+    bytes: 0,
+    sha256: createHash("sha256").digest("hex"),
+  };
+  const cacheBase = {
+    ...sourceInitial,
+    expectedArtifactIds: ids,
+    frozenMissingFiles: sourceInitial.frozenMissingFiles.filter((row) => ids.includes(row.artifactId)),
+    sidecarObstructions: [],
+    reusedFiles: sourceCensus.flatMap((row) => row.reusedFiles.map(
+      (file) => ({ artifactId: row.id, ...file }),
+    )),
+    downloadedFiles,
+    networkDownloadCount: downloadedFiles.length,
+    phases: { sourceCensus, staging: [], finalOffline: [] },
+    lifetimePlan,
+    diskPlan,
+    derivedSidecarLifecycle: { initial: emptyInventory, afterCells: [] },
+    offlineBeforeCells: true,
+  };
+  await writeFile(path.join(evidence, "cache-preflight-initial.json"), `${JSON.stringify({
+    ...cacheBase, evidencePhase: "initial", status: "passed", error: null,
+  }, null, 2)}\n`);
+  const staging = sourceCensus.map((row) => ({
+    id: row.id,
+    repository: row.repository,
+    revision: row.revision,
+    subdirectory: row.subdirectory,
+    allowPatterns: row.allowPatterns,
+    expectedFiles: row.expectedFiles,
+    reusedFiles: row.reusedFiles,
+    downloadedFiles: audits.get(row.id).downloadedFiles,
+  }));
+  const finalOffline = staging.map((row) => ({
+    id: row.id,
+    repository: row.repository,
+    revision: row.revision,
+    subdirectory: row.subdirectory,
+    allowPatterns: row.allowPatterns,
+    expectedFiles: row.expectedFiles,
+    inventory: {
+      root: `fixture-stage/${row.id}`,
+      files: row.expectedFiles.length,
+      bytes: [...row.reusedFiles, ...row.downloadedFiles].reduce((sum, file) => sum + file.bytes, 0),
+      sha256: "a".repeat(64),
+    },
+  }));
+  const sidecarObstructions = ids.map((id) => ({
+    artifactIds: [id], root: `fixture-stage/${id}`, path: ".candle-device-format-v1",
+    bytes: 7, sha256: "a".repeat(64),
+  }));
+  const afterCells = executionOrdinals.map((ordinal) => {
+    const cell = checked.cells[ordinal - 1];
+    const failed = [14, 18, 19].includes(ordinal);
+    const flux = cell.artifactIds.some((id) => id.startsWith("flux1-"));
+    return {
+      ordinal,
+      cellId: cell.id,
+      providerExecution: failed ? "failed" : "completed",
+      requestMemoryStrategy: failed ? null : {
+        strategy: flux ? "default-resident" : "not-applicable",
+        requestMemoryPresent: false,
+        stageResidency: false,
+        streamTransformerBlocks: false,
+      },
+      derivedDisposition: flux ? "resident-empty" : "not-applicable",
+      inventory: emptyInventory,
+    };
+  });
+  const finalCache = {
+    ...cacheBase,
+    evidencePhase: "final",
+    status: "passed",
+    error: null,
+    sidecarObstructions,
+    phases: { sourceCensus, staging, finalOffline },
+    derivedSidecarLifecycle: { initial: emptyInventory, afterCells },
+  };
+  await writeFile(path.join(evidence, "cache-preflight.json"), `${JSON.stringify(finalCache, null, 2)}\n`);
+  const cacheBytes = await readFile(path.join(evidence, "cache-preflight.json"));
+  const diskFreeProbes = executionOrdinals.flatMap((ordinal) => {
+    const starting = lifetimePlan.filter((row) => row.firstOrdinal === ordinal).map((row) => ({
+      phase: `before-stage:${row.artifactId}`,
+      ordinal,
+      root: "fixture",
+      freeBytes: 128 * 1024 ** 3,
+      requiredFreeBytes: 99_106_288_594,
+    }));
+    return [...starting, {
+      phase: "before-execution",
+      ordinal,
+      root: "fixture",
+      freeBytes: 128 * 1024 ** 3,
+      requiredFreeBytes: 99_106_288_594,
+    }];
+  });
+  for (const { ordinal, receipt } of rootReceipts) {
+    receipt.authorityLifecycle.diskProbes = diskFreeProbes.filter(
+      (probe) => probe.ordinal === receipt.cell.ordinal,
+    );
+    await writeFile(
+      path.join(evidence, ordinal, "receipt.json"),
+      `${JSON.stringify(receipt, null, 2)}\n`,
+    );
+  }
+  const summary = {
+    schemaVersion: 1,
+    profile: PROFILE_NAME,
+    repositories: {
+      sceneworks: { sha: metadata.headSha, clean: true },
+      inference: { sha: metadata.inferenceSha, clean: true },
+    },
+    execution: {
+      runId: metadata.runId,
+      runAttempt: metadata.runAttempt,
+      headSha: metadata.headSha,
+      headRef: "refs/heads/feature/sc-20738-candle-cuda-parity",
+      workflow: "Windows Candle worker",
+      runnerName: "cuda-windows-2",
+      runnerOs: "Windows",
+      runnerArch: "X64",
+    },
+    receipts: [
+      ...imported.outcomes,
+      ...rootReceipts.map(({ cell, ordinal, receipt }) => ({
+        id: cell.id,
+        status: receipt.status,
+        receipt: `${ordinal}/receipt.json`,
+        error: receipt.error,
+        source: "continuation",
+      })),
+    ],
+    lineage: {
+      imported: imported.lineage,
+      continuation: {
+        runId: metadata.runId,
+        runAttempt: metadata.runAttempt,
+        headSha: metadata.headSha,
+        inferenceSha: metadata.inferenceSha,
+        profileCellSemanticsSha256: metadata.cellSemanticsSha256,
+        profileArtifactSemanticsSha256: metadata.artifactSemanticsSha256,
+        startOrdinal: 10,
+      },
+    },
+    cachePreflight: {
+      path: "cache-preflight.json",
+      bytes: cacheBytes.length,
+      sha256: createHash("sha256").update(cacheBytes).digest("hex"),
+    },
+    authorityLifecycle: rootReceipts.map(({ receipt }) => receipt.authorityLifecycle),
+    diskFreeProbes,
+    finalAuthorityLifecycle: {
+      stage: { ...emptyInventory, root: "fixture-stage" },
+      derived: { ...emptyInventory, root: "fixture-derived" },
+      derivedNamespaces: [],
+      missingStoreAbsent: true,
+    },
+    passed: 16,
+    failed: 3,
+    campaignErrors: [],
+  };
+  await writeFile(path.join(evidence, "campaign-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+  return { candidate, evidence, metadata, summary };
+}
+
+test("sparse recovery imports only per-cell-compatible PASS receipts and quarantines 14, 18, and 19", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-21306-sparse-recovery-"));
+  try {
+    const validRoot = path.join(temporary, "valid");
+    await mkdir(validRoot);
+    const fixture = await writeSparseRecoveryCandidate(validRoot);
+    const selected = await selectSparseRecovery(validRoot, profile());
+    assert.deepEqual(
+      selected.receipts.map(({ cell }) => profile().cells.findIndex((row) => row.id === cell.id) + 1),
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17],
+    );
+    assert.deepEqual(selected.failures.map(({ ordinal }) => ordinal), [14, 18, 19]);
+    assert.equal(selected.compatibility.length, 16);
+    const output = path.join(temporary, "output");
+    await mkdir(output);
+    const imported = await importSparseRecovery(selected, output);
+    assert.equal(imported.outcomes.length, 16);
+    assert.deepEqual(imported.lineage.executionOrdinals, [14, 18, 19]);
+    assert.equal((await readdir(path.join(output, "_imported-prefix"))).includes("14-ltx-2-3-q8"), false);
+
+    for (const [label, mutate, pattern] of [
+      ["metadata", async (candidate) => {
+        const file = path.join(candidate, "artifact-metadata.json");
+        const value = JSON.parse(await readFile(file));
+        value.artifactDigest = `sha256:${"0".repeat(64)}`;
+        await writeFile(file, JSON.stringify(value));
+      }, /artifact 9492288293/],
+      ["pass-rehash", async (candidate) => {
+        await writeFile(path.join(candidate, "evidence", "15-sdxl-openpose", "controller.log"), "tampered\n");
+      }, /rehash/],
+      ["failed-promoted", async (candidate) => {
+        const file = path.join(candidate, "evidence", "14-ltx-2-3-q8", "receipt.json");
+        const value = JSON.parse(await readFile(file));
+        value.status = "passed";
+        value.error = null;
+        await writeFile(file, JSON.stringify(value));
+      }, /exact audited FAILED|summary receipt/],
+      ["summary-partition", async (candidate) => {
+        const file = path.join(candidate, "evidence", "campaign-summary.json");
+        const value = JSON.parse(await readFile(file));
+        value.receipts[17].status = "passed";
+        await writeFile(file, JSON.stringify(value));
+      }, /path.source.status/],
+      ["archived-lineage", async (candidate) => {
+        const file = path.join(candidate, "evidence", "_imported-prefix", "lineage.json");
+        const value = JSON.parse(await readFile(file));
+        value.importedOrdinals.pop();
+        await writeFile(file, JSON.stringify(value));
+      }, /archived lineage/],
+    ]) {
+      const root = path.join(temporary, label);
+      await mkdir(root);
+      await cp(fixture.candidate, path.join(root, "9492288293"), { recursive: true });
+      await mutate(path.join(root, "9492288293"));
+      await assert.rejects(selectSparseRecovery(root, profile()), pattern, label);
+    }
+    const incompatible = profile();
+    incompatible.cells[14].request.steps += 1;
+    await assert.rejects(selectSparseRecovery(validRoot, incompatible), /semantic tuples drifted/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
 
 test("recovery continuation imports only audited PASS cells and rejects ambiguity or tampering", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-21252-recovery-"));
@@ -1038,7 +1528,7 @@ test("start-10 cache preflight binds the reviewed remaining census without weake
   try {
     const fixture = await writeRecoveryCandidate(temporary);
     const initial = JSON.parse(await readFile(path.join(fixture.evidence, "cache-preflight-initial.json"), "utf8"));
-    const checked = profile();
+    const checked = recoveryArtifactProfile();
     const ids = [...new Set(checked.cells.slice(9).flatMap((cell) => cell.artifactIds))];
     const sourceCensus = initial.phases.sourceCensus.filter((row) => ids.includes(row.id));
     const plannedAudits = new Map(sourceCensus.map((row) => [row.id, {
@@ -1047,11 +1537,14 @@ test("start-10 cache preflight binds the reviewed remaining census without weake
         ({ artifactId, ...file }) => file,
       ),
     }]));
-    const lifetimePlan = authorityLifetimePlan(checked, 9, plannedAudits);
+    const lifetimePlan = authorityLifetimePlan(
+      checked, Array.from({ length: 10 }, (_, index) => index + 10), plannedAudits,
+    );
     const diskPlan = estimateJitDiskPlan(
       lifetimePlan, initial.diskPlan.freeBytes,
       initial.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0),
       initial.diskPlan.nonModelPaths,
+      179_028_698_264,
     );
     const startTen = {
       ...initial,
@@ -1099,9 +1592,12 @@ test("start-10 cache preflight binds the reviewed remaining census without weake
     shifted.frozenMissingFiles = [];
     shifted.downloadedFiles = [];
     shifted.networkDownloadCount = 0;
-    shifted.lifetimePlan = authorityLifetimePlan(checked, 10, shiftedAudits);
+    shifted.lifetimePlan = authorityLifetimePlan(
+      checked, Array.from({ length: 9 }, (_, index) => index + 11), shiftedAudits,
+    );
     shifted.diskPlan = estimateJitDiskPlan(
       shifted.lifetimePlan, initial.diskPlan.freeBytes, 0, initial.diskPlan.nonModelPaths,
+      179_028_698_264,
     );
     const shiftedValidation = {
       ...validation,
@@ -1531,7 +2027,8 @@ test("cleanup isolation failure preserves all 19 durable outcomes and quarantine
         )),
         downloadEvidenceSha256: "d".repeat(64),
       },
-      fault, operations, suppressVerdict: true, startIndex: 0,
+      fault, operations, suppressVerdict: true,
+      executionOrdinals: Array.from({ length: 19 }, (_, index) => index + 1),
     });
     assert.deepEqual(
       attemptedCells,
@@ -1576,7 +2073,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
     runtimeResultMode = "valid", providerRuntimeFailureAt = null,
     providerFailureDerivedMode = "empty", successfulFluxDerivedMode = "resident",
-    runtimeMemoryMode = "current",
+    runtimeMemoryMode = "current", sparse = false,
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -1822,12 +2319,15 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       runId: "continuation", runAttempt: "1", headSha: "3".repeat(40), headRef: "refs/heads/continuation",
       workflow: "fixture", runnerName: "fixture-runner", runnerOs: "Windows", runnerArch: "X64",
     };
+    const selectedExecutionOrdinals = sparse
+      ? [14, 18, 19] : Array.from({ length: 12 }, (_, index) => index + 8);
+    const selectedExecutionSet = new Set(selectedExecutionOrdinals);
     const importedPrefix = {
       lineage: { kind: "fixture-prefix" },
-      outcomes: checked.cells.slice(0, 7).map((cell, index) => ({
+      outcomes: checked.cells.flatMap((cell, index) => selectedExecutionSet.has(index + 1) ? [] : [{
         id: cell.id, status: "passed", receipt: `_imported-prefix/${index + 1}/receipt.json`,
         error: null, emergencyReceiptError: null, source: "imported",
-      })),
+      }]),
     };
     try {
       const result = await runCampaign({}, {
@@ -1866,13 +2366,14 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           }
         } : undefined,
         suppressVerdict: true,
+        executionOrdinals: selectedExecutionOrdinals,
       });
       const cacheEvidence = JSON.parse(await readFile(
         path.join(output, ...result.summary.cachePreflight.path.split("/")),
         "utf8",
       ));
       const continuationReceipts = [];
-      for (const outcome of result.summary.receipts.slice(7)) {
+      for (const outcome of result.summary.receipts.filter((row) => row.source === "continuation")) {
         if (!outcome.receipt) continue;
         continuationReceipts.push(JSON.parse(await readFile(
           path.join(output, ...outcome.receipt.split("/")), "utf8",
@@ -1882,8 +2383,8 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
         result, events, runtimeCells, checked, cacheEvidence,
         continuationReceipts,
         cacheValidation: {
-          remainingArtifactIds: [...new Set(checked.cells.slice(7).flatMap(
-            (cell) => cell.artifactIds,
+          remainingArtifactIds: [...new Set(selectedExecutionOrdinals.flatMap(
+            (ordinal) => checked.cells[ordinal - 1].artifactIds,
           ))],
           artifactExpectedFiles,
           downloadEvidenceSha256: "d".repeat(64),
@@ -2194,6 +2695,34 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
   assert.equal(passed.result.summary.finalAuthorityLifecycle.stage.files, 0);
   assert.equal(passed.result.summary.finalAuthorityLifecycle.derived.files, 0);
   assert.equal(passed.result.summary.finalAuthorityLifecycle.missingStoreAbsent, true);
+
+  const sparse = await scenario({ sparse: true });
+  assert.deepEqual(sparse.runtimeCells.map(({ id }) => id), [
+    "ltx-2-3-q8", "illustrious-v1-openpose", "illustrious-v2-openpose",
+  ]);
+  assert.deepEqual(sparse.cacheEvidence.diskPlan.cells.map(({ ordinal }) => ordinal), [14, 18, 19]);
+  assert.deepEqual(sparse.result.summary.lineage.continuation.executionOrdinals, [14, 18, 19]);
+  assert.equal(sparse.result.summary.receipts.length, 19);
+  assert.deepEqual(
+    sparse.result.summary.receipts.map(({ id }) => id),
+    profile().cells.map(({ id }) => id),
+  );
+  assert.deepEqual(
+    sparse.result.summary.authorityLifecycle.find((row) => row.ordinal === 18)
+      .staged.map(({ artifactId }) => artifactId),
+    [
+      "illustrious-v1-q4", "sdxl-openpose", "sdxl-tokenizer-l",
+      "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+    ],
+  );
+  assert.deepEqual(
+    sparse.result.summary.authorityLifecycle.find((row) => row.ordinal === 19)
+      .released.map(({ artifactId }) => artifactId),
+    [
+      "illustrious-v2-q4", "sdxl-openpose", "sdxl-tokenizer-l",
+      "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+    ],
+  );
 
   const residentReceipt = passed.continuationReceipts[0];
   assert.equal(
@@ -2656,10 +3185,10 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /HF_HUB_OFFLINE: "1"/);
   assert.match(terminalBlock, /TRANSFORMERS_OFFLINE: "1"/);
   assert.match(terminalBlock, /actions\/artifacts\/\$artifactId/);
-  assert.match(terminalBlock, /9488587517[\s\S]*?4322200[\s\S]*?765c8f4ed419e7a7d0fbc20dcd65f5be6f0be7ce9ed9f151915208bf541692bf/);
+  assert.match(terminalBlock, /9492288293[\s\S]*?15452320[\s\S]*?dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724/);
   assert.match(terminalBlock, /\$artifact\.expired[\s\S]*?\$artifact\.size_in_bytes[\s\S]*?\$artifact\.digest/);
   assert.match(terminalBlock, /gh run download \$runId --name \$artifactName --dir \$evidence/);
-  assert.match(terminalBlock, /62be42127e2b4ff07321e2c369de92fc6edef526/);
+  assert.match(terminalBlock, /43c718b7e9a852bd5029448d18841fed0f508c3a/);
   assert.doesNotMatch(terminalBlock, /snapshot_download/);
   assert.match(terminalBlock, /python -m venv \$venv/);
   assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);
@@ -2667,11 +3196,12 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /SCENEWORKS_TERMINAL_PYTHON=\$python/);
   assert.match(terminalBlock, /from huggingface_hub import __version__/);
   assert.match(terminalBlock, /__version__ == '0\.36\.0'/);
-  assert.match(terminalBlock, /q8\/transformer\/model\.safetensors/);
+  assert.doesNotMatch(terminalBlock, /q8\/transformer\/model\.safetensors/);
   const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
-  assert.match(controller, /RECOVERY_IMPORTED_PREFIX_CELLS = 9[\s\S]*?RECOVERY_REMAINING_AUTHORITIES = 14[\s\S]*?RECOVERY_REMAINING_FILES = 160/);
+  assert.match(controller, /SPARSE_EXECUTION_ORDINALS = \[14, 18, 19\][\s\S]*?SPARSE_REMAINING_AUTHORITIES = 8[\s\S]*?SPARSE_REMAINING_FILES = 70/);
   assert.match(controller, /stale cell-10 sentinel/);
   assert.match(controller, /selectRecoveryContinuation[\s\S]*?importRecoveryContinuation/);
+  assert.match(controller, /selectSparseRecovery[\s\S]*?importSparseRecovery/);
   assert.doesNotMatch(controller, /JSON\.stringify\(staged\.downloadedFiles/);
   assert.match(controller, /async function downloadReviewedMissing[\s\S]*?HF_HUB_OFFLINE: "0"/);
   assert.match(controller, /async function stageArtifact[\s\S]*?HF_HUB_OFFLINE: "1"/);

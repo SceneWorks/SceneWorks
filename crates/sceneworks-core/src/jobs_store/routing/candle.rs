@@ -332,6 +332,12 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
         return Some(CandleImageLane::ImportedFamily);
     }
 
+    // Owned-to-reject requests are deliberately not a served lane. The scheduler claims them via
+    // `image_job_candle_pose_reject`, while the worker's reject guard runs before generic T2I.
+    if image_request_candle_pose_reject(model, &job.payload) {
+        return None;
+    }
+
     CANDLE_IMAGE_ROUTES
         .iter()
         .find(|route| route.matches(model, &job.payload))
@@ -905,9 +911,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
-    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; terminal
-    // acceptance admits only its exact q4/q8 product packages. Other video providers remain dense
-    // and fail closed for positive requests.
+    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; q4 is the
+    // proven product route. The terminal q8 cell did not execute the package's fixed eight-step
+    // recipe and therefore remains fail-closed. Other video providers remain dense and fail closed.
     if (candle_request_wants_quant(payload) || model == "ltx_2_3")
         && !candle_video_tier_select_eligible(model, payload)
     {
@@ -922,7 +928,8 @@ enum CandleLtxTier {
     Q8,
 }
 
-/// Parse only the exact packed tiers published by the shared LTX bundle.
+/// Parse only the exact packed tiers published by the shared LTX bundle. Recognizing q8 here is
+/// source readiness, not product admission.
 fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
     let value = payload
         .get("advanced")
@@ -952,7 +959,7 @@ fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<Strin
                 | "video_bridge"
                 | "replace_person"
         )
-        && candle_ltx_requested_tier(payload).is_some()
+        && candle_ltx_requested_tier(payload) == Some(CandleLtxTier::Q4)
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -1207,26 +1214,16 @@ pub(crate) fn is_sdxl_family_candle_model(model: &str) -> bool {
 }
 
 /// The exact SDXL-family ids that share the generic OpenPose ControlNet provider. This is
-/// deliberately wider than [`is_sdxl_family_candle_model`] by one distilled checkpoint:
-/// RealVisXL Lightning supports the new pose-only control provider recipe, while the pre-existing
-/// edit/IP-Adapter family remains unchanged and continues to exclude it.
-pub(crate) const SDXL_CONTROL_MODELS: &[&str] = &[
-    "sdxl",
-    "realvisxl",
-    "realvisxl_lightning",
-    "illustrious_xl_v1",
-    "illustrious_xl_v2",
-];
+/// deliberately wider than the accepted editable subset by one distilled checkpoint: RealVisXL
+/// Lightning supports the pose-only provider recipe, while the two Illustrious q4 packages remain
+/// excluded because terminal cells 18-19 did not prove packed package authority.
+pub(crate) const SDXL_CONTROL_MODELS: &[&str] = &["sdxl", "realvisxl", "realvisxl_lightning"];
 
 pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
     SDXL_CONTROL_MODELS.contains(&model)
 }
 
-/// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
-/// scheduler predicate intentionally claims malformed/non-empty pose carriers and explicit material
-/// control intent too, before edit or IP-Adapter, so no other conditioned route can silently discard
-/// them. Missing/null/empty poses remain ordinary generation only when no other control field is set.
-pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> bool {
+fn has_material_sdxl_control_intent(payload: &Map<String, Value>) -> bool {
     let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
         return false;
     };
@@ -1248,6 +1245,14 @@ pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> boo
         || advanced
             .get("controlWeights")
             .is_some_and(|value| !value.is_null())
+}
+
+/// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
+/// scheduler predicate intentionally claims malformed/non-empty pose carriers and explicit material
+/// control intent too, before edit or IP-Adapter, so no other conditioned route can silently discard
+/// them. Missing/null/empty poses remain ordinary generation only when no other control field is set.
+pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> bool {
+    has_material_sdxl_control_intent(payload)
 }
 
 /// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle
@@ -1839,14 +1844,12 @@ pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool
 }
 
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
-/// z_image + flux_dev sc-8379 / sc-8412, plus the generic five-model SDXL OpenPose lane).
+/// z_image + flux_dev sc-8379 / sc-8412, plus the exact three-model SDXL OpenPose lane).
 /// An `advanced.poses` job on any OTHER candle-routed model has no pose path on candle.
 pub(crate) const CANDLE_POSE_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
     "realvisxl_lightning",
-    "illustrious_xl_v1",
-    "illustrious_xl_v2",
     "qwen_image",
     "kolors",
     "z_image_turbo",
@@ -1860,9 +1863,9 @@ pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
     CANDLE_POSE_MODELS.contains(&model)
 }
 
-/// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
+/// Material control intent on a **candle-routed model with no candle pose lane** —
 /// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything outside the wired
-/// pose families), not `edit_image` (sc-5968, epic 5483). No native lane has a pose path for these
+/// pose families) (sc-5968, epic 5483). No native lane has a control path for these
 /// models off-Mac (the historical `sdxl` adapter's OpenPose lived only in
 /// the `instantid_realvisxl` adapter), so a generic claimant could silently drop the poses and render an unconditioned T2I
 /// image. The candle worker therefore CLAIMS these (`worker_supports_job`) to REJECT them with a typed
@@ -1874,15 +1877,7 @@ pub(crate) fn image_request_candle_pose_reject(model: &str, payload: &Map<String
     if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
         return false;
     }
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_material_sdxl_control_intent(payload)
 }
 
 /// [`image_request_candle_pose_reject`] on a [`JobSnapshot`].

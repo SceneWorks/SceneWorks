@@ -37,13 +37,12 @@ describe("controlModes ↔ manifest parity (sc-8245)", () => {
 
   it("the manifest advertises strict control on the expected backbones", () => {
     const ids = manifestControlModels.map((model) => model.id).sort();
-    // Fun-Union/Krea plus the four generic SDXL OpenPose backbones currently truthful on both native
-    // providers. RealVisXL Lightning stays hidden until MLX supports ControlNet + Lightning together.
+    // Fun-Union/Krea plus the two generic SDXL OpenPose backbones accepted on both native providers.
+    // RealVisXL Lightning stays hidden until MLX supports ControlNet + Lightning together; the two
+    // failed Illustrious terminal cells likewise remain hidden.
     expect(ids).toEqual([
       "flux2_dev",
       "flux_dev",
-      "illustrious_xl_v1",
-      "illustrious_xl_v2",
       "krea_2_turbo",
       "qwen_image",
       "realvisxl",

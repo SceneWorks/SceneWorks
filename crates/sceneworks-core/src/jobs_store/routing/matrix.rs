@@ -1863,6 +1863,15 @@ fn conditioning_cell(
     let (job_type, payload) = conditioning_payload(model, shape, mlx_facts, candle_facts)?;
     let job = probe_job(job_type, &model.id, payload)?;
     let supports = |facts: &RuntimeDescriptorFacts| {
+        // The shared `sdxl` runtime descriptor advertises ControlNet for every route alias, and the
+        // scheduler deliberately owns unsupported Illustrious control payloads only to reject them.
+        // Neither fact is product support: cells 18-19 remained terminal-evidence-only, so their
+        // exact model ids must stay false on both backends despite the shared descriptor/claim.
+        if shape == "control"
+            && matches!(model.id.as_str(), "illustrious_xl_v1" | "illustrious_xl_v2")
+        {
+            return false;
+        }
         let descriptors = native_generator_descriptors(facts, &model.id);
         descriptors
             .into_iter()
@@ -3553,8 +3562,6 @@ mod tests {
     fn sc19059_resolved_candle_conditioning_is_not_left_in_the_residual_register() {
         let baseline = backend_capability_matrix().expect("production matrix derives");
         let resolved = [
-            ("illustrious_xl_v1", "control"),
-            ("illustrious_xl_v2", "control"),
             ("realvisxl", "control"),
             ("realvisxl_lightning", "control"),
             ("scail2_14b", "multiReference"),
@@ -3603,13 +3610,7 @@ mod tests {
             &serde_json::to_string(&missing_candle_control).unwrap(),
         )
         .expect("mutated production facts still derive a matrix");
-        for model in [
-            "illustrious_xl_v1",
-            "illustrious_xl_v2",
-            "realvisxl",
-            "realvisxl_lightning",
-            "sdxl",
-        ] {
+        for model in ["realvisxl", "realvisxl_lightning", "sdxl"] {
             let cell = mutated
                 .models
                 .iter()
@@ -4149,6 +4150,21 @@ mod tests {
                 (control.mlx, control.candle),
                 (Some(true), Some(true)),
                 "{model} must follow its exact production pose lanes"
+            );
+            assert!(control.parity_obligation.is_none());
+        }
+
+        for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let control = row
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == "control")
+                .expect("shared descriptor axis remains represented");
+            assert_eq!(
+                (control.mlx, control.candle),
+                (Some(false), Some(false)),
+                "{model} terminal evidence must not become a product control claim"
             );
             assert!(control.parity_obligation.is_none());
         }
@@ -4971,7 +4987,7 @@ mod tests {
         let expected_records = BTreeMap::from([
             (
                 "epic-9083-precision-sequencing",
-                ("epic-9083", "precision", 14usize),
+                ("epic-9083", "precision", 15usize),
             ),
             (
                 "epic-8433-krea-realtime-operation-sequencing",

@@ -5,10 +5,13 @@ SC-20945 adds one deliberately opt-in terminal evidence profile to
 The profile stays off on pushes, pull requests, and ordinary manual runs. Run it once only after the
 epic's SceneWorks and inference heads are final, clean, reviewed, and pin-matched.
 
-SC-20974's reviewed continuation is deliberately segmented. It imports and rehashes the contiguous
-PASS prefix from cells 1-7 of the old `8886a9e69f26beec05688c81b414859bd102f6d0` run, quarantines
-that run's non-executed cell-8 setup skeleton, and executes cells 8-19 under the corrected head. The
-summary records both run identities; it never represents the two segments as one run.
+SC-21306's reviewed recovery is deliberately sparse. It accepts only exact GitHub artifact
+`9492288293` from run `32628540694`, validates that artifact under its frozen legacy profile, and
+rehashes all receipt evidence. It imports only PASS cells whose individual semantic tuples are
+unchanged: ordinals 1-13 and 15-17. The legacy LTX failure at ordinal 14 and the two Illustrious
+failures at ordinals 18-19 are quarantined, never promoted. Only ordinals `[14, 18, 19]` execute
+under the corrected profile. The summary retains the complete prior lineage and the explicit sparse
+execution list; it never represents the segments as one run.
 
 ## Frozen scope
 
@@ -27,10 +30,27 @@ artifact IDs, requested tier, capability, and every request key/value:
 Anima, SANA, VACE, FLUX.2 TrueV2, and historical Eros surfaces are rejected by source validation.
 The four deliberately dismantled pin-keyed gates are not used or changed. This profile is terminal
 evidence, so it must not be added to routine measurement, calibration, canary, or memory-matrix runs.
-The ordered cell digest remains
-`dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879`; the reviewed 23-authority
-digest after the truthful LTX parent change is
-`5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932`.
+LTX-2.3 distilled uses its fixed eight-step schedule; any four-, seven-, or nine-step profile
+mutation fails closed. The corrected ordered cell digest is
+`2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1`; the current reviewed
+23-authority digest is
+`1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255`.
+
+The current Illustrious primaries select published immutable revisions
+`778c3f02b7703b0c2755d0c0447592897193c6b5` (v1) and
+`672e9851ede4dc856fa945649b6691975c9d74a3` (v2). Their q4 text encoder, second text encoder, and
+UNet configs must each carry the exact `bits: 4`, `group_size: 64` marker represented by the closed
+profile marker. The current download inventory is independently digest-bound as
+`1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee`. The republished
+authorities change configuration metadata only; their packed q4 component configs are bound to
+SHA-256 `f87b89e4249e027632236caba75d1140e14fd4c2ce4b4e554f2912b234e72cf9`,
+`3b96bc14843360d24e864f7d1ac6d83e95cad8f68209e7e503cefa9a4f65b18b`, and
+`aeb34c12f61f1edd9f7e17d8332f91197bacad70754bfaa450836137c40c8c4d` for the first text
+encoder, second text encoder, and UNet respectively. The q8 component config hashes are
+`c74289384c56ae6fdac29b39f01c081aa7dbd20161b371c5dc3b486fa94bf8fb`,
+`2891a3c519b99c3b5983aeee973095974f2e08df5d88e7d59c88635638fa8d6a`, and
+`379fb37b8b7a893113925439117acebc03b205615b281bcc139b7c418b26ce7f` in the same order. The
+VAE weight identities and measured decode baselines are unchanged.
 
 ## Dispatch contract
 
@@ -61,31 +81,26 @@ Unreviewed extras such as `.incomplete` blobs and model-adjacent `.candle-device
 derivatives are excluded. Hugging Face snapshot file links are valid only when
 their resolved blobs remain inside that trusted root; broken, empty, or escaping links fail closed.
 
-The continuation census is exactly 16 logical authorities and 199 files. File sizes and hashes follow
-valid Hugging Face links to their trusted blob targets; link-entry length is never used as model-byte
-accounting. The reviewed followed-target total is 179,028,698,264 bytes (the earlier link-length
-observation undercounted 18 Schnell-q8 targets by exactly 5,361,654,035 bytes).
+The sparse recovery census is exactly eight logical authorities and 70 files: the LTX q8/Gemma pair,
+the two Illustrious primaries, and the four shared SDXL helpers. File sizes and hashes follow valid
+Hugging Face links to their trusted blob targets; link-entry length is never used as model-byte
+accounting. The exact followed-target total is 66,821,159,668 bytes; the 390-byte increase is the six
+reviewed q4 config markers across the two current Illustrious authorities.
 
 Authorities are copied just in time into campaign-owned staging under `RUNNER_TEMP`, immediately
-before their first consumer, and are retained only through their exact last consumer. SCAIL q4 lives
-across cells 11-12; the four shared SDXL helpers live across cells 15-19 while each backbone rotates
-after one cell. The LTX q8/Gemma pair is staged together for cell 14. Existing valid files are never
-overwritten or downloaded.
-The sole reviewed network exception is
-`SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599` file
-`q8/transformer/model.safetensors`. If and only if the frozen census reports exactly that miss, the
-pinned client fetches that exact filename into an isolated campaign-owned persistent store and proves the returned commit,
-metadata size, LFS SHA-256, and actual file SHA-256. It never calls a snapshot/glob/ref-main route;
-existing `.incomplete` files are untrusted and are neither renamed nor resumed. LTX q8 and Gemma use
-the complete production-approved cached parent revision
-`254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. After the one possible
-fill, network mode is forced offline for every JIT stage and cell.
+before their first selected consumer, and are retained only through their exact last selected
+consumer. The LTX q8/Gemma pair is staged together for cell 14. The four shared SDXL helpers live
+across sparse cells 18-19 while the two Illustrious primaries rotate after one cell. Existing valid
+files are never overwritten or downloaded. Because Schnell is outside this sparse scope, any missing
+file fails preflight; the campaign performs zero network downloads and forces offline mode before
+the first selected cell. LTX q8 and Gemma use the complete production-approved cached parent revision
+`254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. Network mode stays
+offline for every JIT stage and cell.
 
 The disk admission model binds exact source bytes, the conservative streamed-FLUX sidecar ceilings
 (494 files; q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file
 reserve), and a
 40-GiB non-model reserve for Cargo target, output, the pinned venv, logs, and filesystem fluctuation.
-The persistent Schnell-q8 miss is retained only through cell 10 and removed with that authority.
 The largest model-plus-sidecar live set is therefore the LTX pair itself at
 56,156,615,634 bytes, so the controller requires at least 99,106,288,594 free bytes. It checks that
 floor after the missing-file fill, before every authority stage, and before every GPU process. The
@@ -95,8 +110,9 @@ Output and scratch must be fresh, distinct, non-nested descendants of the resolv
 outside both repositories. Every recursive removal rechecks that confinement and rejects
 symlink/reparse replacement.
 
-The Node controller awaits one fresh `sceneworks-worker` process for each cell with
-`--test-threads=1`; it never starts cells in parallel and exposes no per-cell dispatch input. The Rust
+The Node controller awaits one fresh `sceneworks-worker` process for each selected cell with
+`--test-threads=1`; it executes exactly ordinals 14, 18, and 19, never starts cells in parallel, and
+exposes no per-cell dispatch input. The Rust
 entrypoint constructs the production load spec and deterministic request in reviewable code. Packed
 tier markers must agree with the requested q4/q8 directory, and runtime results must say requested
 tier equals resolved tier with `denseFallback: false`. The same runtime result carries a closed
@@ -138,16 +154,24 @@ persisted inputs, outputs, and logs. Receipts also bind:
 - workflow run, head, attempt, runner OS/architecture/name, system-memory identity, GPU index/PCI
   identity/UUID/compute capability/driver/total memory, and raw VRAM samples.
 
-The controller discovers artifacts by the fixed old-head terminal prefix and accepts exactly one
-candidate whose first seven primary receipts are contiguous PASS outcomes at inference pin
-`b646a6f89ba9f6b07efe53dd583d8a42e21e9871`, old cell digest
-`dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879`, and old artifact digest
-`f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e`. It rehashes every imported
-input, output, and log and retains the GitHub artifact SHA-256 in lineage. Cell 8 may exist only as
-the initial controller log plus failed pre-execution
-receipt: no selected/model bytes, input, runtime result, output, or cleanup attempt. That residue is
-copied under `_imported-boundary-residue/` and excluded from the seven-PASS lineage. Any substantive
-cell-8 file or any later cell invalidates the candidate.
+The controller accepts exactly one candidate for artifact `9492288293`, size 15,452,320 bytes,
+GitHub digest `sha256:dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724`,
+SceneWorks head `43c718b7e9a852bd5029448d18841fed0f508c3a`, and inference pin
+`b646a6f89ba9f6b07efe53dd583d8a42e21e9871`. Its source cell digest is the legacy
+`dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879`. The importer validates the
+closed campaign summary, full prior 1-9 lineage, both cache phases, cleanup, exact provenance, schema,
+and rehashed input/output/log evidence for all 19 receipts. It then compares each PASS cell's
+canonical tuple independently with the corrected profile. A global digest match is never used to
+waive a per-cell mismatch. Ordinals 14, 18, and 19 must remain failures and are recorded as
+quarantined; any attempt to promote one invalidates the candidate.
+
+Artifact `9492288293` remains bound to the frozen pre-marker Illustrious revisions
+`c5a92a902dd4e6ee99c2a57981ecf66209905dd1` (v1) and
+`7c5c8b2bb75a8f38a7365e70bdf84d38d6204473` (v2), artifact-authority digest
+`5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932`, and download-evidence
+digest `9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b`. The current inventory
+retains those exact legacy rows only for importer selection; it never re-labels old receipts with
+the new revisions or digest.
 
 The closed Draft 2020-12 `cache-preflight.json` binds the download-evidence SHA-256, authoritative
 filename census, followed target bytes/hashes, hit/download partition, first/last-use plan, persistent
@@ -159,9 +183,9 @@ its closed request-memory strategy, derived inventory, and exact releases;
 the final summary binds the complete lifecycle and empty terminal state.
 
 A cache preflight directory, write, stat, hash, schema/semantic validation, census, staging, or final
-offline-validation failure starts no continuation GPU cell. An independent emergency writer retains
-the failed preflight evidence, and the controller emits durable failed outcomes for cells 8-19 while
-retaining the seven imported PASS receipts. A cell
+offline-validation failure starts no sparse GPU cell. An independent emergency writer retains the
+failed preflight evidence, and the controller emits durable failed outcomes for ordinals 14, 18, and
+19 while retaining the 16 compatible imported PASS receipts. A cell
 failure anywhere in setup, provisioning, execution, hashing, schema validation, atomic
 receipt publication, or cleanup is recorded and the controller proceeds through all reviewed cells.
 If a per-cell scratch removal fails or its absence cannot be proven, the controller quarantines the
@@ -189,3 +213,68 @@ cargo fmt --all -- --check
 
 The hardware test is `#[ignore]`d, test-only, Candle-only, and additionally refuses to run unless the
 workflow-only `SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA=1` opt-in is present.
+
+## Independently audited promotion outcome
+
+The promotion authority is GitHub Actions run `32628540694`, attempt 1, exact SceneWorks head
+`43c718b7e9a852bd5029448d18841fed0f508c3a`, artifact
+`sc-20945-epic-20738-43c718b7e9a852bd5029448d18841fed0f508c3a-32628540694-1`
+(artifact id `9492288293`, 15,452,320 bytes, GitHub SHA-256
+`dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724`). The independent audit
+rehashes the original cells 1-7, recovery cells 8-9, and current cells 10-19 rather than trusting the
+campaign summary. All selected inputs, outputs, controller/runtime logs, repository heads, pins,
+runtime results, and receipts match their imported lineage and frozen profile/schema/semantic
+digests. Thirty-one output PNGs are non-degenerate, including SCAIL-2's exact six-pair
+counterfactual boundary.
+
+Exactly cells 1-13 and 15-17 are product-promotable. Receipt peaks are physical-target GPU MiB;
+manifest GiB values are MiB / 1024 rounded to three decimals, and a new default-tier blanket adds
+the worker-owned 2 GiB reserve and rounds up. FLUX keeps its older, larger 1024x1024 admission rows
+because replacing them with lower 512x512 observations would weaken an independently established
+guard.
+
+| Cells | Product cells | Receipt peaks (MiB) | Receipt-backed memory evidence |
+| --- | --- | --- | --- |
+| 1-2 | Chroma1 Base q4 / q8 | 16,676 / 25,094 | q4 16.285 / 19 GiB floor; q8 24.506 / 27 GiB floor |
+| 3-4 | Chroma1 Flash q4 / q8 | 16,676 / 23,364 | q4 16.285 / 19 GiB floor; q8 22.816 / 25 GiB floor |
+| 5-6 | Chroma1 HD q4 / q8 | 16,708 / 23,364 | q4 16.316 / 19 GiB floor; q8 22.816 / 25 GiB floor |
+| 7-8 | FLUX.1 dev q4 / q8 | 11,556 / 23,752 | terminal 11.285 / 23.195; stricter existing 24 / 34 GiB floors retained |
+| 9-10 | FLUX.1 Schnell q4 / q8 | 14,733 / 22,268 | terminal 14.388 / 21.746; stricter existing 24 / 34 GiB floors retained |
+| 11-13 | SCAIL-2 q4, q4 six-reference, q8 | 58,890 / 62,730 / 66,486 | q4 61.260 / 64 GiB floor; q8 64.928 / 67 GiB floor |
+| 15 | SDXL q4 + OpenPose | 7,171 | q4 7.003 / 10 GiB floor |
+| 16 | RealVisXL q4 + OpenPose | 9,649 | q4 9.423 / 12 GiB floor |
+| 17 | RealVisXL Lightning q4 + OpenPose | 6,915 | q4 6.753 / 9 GiB floor |
+
+Promotion deletes only the twelve proven precision exception paths: six Chroma, four FLUX.1, and
+two SCAIL-2 q4/q8 cells. The three accepted SDXL OpenPose compositions had no exception paths to
+delete; their catalog, routing, install companion, and q4-only worker validation are narrowed to
+those exact models and tier.
+
+The Chroma and OpenPose rows are deliberately not written as partial generic `candle` blocks. That
+block is both the base-route VRAM gate and the complete advertised tier axis. Chroma's previously
+established bf16 route has no terminal cell here, and the shared SDXL base routes retain independent
+q8/bf16 authority. Partial q4/q8 or q4-only ladders would make those tiers borrow a smaller default
+floor and erase them from the generated memory matrix. Chroma therefore retains its pre-existing
+base-route admission behavior, while the bespoke OpenPose route validates q4 before download/load
+and performs its existing load-exact base-plus-overlay admission. The table records the measured
+composition rows without turning them into dense or cross-tier authority.
+
+Cells 14, 18, and 19 are not promotion authority:
+
+- Cell 14 requested four LTX-2.3 q8 steps, but the immutable package has a baked fixed eight-step
+  recipe. LTX q8 returns to the epic-9083 precision exception and remains fail-closed; q4 is
+  unchanged.
+- Cells 18-19 selected Illustrious XL v1/v2 q4 authorities without the packed-quantization marker.
+  They do not authorize on-the-fly or dense fallback. Both models remain absent from the shared
+  OpenPose install/UI surface and the exact worker/router allow-list.
+
+The audit also verifies GPU index/PCI identity/UUID/driver/compute capability and confinement to the
+97,887 MiB target, cache-preflight census and capacity, JIT authority lifecycles, derived-cache
+dispositions, per-cell scratch cleanup, and final emptiness of staging, derived, and persistent-miss
+stores. No rerun is needed for cells 15-17: their complete receipts and independently hashed outputs
+stand on their own. The safest recovery is one later sparse terminal campaign containing only LTX q8
+with its fixed eight-step request and the two Illustrious q4 cells after republished packed-marker
+authorities; it must import these sixteen PASS cells rather than rerun them.
+
+This promotion closes only SC-20741, SC-20744, and SC-20748. SC-20742 remains blocked on the
+separate FLUX.2 TrueV2 authority and is not implied complete by this terminal campaign.

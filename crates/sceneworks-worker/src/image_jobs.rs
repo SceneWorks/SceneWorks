@@ -971,12 +971,12 @@ pub(crate) async fn run_image_generate_job(
                 )));
             }
             ImageRoute::PoseReject => {
-                // No-silent-T2I (sc-5968): a strict-pose job on an MLX model with NO pose-control lane
-                // that `mlx_available` would otherwise render as plain txt2img, dropping the poses.
+                // No-silent-T2I (sc-5968): control intent on an MLX model with NO pose-control lane
+                // that `mlx_available` would otherwise render as plain txt2img, dropping the intent.
                 // Refuse loudly — the MLX twin of the candle `PoseReject` reject.
                 return Err(WorkerError::InvalidPayload(format!(
-                    "strict pose (advanced.poses) is not supported for model '{}' on the MLX backend — \
-                     refusing rather than silently generating an unconditioned image (wired MLX pose \
+                    "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the MLX backend — \
+                     refusing rather than silently generating an unconditioned image (wired MLX control \
                      families: {})",
                     request.model,
                     WIRED_MLX_POSE_FAMILIES.join(", ")
@@ -1436,8 +1436,8 @@ pub(crate) async fn run_image_generate_job(
                 // precisely to fail them loudly here.
                 CandleImageRoute::PoseReject => {
                     return Err(WorkerError::InvalidPayload(format!(
-                        "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
-                         refusing rather than silently generating an unconditioned image (wired candle pose \
+                        "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the candle backend — \
+                         refusing rather than silently generating an unconditioned image (wired candle control \
                          families: {})",
                         request.model,
                         WIRED_CANDLE_POSE_FAMILIES.join(", ")

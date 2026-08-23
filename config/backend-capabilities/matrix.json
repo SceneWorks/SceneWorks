@@ -5,7 +5,7 @@
     "modelCount": 94,
     "importedFamilyCount": 3,
     "cellCount": 918,
-    "mlxOnlyCellCount": 62,
+    "mlxOnlyCellCount": 63,
     "candleOnlyCellCount": 47,
     "exceptionCount": 18
   },
@@ -21,17 +21,17 @@
     "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
     "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
     "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
-    "exceptionRegister": "9d2f92699b2fedd8f36c71805cd012f58f798e6b542eb2804f005cfc1732b801",
-    "manifest": "f189425b35fc042760acf78fe8f96b96005c86b47a80103f6584e390b9bd0593",
+    "exceptionRegister": "f02f5a64205b72640699868671e5d6925281982c4934b14b3c282c4d1962fca9",
+    "manifest": "baeaf37a9537dfb739b4a34135821343358b20204ab1e1b3e0a34ceb29f5ee92",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
-    "routerCandle": "18cb69df9404fa9d6fc64b5da0b5549498b3f1175616ef72195605d3c9decf33",
+    "routerCandle": "4de14a3f069d43b05390ddaf12765e72ff16e51c3f46234dcb960afafbc51704",
     "routerCatalog": "0a08189104df04729dddc8a94c210876e243afd0b03812ce6c072b3a9efe453c",
     "routerGaps": "885a73b08cd2d598d656adb15d69a2ea0a78faa0437fc3ba0e25d5f5245efcb2",
     "routerMlx": "d9bc69db199a5efe378db62d558ab134a0ee1c82da8561dbb1d0d641bd0f57cb",
     "scheduler": "7adf257c047f8fd15dff086add27a928d5e09ceed29c1371ab3058de254d0748",
     "trainingCatalog": "ba87e0cb93ab872fd2a430f2ac4aeaedf8c65d6869b37b7ff7df4071309289e0",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
-    "webFallbackCatalog": "a891ecf336d746433b0e10279132bfdc8425e85b6f71a62ec842ccc2a56907bc",
+    "webFallbackCatalog": "1c8358829b15995c2c424e6560ff83d832faa6dc28e302a7776e7192a0308cf6",
     "webImageAdvanced": "b18fa5be38f71fa65b88e8e7eef48e96f44d6031196dcfc4d434d27438f8516d",
     "webImageRequest": "07833b54289d0c457ebb05b9db06e32b0221bc8c2d5d7eb1f4ae04124b0a60e3",
     "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
@@ -48,7 +48,7 @@
     "workerDispatch": "17dc38a3d43d9ce435edab4ab67b2fad04ed083571368ea26abaf2362ef307cf",
     "workerEngineTable": "03c64b8abe9c47424d601d4def9a255ef4c9da081098d972a23925bbce16e63b",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "993d0c06facdb7e222482ee78dc17c6aae4e07c235cf9a4f34563badb1630223",
+    "workerImageDispatch": "a17927dc414e9dc4c15326071a19cf4b63fa84fb631536e1206be070971ce4d6",
     "workerImageKreaImported": "0ce6e705505c9e75ead843201d2cb88f996962247b6f4b5d8e19bab326401d2c",
     "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
@@ -1762,8 +1762,8 @@
       "conditioningShape": [
         {
           "capability": "control",
-          "mlx": true,
-          "candle": true
+          "mlx": false,
+          "candle": false
         },
         {
           "capability": "mask",
@@ -1876,8 +1876,8 @@
       "conditioningShape": [
         {
           "capability": "control",
-          "mlx": true,
-          "candle": true
+          "mlx": false,
+          "candle": false
         },
         {
           "capability": "mask",
@@ -2746,7 +2746,12 @@
         {
           "capability": "q8",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
         }
       ],
       "guidanceMethod": [],
@@ -7371,7 +7376,7 @@
       "id": "epic-9083-precision-sequencing",
       "category": "precision",
       "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying the remaining exact 14 MLX-only precision-tier cells under epic-9083 on 2026-08-14; sc-20969 terminal acceptance closed the reviewed Chroma, FLUX.1, LTX-2.3, and SCAIL-2 q4/q8 cells. The canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "evidence": "Michael Trefry directly approved carrying the remaining exact 15 MLX-only precision-tier cells under epic-9083 on 2026-08-14; the independently audited epic-20738 terminal acceptance closed the reviewed Chroma, FLUX.1, and SCAIL-2 q4/q8 cells. LTX-2.3 q8 remains sequenced because terminal cell 14 requested 4 steps against a baked fixed 8-step package and therefore did not prove that exact product route. The canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
       "approver": "Michael Trefry",
       "authority": "epic-9083",
       "approvedDate": "2026-08-14",
@@ -7386,6 +7391,7 @@
         "models/anima_turbo/precisionTier/q8",
         "models/flux2_klein_9b_true_v2/precisionTier/q4",
         "models/flux2_klein_9b_true_v2/precisionTier/q8",
+        "models/ltx_2_3/precisionTier/q8",
         "models/sana_1600m/precisionTier/q4",
         "models/sana_1600m/precisionTier/q8",
         "models/sana_sprint_1600m/precisionTier/q4",

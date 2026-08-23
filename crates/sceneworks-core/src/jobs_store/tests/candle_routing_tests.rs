@@ -269,13 +269,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         cases.push((edit(model), CandleImageLane::SdxlEdit));
         cases.push((reference(model), CandleImageLane::SdxlIpAdapter));
     }
-    for model in [
-        "sdxl",
-        "realvisxl",
-        "realvisxl_lightning",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-    ] {
+    for model in ["sdxl", "realvisxl", "realvisxl_lightning"] {
         cases.push((pose(model), CandleImageLane::SdxlControl));
     }
     for advanced in [
@@ -296,6 +290,35 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             image_job_candle_lane(&image_generate_job(payload)),
             Some(expected)
         );
+    }
+    for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
+        for advanced in [
+            json!({ "poses": [{ "keypoints": [] }] }),
+            json!({ "poses": "malformed" }),
+            json!({ "poses": [null] }),
+            json!({ "controlMode": "pose" }),
+            json!({ "controlMode": false }),
+            json!({ "controlImage": "asset" }),
+            json!({ "controlWeights": {} }),
+        ] {
+            let payload = json!({ "model": model, "advanced": advanced });
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(payload.clone())),
+                None
+            );
+            assert!(
+                image_request_candle_pose_reject(model, &object(payload)),
+                "{model} must own every material control carrier only to reject"
+            );
+        }
+        assert!(image_request_candle_pose_reject(
+            model,
+            &object(json!({
+                "mode": "edit_image",
+                "sourceAssetId": "source_1",
+                "advanced": { "controlMode": "pose" }
+            }))
+        ));
     }
 
     // Real same-model overlaps pin the exact first-match precedence. Each tuple names the
@@ -2752,11 +2775,11 @@ fn candle_video_tier_selects_match_published_platform_tiers() {
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
     ));
     assert!(
-        video_request_candle_eligible(
+        !video_request_candle_eligible(
             "ltx_2_3",
             &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
         ),
-        "terminal acceptance admits the exact packed LTX q8 product route"
+        "LTX q8 remains fail-closed because terminal cell 14 did not run the fixed eight-step recipe"
     );
     let q8_job = video_generate_job(json!({
         "model": "ltx_2_3",
@@ -2764,8 +2787,8 @@ fn candle_video_tier_selects_match_published_platform_tiers() {
         "advanced": { "mlxQuantize": 8 }
     }));
     assert!(
-        video_job_is_candle_eligible(&q8_job),
-        "the production job route must admit the exact LTX q8 product package"
+        !video_job_is_candle_eligible(&q8_job),
+        "the production job route must keep the unproven LTX q8 package closed"
     );
     for invalid_tier in [
         json!(0),
@@ -2833,8 +2856,8 @@ fn candle_ltx_replace_is_model_native_and_requires_its_ic_adapter() {
     let mut q8_shape = object(shape.clone());
     q8_shape.insert("advanced".into(), json!({ "mlxQuantize": 8 }));
     assert!(
-        ltx_replace_candle_eligible("ltx_2_3", &q8_shape),
-        "terminal acceptance admits q8 on LTX's native replacement route too"
+        !ltx_replace_candle_eligible("ltx_2_3", &q8_shape),
+        "the failed terminal q8 cell cannot promote LTX's replacement route"
     );
     let mut q4_shape = object(shape.clone());
     q4_shape.insert("advanced".into(), json!({ "mlxQuantize": 4 }));
