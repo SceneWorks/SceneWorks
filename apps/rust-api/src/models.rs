@@ -1588,6 +1588,45 @@ async fn reconcile_deleted_source(
     }
 }
 
+/// Drop the plan-store documents and cached derivatives a deleted LINKED model owned.
+///
+/// Keyed on `importPlan.checkpointId` — the same discriminator the scheduler and the worker's
+/// route selection use — so a model that is not plan-backed does nothing here. Never touches the
+/// linked library and never removes the approved root: only this checkpoint's record, plan,
+/// bindings and derivatives.
+///
+/// Failures become warnings rather than failing the delete: the manifest entry is already gone by
+/// this point, so refusing here would leave the catalog and the plan store disagreeing with no way
+/// to retry.
+async fn forget_linked_checkpoint(state: &AppState, entry: &Value) -> Vec<String> {
+    let Some(checkpoint_id) = entry
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(str::to_owned)
+    else {
+        return Vec::new();
+    };
+    let data_dir = state.settings.data_dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?
+            .invalidate_checkpoint(&checkpoint_id)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(_)) => Vec::new(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "forgetting a linked checkpoint failed after a model delete");
+            vec![format!(
+                "This model's import plan and cached derivatives could not be removed: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "the linked-checkpoint cleanup task failed");
+            vec!["This model's import plan and cached derivatives could not be removed.".to_owned()]
+        }
+    }
+}
+
 pub(crate) async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -1675,6 +1714,12 @@ pub(crate) async fn delete_model(
     }
     let mut warnings =
         catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
+    // A plan-backed (linked) model's bytes are not ours, but its plan documents and derivatives
+    // are. Without this the manifest entry went away and the record, plan, bindings and every
+    // cached derivative stayed behind forever — reachable by nothing, reclaimable by nothing.
+    // E6 still holds exactly: this drops SceneWorks-owned documents, never a library file, and
+    // never the approved root itself (other checkpoints under it stay valid).
+    warnings.extend(forget_linked_checkpoint(&state, cleanup_source).await);
     // The source is gone; reclaim (or surface) every resolved-cache entry that depended on it.
     warnings.extend(
         reconcile_deleted_source(
@@ -2510,6 +2555,34 @@ pub(crate) async fn create_model_import_job(
         .map_err(IntoResponse::into_response)
 }
 
+/// The `(rootId, relativePath)` pair a linked checkpoint import names, if this request is one.
+///
+/// Both or neither: a request carrying only one half names no checkpoint, and silently treating it
+/// as a fetch import would queue a job with no source at all.
+fn linked_checkpoint_selection(
+    payload: &ModelImportRequest,
+) -> Result<Option<(String, String)>, ApiError> {
+    let root_id = payload
+        .linked_root_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let relative_path = payload
+        .linked_relative_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (root_id, relative_path) {
+        (Some(root_id), Some(relative_path)) => {
+            Ok(Some((root_id.to_owned(), relative_path.to_owned())))
+        }
+        (None, None) => Ok(None),
+        _ => Err(ApiError::bad_request(
+            "A linked checkpoint import requires both linkedRootId and linkedRelativePath",
+        )),
+    }
+}
+
 /// What a managed install records about where its bytes came from (sc-20636). Serialized onto the
 /// queued job as `importProvenance` and handed to the ingest, which puts it in the persisted plan.
 ///
@@ -2762,13 +2835,65 @@ pub(crate) async fn queue_model_import_job(
     state: AppState,
     mut payload: ModelImportRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let (provenance, revision) = normalize_model_import_source(&mut payload)?;
-    if option_str_is_empty(payload.repo.as_deref())
+    // Linked (in-place) ownership: an approved library root plus a confined relative path, and
+    // never an absolute path (epic 20398, sc-20635). It is an ALTERNATIVE ownership mode rather
+    // than another way to FETCH, so it is resolved before source normalisation and excludes it
+    // entirely — including sc-20636's discriminated `source`, which only ever names a transfer.
+    let linked = linked_checkpoint_selection(&payload)?;
+    if let Some((root_id, relative_path)) = linked.clone() {
+        if !option_str_is_empty(payload.repo.as_deref())
+            || !option_str_is_empty(payload.source_url.as_deref())
+            || !option_str_is_empty(payload.source_path.as_deref())
+            || payload.source.is_some()
+        {
+            return Err(ApiError::bad_request(
+                "A linked checkpoint import references a library in place; do not also provide a \
+                 repo, source URL, source path, or a discriminated source",
+            ));
+        }
+        // Fail fast on an unapproved or unavailable root, and on a path shape the plan store would
+        // refuse anyway, so a job is never queued for a source that cannot compile. The same
+        // validator `compile_linked` uses, not a second copy of its rules.
+        sceneworks_core::checkpoint_plan_store::validate_linked_relative_path(&relative_path)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let data_dir = state.settings.data_dir.clone();
+        let probed_root_id = root_id.clone();
+        tokio::task::spawn_blocking(move || {
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+                .resolve_root(&probed_root_id)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("Approved root lookup failed: {error}")))?
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        // The VALIDATED values are what the job carries. Without this the route validated the
+        // trimmed pair and then serialised the raw one, so `" root-abc "` passed the API and
+        // failed in the worker — and the queued `manifestEntry` (built from the trimmed pair
+        // below) and the job payload disagreed about which checkpoint was being imported.
+        payload.linked_root_id = Some(root_id);
+        payload.linked_relative_path = Some(relative_path);
+    }
+    // Source normalisation collapses sc-20636's discriminated `source` onto the flat
+    // repo/sourceUrl/sourcePath fields. A linked import has no transfer to normalise — it was
+    // refused above if it named one — so it names its own provenance and skips the fetch checks.
+    let (provenance, revision) = match &linked {
+        Some((root_id, relative_path)) => (
+            ModelImportProvenance {
+                source: "linked-library",
+                reference: Some(format!("{root_id}/{relative_path}")),
+                ..Default::default()
+            },
+            None,
+        ),
+        None => normalize_model_import_source(&mut payload)?,
+    };
+    if linked.is_none()
+        && option_str_is_empty(payload.repo.as_deref())
         && option_str_is_empty(payload.source_url.as_deref())
         && option_str_is_empty(payload.source_path.as_deref())
     {
         return Err(ApiError::bad_request(
-            "Provide a Hugging Face repo, source URL, or source path",
+            "Provide a Hugging Face repo, source URL, source path, or an approved library root id \
+             with a relative path",
         ));
     }
     if let Some(source_url) = payload.source_url.as_deref() {
@@ -2811,6 +2936,14 @@ pub(crate) async fn queue_model_import_job(
         .name
         .clone()
         .or_else(|| payload.repo.clone())
+        .or_else(|| {
+            linked.as_ref().and_then(|(_, relative_path)| {
+                FsPath::new(relative_path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+        })
         .or_else(|| {
             payload
                 .source_url
@@ -2891,25 +3024,44 @@ pub(crate) async fn queue_model_import_job(
         )?;
     }
     let timestamp = now_rfc3339();
-    let mut manifest_entry = json!({
-        "id": model_id,
-        "name": name,
-        "type": model_type,
-        "source": {
-            // The provider the SOURCE normalisation resolved, so a Civitai import is recorded as
-            // "civitai" rather than as the generic "url" its transfer happens to share. Coarser
-            // than provenance for the two non-remote shapes — see `manifest_provider`.
-            "provider": provenance.manifest_provider(),
-            "repo": payload.repo.clone(),
-            "path": source_path_rel,
-        },
-        "files": payload.files.clone(),
-        "paths": {
-            "model": target_dir.display().to_string(),
-        },
-        "createdAt": timestamp,
-        "updatedAt": timestamp,
-    });
+    // A linked entry names its library by root id and relative path and carries NO install path:
+    // nothing is copied, and the plan-driven route reads the plan's own layers. The worker stamps
+    // `importPlan.checkpointId` onto this entry once the full-content compile succeeds — a
+    // candidate that never compiles never becomes selectable (E7).
+    let mut manifest_entry = match &linked {
+        Some((root_id, relative_path)) => json!({
+            "id": model_id,
+            "name": name,
+            "type": model_type,
+            "source": {
+                "provider": provenance.manifest_provider(),
+                "rootId": root_id,
+                "relativePath": relative_path,
+            },
+            "files": payload.files.clone(),
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+        }),
+        None => json!({
+            "id": model_id,
+            "name": name,
+            "type": model_type,
+            "source": {
+                // The provider the SOURCE normalisation resolved, so a Civitai import is recorded
+                // as "civitai" rather than as the generic "url" its transfer happens to share.
+                // Coarser than provenance for the two non-remote shapes — see `manifest_provider`.
+                "provider": provenance.manifest_provider(),
+                "repo": payload.repo.clone(),
+                "path": source_path_rel,
+            },
+            "files": payload.files.clone(),
+            "paths": {
+                "model": target_dir.display().to_string(),
+            },
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+        }),
+    };
     if let Some(source_url) = payload.source_url.clone() {
         if let Some(source) = manifest_entry
             .get_mut("source")
@@ -2942,10 +3094,14 @@ pub(crate) async fn queue_model_import_job(
     }
     payload.insert("modelId".to_owned(), manifest_entry["id"].clone());
     payload.insert("modelName".to_owned(), manifest_entry["name"].clone());
-    payload.insert(
-        "targetDir".to_owned(),
-        Value::String(target_dir.display().to_string()),
-    );
+    // A linked import installs nothing, so it gets no install directory: handing one to the worker
+    // would name a path that must never be created for this ownership mode.
+    if linked.is_none() {
+        payload.insert(
+            "targetDir".to_owned(),
+            Value::String(target_dir.display().to_string()),
+        );
+    }
     payload.insert(
         "manifestPath".to_owned(),
         Value::String(manifest_path.display().to_string()),
@@ -2976,6 +3132,8 @@ pub(crate) async fn model_import_request_from_multipart(
         repo: None,
         source_url: None,
         source_path: None,
+        linked_root_id: None,
+        linked_relative_path: None,
         files: Vec::new(),
         family: None,
         expected_sha256: None,
@@ -12279,6 +12437,10 @@ mod model_import_source_tests {
             repo: None,
             source_url: None,
             source_path: None,
+            // Linked (in-place) ownership is a different mode entirely (sc-20635); a legacy flat
+            // request never names one.
+            linked_root_id: None,
+            linked_relative_path: None,
             files: Vec::new(),
             family: None,
             expected_sha256: None,

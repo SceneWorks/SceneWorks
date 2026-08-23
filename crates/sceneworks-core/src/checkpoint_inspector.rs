@@ -374,6 +374,84 @@ pub fn discover_checkpoint(request: &CheckpointInspectionRequestV1) -> Checkpoin
     }
 }
 
+/// Bounded, header-only discovery of every checkpoint candidate an approved linked-library root
+/// holds (epic 20398, sc-20635).
+///
+/// [`discover_checkpoint`] answers "what is inside THIS one checkpoint source"; a library root is
+/// a directory of many unrelated checkpoints, so each discovered weight file is reported as its own
+/// candidate keyed by its portable root-relative path — the exact `relativePath`
+/// `CheckpointPlanStore::compile_linked` takes.
+///
+/// This is discovery, not validation: nothing here is selectable. Only the full-content compile
+/// (which streams every byte through SHA-256) can promote a candidate to a runnable plan (E7), so
+/// the caller renders these as visible-but-unselectable until it has a persisted record.
+///
+/// Every path is canonicalized and required to stay under the canonical root; a candidate that
+/// escapes is dropped with a [`CheckpointDiagnosticCodeV1::PathEscapesRoot`] diagnostic rather than
+/// being reported (fail closed, E6/E7).
+pub fn discover_library_root(root_path: &Path) -> CheckpointDiscoveryV1 {
+    let mut diagnostics = Vec::new();
+    let canonical_root = match std::fs::canonicalize(root_path) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            return CheckpointDiscoveryV1 {
+                layout: None,
+                candidates: Vec::new(),
+                descriptor_paths: Vec::new(),
+                diagnostics: vec![CheckpointDiagnosticV1::error(
+                    CheckpointDiagnosticCodeV1::SourceNotFound,
+                    None,
+                    format!(
+                        "library root '{}' is unavailable: {error}",
+                        root_path.display()
+                    ),
+                )],
+            };
+        }
+    };
+    if !canonical_root.is_dir() {
+        return CheckpointDiscoveryV1 {
+            layout: None,
+            candidates: Vec::new(),
+            descriptor_paths: Vec::new(),
+            diagnostics: vec![CheckpointDiagnosticV1::error(
+                CheckpointDiagnosticCodeV1::UnsupportedContainer,
+                None,
+                format!("library root '{}' is not a directory", root_path.display()),
+            )],
+        };
+    }
+    let resolved = ResolvedInput {
+        canonical_target: canonical_root.clone(),
+        canonical_root,
+    };
+    let files = discover_directory(&resolved);
+    diagnostics.extend(files.diagnostics);
+    let mut candidates = Vec::new();
+    for path in files.weights {
+        match discover_weight(&resolved, &path) {
+            Ok(candidate) => candidates.push(candidate),
+            Err(diagnostic) => diagnostics.push(diagnostic),
+        }
+    }
+    candidates.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut descriptor_paths = files
+        .descriptors
+        .iter()
+        .filter_map(|path| relative_to_root(&resolved, path))
+        .collect::<Vec<_>>();
+    descriptor_paths.sort();
+    descriptor_paths.dedup();
+    sort_diagnostics(&mut diagnostics);
+    CheckpointDiscoveryV1 {
+        // A library root is a container of many checkpoints, not one checkpoint with a layout.
+        layout: None,
+        candidates,
+        descriptor_paths,
+        diagnostics,
+    }
+}
+
 pub fn inspect_checkpoint(request: &CheckpointInspectionRequestV1) -> CheckpointInspectionV1 {
     inspect_checkpoint_with_hook(request, |_| {})
 }

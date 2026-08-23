@@ -167,6 +167,11 @@ jobs:
         run: cargo test -p sceneworks-core windows_registry_cache_detects_between_window_rewrite_with_restored_mtime
       - name: Run Windows resolved-cache and materialization safety regressions
         run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"
+      # The checkpoint plan store's Windows-only confinement probe (sc-20635): a junction out of
+      # an approved library must fail closed. It lives in an INTEGRATION test, so neither name
+      # filter above reaches it and it needs its own `--test` target.
+      - name: Run Windows checkpoint plan store regressions
+        run: cargo test -p sceneworks-core --test checkpoint_plan_store
       - name: Run desktop Rust tests
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint
