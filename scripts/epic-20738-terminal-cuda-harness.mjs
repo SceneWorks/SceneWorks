@@ -118,9 +118,11 @@ const RECOVERY_BOUNDARY_LOG = {
 const LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES = 173_667_044_229;
 const REVIEWED_ALL_AT_ONCE_SOURCE_BYTES = 179_028_698_654;
 const LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES = 179_028_698_264;
-const REVIEWED_JIT_SOURCE_PEAK_BYTES = 56_156_615_634;
+const PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES = 56_156_615_634;
+const REVIEWED_JIT_SOURCE_PEAK_BYTES = 63_979_929_282;
 const NON_MODEL_DISK_RESERVE_BYTES = 40 * 1024 ** 3;
-const REVIEWED_FREE_FLOOR_BYTES = 99_106_288_594;
+const PRE_HYDRATION_FREE_FLOOR_BYTES = 99_106_288_594;
+const REVIEWED_FREE_FLOOR_BYTES = 106_929_602_242;
 const FLUX_Q4_SIDECAR_BYTES = 7_396_392_960 + 494 * 16_384;
 const FLUX_Q8_SIDECAR_BYTES = 12_573_868_032 + 494 * 16_384;
 const DERIVED_DISPOSITION_NOT_APPLICABLE = "not-applicable";
@@ -360,12 +362,17 @@ export function estimateJitDiskPlan(
   if (persistentBytesFromPlan !== persistentMissingBytes) {
     fail(`persistent missing-file byte census drifted: plan=${persistentBytesFromPlan}, input=${persistentMissingBytes}`);
   }
+  const currentIllustriousHydrationBytes = lifetimes.filter((row) => (
+    ILLUSTRIOUS_CURRENT_AUTHORITIES.has(row.artifactId)
+  )).flatMap((row) => row.physicalFiles).filter((file) => file.persistent)
+    .reduce((sum, file) => sum + file.bytes, 0);
+  const modeledJitPeakBytes = PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES
+    + currentIllustriousHydrationBytes;
   const allAtOnceSidecarReserveBytes = Math.max(FLUX_Q4_SIDECAR_BYTES, FLUX_Q8_SIDECAR_BYTES);
   if (logicalSourceBytes === reviewedAllAtOnceSourceBytes
     && (allAtOnceSourceBytes !== reviewedAllAtOnceSourceBytes
-      || (persistentMissingBytes > 0
-        ? peak.modelAndSidecarBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
-        : peak.modelAndSidecarBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES))) {
+      || modeledJitPeakBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES
+      || peak.modelAndSidecarBytes !== modeledJitPeakBytes)) {
     fail(`reviewed disk census drifted: all=${allAtOnceSourceBytes}, peak=${peak.modelAndSidecarBytes}`);
   }
   return {
@@ -375,6 +382,7 @@ export function estimateJitDiskPlan(
     nonModelPaths,
     legacyNaiveLinkLengthSourceBytes: LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES,
     reviewedAllAtOnceSourceBytes,
+    preHydrationJitSourcePeakBytes: PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES,
     reviewedJitSourcePeakBytes: REVIEWED_JIT_SOURCE_PEAK_BYTES,
     logicalSourceBytes,
     allAtOnceSourceBytes,
@@ -1958,7 +1966,7 @@ function validateRecoverySummary(summary, currentProfile, metadata) {
     exactKeys(probe, ["phase", "ordinal", "root", "freeBytes", "requiredFreeBytes"], `recovery disk probe ${index + 1}`);
     if (probe.phase !== expectedProbePhases[index][0] || probe.ordinal !== expectedProbePhases[index][1]
       || !Number.isSafeInteger(probe.freeBytes) || !Number.isSafeInteger(probe.requiredFreeBytes)
-      || probe.requiredFreeBytes !== REVIEWED_FREE_FLOOR_BYTES) {
+      || probe.requiredFreeBytes !== PRE_HYDRATION_FREE_FLOOR_BYTES) {
       fail(`recovery disk probe ${index + 1} does not bind the audited partial-run lifecycle`);
     }
   }
@@ -3298,11 +3306,19 @@ export function validateCachePreflightEvidence(document, {
           : legacyEvidence ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
       const expectedAllAtOnceSourceBytes = legacyEvidence
         ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
+      const currentIllustriousHydrationBytes = document.downloadedFiles.filter((file) => (
+        ILLUSTRIOUS_CURRENT_AUTHORITIES.has(file.artifactId)
+      )).reduce((sum, file) => sum + file.bytes, 0);
+      const expectedJitPeakBytes = PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES
+        + currentIllustriousHydrationBytes;
       if (document.diskPlan.reviewedAllAtOnceSourceBytes !== expectedAllAtOnceSourceBytes
+        || document.diskPlan.preHydrationJitSourcePeakBytes
+          !== PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES
         || document.diskPlan.reviewedJitSourcePeakBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
         || document.diskPlan.logicalSourceBytes !== expectedSourceBytes
         || document.diskPlan.allAtOnceSourceBytes !== expectedSourceBytes
-        || document.diskPlan.peakModelAndSidecarBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
+        || expectedJitPeakBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES
+        || document.diskPlan.peakModelAndSidecarBytes !== expectedJitPeakBytes
         || document.diskPlan.peakRequiredAdditionalBytes !== REVIEWED_FREE_FLOOR_BYTES) {
         fail("passed cache preflight drifted from reviewed target-byte totals and JIT floor");
       }

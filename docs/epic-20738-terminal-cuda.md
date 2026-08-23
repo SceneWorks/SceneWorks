@@ -106,10 +106,13 @@ The disk admission model binds exact source bytes, the conservative streamed-FLU
 (494 files; q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file
 reserve), and a
 40-GiB non-model reserve for Cargo target, output, the pinned venv, logs, and filesystem fluctuation.
-The largest model-plus-sidecar live set is therefore the LTX pair itself at
-56,156,615,634 bytes, so the controller requires at least 99,106,288,594 free bytes. It checks that
-floor after the missing-file fill, before every authority stage, and before every GPU process. The
-former all-at-once plan is deterministically refused.
+Before hydration, the largest model-plus-sidecar live set is the LTX pair at 56,156,615,634 bytes.
+A fully absent pair of current Illustrious q4 snapshots adds 3,911,656,986 and 3,911,656,662
+persistent bytes before ordinal 14, producing the reviewed 63,979,929,282-byte physical peak. With
+the 40-GiB reserve, the controller therefore requires at least 106,929,602,242 free bytes. It checks
+that floor after the missing-file fill, before every authority stage, and before every GPU process.
+Each downloaded authority store becomes that authority's stage root and is released at its exact
+ordinal-18/19 lifetime boundary. The former all-at-once plan is deterministically refused.
 
 Output and scratch must be fresh, distinct, non-nested descendants of the resolved `RUNNER_TEMP`,
 outside both repositories. Every recursive removal rechecks that confinement and rejects

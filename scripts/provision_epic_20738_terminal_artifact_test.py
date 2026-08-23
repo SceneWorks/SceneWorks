@@ -384,12 +384,11 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             "unet/model.safetensors": (len(first), hashlib.sha256(first).hexdigest()),
         }
         authority = {(self.CURRENT_REPOSITORY, self.CURRENT_REVISION): inventory}
-        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as stored, tempfile.TemporaryDirectory() as staged, mock.patch.dict(
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as stored, mock.patch.dict(
             MODULE.REVIEWED_HYDRATION_AUTHORITIES, authority, clear=True
         ):
             cache = Path(directory).resolve()
             missing_store = Path(stored).resolve()
-            staging = Path(staged).resolve()
             selected = self.current_selected(cache)
             (selected / "unet").mkdir(parents=True)
             (selected / "unet" / "model.safetensors").write_bytes(first)
@@ -421,7 +420,7 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                 )
             self.assertEqual([row["path"] for row in downloaded["downloadedFiles"]], ["config.json"])
             staged_result = MODULE.stage_artifact(
-                self.current_request(inventory), cache, staging, missing_store
+                self.current_request(inventory), cache, missing_store, missing_store
             )
             self.assertTrue(staged_result["complete"])
             self.assertEqual(staged_result["matchedFiles"], sorted(inventory))
