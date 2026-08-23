@@ -30,8 +30,8 @@ use crate::checkpoint_import::{
     ImportPlanV1, SourceLocatorV1, CHECKPOINT_IMPORT_CONTRACT_VERSION,
 };
 use crate::checkpoint_inspector::{
-    inspect_checkpoint, CheckpointDiagnosticSeverityV1, CheckpointDiagnosticV1,
-    CheckpointInspectionRequestV1,
+    discover_library_root, inspect_checkpoint, CheckpointCandidateV1, CheckpointDiagnosticCodeV1,
+    CheckpointDiagnosticSeverityV1, CheckpointDiagnosticV1, CheckpointInspectionRequestV1,
 };
 
 /// Directory under the application data dir that holds every file this store owns.
@@ -45,12 +45,36 @@ pub const BINDINGS_DIR: &str = "bindings";
 
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
-/// One approved linked-library root: an opaque stable id and the absolute directory it names.
+/// The longest user-chosen library label the store persists.
+pub const MAX_ROOT_LABEL_BYTES: usize = 128;
+
+/// One approved linked-library root: an opaque stable id, the absolute directory it names, and the
+/// user's display label for it.
+///
+/// `label` is presentation only — nothing keys off it — and it is absent from roots written before
+/// sc-20635, so it defaults to empty and [`Self::display_label`] falls back to the directory name.
+/// The id and the label move independently: `rename_root` changes only the label, `relink_root`
+/// changes only the path, and both keep every compiled plan's `rootId` valid.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApprovedRootV1 {
     pub root_id: String,
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+}
+
+impl ApprovedRootV1 {
+    /// The label to show for this root: the user's own, else the directory's own name.
+    pub fn display_label(&self) -> String {
+        if !self.label.is_empty() {
+            return self.label.clone();
+        }
+        self.path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.to_string_lossy().into_owned())
+    }
 }
 
 /// The persisted approved-root set.
@@ -82,6 +106,7 @@ impl ApprovedRootsV1 {
             });
         }
         let mut ids = std::collections::BTreeSet::new();
+        let mut paths = std::collections::BTreeSet::new();
         for root in &self.roots {
             if root.root_id.trim().is_empty() || !root.path.is_absolute() {
                 return Err(CheckpointPlanError::Corrupt {
@@ -92,10 +117,25 @@ impl ApprovedRootsV1 {
                     ),
                 });
             }
+            if !root.label.is_empty() {
+                validate_root_label(&root.label)?;
+            }
             if !ids.insert(root.root_id.as_str()) {
                 return Err(CheckpointPlanError::Corrupt {
                     what: APPROVED_ROOTS_FILE.to_owned(),
                     message: format!("approved root id {:?} is declared twice", root.root_id),
+                });
+            }
+            // Two ids bound to one directory is the shape `relink_root` would create if a later
+            // `approve_root` of the relinked path derived a fresh id: the same files would then
+            // compile twice under two identities and only one of them would ever be relinked.
+            if !paths.insert(root.path.as_path()) {
+                return Err(CheckpointPlanError::Corrupt {
+                    what: APPROVED_ROOTS_FILE.to_owned(),
+                    message: format!(
+                        "approved directory {} is bound to two root ids",
+                        root.path.display()
+                    ),
                 });
             }
         }
@@ -105,6 +145,29 @@ impl ApprovedRootsV1 {
     pub fn get(&self, root_id: &str) -> Option<&ApprovedRootV1> {
         self.roots.iter().find(|root| root.root_id == root_id)
     }
+
+    /// The approved root already bound to `canonical_path`, whatever its id.
+    pub fn get_by_path(&self, canonical_path: &Path) -> Option<&ApprovedRootV1> {
+        self.roots.iter().find(|root| root.path == canonical_path)
+    }
+}
+
+/// A user-chosen library label: printable, bounded, and never a path component.
+fn validate_root_label(label: &str) -> Result<(), CheckpointPlanError> {
+    let invalid = |reason: &str| CheckpointPlanError::InvalidRootLabel {
+        label: label.to_owned(),
+        reason: reason.to_owned(),
+    };
+    if label.trim().is_empty() {
+        return Err(invalid("must not be blank"));
+    }
+    if label.len() > MAX_ROOT_LABEL_BYTES {
+        return Err(invalid("must be at most 128 bytes"));
+    }
+    if label.chars().any(char::is_control) {
+        return Err(invalid("must not contain control characters"));
+    }
+    Ok(())
 }
 
 /// Filesystem stamp of one layer's source entry, captured at compile time. Cheap to re-take; any
@@ -233,6 +296,17 @@ pub enum CheckpointPlanError {
         relative_path: String,
         reason: String,
     },
+    /// The user-chosen library label cannot be persisted.
+    InvalidRootLabel {
+        label: String,
+        reason: String,
+    },
+    /// A relink would bind this root id to a directory another approved root already owns.
+    RootAlreadyApproved {
+        root_id: String,
+        existing_root_id: String,
+        path: PathBuf,
+    },
     /// Full-content inspection did not produce a runnable inventory (unknown family, malformed
     /// container, missing sidecar, …); the diagnostics are the inspector's typed findings.
     UnrunnableSource {
@@ -319,6 +393,8 @@ impl CheckpointPlanError {
             Self::RootUnavailable { .. } => "root-unavailable",
             Self::RootNotApprovable { .. } => "root-not-approvable",
             Self::InvalidRelativePath { .. } => "invalid-relative-path",
+            Self::InvalidRootLabel { .. } => "invalid-root-label",
+            Self::RootAlreadyApproved { .. } => "root-already-approved",
             Self::UnrunnableSource { .. } => "unrunnable-source",
             Self::UnknownCheckpoint { .. } => "unknown-checkpoint",
             Self::MissingPlan { .. } => "missing-plan",
@@ -353,6 +429,18 @@ impl fmt::Display for CheckpointPlanError {
                 relative_path,
                 reason,
             } => write!(f, "relative path {relative_path:?} is invalid: {reason}"),
+            Self::InvalidRootLabel { label, reason } => {
+                write!(f, "library label {label:?} is invalid: {reason}")
+            }
+            Self::RootAlreadyApproved {
+                root_id,
+                existing_root_id,
+                path,
+            } => write!(
+                f,
+                "root {root_id:?} cannot be relinked to {}: approved root {existing_root_id:?} already owns that directory",
+                path.display()
+            ),
             Self::UnrunnableSource {
                 checkpoint_id,
                 diagnostics,
@@ -472,6 +560,88 @@ pub fn linked_checkpoint_id(root_id: &str, relative_path: &str) -> String {
     format!("linked/{root_id}/{relative_path}")
 }
 
+/// Split a linked checkpoint id back into `(root_id, relative_path)`.
+///
+/// The id is the persisted identity, so every lifecycle action that has only an id — rescan,
+/// status, per-root removal — recovers the root binding from it rather than from a stored absolute
+/// path (E6). `None` for a managed id or any other shape. A root id never contains `/`
+/// ([`derive_root_id`] emits `root-<hex>`), so the first separator is unambiguous.
+pub fn parse_linked_checkpoint_id(checkpoint_id: &str) -> Option<(&str, &str)> {
+    let rest = checkpoint_id.strip_prefix("linked/")?;
+    let (root_id, relative_path) = rest.split_once('/')?;
+    if root_id.is_empty() || relative_path.is_empty() {
+        return None;
+    }
+    Some((root_id, relative_path))
+}
+
+/// Whether a persisted linked checkpoint can be selected right now, and if not, which lifecycle
+/// action the user has to take (AC1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedCheckpointStateV1 {
+    /// Record, plan, approved root and every source byte verified: selectable.
+    Ready,
+    /// The approved root's directory is not there (unmounted volume, moved library). The plans
+    /// stay valid; `relink_root` re-points the id at the library's new location.
+    NeedsRelink,
+    /// The root is present but this checkpoint's source is gone, changed, or its plan no longer
+    /// matches its record. `rescan_checkpoint` recompiles it from the current bytes.
+    NeedsRescan,
+}
+
+/// One persisted linked checkpoint and what the store currently thinks of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedCheckpointStatusV1 {
+    pub checkpoint_id: String,
+    pub root_id: String,
+    pub relative_path: String,
+    pub state: LinkedCheckpointStateV1,
+    /// The typed refusal behind a non-`Ready` state, `[checkpoint-plan:<code>] …`.
+    pub detail: Option<String>,
+}
+
+impl LinkedCheckpointStatusV1 {
+    pub fn is_selectable(&self) -> bool {
+        self.state == LinkedCheckpointStateV1::Ready
+    }
+}
+
+/// One header-only candidate a library scan found, plus its compile state.
+///
+/// `selectable` is false for every candidate that has no `Ready` persisted plan: header evidence
+/// is a hint, and only the full-content compile can promote it (E7).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedCandidateV1 {
+    pub checkpoint_id: String,
+    pub candidate: CheckpointCandidateV1,
+    pub status: Option<LinkedCheckpointStatusV1>,
+    pub selectable: bool,
+}
+
+/// The result of rescanning one approved root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedRootScanV1 {
+    pub root: ApprovedRootV1,
+    /// False when the root directory is not there; every one of its checkpoints is Needs Relink.
+    pub available: bool,
+    pub candidates: Vec<LinkedCandidateV1>,
+    /// Persisted checkpoints under this root the scan did not see as candidates: deleted, renamed,
+    /// or now unreadable. They surface here rather than vanishing from the catalog.
+    pub unmatched: Vec<LinkedCheckpointStatusV1>,
+    pub diagnostics: Vec<CheckpointDiagnosticV1>,
+}
+
+/// What removing an approved root dropped. Only store-owned documents — never a library file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootRemovalV1 {
+    pub root: ApprovedRootV1,
+    pub removed_checkpoints: Vec<String>,
+}
+
 /// Deterministic opaque id for an approved root. Derived from the canonical path's digest so
 /// re-approving the same directory is idempotent; the path itself never appears in the id, and a
 /// later relink keeps the id while rebinding the path.
@@ -481,6 +651,16 @@ pub fn derive_root_id(canonical_path: &Path) -> String {
     hasher.update(canonical_path.to_string_lossy().as_bytes());
     let digest = hasher.finalize();
     format!("root-{:x}", digest)[..21].to_owned()
+}
+
+/// The one place the shape of a linked `relativePath` is defined.
+///
+/// Exposed so a caller can fail fast on a malformed path (an API request, a UI form) using the
+/// SAME rules `compile_linked` will apply, rather than a second, drifting copy of them. It is a
+/// lexical check only: whether the path's canonical target actually stays inside the root is
+/// decided later by [`confined_root_join`], on the path that is opened.
+pub fn validate_linked_relative_path(relative_path: &str) -> Result<(), CheckpointPlanError> {
+    validate_portable_relative_path(relative_path).map(|_| ())
 }
 
 fn validate_portable_relative_path(relative_path: &str) -> Result<PathBuf, CheckpointPlanError> {
@@ -664,9 +844,25 @@ impl CheckpointPlanStore {
         self.write_atomic(&self.approved_roots_path(), &payload)
     }
 
-    /// Approve an existing directory as a linked-library root. Idempotent for the same canonical
-    /// directory; the returned root carries the id plans will reference.
+    /// Approve an existing directory as a linked-library root, labelled by its own directory name.
     pub fn approve_root(&self, path: &Path) -> Result<ApprovedRootV1, CheckpointPlanError> {
+        self.approve_root_inner(path, None)
+    }
+
+    /// Approve an existing directory under a user-chosen label.
+    pub fn approve_root_with_label(
+        &self,
+        path: &Path,
+        label: &str,
+    ) -> Result<ApprovedRootV1, CheckpointPlanError> {
+        validate_root_label(label)?;
+        self.approve_root_inner(path, Some(label))
+    }
+
+    /// Canonicalize and confirm a candidate root directory. Every lifecycle action that binds a
+    /// path goes through here, so a symlinked or reparse-point root is resolved to its real
+    /// directory ONCE and every later `confined_root_join` compares against that real directory.
+    fn approvable_canonical_root(path: &Path) -> Result<PathBuf, CheckpointPlanError> {
         if !path.is_absolute() {
             return Err(CheckpointPlanError::RootNotApprovable {
                 path: path.to_path_buf(),
@@ -684,29 +880,315 @@ impl CheckpointPlanStore {
                 reason: "root must be an existing directory".to_owned(),
             });
         }
+        Ok(canonical)
+    }
+
+    fn approve_root_inner(
+        &self,
+        path: &Path,
+        label: Option<&str>,
+    ) -> Result<ApprovedRootV1, CheckpointPlanError> {
+        let canonical = Self::approvable_canonical_root(path)?;
         let mut roots = self.approved_roots()?;
+        // Path first, id second. After a `relink_root` a directory is bound to an id that
+        // `derive_root_id` would NOT produce for it, and re-approving it must return that existing
+        // binding rather than mint a second id for the same files.
+        if let Some(existing) = roots.get_by_path(&canonical) {
+            return Ok(existing.clone());
+        }
         let root_id = derive_root_id(&canonical);
         if let Some(existing) = roots.get(&root_id) {
-            // Idempotent only for the SAME directory. `derive_root_id` truncates the digest, so a
-            // matching id is not by itself proof of a matching path — without this check, approving
-            // directory B could hand back directory A's binding and every plan compiled against it
-            // would silently read A's files.
-            if existing.path != canonical {
-                return Err(CheckpointPlanError::RootIdCollision {
-                    root_id,
-                    existing_path: existing.path.clone(),
+            // `derive_root_id` truncates the digest, so a matching id is not by itself proof of a
+            // matching path — and the path check above already returned for the same directory, so
+            // reaching here means two different directories collided on one id.
+            return Err(CheckpointPlanError::RootIdCollision {
+                root_id,
+                existing_path: existing.path.clone(),
+                path: canonical,
+            });
+        }
+        let root = ApprovedRootV1 {
+            root_id,
+            path: canonical,
+            label: label.unwrap_or_default().to_owned(),
+        };
+        roots.roots.push(root.clone());
+        self.save_approved_roots(&roots)?;
+        Ok(root)
+    }
+
+    /// Relabel an approved root. Presentation only: the id, the path, and every compiled plan are
+    /// untouched, and nothing under the library is read or written.
+    pub fn rename_root(
+        &self,
+        root_id: &str,
+        label: &str,
+    ) -> Result<ApprovedRootV1, CheckpointPlanError> {
+        validate_root_label(label)?;
+        let mut roots = self.approved_roots()?;
+        let root = roots
+            .roots
+            .iter_mut()
+            .find(|root| root.root_id == root_id)
+            .ok_or_else(|| CheckpointPlanError::UnknownRoot {
+                root_id: root_id.to_owned(),
+            })?;
+        root.label = label.to_owned();
+        let renamed = root.clone();
+        self.save_approved_roots(&roots)?;
+        Ok(renamed)
+    }
+
+    /// Re-point an approved root at the library's new location, keeping the root id so every
+    /// persisted `Linked { rootId, relativePath }` stays valid (E6).
+    ///
+    /// The new directory is canonicalized and confirmed here; the plans are NOT trusted afterwards.
+    /// A relink can legitimately be a move of the same library, but it can also be a retarget at a
+    /// different one, so the caller's next `resolve`/`scan_root` re-verifies every layer's bytes
+    /// against the fingerprint the plan was compiled from and refuses on drift.
+    pub fn relink_root(
+        &self,
+        root_id: &str,
+        path: &Path,
+    ) -> Result<ApprovedRootV1, CheckpointPlanError> {
+        let canonical = Self::approvable_canonical_root(path)?;
+        let mut roots = self.approved_roots()?;
+        if let Some(existing) = roots.get_by_path(&canonical) {
+            if existing.root_id != root_id {
+                return Err(CheckpointPlanError::RootAlreadyApproved {
+                    root_id: root_id.to_owned(),
+                    existing_root_id: existing.root_id.clone(),
                     path: canonical,
                 });
             }
             return Ok(existing.clone());
         }
-        let root = ApprovedRootV1 {
-            root_id,
-            path: canonical,
-        };
-        roots.roots.push(root.clone());
+        let root = roots
+            .roots
+            .iter_mut()
+            .find(|root| root.root_id == root_id)
+            .ok_or_else(|| CheckpointPlanError::UnknownRoot {
+                root_id: root_id.to_owned(),
+            })?;
+        root.path = canonical;
+        let relinked = root.clone();
         self.save_approved_roots(&roots)?;
-        Ok(root)
+        Ok(relinked)
+    }
+
+    /// Forget an approved root and every checkpoint compiled from it.
+    ///
+    /// Removal is store-scoped by construction: the only paths this touches are
+    /// `<data>/checkpoints/{approved-roots.json,inventory.json,plans/…,bindings/…}`. The library
+    /// directory is never opened for writing, never enumerated for deletion, and its files are
+    /// never referenced here at all (E6).
+    pub fn remove_root(&self, root_id: &str) -> Result<RootRemovalV1, CheckpointPlanError> {
+        let mut roots = self.approved_roots()?;
+        let root = roots
+            .get(root_id)
+            .cloned()
+            .ok_or_else(|| CheckpointPlanError::UnknownRoot {
+                root_id: root_id.to_owned(),
+            })?;
+        let removed_checkpoints = self.linked_checkpoint_ids_for_root(root_id)?;
+        for checkpoint_id in &removed_checkpoints {
+            self.invalidate(checkpoint_id)?;
+        }
+        roots.roots.retain(|existing| existing.root_id != root_id);
+        self.save_approved_roots(&roots)?;
+        Ok(RootRemovalV1 {
+            root,
+            removed_checkpoints,
+        })
+    }
+
+    /// Every persisted checkpoint id whose identity names `root_id`, in inventory order.
+    pub fn linked_checkpoint_ids_for_root(
+        &self,
+        root_id: &str,
+    ) -> Result<Vec<String>, CheckpointPlanError> {
+        Ok(self
+            .inventory()?
+            .records
+            .into_iter()
+            .filter(|record| {
+                parse_linked_checkpoint_id(&record.checkpoint_id)
+                    .is_some_and(|(id, _)| id == root_id)
+            })
+            .map(|record| record.checkpoint_id)
+            .collect())
+    }
+
+    /// What the store currently thinks of one persisted linked checkpoint.
+    ///
+    /// This is [`Self::resolve`] reduced to its verdict: it runs the same record ↔ plan agreement,
+    /// the same approved-root lookup, and the same per-layer confinement and byte verification, and
+    /// classifies the typed refusal into the lifecycle action the user has to take. A missing root
+    /// is Needs Relink; anything about the bytes is Needs Rescan.
+    pub fn checkpoint_status(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<LinkedCheckpointStatusV1, CheckpointPlanError> {
+        let (root_id, relative_path) =
+            parse_linked_checkpoint_id(checkpoint_id).ok_or_else(|| {
+                CheckpointPlanError::UnknownCheckpoint {
+                    checkpoint_id: checkpoint_id.to_owned(),
+                }
+            })?;
+        // Prove the record exists before classifying: an id nobody compiled is not a lifecycle
+        // state, it is an unknown checkpoint, and swallowing that into `NeedsRescan` would make
+        // every typo look like a repairable library.
+        self.record(checkpoint_id)?;
+        let status =
+            |state: LinkedCheckpointStateV1, detail: Option<String>| LinkedCheckpointStatusV1 {
+                checkpoint_id: checkpoint_id.to_owned(),
+                root_id: root_id.to_owned(),
+                relative_path: relative_path.to_owned(),
+                state,
+                detail,
+            };
+        match self.resolve(checkpoint_id) {
+            Ok(_) => Ok(status(LinkedCheckpointStateV1::Ready, None)),
+            Err(
+                error @ (CheckpointPlanError::UnknownRoot { .. }
+                | CheckpointPlanError::RootUnavailable { .. }),
+            ) => Ok(status(
+                LinkedCheckpointStateV1::NeedsRelink,
+                Some(error.to_string()),
+            )),
+            Err(
+                error @ (CheckpointPlanError::SourceMissing { .. }
+                | CheckpointPlanError::SourceDrifted { .. }
+                | CheckpointPlanError::PathEscapesRoot { .. }
+                | CheckpointPlanError::PlanTampered { .. }
+                | CheckpointPlanError::MissingPlan { .. }
+                | CheckpointPlanError::InvalidRelativePath { .. }
+                | CheckpointPlanError::UnsupportedLocator { .. }),
+            ) => Ok(status(
+                LinkedCheckpointStateV1::NeedsRescan,
+                Some(error.to_string()),
+            )),
+            // Corruption, I/O and contract failures are the store's own problem, not a library
+            // lifecycle state; returning them keeps them from being papered over as "rescan".
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Recompile one persisted linked checkpoint from the bytes on disk right now.
+    ///
+    /// Identity is preserved (`rootId + relativePath`); the plan, its layer fingerprints and the
+    /// source stamps are replaced. `compile_linked` supersedes the previous plan documents through
+    /// `upsert_record`, so a rescan leaves no orphaned plan behind.
+    pub fn rescan_checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        let (root_id, relative_path) =
+            parse_linked_checkpoint_id(checkpoint_id).ok_or_else(|| {
+                CheckpointPlanError::UnknownCheckpoint {
+                    checkpoint_id: checkpoint_id.to_owned(),
+                }
+            })?;
+        self.compile_linked(root_id, relative_path)
+    }
+
+    /// Rescan an approved root: bounded header-only discovery of every candidate it holds, joined
+    /// with the compile state of everything already persisted under it (AC1).
+    ///
+    /// Read-only with respect to the library. Discovery reads container headers, and each
+    /// candidate's path is re-confined with [`confined_root_join`] — the same primitive a later
+    /// compile uses to open it — so a candidate whose canonical target escapes the root is dropped
+    /// with a `PathEscapesRoot` diagnostic instead of being offered (AC2).
+    pub fn scan_root(&self, root_id: &str) -> Result<LinkedRootScanV1, CheckpointPlanError> {
+        let roots = self.approved_roots()?;
+        let root = roots
+            .get(root_id)
+            .cloned()
+            .ok_or_else(|| CheckpointPlanError::UnknownRoot {
+                root_id: root_id.to_owned(),
+            })?;
+        let mut persisted: BTreeMap<String, LinkedCheckpointStatusV1> = BTreeMap::new();
+        for checkpoint_id in self.linked_checkpoint_ids_for_root(root_id)? {
+            let status = self.checkpoint_status(&checkpoint_id)?;
+            persisted.insert(status.relative_path.clone(), status);
+        }
+        if !root.path.is_dir() {
+            // An unavailable root has no candidates to offer and nothing to say about bytes: every
+            // compiled checkpoint under it is Needs Relink, whatever its last known state was.
+            let unmatched = persisted
+                .into_values()
+                .map(|status| LinkedCheckpointStatusV1 {
+                    state: LinkedCheckpointStateV1::NeedsRelink,
+                    ..status
+                })
+                .collect();
+            return Ok(LinkedRootScanV1 {
+                diagnostics: vec![CheckpointDiagnosticV1 {
+                    severity: CheckpointDiagnosticSeverityV1::Error,
+                    code: CheckpointDiagnosticCodeV1::SourceNotFound,
+                    relative_path: None,
+                    message: format!(
+                        "approved root {root_id:?} at {} is not available (unmounted or moved)",
+                        root.path.display()
+                    ),
+                }],
+                root,
+                available: false,
+                candidates: Vec::new(),
+                unmatched,
+            });
+        }
+        let discovery = discover_library_root(&root.path);
+        let mut diagnostics = discovery.diagnostics;
+        let mut candidates = Vec::with_capacity(discovery.candidates.len());
+        for candidate in discovery.candidates {
+            let checkpoint_id = linked_checkpoint_id(root_id, &candidate.relative_path);
+            // Re-confine on the exact path a compile would open, not on the discovery string.
+            if let Err(error) =
+                confined_root_join(&checkpoint_id, &root.path, &candidate.relative_path)
+            {
+                diagnostics.push(CheckpointDiagnosticV1 {
+                    severity: CheckpointDiagnosticSeverityV1::Error,
+                    code: CheckpointDiagnosticCodeV1::PathEscapesRoot,
+                    relative_path: Some(candidate.relative_path.clone()),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+            let status = persisted.remove(&candidate.relative_path);
+            candidates.push(LinkedCandidateV1 {
+                selectable: status
+                    .as_ref()
+                    .is_some_and(LinkedCheckpointStatusV1::is_selectable),
+                checkpoint_id,
+                candidate,
+                status,
+            });
+        }
+        let unmatched = persisted
+            .into_values()
+            .map(|status| match status.state {
+                // The scan did not see it, so whatever the per-checkpoint verdict was, the source
+                // is not where the plan says: rescan, not relink (the root itself is present).
+                LinkedCheckpointStateV1::Ready => LinkedCheckpointStatusV1 {
+                    state: LinkedCheckpointStateV1::NeedsRescan,
+                    detail: Some(
+                        "[checkpoint-plan:source-missing] the library scan no longer finds this \
+                         checkpoint under its approved root"
+                            .to_owned(),
+                    ),
+                    ..status
+                },
+                _ => status,
+            })
+            .collect();
+        Ok(LinkedRootScanV1 {
+            root,
+            available: true,
+            candidates,
+            unmatched,
+            diagnostics,
+        })
     }
 
     /// The live directory for an approved root id.

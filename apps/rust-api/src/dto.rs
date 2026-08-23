@@ -1161,6 +1161,16 @@ pub(crate) struct ModelImportRequest {
     pub(crate) source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) source_path: Option<String>,
+    /// Linked (in-place) ownership: the approved library root the checkpoint lives under
+    /// (epic 20398, sc-20635). Paired with [`Self::linked_relative_path`]; the two together are
+    /// the checkpoint's durable identity, and no absolute path is ever accepted or persisted (E6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_root_id: Option<String>,
+    /// The checkpoint's path relative to its approved root, `/`-separated. Confined by
+    /// `CheckpointPlanStore`: absolute, `..`-bearing and backslash-separated paths are refused,
+    /// and a path whose canonical target escapes the root is refused again at compile time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_relative_path: Option<String>,
     #[serde(default)]
     pub(crate) files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

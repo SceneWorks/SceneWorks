@@ -20,8 +20,10 @@ pub use retention::{
 };
 
 use crate::model_artifacts::{
-    ActiveArtifactLease, ArtifactLocation, ModelArtifactResolver, PromotionCandidate,
-    ResolvedModelArtifact,
+    ActiveArtifactLease, ArtifactAvailability, ArtifactCompleteness, ArtifactIdentity,
+    ArtifactLocation, ArtifactProvenance, ModelArtifactResolver, PromotionCandidate,
+    ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+    MODEL_ARTIFACT_CONTRACT_VERSION,
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -285,11 +287,59 @@ pub struct SourceVolumeObservation {
     pub observed_at: u64,
 }
 
+/// How an entry's bundle came to exist, and therefore what retention may assume about it.
+///
+/// The distinction is load-bearing exactly once, in [`retention`]'s eviction proof. A
+/// [`Self::SourceCopy`] entry is only evictable while the source library still holds a verified
+/// second copy of every byte — deleting it would otherwise destroy the user's only copy. A
+/// [`Self::Derived`] entry has no second copy anywhere by construction: it was COMPUTED from an
+/// input the cache does not hold, so demanding a second copy would make it permanently unevictable
+/// and the cache would grow without bound. Its safety property is the other one — it is
+/// reproducible from its input, and worthless without it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedCacheProduction {
+    /// Copied from a complete second copy in the configured source library.
+    #[default]
+    SourceCopy,
+    /// Computed by a producer (epic 20398 checkpoint derivatives: derived indexes, normalised
+    /// layouts, backend repacks).
+    Derived,
+}
+
+impl ResolvedCacheProduction {
+    /// Journals written before sc-20635 carry no `production` field and are all source copies, so
+    /// the default round-trips byte-for-byte and only derived entries widen the document.
+    fn is_source_copy(&self) -> bool {
+        *self == Self::SourceCopy
+    }
+
+    pub fn is_derived(&self) -> bool {
+        *self == Self::Derived
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedCacheMetadata {
     pub schema_version: u32,
     pub cache_key: String,
+    #[serde(
+        default,
+        skip_serializing_if = "ResolvedCacheProduction::is_source_copy"
+    )]
+    pub production: ResolvedCacheProduction,
+    /// For a derived entry, the logical input whose producer created this bundle — a checkpoint id
+    /// for epic-20398 derivatives.
+    ///
+    /// Deliberately NOT part of the cache key: a derivative is content-addressed, so two
+    /// checkpoints with byte-identical inputs share one entry and the second one is a cache hit
+    /// rather than a second copy. This field is lifecycle bookkeeping only, so a "forget this
+    /// checkpoint" action can reach the derivatives that were produced for it. Scoping a removal
+    /// this way can cost a checkpoint that was sharing the entry a re-production; it can never
+    /// lose data, because a derivative is reproducible from its input by definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
     pub artifact: ResolvedModelArtifact,
     pub source_configured_path: PathBuf,
     pub source_canonical_path: PathBuf,
@@ -351,6 +401,94 @@ pub enum ReservationOutcome {
     Acquired(Box<ResolvedCacheReservation>),
     AlreadyComplete(Box<ResolvedCacheMetadata>),
     Contended,
+}
+
+/// A bundle the cache will hold that no source library holds a second copy of, described BEFORE
+/// its bytes exist (epic 20398, sc-20635).
+///
+/// A [`PromotionCandidate`] carries a validated artifact because its bytes are already installed;
+/// a derivative's are not, so the plan carries only what the cache key is computed from — identity,
+/// closure and provenance — and the file digests are enriched from the staged bytes at publication,
+/// exactly as the copy path enriches them after copying. The key is therefore known before any work
+/// is done, which is what makes the cache lookup meaningful.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedArtifactPlan {
+    identity: ArtifactIdentity,
+    closure: ResolvedBundleClosure,
+    provenance: ArtifactProvenance,
+}
+
+impl DerivedArtifactPlan {
+    /// `members` is the full closure, with `size_bytes`/`sha256` left unset: the producer has not
+    /// written the bytes yet, and those fields are deliberately excluded from the cache key.
+    pub fn new(
+        identity: ArtifactIdentity,
+        members: Vec<ResolvedBundleMember>,
+    ) -> Result<Self, ResolvedCacheError> {
+        identity
+            .validate()
+            .map_err(|error| ResolvedCacheError::request(error.to_string()))?;
+        let closure = ResolvedBundleClosure::new(members)
+            .map_err(|error| ResolvedCacheError::request(error.to_string()))?;
+        Ok(Self {
+            provenance: ArtifactProvenance {
+                identity: identity.clone(),
+                fixed_artifact_tier: None,
+            },
+            identity,
+            closure,
+        })
+    }
+
+    pub fn identity(&self) -> &ArtifactIdentity {
+        &self.identity
+    }
+
+    pub fn closure(&self) -> &ResolvedBundleClosure {
+        &self.closure
+    }
+
+    /// The key this derivative will occupy. Computable with nothing on disk.
+    pub fn cache_key(&self) -> Result<String, ResolvedCacheError> {
+        self.artifact_at(Path::new("/"), ArtifactState::Pending)
+            .cache_key()
+            .map_err(|error| ResolvedCacheError::request(error.to_string()))
+    }
+
+    /// The artifact document for this plan rooted at `root`.
+    ///
+    /// While the producer is still running the bundle genuinely does not exist, so the pending form
+    /// says so (`Incomplete`/`Missing`). Neither field is part of the cache key, so the pending and
+    /// published forms occupy the same entry.
+    fn artifact_at(&self, root: &Path, state: ArtifactState) -> ResolvedModelArtifact {
+        let (completeness, availability) = match state {
+            ArtifactState::Pending => (
+                ArtifactCompleteness::Incomplete,
+                ArtifactAvailability::Missing,
+            ),
+            ArtifactState::Published => (
+                ArtifactCompleteness::Complete,
+                ArtifactAvailability::Available,
+            ),
+        };
+        ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: self.identity.clone(),
+            location: ArtifactLocation::ResolvedLocal {
+                root: root.to_path_buf(),
+            },
+            closure: self.closure.clone(),
+            provenance: self.provenance.clone(),
+            completeness,
+            availability,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArtifactState {
+    Pending,
+    Published,
 }
 
 #[derive(Clone)]
@@ -736,6 +874,55 @@ impl ResolvedCacheStore {
         logical_model_owner: &str,
     ) -> Result<ReservationOutcome, ResolvedCacheError> {
         validate_candidate(candidate)?;
+        self.reserve_inner(
+            &candidate.cache_key,
+            source_configured_path,
+            logical_model_owner,
+            ResolvedCacheProduction::SourceCopy,
+            None,
+            |_staging| candidate.artifact.clone(),
+        )
+    }
+
+    /// Reserve an entry for a bundle that will be PRODUCED rather than copied (sc-20635).
+    ///
+    /// Same entry, same locks, same journal, same staging directory, same atomic publication and
+    /// the same receipt as [`Self::reserve`] — the only differences are that no source-library
+    /// second copy is required to exist and the entry records
+    /// [`ResolvedCacheProduction::Derived`] so retention judges it by the right rule.
+    ///
+    /// `source_configured_path` is the input the derivative was derived FROM (for a linked
+    /// checkpoint, its approved library root). It must exist: a derivative of an absent input is
+    /// not something to start producing, and recording it is what lets source-lifecycle
+    /// reconciliation reach the derivative when that input goes away.
+    pub fn reserve_derived(
+        &self,
+        plan: &DerivedArtifactPlan,
+        source_configured_path: &Path,
+        derived_from: &str,
+        logical_model_owner: &str,
+    ) -> Result<ReservationOutcome, ResolvedCacheError> {
+        let cache_key = plan.cache_key()?;
+        self.reserve_inner(
+            &cache_key,
+            source_configured_path,
+            logical_model_owner,
+            ResolvedCacheProduction::Derived,
+            Some(derived_from.to_owned()),
+            |staging| plan.artifact_at(staging, ArtifactState::Pending),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_inner(
+        &self,
+        cache_key: &str,
+        source_configured_path: &Path,
+        logical_model_owner: &str,
+        production: ResolvedCacheProduction,
+        derived_from: Option<String>,
+        artifact_for_staging: impl FnOnce(&Path) -> ResolvedModelArtifact,
+    ) -> Result<ReservationOutcome, ResolvedCacheError> {
         let logical_model_owner = validate_model_owner(logical_model_owner)?.to_owned();
         let source_canonical_path =
             std::fs::canonicalize(source_configured_path).map_err(|error| {
@@ -747,7 +934,7 @@ impl ResolvedCacheStore {
         if !source_canonical_path.is_dir() {
             return Err(ResolvedCacheError::new("source root is not a directory"));
         }
-        let digest = cache_key_digest(&candidate.cache_key)?;
+        let digest = cache_key_digest(cache_key)?;
         let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
         match FileExt::try_lock_exclusive(&artifact_lock) {
             Ok(()) => {}
@@ -756,7 +943,7 @@ impl ResolvedCacheStore {
             }
             Err(error) => return Err(error.into()),
         }
-        let entry = self.entry_path(&candidate.cache_key)?;
+        let entry = self.entry_path(cache_key)?;
         ensure_managed_entry_dir(&entry)?;
         let _metadata_lock = self.lock_metadata(&digest)?;
         let existing = match self.read_metadata_unlocked(&digest)? {
@@ -806,8 +993,10 @@ impl ResolvedCacheStore {
         let now = now_seconds()?;
         let mut metadata = ResolvedCacheMetadata {
             schema_version: RESOLVED_CACHE_STORE_VERSION,
-            cache_key: candidate.cache_key.clone(),
-            artifact: candidate.artifact.clone(),
+            cache_key: cache_key.to_owned(),
+            production,
+            derived_from,
+            artifact: artifact_for_staging(&staging),
             source_configured_path: source_configured_path.to_path_buf(),
             source_canonical_path,
             entry_relative_path: PathBuf::from("entries").join(&digest),
@@ -835,7 +1024,7 @@ impl ResolvedCacheStore {
         self.write_metadata_unlocked(&digest, &metadata)?;
         let record = SessionRecord {
             schema_version: RESOLVED_CACHE_STORE_VERSION,
-            cache_key: candidate.cache_key.clone(),
+            cache_key: cache_key.to_owned(),
             operation_id: reservation_id.clone(),
             model_owner: logical_model_owner.clone(),
             kind: SessionRecordKind::Reservation,
@@ -845,7 +1034,7 @@ impl ResolvedCacheStore {
         Ok(ReservationOutcome::Acquired(Box::new(
             ResolvedCacheReservation {
                 store: self.clone(),
-                cache_key: candidate.cache_key.clone(),
+                cache_key: cache_key.to_owned(),
                 digest,
                 reservation_id,
                 reservation_owner: logical_model_owner,
@@ -1683,6 +1872,52 @@ impl ResolvedCacheReservation {
         self.record_complete(artifact)
     }
 
+    /// Publish a bundle the producer wrote into [`Self::staging_path`] (sc-20635).
+    ///
+    /// The producer declares its outputs up front in `plan`; this reads back exactly those staged
+    /// files, enriches the closure with their measured size and SHA-256, and hands the result to
+    /// the same [`Self::publish_staged`] the copy path uses — so the artifact is re-validated
+    /// against the bytes on disk, its cache key is proven unchanged, the tree is fsynced, and the
+    /// staging directory is atomically renamed into place.
+    ///
+    /// Every way a producer can leave a partial or wrong bundle refuses here rather than being
+    /// published: a declared file it did not write, a declared path that is a symlink or a
+    /// directory, or a file it wrote that the plan does not declare (which would leave bytes the
+    /// entry's own accounting never counts and retention would over-reclaim against).
+    pub(crate) fn publish_produced(
+        self,
+        plan: &DerivedArtifactPlan,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        let mut artifact = plan.artifact_at(&self.staging_path, ArtifactState::Published);
+        let mut declared = BTreeSet::new();
+        for member in &mut artifact.closure.members {
+            for file in &mut member.files {
+                let relative = member.destination.join(&file.relative_path);
+                let path = self.staging_path.join(&relative);
+                let (size_bytes, sha256) = measure_produced_file(&path)?;
+                file.size_bytes = Some(size_bytes);
+                file.sha256 = Some(sha256);
+                declared.insert(relative);
+            }
+        }
+        artifact.closure = ResolvedBundleClosure::new(artifact.closure.members)
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+        reject_undeclared_produced_files(&self.staging_path, &declared)?;
+        self.publish_staged(artifact)
+    }
+
+    /// Abandon a reservation whose producer failed: drop whatever it staged and record the entry
+    /// as interrupted, so the next attempt starts from an empty staging directory rather than
+    /// inheriting a half-written one.
+    pub(crate) fn discard(mut self) -> Result<(), ResolvedCacheError> {
+        if self.staging_path.exists() {
+            let staging_root = self.store.root().join("staging");
+            remove_managed_tree(&self.staging_path, &staging_root)?;
+        }
+        self.mark_interrupted()?;
+        Ok(())
+    }
+
     /// Marks only this still-owned reservation interrupted. The private reservation/session
     /// identities and held artifact lock prevent key-only or cross-owner invalidation.
     pub fn mark_interrupted(&mut self) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
@@ -2139,6 +2374,122 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
         || fs2_contended.is_some() && error.raw_os_error() == fs2_contended
 }
 
+/// Everything [`ResolvedModelArtifact::validate`] proves except what needs the bundle to exist.
+///
+/// Used for exactly one shape: a derived entry still being produced. It must be `Incomplete` /
+/// `Missing` — a pending derivative that claims to be complete is the shape a stale journal would
+/// have, and admitting it would let an unfinished bundle be treated as loadable.
+fn validate_pending_derivative_shape(
+    artifact: &ResolvedModelArtifact,
+) -> Result<(), ResolvedCacheError> {
+    let refuse = |message: &str| ResolvedCacheError::new(message.to_owned());
+    if artifact.schema_version != MODEL_ARTIFACT_CONTRACT_VERSION {
+        return Err(refuse(
+            "pending derivative has an unsupported contract version",
+        ));
+    }
+    artifact
+        .identity
+        .validate()
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    artifact
+        .provenance
+        .identity
+        .validate()
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    if artifact.identity != artifact.provenance.identity {
+        return Err(refuse("pending derivative identity and provenance differ"));
+    }
+    if artifact.completeness != ArtifactCompleteness::Incomplete
+        || artifact.availability != ArtifactAvailability::Missing
+    {
+        return Err(refuse(
+            "pending derivative must be recorded as incomplete and missing until it publishes",
+        ));
+    }
+    if !matches!(artifact.location, ArtifactLocation::ResolvedLocal { .. }) {
+        return Err(refuse("pending derivative is not app-owned"));
+    }
+    let canonical = ResolvedBundleClosure::new(artifact.closure.members.clone())
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    if canonical != artifact.closure {
+        return Err(refuse(
+            "pending derivative closure is not in canonical form",
+        ));
+    }
+    Ok(())
+}
+
+/// Measure one file a producer staged. Never follows a link and never accepts anything but a
+/// regular file, so a producer cannot publish bytes that live outside the staging directory.
+fn measure_produced_file(path: &Path) -> Result<(u64, String), ResolvedCacheError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ResolvedCacheError::new(format!(
+            "produced derivative file {} is missing: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+        || !metadata.is_file()
+    {
+        return Err(ResolvedCacheError::new(format!(
+            "produced derivative file {} is linked, reparsed, or not a file",
+            path.display()
+        )));
+    }
+    let mut file = File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut size_bytes = 0_u64;
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        size_bytes = size_bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| ResolvedCacheError::new("produced derivative byte count overflow"))?;
+    }
+    if size_bytes != metadata.len() {
+        return Err(ResolvedCacheError::new(format!(
+            "produced derivative file {} changed while it was being measured",
+            path.display()
+        )));
+    }
+    Ok((size_bytes, format!("sha256:{:x}", digest.finalize())))
+}
+
+/// Refuse a staged tree holding anything the plan did not declare.
+fn reject_undeclared_produced_files(
+    staging: &Path,
+    declared: &BTreeSet<PathBuf>,
+) -> Result<(), ResolvedCacheError> {
+    let mut stack = vec![staging.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(staging).map_err(|_| {
+                ResolvedCacheError::new("produced derivative file escaped its staging directory")
+            })?;
+            if !declared.contains(relative) {
+                return Err(ResolvedCacheError::new(format!(
+                    "produced derivative staged an undeclared file {}",
+                    relative.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_candidate(candidate: &PromotionCandidate) -> Result<(), ResolvedCacheError> {
     candidate
         .artifact
@@ -2180,15 +2531,28 @@ fn validate_metadata_shape_with(
         .artifact
         .cache_key()
         .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
-    match verification {
-        ContentVerification::RehashEveryFile => metadata
-            .artifact
-            .validate()
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
-        ContentVerification::PathsAndSizesOnly => {
-            artifact_without_content_hashes(&metadata.artifact)
+    // A derived entry that has not published yet has no bytes anywhere — that is what its producer
+    // is running to create, and an interrupted one had its staging tree removed — so there is
+    // nothing on disk for `validate` to read. Its identity, provenance agreement and canonical
+    // closure are still checked (and so, below, is its cache key), and the pending shape check
+    // requires it to say `Incomplete`/`Missing`, so an unfinished bundle can never be mistaken for
+    // a loadable one. The exemption is exactly as narrow as the fact: only Derived, and only while
+    // the entry is not Complete.
+    let is_pending_derivative =
+        metadata.production.is_derived() && metadata.state != ResolvedCacheEntryState::Complete;
+    if is_pending_derivative {
+        validate_pending_derivative_shape(&metadata.artifact)?;
+    } else {
+        match verification {
+            ContentVerification::RehashEveryFile => metadata
+                .artifact
                 .validate()
-                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
+            ContentVerification::PathsAndSizesOnly => {
+                artifact_without_content_hashes(&metadata.artifact)
+                    .validate()
+                    .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+            }
         }
     }
     let reservation_shape_is_valid = match metadata.state {

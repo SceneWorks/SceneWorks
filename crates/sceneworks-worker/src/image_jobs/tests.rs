@@ -21333,3 +21333,192 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
     );
     assert_eq!(legacy_sha, plan_sha);
 }
+
+/// End-to-end reachability (sc-20635, AC1): approve a library root → compile a linked checkpoint →
+/// let the MODEL-IMPORT stamp build the manifest entry → `prepare_image_route` selects
+/// `ImageRoute::CheckpointPlan` and hands the handler the plan's own weights.
+///
+/// This is the link sc-20634's review found missing: `approve_root`/`compile_linked` had no
+/// non-test caller, so a compiled plan was a file on disk nothing could select. The entry here is
+/// NOT hand-written — it is exactly what `model_jobs::linked_checkpoint_manifest_entry` produces
+/// for this compile, which is what `run_model_import_job` upserts into `user.models.jsonc`.
+///
+/// Failing mutation: delete the `entry.insert("importPlan", …)` line in
+/// `linked_checkpoint_manifest_entry` and this goes red — `resolve_image_route` returns `None`
+/// (nothing claims the entry) instead of `CheckpointPlan`.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_approved_root_becomes_a_selectable_plan_backed_model_through_the_import_stamp() {
+    let fx = CheckpointPlanFixture::new("reachability", true);
+    write_tiny_safetensors(
+        &fx.library_dir.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let compiled = fx
+        .store
+        .compile_linked(&fx.root_id, "kreamania.safetensors")
+        .expect("the linked checkpoint compiles");
+
+    // The manifest entry the API queued, before the worker's stamp: no plan, no install path.
+    let queued: JsonObject = json!({
+        "id": "linked_kreamania",
+        "name": "kreamania",
+        "type": "image",
+        "catalogScope": "user",
+        "source": {
+            "provider": "linked-library",
+            "rootId": fx.root_id,
+            "relativePath": "kreamania.safetensors",
+        },
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&queued),
+        None,
+        "SANITY: the queued entry is not yet plan-backed"
+    );
+
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled);
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+        Some(compiled.checkpoint_id.as_str()),
+        "the import stamps the persisted identity, which is the ONLY selection discriminator"
+    );
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("krea_2"),
+        "the compiled plan's family is stamped so the catalog can route it"
+    );
+    assert!(
+        entry
+            .get("paths")
+            .and_then(Value::as_object)
+            .and_then(|paths| paths.get("model"))
+            .is_none(),
+        "a linked entry carries no install path: nothing was installed"
+    );
+    // Identity is rootId + relativePath, never an absolute path (E6).
+    let serialized = serde_json::to_string(&entry).unwrap();
+    assert!(
+        !serialized.contains(fx.library_dir.to_str().unwrap()),
+        "no absolute library path may reach the manifest entry: {serialized}"
+    );
+
+    let mut payload = json!({
+        "projectId": "p",
+        "model": "linked_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+    });
+    payload["modelManifestEntry"] = Value::Object(entry);
+    let request = request(payload);
+
+    let prepared = prepare_image_route(&request, &fx.settings)
+        .expect("route preparation succeeds")
+        .expect("a plan-backed entry is claimed by a route");
+    assert_eq!(
+        prepared.kind(),
+        ImageRoute::CheckpointPlan,
+        "ROUTE EVIDENCE: an approved root's compiled checkpoint is selectable end to end"
+    );
+    let PreparedImageRoute::CheckpointPlan(sources) = prepared else {
+        panic!("the plan route must carry its own prepared sources");
+    };
+    assert_eq!(sources.checkpoint_id, compiled.checkpoint_id);
+    assert_eq!(
+        sources.primary.loader_path(),
+        fx.library_dir.join("kreamania.safetensors").as_path(),
+        "the handler loads the LINKED file in place; nothing was copied"
+    );
+}
+
+/// AC1 lifecycle → routing: a compiled checkpoint whose library moved stops being selectable with
+/// its typed refusal, and a relink of the SAME root id makes it selectable again without
+/// recompiling. The manifest entry never changes: it carries the identity, not the path.
+#[cfg(target_os = "macos")]
+#[test]
+fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_entry() {
+    let fx = CheckpointPlanFixture::new("relink-route", true);
+    write_tiny_safetensors(
+        &fx.library_dir.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let compiled = fx
+        .store
+        .compile_linked(&fx.root_id, "kreamania.safetensors")
+        .unwrap();
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(
+        json!({"id": "linked_kreamania", "catalogScope": "user", "type": "image"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        &compiled,
+    );
+    let mut payload = json!({
+        "projectId": "p",
+        "model": "linked_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+    });
+    payload["modelManifestEntry"] = Value::Object(entry);
+    let request = request(payload);
+    assert_eq!(
+        prepare_image_route(&request, &fx.settings)
+            .unwrap()
+            .map(|route| route.kind()),
+        Some(ImageRoute::CheckpointPlan)
+    );
+
+    // The user moves the library.
+    let moved = tempfile::Builder::new()
+        .prefix(&format!("plan-route-moved-{}-", std::process::id()))
+        .tempdir()
+        .unwrap();
+    let moved_dir = std::fs::canonicalize(moved.path()).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        moved_dir.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    std::fs::remove_file(fx.library_dir.join("kreamania.safetensors")).unwrap();
+
+    // Now the route refuses LOUDLY with the plan store's typed diagnostic rather than silently
+    // falling through to another lane or the stub.
+    let error = match prepare_image_route(&request, &fx.settings) {
+        Err(error) => error.to_string(),
+        Ok(route) => panic!(
+            "a plan-backed entry whose source is gone is a refusal, not a route miss (got {:?})",
+            route.map(|route| route.kind())
+        ),
+    };
+    assert!(
+        error.contains("[checkpoint-plan:source-missing]"),
+        "{error}"
+    );
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        sceneworks_core::checkpoint_plan_store::LinkedCheckpointStateV1::NeedsRescan
+    );
+
+    // Relink the SAME root id at the library's new home: selectable again, same entry, no
+    // recompile, and the plan's layer now resolves under the new directory.
+    fx.store.relink_root(&fx.root_id, &moved_dir).unwrap();
+    let prepared = prepare_image_route(&request, &fx.settings)
+        .unwrap()
+        .expect("the relinked checkpoint is selectable again");
+    assert_eq!(prepared.kind(), ImageRoute::CheckpointPlan);
+    let PreparedImageRoute::CheckpointPlan(sources) = prepared else {
+        panic!("the plan route must carry its own prepared sources");
+    };
+    assert_eq!(
+        sources.primary.loader_path(),
+        moved_dir.join("kreamania.safetensors").as_path()
+    );
+}

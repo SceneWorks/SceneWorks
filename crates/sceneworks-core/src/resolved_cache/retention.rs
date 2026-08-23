@@ -829,6 +829,13 @@ impl ResolvedCacheStore {
             }
         };
         let source_proof = match &scanned {
+            // A DERIVED bundle has no source-library second copy to prove — it was computed, not
+            // copied (sc-20635). Demanding one would hold every derivative forever and the cache
+            // would grow past its own limit. What makes it safe to drop is the other property:
+            // it is reproducible from its input and worthless without it. Every OTHER eviction
+            // guard still applies below in full — completeness, pin, LRU freshness, the exclusive
+            // artifact lock that an active lease holds shared, and the shape re-validation.
+            Some(scanned) if scanned.production.is_derived() => None,
             Some(scanned)
                 if scanned.state == ResolvedCacheEntryState::Complete
                     && !scanned.effective_pin
@@ -892,20 +899,26 @@ impl ResolvedCacheStore {
         }
         // The unlocked proof is only usable if the entry is byte-for-byte the one it was taken
         // against; any journal write in between invalidates it.
-        let snapshot = match source_proof {
-            Some(Ok(snapshot))
-                if scanned
-                    .as_ref()
-                    .is_some_and(|scanned| scanned.updated_at == metadata.updated_at) =>
-            {
-                snapshot
-            }
-            Some(Err(detail)) => return retained(RetentionHold::SourceUnverified, Some(detail)),
-            _ => {
-                return retained(
-                    RetentionHold::Fresh,
-                    Some("entry changed while its source was being verified".to_owned()),
-                );
+        let snapshot = if metadata.production.is_derived() {
+            None
+        } else {
+            match source_proof {
+                Some(Ok(snapshot))
+                    if scanned
+                        .as_ref()
+                        .is_some_and(|scanned| scanned.updated_at == metadata.updated_at) =>
+                {
+                    Some(snapshot)
+                }
+                Some(Err(detail)) => {
+                    return retained(RetentionHold::SourceUnverified, Some(detail))
+                }
+                _ => {
+                    return retained(
+                        RetentionHold::Fresh,
+                        Some("entry changed while its source was being verified".to_owned()),
+                    );
+                }
             }
         };
         if let Err(error) = validate_complete_metadata_inner(
@@ -915,8 +928,10 @@ impl ResolvedCacheStore {
         ) {
             return retained(RetentionHold::RecoveryCandidate, Some(error.to_string()));
         }
-        if let Err(detail) = revalidate_source_snapshot(&snapshot) {
-            return retained(RetentionHold::SourceUnverified, Some(detail));
+        if let Some(snapshot) = &snapshot {
+            if let Err(detail) = revalidate_source_snapshot(snapshot) {
+                return retained(RetentionHold::SourceUnverified, Some(detail));
+            }
         }
         self.write_eviction_marker(
             &digest,
