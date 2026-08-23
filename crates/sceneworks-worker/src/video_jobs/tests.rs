@@ -118,6 +118,41 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         Some("enhancer:uncensored"),
         "a multi-reference request must not mint the single-reference receipt"
     );
+
+    input.conditioning = vec![
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: -1,
+            strength: 1.0,
+        },
+    ];
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some(
+            "enhancer:uncensored+keyframe:first:image:768x512:frame:0:strength:3f800000+keyframe:last:image:768x512:frame:-1:strength:3f800000"
+        ),
+        "the ordered first/last carrier, shape, latent anchors, and independent strengths must reach the evidence identity"
+    );
+
+    input.conditioning.swap(0, 1);
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored"),
+        "reordered keyframes must not mint the ordered first/last receipt"
+    );
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan

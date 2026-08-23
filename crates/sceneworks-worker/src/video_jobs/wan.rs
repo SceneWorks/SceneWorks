@@ -1515,6 +1515,35 @@ pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
                 strength.to_bits()
             ));
         }
+        let keyframes = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::Keyframe {
+                    image,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((image, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(first, 0, first_strength), (last, -1, last_strength)] = keyframes.as_slice() {
+            overlays.push(format!(
+                "keyframe:first:image:{}x{}:frame:0:strength:{:08x}",
+                first.width,
+                first.height,
+                first_strength.to_bits()
+            ));
+            overlays.push(format!(
+                "keyframe:last:image:{}x{}:frame:-1:strength:{:08x}",
+                last.width,
+                last.height,
+                last_strength.to_bits()
+            ));
+        }
     }
     (!overlays.is_empty()).then(|| overlays.join("+"))
 }
