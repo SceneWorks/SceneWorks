@@ -333,7 +333,7 @@
       "required": [
         "freeBytes", "persistentMissingBytes", "nonModelReserveBytes", "nonModelPaths",
         "legacyNaiveLinkLengthSourceBytes", "reviewedAllAtOnceSourceBytes",
-        "preHydrationJitSourcePeakBytes", "reviewedJitSourcePeakBytes",
+        "reviewedJitSourcePeakBytes",
         "logicalSourceBytes", "allAtOnceSourceBytes",
         "allAtOnceRequiredBytes", "peakOrdinal", "peakArtifactIds", "peakStagedBytes",
         "peakSidecarReserveBytes", "peakModelAndSidecarBytes", "peakRequiredAdditionalBytes", "admitted", "cells"

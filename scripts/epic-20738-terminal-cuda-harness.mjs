@@ -2173,7 +2173,36 @@ async function validateSparseRecoveryCacheEvidence(evidenceRoot, legacyProfile, 
   for (const filename of ["cache-preflight-initial.json", "cache-preflight.json"]) {
     const file = path.join(evidenceRoot, filename);
     const document = JSON.parse(await readFile(file, "utf8"));
-    validateCachePreflightEvidence(document, {
+    validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
+    if (!document.diskPlan || Object.hasOwn(document.diskPlan, "preHydrationJitSourcePeakBytes")) {
+      fail(`sparse recovery ${filename} does not have the exact archived legacy disk-plan shape`);
+    }
+    const projectedDiskPlan = estimateJitDiskPlan(
+      document.lifetimePlan,
+      document.diskPlan.freeBytes,
+      document.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0),
+      document.diskPlan.nonModelPaths,
+      LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
+    );
+    const expectedLegacyDiskPlan = structuredClone(projectedDiskPlan);
+    delete expectedLegacyDiskPlan.preHydrationJitSourcePeakBytes;
+    expectedLegacyDiskPlan.reviewedJitSourcePeakBytes = PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES;
+    for (const cell of expectedLegacyDiskPlan.cells) {
+      cell.requiredAdditionalBytes = Math.max(
+        cell.modelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
+        PRE_HYDRATION_FREE_FLOOR_BYTES,
+      );
+    }
+    expectedLegacyDiskPlan.peakRequiredAdditionalBytes = Math.max(
+      expectedLegacyDiskPlan.peakModelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
+      PRE_HYDRATION_FREE_FLOOR_BYTES,
+    );
+    expectedLegacyDiskPlan.admitted = expectedLegacyDiskPlan.freeBytes
+      >= expectedLegacyDiskPlan.peakRequiredAdditionalBytes;
+    if (JSON.stringify(document.diskPlan) !== JSON.stringify(expectedLegacyDiskPlan)) {
+      fail(`sparse recovery ${filename} archived legacy disk plan drifted`);
+    }
+    validateCachePreflightEvidence({ ...document, diskPlan: projectedDiskPlan }, {
       remainingArtifactIds: expectedArtifactIds,
       artifactExpectedFiles,
       downloadEvidenceSha256: LEGACY_DOWNLOAD_EVIDENCE_SHA256,
@@ -3120,6 +3149,11 @@ export function validateCachePreflightEvidence(document, {
   derivedSidecarRoot, missingStore, expectedNonModelPaths, profile, executionOrdinals = null,
 }) {
   validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
+  if (document.diskPlan
+    && document.diskPlan.preHydrationJitSourcePeakBytes
+      !== PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES) {
+    fail("current cache preflight disk plan omitted or drifted from the pre-hydration JIT peak");
+  }
   if (document.profile !== profile.profile
     || document.downloadEvidenceSha256 !== downloadEvidenceSha256
     || document.sourceCacheRoot !== guard.cacheRoot
