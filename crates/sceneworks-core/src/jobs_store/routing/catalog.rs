@@ -813,11 +813,11 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("z_image", true, true, false, false, true),
     // `z_image_edit` (epic 3529 / sc-3923): MLX-only edit id on Turbo weights.
     ModelCaps::new("z_image_edit", true, false, false, false, false),
-    // FLUX.1's exact packed q4/q8 resolver and receipt plumbing are staged by sc-20742, but product
-    // admission remains false until the terminal CUDA campaign proves those cells. Preserve the
-    // existing dense LoRA/LoKr route; packed-plus-adapter remains independently unsupported.
-    ModelCaps::new("flux_schnell", true, true, false, true, false),
-    ModelCaps::new("flux_dev", true, true, false, true, false),
+    // sc-20969: terminal-CUDA acceptance admits the reviewed packaged q4/q8 FLUX.1 routes. Keep
+    // adapter-on-packed independently fail-closed: the established dense LoRA/LoKr route remains,
+    // but a packed tier plus adapter does not become admissible through this promotion.
+    ModelCaps::new("flux_schnell", true, true, true, true, false),
+    ModelCaps::new("flux_dev", true, true, true, true, false),
     // Base `qwen_image` candle txt2img is a turnkey packed-quant family (sc-8669 wired the q4/q8/bf16
     // subdirs into `STANDARD_TIER_MODELS`; sc-10969 measured the tiers), so a tier-select `mlxQuantize`
     // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
@@ -899,14 +899,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // PuLID-FLUX on FLUX.1-dev (sc-3344): `character_image` with a reference face runs through native
     // MLX or the bespoke `pulid_flux_candle_eligible` lane, not the plain txt2img gate.
     ModelCaps::new("pulid_flux_dev", true, false, false, false, false),
-    // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). The packed q4/q8 resolver and
-    // exact-tier refusal plumbing are staged by sc-20741, but product admission remains false until
-    // the epic-end CUDA evidence phase proves the published tiers. Preserve the existing dense
-    // LoRA/LoKr lane; a later evidence-backed promotion may set `candle_quant` while leaving
-    // `candle_quant_lora` false because adapter-on-packed is independently unsupported.
-    ModelCaps::new("chroma1_hd", true, true, false, true, false),
-    ModelCaps::new("chroma1_base", true, true, false, true, false),
-    ModelCaps::new("chroma1_flash", true, true, false, true, false),
+    // sc-20969: terminal-CUDA acceptance admits the reviewed packaged q4/q8 Chroma routes. As with
+    // FLUX.1, dense LoRA/LoKr is preserved while packed tier plus adapter stays independently
+    // fail-closed.
+    ModelCaps::new("chroma1_hd", true, true, true, true, false),
+    ModelCaps::new("chroma1_base", true, true, true, true, false),
+    ModelCaps::new("chroma1_flash", true, true, true, true, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
     //
     // sc-14249 (epic 9083): `candle_quant = true` across the whole family. `candle-gen-sensenova`
@@ -2300,6 +2298,11 @@ mod tests {
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
+        "flux_schnell",
+        "flux_dev",
+        "chroma1_hd",
+        "chroma1_base",
+        "chroma1_flash",
         // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
         // the candle txt2img lane, so a tier-select stays on candle. Qwen now appears in the combined
         // quant+adapter list above.

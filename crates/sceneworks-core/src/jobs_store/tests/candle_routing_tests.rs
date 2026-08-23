@@ -1184,7 +1184,7 @@ fn flux1_lora_stays_on_candle() {
 }
 
 #[test]
-fn flux1_packed_tier_routing_remains_staged_and_fail_closed() {
+fn flux1_packed_tier_routing_admits_exact_product_tiers_and_keeps_boundaries_closed() {
     for model in ["flux_schnell", "flux_dev"] {
         assert!(
             image_request_candle_eligible(
@@ -1200,13 +1200,19 @@ fn flux1_packed_tier_routing_remains_staged_and_fail_closed() {
                 "advanced": { "mlxQuantize": bits }
             }));
             assert!(
-                !image_request_candle_eligible(model, &payload),
-                "{model} q{bits} must remain fail-closed before terminal CUDA evidence"
+                image_request_candle_eligible(model, &payload),
+                "{model} q{bits} terminal product package must route to Candle"
             );
             assert_eq!(
                 candle_image_first_refusal(model, &payload),
-                Some(CandleImageRefusal::QuantTier)
+                None,
+                "{model} q{bits} must have no Candle routing refusal"
             );
+            assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "advanced": { "mlxQuantize": bits }
+            }))));
         }
 
         // The hosted FLUX.1 Candle surface has only q4/q8. Do not reinterpret a dense/q6 or
@@ -1240,14 +1246,14 @@ fn flux1_packed_tier_routing_remains_staged_and_fail_closed() {
                 assert!(!image_request_candle_eligible(model, &packed_adapter));
                 assert_eq!(
                     candle_image_first_refusal(model, &packed_adapter),
-                    Some(CandleImageRefusal::QuantTier),
-                    "{model} must not launder staged q{bits}+{network_type} into its dense adapter lane"
+                    Some(CandleImageRefusal::QuantLoraCombination),
+                    "{model} must not launder admitted q{bits}+{network_type} into its dense adapter lane"
                 );
             }
         }
     }
 
-    // True V2 remains the flat BF16 convert-at-install route. Promoting FLUX.1 must not make
+    // True V2 remains the flat BF16 convert-at-install route. Admitting FLUX.1 must not make
     // the similarly named FLUX.2 variant look packed-tier capable.
     for bits in [4, 8] {
         let payload = object(json!({
@@ -1565,11 +1571,10 @@ fn boogu_base_and_turbo_img2img_route_to_candle() {
 fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
     // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
     // explicit `advanced.mlxQuantize > 0` request away rather than silently running dense. Chroma's
-    // resolver plumbing is staged, but its product catalog stays in this fail-closed class until the
-    // terminal CUDA evidence phase promotes the exact q4/q8 cells.
+    // exact published q4/q8 packages are the reviewed product exception: each routes to Candle.
     for model in ["chroma1_base", "chroma1_flash", "chroma1_hd"] {
         for bits in [4, 8] {
-            assert!(!image_request_candle_eligible(
+            assert!(image_request_candle_eligible(
                 model,
                 &object(json!({ "advanced": { "mlxQuantize": bits } }))
             ));
@@ -1600,19 +1605,23 @@ fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
 }
 
 #[test]
-fn chroma_packed_tiers_remain_staged_while_dense_adapters_stay_on_candle() {
-    // sc-20741 stages the exact q4/q8 and quant-plus-adapter refusal plumbing without advertising an
-    // unmeasured product cell. All three ids therefore continue to refuse every positive quant
-    // request, while their pre-existing dense LoRA/LoKr path remains available.
+fn chroma_packed_tiers_admit_exact_product_routes_while_adapters_stay_closed() {
+    // sc-20969 admits exactly Chroma's q4/q8 product packages. Their existing dense LoRA/LoKr
+    // route remains available, but adapter-on-packed remains a distinct rejected composition.
     for model in ["chroma1_base", "chroma1_flash", "chroma1_hd"] {
         for bits in [4, 8] {
             assert!(
-                !image_request_candle_eligible(
+                image_request_candle_eligible(
                     model,
                     &object(json!({ "prompt": "a red fox", "advanced": { "mlxQuantize": bits } }))
                 ),
-                "{model} q{bits} must remain fail-closed before terminal evidence"
+                "{model} q{bits} terminal product package must route to Candle"
             );
+            assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "advanced": { "mlxQuantize": bits }
+            }))));
         }
 
         assert!(
@@ -1636,7 +1645,7 @@ fn chroma_packed_tiers_remain_staged_while_dense_adapters_stay_on_candle() {
             );
         }
 
-        // Adding an adapter must not launder a staged packed tier into the dense adapter lane.
+        // Adding an adapter must not launder an admitted packed tier into the dense adapter lane.
         for bits in [4, 8] {
             for network_type in ["lora", "lokr"] {
                 assert!(
@@ -2743,11 +2752,11 @@ fn candle_video_tier_selects_match_published_platform_tiers() {
         &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 4 } }))
     ));
     assert!(
-        !video_request_candle_eligible(
+        video_request_candle_eligible(
             "ltx_2_3",
             &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
         ),
-        "the source-ready LTX q8 resolver must remain behind the terminal capability-fact gate"
+        "terminal acceptance admits the exact packed LTX q8 product route"
     );
     let q8_job = video_generate_job(json!({
         "model": "ltx_2_3",
@@ -2755,8 +2764,8 @@ fn candle_video_tier_selects_match_published_platform_tiers() {
         "advanced": { "mlxQuantize": 8 }
     }));
     assert!(
-        !video_job_is_candle_eligible(&q8_job),
-        "the production job route must keep LTX q8 fail-closed until the terminal campaign"
+        video_job_is_candle_eligible(&q8_job),
+        "the production job route must admit the exact LTX q8 product package"
     );
     for invalid_tier in [
         json!(0),
@@ -2824,8 +2833,8 @@ fn candle_ltx_replace_is_model_native_and_requires_its_ic_adapter() {
     let mut q8_shape = object(shape.clone());
     q8_shape.insert("advanced".into(), json!({ "mlxQuantize": 8 }));
     assert!(
-        !ltx_replace_candle_eligible("ltx_2_3", &q8_shape),
-        "q8 replacement must remain behind the same terminal capability-fact gate"
+        ltx_replace_candle_eligible("ltx_2_3", &q8_shape),
+        "terminal acceptance admits q8 on LTX's native replacement route too"
     );
     let mut q4_shape = object(shape.clone());
     q4_shape.insert("advanced".into(), json!({ "mlxQuantize": 4 }));
@@ -3023,7 +3032,7 @@ fn person_replace_job(payload: Value) -> JobSnapshot {
 }
 
 #[test]
-fn scail2_candle_separates_source_ready_tiers_from_product_acceptance() {
+fn scail2_candle_admits_exact_product_tiers_and_rejects_packed_adapters() {
     // Standalone character animation: scail2_14b + animate_character + a reference + a driving clip.
     // The reference can be referenceAssetIds, a bare referenceAssetId, or the i2v sourceAssetId.
     for reference in [
@@ -3078,7 +3087,7 @@ fn scail2_candle_separates_source_ready_tiers_from_product_acceptance() {
         }))
     ));
     // The dense adapter forms claim the full video gate, preserving animation and replacement
-    // conditioning/masks/driving-clip paths while packed tiers wait for descriptor promotion.
+    // conditioning/masks/driving-clip paths while packed tiers remain adapter-free.
     assert!(video_job_is_candle_eligible(&video_generate_job(json!({
         "model": "scail2_14b",
         "mode": "animate_character",
@@ -3094,8 +3103,7 @@ fn scail2_candle_separates_source_ready_tiers_from_product_acceptance() {
         "loras": [{ "name": "scail2-dpo" }]
     }))));
 
-    // The resolver can consume exact packaged q4/q8 directories and the repaired runtime facts
-    // advertise both tiers, but these remain source/engine proofs until terminal product acceptance.
+    // Terminal acceptance admits the exact packaged q4/q8 directories on both production modes.
     for (bits, mode_payload) in [
         (
             4,
@@ -3122,27 +3130,14 @@ fn scail2_candle_separates_source_ready_tiers_from_product_acceptance() {
             scail2_candle_source_tier_eligible(&payload),
             "q{bits} must retain its exact source package: {payload:?}"
         );
-        let mode = if payload.contains_key("mode") {
-            "animate_character"
-        } else {
-            "replace_person"
-        };
-        assert!(
-            crate::jobs_store::routing::matrix::candle_video_descriptor_supports_quant(
-                "scail2_14b",
-                mode,
-                if bits == 4 { "q4" } else { "q8" },
-            ),
-            "the authoritative repaired Candle facts must retain q{bits}: {payload:?}"
-        );
         let production_eligible = if payload.contains_key("mode") {
             scail2_animate_candle_eligible("scail2_14b", &payload)
         } else {
             scail2_replace_candle_eligible("scail2_14b", &payload)
         };
         assert!(
-            !production_eligible,
-            "q{bits} must remain closed until terminal product acceptance: {payload:?}"
+            production_eligible,
+            "terminal acceptance must admit the exact q{bits} product route: {payload:?}"
         );
     }
 }
@@ -4453,12 +4448,10 @@ fn an_unhealthy_worker_is_routed_nothing_even_with_full_capabilities() {
 // family. A message naming a conditioning bug that does not exist sends triage hunting one.
 // ---------------------------------------------------------------------------------------------
 
-/// The two dense families that remain in this wording regression (`flux_dev`, `flux_schnell`) advertise
-/// `supported_quants: &[]` — dense bf16/fp16 only — so `advanced.mlxQuantize: 4` is correctly
-/// refused rather than silently run dense (sc-5099). The refusal must SAY that: name the requested
-/// tier and what the family does serve, and never claim a conditioning shape the payload lacks.
+/// FLUX.1's reviewed q4/q8 product packages must now route with no residual gap-classification
+/// exception. This protects the user-facing route as well as the catalog's derived capability row.
 #[test]
-fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_shape() {
+fn flux1_exact_packed_product_tiers_have_no_candle_gap() {
     for model in ["flux_dev", "flux_schnell"] {
         for bits in [4, 8] {
             let job = image_generate_job(json!({
@@ -4471,36 +4464,13 @@ fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_
                 "maskAssetId": null,
                 "advanced": { "mlxQuantize": bits }
             }));
-            // Routing is unchanged: the request is still refused (the sc-5099 no-silent-dense posture).
             assert!(
-                !image_job_is_candle_eligible(&job),
-                "{model} q{bits} must stay refused — this story changes wording only"
-            );
-            let reason = candle_supported(&job).expect_err("a quant request must stay a named gap");
-            let message = reason.candle_error_message();
-            assert!(
-                reason.feature.contains("quant"),
-                "{model} q{bits} must be blamed on the quant tier: {reason:?}"
+                image_job_is_candle_eligible(&job),
+                "{model} q{bits} reviewed product package must route to Candle"
             );
             assert!(
-                message.contains(&format!("q{bits}")),
-                "the message must name the REQUESTED tier q{bits}: {message}"
-            );
-            assert!(
-                message.contains("mlxQuantize"),
-                "the message must name the payload field that caused it: {message}"
-            );
-            assert!(
-                message.contains("dense"),
-                "the message must say what the family DOES serve (dense only): {message}"
-            );
-            assert!(
-                !message.contains("conditioned shape"),
-                "an unconditioned payload must never be blamed on a conditioning shape: {message}"
-            );
-            assert!(
-                !message.contains("edit / reference / inpaint"),
-                "the message must not list causes the payload does not carry: {message}"
+                candle_supported(&job).is_ok(),
+                "{model} q{bits} must not leave a Candle unsupported gap"
             );
         }
     }
@@ -4508,7 +4478,7 @@ fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_
 
 /// AC-4 mutation guard: all five families with the quant override REMOVED still route to candle.
 /// Chroma also keeps treating `mlxQuantize: 0` as its ordinary dense encoding; FLUX.1 deliberately
-/// refuses that explicit BF16 request because its staged packed resolver has no BF16 artifact.
+/// refuses that explicit BF16 request because its exact packed resolver has no BF16 artifact.
 #[test]
 fn quant_message_split_did_not_move_the_routing_decision() {
     for model in [
@@ -4693,10 +4663,8 @@ fn candle_gap(model: &str, payload: Value) -> (String, String) {
     (reason.feature.clone(), reason.detail.clone())
 }
 
-/// Reviewer repro 1. `flux_schnell` t2i with BOTH `advanced.mlxQuantize` and `advanced.phases`: the
-/// gate refuses on phases (candle.rs `Phases`) before it ever reaches the quant check, so blaming
-/// the quant tier attached a remediation ("re-submit without advanced.mlxQuantize and the same
-/// request routes to candle") that is FALSE — phases alone is still refused.
+/// `flux_schnell` t2i with `advanced.mlxQuantize` and `advanced.phases` must still blame phases:
+/// q4 is now an admitted product tier, so removing the phase schedule is the complete remediation.
 #[test]
 fn phases_are_blamed_before_quant_because_the_gate_refuses_them_first() {
     let both = json!({
@@ -4710,67 +4678,39 @@ fn phases_are_blamed_before_quant_because_the_gate_refuses_them_first() {
         "the FIRST refusing check is advanced.phases, not the quant tier: {feature}"
     );
     assert!(
-        !detail.contains("re-submit without advanced.phases"),
-        "removing phases does NOT route this request (the quant tier still refuses it), so the \
-         message must not promise it does: {detail}"
+        detail.contains("re-submit without advanced.phases"),
+        "removing phases must route the admitted q4 request: {detail}"
     );
     assert!(
-        detail.contains("advanced.mlxQuantize"),
-        "the message must name the OTHER check that also refuses, so the reader is not sent \
-         through a fix that leaves the request refused: {detail}"
+        !detail.contains("advanced.mlxQuantize"),
+        "an admitted q4 tier is not an additional refusal: {detail}"
     );
-
-    // Peel the phases off and the quant tier becomes the first refusal — with its remediation back,
-    // because now it really is the only one.
-    let (feature, detail) = candle_gap(
-        "flux_schnell",
-        json!({
-            "prompt": "a red fox",
-            "mode": "text_to_image",
-            "advanced": { "mlxQuantize": 4 }
-        }),
-    );
-    assert!(feature.contains("q4 quant tier"), "{feature}");
-    assert!(
-        detail.contains("re-submit without advanced.mlxQuantize and the same request routes"),
-        "the quant remediation is honest once quant is the ONLY refusal: {detail}"
-    );
-
-    // …and peeling the quant off routes it, which is what makes that remediation true.
+    // Peeling the phase schedule leaves the reviewed q4 package routable.
     assert!(
         image_request_candle_eligible(
             "flux_schnell",
-            &object(json!({ "prompt": "a red fox", "mode": "text_to_image" }))
+            &object(
+                json!({ "prompt": "a red fox", "mode": "text_to_image", "advanced": { "mlxQuantize": 4 } })
+            )
         ),
-        "flux_schnell plain t2i with neither phases nor quant must route to candle"
+        "flux_schnell q4 t2i without phases must route to Candle"
     );
 }
 
 /// Reviewer repro 2. The gate's reference-only-mode refusal applies ONLY to the families that
 /// reserve those modes for a specialized lane (flux2_* / qwen_image_edit* / sensenova_u1_8b*). On
-/// `flux_schnell` a `style_variations` request with every carrier null is NOT refused for the mode —
-/// the quant tier is what refuses it — so a "needs a source/reference image" message names a cause
-/// the gate never applied.
+/// `flux_schnell` has no reserved `style_variations` mode and q4 is admitted, so the same payload
+/// must route rather than manufacture a conditioning or quant error.
 #[test]
 fn a_reference_mode_is_blamed_only_on_the_families_that_reserve_it() {
-    let (feature, detail) = candle_gap(
+    assert!(image_request_candle_eligible(
         "flux_schnell",
-        json!({
+        &object(json!({
             "prompt": "a red fox",
             "mode": "style_variations",
             "advanced": { "mlxQuantize": 4 }
-        }),
-    );
-    assert!(
-        feature.contains("q4 quant tier"),
-        "flux_schnell does not reserve style_variations, so the quant tier is the first refusal: \
-         {feature}"
-    );
-    assert!(
-        !detail.contains("needs a source/reference image"),
-        "the mode is not what refused on this family — claiming a missing conditioning image sends \
-         triage after a bug that does not exist: {detail}"
-    );
+        }))
+    ));
 
     // The same mode on a family that DOES reserve it keeps the conditioning-image message.
     let (feature, detail) = candle_gap(
@@ -4827,12 +4767,12 @@ fn a_reference_mode_is_blamed_only_on_the_families_that_reserve_it() {
 
 /// The whole order, peeled one cause at a time. Each step asserts the gate still refuses AND that
 /// the classifier names the check `image_request_candle_eligible` reaches first; removing that one
-/// cause moves the blame to the next. `flux_schnell` advertises inference LoRA but no quant tier,
-/// so its peel covers edit-mode → carrier → poses → phases → quant. The `loras` entry rides along
+/// cause moves the blame to the next. `flux_schnell` advertises inference LoRA, so its dense peel
+/// covers edit-mode → carrier → poses → phases. The `loras` entry rides along
 /// the whole way to prove a check that does NOT refuse never steals the blame.
 #[test]
 fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
-    let steps: [(Value, &str); 5] = [
+    let steps: [(Value, &str); 4] = [
         (
             json!({
                 "prompt": "p",
@@ -4841,8 +4781,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
                 "loras": [{ "id": "lora_1" }],
                 "advanced": {
                     "poses": [{ "id": "pose_1" }],
-                    "phases": [{ "steps": 4 }],
-                    "mlxQuantize": 4
+                    "phases": [{ "steps": 4 }]
                 }
             }),
             "edit_image",
@@ -4855,8 +4794,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
                 "loras": [{ "id": "lora_1" }],
                 "advanced": {
                     "poses": [{ "id": "pose_1" }],
-                    "phases": [{ "steps": 4 }],
-                    "mlxQuantize": 4
+                    "phases": [{ "steps": 4 }]
                 }
             }),
             "conditioning carrier",
@@ -4868,8 +4806,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
                 "loras": [{ "id": "lora_1" }],
                 "advanced": {
                     "poses": [{ "id": "pose_1" }],
-                    "phases": [{ "steps": 4 }],
-                    "mlxQuantize": 4
+                    "phases": [{ "steps": 4 }]
                 }
             }),
             "strict-pose",
@@ -4879,18 +4816,9 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
                 "prompt": "p",
                 "mode": "text_to_image",
                 "loras": [{ "id": "lora_1" }],
-                "advanced": { "phases": [{ "steps": 4 }], "mlxQuantize": 4 }
+                "advanced": { "phases": [{ "steps": 4 }] }
             }),
             "phases",
-        ),
-        (
-            json!({
-                "prompt": "p",
-                "mode": "text_to_image",
-                "loras": [{ "id": "lora_1" }],
-                "advanced": { "mlxQuantize": 4 }
-            }),
-            "quant tier",
         ),
     ];
     for (payload, expected) in steps {
@@ -4985,26 +4913,15 @@ fn a_malformed_carrier_is_named_only_where_it_is_what_refused() {
     assert!(feature.contains("malformed"), "{feature}");
     assert!(detail.contains("referenceAssetId"), "{detail}");
 
-    // The same malformed carrier on flux1 does not refuse anything — the gate reads a non-string
-    // scalar as absent — so a flux request carrying it AND a quant tier is blamed on the quant
-    // tier, the check that actually refused.
-    let (feature, detail) = candle_gap(
+    // The same malformed carrier on FLUX.1 reads as absent and its reviewed q4 package stays
+    // routable, so no unrelated gap classifier may be manufactured.
+    assert!(image_request_candle_eligible(
         "flux_schnell",
-        json!({
+        &object(json!({
             "prompt": "p",
             "mode": "text_to_image",
             "sourceAssetId": 42,
             "advanced": { "mlxQuantize": 4 }
-        }),
-    );
-    assert!(feature.contains("q4 quant tier"), "{feature}");
-    assert!(
-        !detail.contains("malformed"),
-        "the malformed carrier is not what refused this request: {detail}"
-    );
-    // Proof that the carrier really is inert on this family: drop the quant tier and it routes.
-    assert!(image_request_candle_eligible(
-        "flux_schnell",
-        &object(json!({ "prompt": "p", "mode": "text_to_image", "sourceAssetId": 42 }))
+        }))
     ));
 }

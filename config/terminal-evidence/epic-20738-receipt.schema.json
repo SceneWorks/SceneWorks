@@ -21,7 +21,8 @@
         "requestedTier": { "enum": ["q4", "q8"] },
         "resolvedTier": { "enum": ["q4", "q8"] },
         "denseFallback": { "const": false },
-        "loadSpecQuantBits": { "enum": [null, 4, 8] }
+        "loadSpecQuantBits": { "enum": [null, 4, 8] },
+        "referenceCounterfactuals": { "$ref": "#/$defs/scail2ReferenceCounterfactuals" }
       },
       "allOf": [
         {
@@ -153,11 +154,71 @@
     {
       "if": { "type": "object", "properties": { "status": { "const": "failed" } }, "required": ["status"] },
       "then": { "type": "object", "properties": { "error": { "type": "string", "minLength": 1 } } }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": ["status", "cell"],
+        "properties": {
+          "status": { "const": "passed" },
+          "cell": {
+            "type": "object",
+            "required": ["id"],
+            "properties": { "id": { "const": "scail2-multi-reference-q4" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "cell": {
+            "type": "object",
+            "required": ["referenceCounterfactuals"],
+            "properties": {
+              "referenceCounterfactuals": { "$ref": "#/$defs/scail2ReferenceCounterfactuals" }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
     "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "scail2ReferenceCounterfactual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "meanAbsDelta", "firstFrameMeanAbsDelta", "lastFrameMeanAbsDelta", "witnesses"],
+      "properties": {
+        "reference": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "meanAbsDelta": { "type": "number", "exclusiveMinimum": 0.000001 },
+        "firstFrameMeanAbsDelta": { "type": "number", "minimum": 0 },
+        "lastFrameMeanAbsDelta": { "type": "number", "minimum": 0 },
+        "witnesses": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["omittedReference", "firstFrame", "lastFrame"],
+          "properties": {
+            "omittedReference": { "type": "string", "minLength": 1 },
+            "firstFrame": { "type": "string", "minLength": 1 },
+            "lastFrame": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "scail2ReferenceCounterfactuals": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": false,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 1 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 2 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 3 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 4 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 5 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 6 } } }] }
+      ]
+    },
     "repository": {
       "type": "object",
       "additionalProperties": false,

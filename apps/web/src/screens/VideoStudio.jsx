@@ -139,12 +139,10 @@ const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
 // picker only enables entries whose individual install is complete (`installedTiers`); in particular,
 // adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
 const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"]);
-// Source availability is broader than product acceptance for SCAIL-2 on Candle: q4/q8 packages
-// remain installable/repairable in Model Manager and advertised by the runtime descriptor, but the
-// corresponding product routes stay fail-closed until terminal acceptance. Keep this execution
-// allowlist literal and local to Video Studio so a future catalog tier cannot become runnable merely
-// by appearing in the manifest. MLX continues to use the complete installed tier set.
-const SCAIL2_CANDLE_PRODUCT_TIERS = Object.freeze(["bf16"]);
+// sc-20969 terminal acceptance admits exactly SCAIL-2's shipped q4/q8/bf16 Candle packages. Keep
+// this execution allowlist literal and local so an unrelated future catalog tier cannot become
+// runnable merely by appearing in the manifest. MLX continues to use the complete installed tier set.
+const SCAIL2_CANDLE_PRODUCT_TIERS = Object.freeze(["q4", "q8", "bf16"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
@@ -173,17 +171,14 @@ function videoExecutionTierModel(model, backend) {
   };
 }
 
-function unavailableRecipeTierMessage(model, backend, tier, availableTiers) {
+function unavailableRecipeTierMessage(model, backend, tier) {
   const recorded = tierLabel(tier);
   if (
     backend === "candle" &&
     model?.id === SCAIL2_MODEL_ID &&
     !SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier)
   ) {
-    const bf16Action = availableTiers.includes("bf16")
-      ? "start a new bf16 generation"
-      : "install bf16 in Model Manager before starting a new bf16 generation";
-    return `This recipe was recorded at ${recorded}, which is not enabled for SCAIL-2 Candle generation. Replay it on MLX, or ${bf16Action}.`;
+    return `This recipe was recorded at ${recorded}, which is not enabled for SCAIL-2 Candle generation. Replay it on MLX, or install an admitted SCAIL-2 tier in Model Manager before starting a new generation.`;
   }
   return `This recipe was recorded at ${recorded}, but that tier is not installed and available for ${model?.name ?? "the selected model"} on ${backend === "mlx" ? "MLX" : "Candle"}. Install or repair that tier in Model Manager before replaying this recipe.`;
 }
@@ -738,8 +733,8 @@ export function VideoStudio() {
   // The full display set (all possible tiers, installed or not) + the picker option list with
   // un-downloaded tiers disabled — same show-all/disable-unavailable rule as Image Studio. `availableTiers`
   // stays the SELECTABLE/send set. Ordinarily the picker needs more than one possible tier; the
-  // explicit SCAIL-2 Candle singleton remains visible so the user can see that bf16 is the only
-  // currently accepted execution tier even while Model Manager carries the broader package set.
+  // explicit SCAIL-2 Candle tier surface remains visible so users can see which shipped packages
+  // are admitted even when a particular local install is incomplete.
   const possibleTiers = useMemo(
     () => (nativeTierLane ? allPossibleTiers(executionTierModel, tierOptions) : []),
     [nativeTierLane, executionTierModel, tierOptions],
@@ -757,8 +752,8 @@ export function VideoStudio() {
     [nativeTierLane, possibleTiers, availableTiers, scail2CandleTierLane],
   );
   const baseExecutionTierBlockMessage =
-    scail2CandleTierLane && !availableTiers.includes("bf16")
-      ? "SCAIL-2 Candle generation currently requires the installed bf16 tier. Install or repair bf16 in Model Manager; q4 and q8 are not yet enabled for Candle generation."
+    scail2CandleTierLane && availableTiers.length === 0
+      ? "SCAIL-2 Candle generation requires an installed q4, q8, or bf16 tier. Install or repair one in Model Manager."
       : null;
   const hostMemory = useHostMemory();
   const nativeMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
@@ -846,7 +841,6 @@ export function VideoStudio() {
           selectedModel,
           activeBackend,
           recipeTierRequest.tier,
-          availableTiers,
         )
       : quantTier !== recipeTierRequest.tier
         ? `Preparing this recipe's exact ${tierLabel(recipeTierRequest.tier)} tier. Generation stays blocked until that tier is selected.`
