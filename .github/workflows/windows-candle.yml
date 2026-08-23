@@ -1191,15 +1191,15 @@ jobs:
       # source-reviewed fixed cache root is censused from checked-in immutable download evidence
       # before transfer: there is no cache input,
       # snapshot/glob/ref-main fallback, matrix, child workflow, per-cell dispatch, or secret weight
-      # path. Exact archived artifact 9492288293 is revalidated under its legacy profile. Only the
-      # 16 cells whose individual semantic tuples are unchanged are imported; failed/changed cells
-      # 14, 18, and 19 are quarantined. The resulting sparse 8-authority/70-file scope executes only
-      # those three ordinals after its complete source/disk plan passes and network is forced
+      # path. Exact archived artifact 9498929065 is revalidated under its frozen b646 provenance. Its
+      # 18 authentic PASS cells are imported while failed LTX cell 14 remains quarantined. The
+      # resulting 2-authority/28-file scope executes only ordinal 14 after its complete source/disk
+      # plan passes and network is forced
       # offline. Authorities are copied just in time, retained only through their exact last consumer,
       # rehashed before/after use, and durably cleaned. Exact authority files exclude derivative extras;
       # component roots carry regular-file sidecar obstructions and Candle writes only to per-authority
       # namespaces in a campaign-owned derived cache. A target-byte estimator and 40-GiB non-model
-      # reserve enforce the reviewed 99,106,288,594-byte free-space floor at every transition. The four
+      # reserve enforce the reviewed 106,929,602,242-byte free-space floor at every transition. The four
       # dismantled pin-keyed gates remain untouched.
       - name: Set up the pinned terminal Node runtime
         id: terminal_node
@@ -1249,7 +1249,7 @@ jobs:
             throw 'the fixed terminal cache root must be an existing ordinary directory'
           }
           node scripts/epic-20738-terminal-cuda-harness.mjs check
-      - name: Discover the exact audited 16-PASS sparse recovery source
+      - name: Discover the exact audited 18-PASS recovery source
         id: terminal_prefix
         continue-on-error: true
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
@@ -1258,31 +1258,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $artifactId = '9492288293'
-          $artifactName = 'sc-20945-epic-20738-43c718b7e9a852bd5029448d18841fed0f508c3a-32628540694-1'
-          $artifactSize = 15452320
-          $artifactDigest = 'sha256:dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724'
-          $runId = '32628540694'
+          $artifactId = '9498929065'
+          $artifactName = 'sc-20945-epic-20738-655414ef3e4dec1fe9142901caea538e73ac1490-32655428377-1'
+          $artifactSize = 16071005
+          $artifactDigest = 'sha256:fae791001dd4e2015ce0567290b9b0a1d67de9e503712d2b9a60a0f9af07ec9c'
+          $runId = '32655428377'
           $runAttempt = '1'
-          $headSha = '43c718b7e9a852bd5029448d18841fed0f508c3a'
-          $root = Join-Path $env:RUNNER_TEMP "sc-21306-sparse-recovery-candidates-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $headSha = '655414ef3e4dec1fe9142901caea538e73ac1490'
+          $root = Join-Path $env:RUNNER_TEMP "sc-21306-pass18-recovery-candidates-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
           $artifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$artifactId" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or [string]$artifact.id -ne $artifactId -or $artifact.name -ne $artifactName -or [int64]$artifact.size_in_bytes -ne $artifactSize -or [string]$artifact.digest -ne $artifactDigest -or [string]$artifact.workflow_run.id -ne $runId -or [string]$artifact.workflow_run.head_sha -ne $headSha) { throw 'audited sparse recovery artifact identity is missing, expired, or tampered' }
+          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or [string]$artifact.id -ne $artifactId -or $artifact.name -ne $artifactName -or [int64]$artifact.size_in_bytes -ne $artifactSize -or [string]$artifact.digest -ne $artifactDigest -or [string]$artifact.workflow_run.id -ne $runId -or [string]$artifact.workflow_run.head_sha -ne $headSha) { throw 'audited 18-PASS recovery artifact identity is missing, expired, or tampered' }
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$runId" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or [string]$run.id -ne $runId -or [string]$run.run_attempt -ne $runAttempt -or [string]$run.head_sha -ne $headSha) { throw 'audited sparse recovery workflow run identity drifted' }
+          if ($LASTEXITCODE -ne 0 -or [string]$run.id -ne $runId -or [string]$run.run_attempt -ne $runAttempt -or [string]$run.head_sha -ne $headSha) { throw 'audited 18-PASS recovery workflow run identity drifted' }
           $candidate = Join-Path $root $artifactId
           $evidence = Join-Path $candidate 'evidence'
           New-Item -ItemType Directory -Path $evidence -Force | Out-Null
           gh run download $runId --name $artifactName --dir $evidence
-          if ($LASTEXITCODE -ne 0) { throw "failed to download audited sparse recovery artifact $artifactId" }
+          if ($LASTEXITCODE -ne 0) { throw "failed to download audited 18-PASS recovery artifact $artifactId" }
           $metadata = [ordered]@{
             artifactId = $artifactId; artifactName = $artifactName; artifactSize = $artifactSize; artifactDigest = $artifactDigest
             runId = $runId; runAttempt = $runAttempt; headSha = $headSha
             inferenceSha = 'b646a6f89ba9f6b07efe53dd583d8a42e21e9871'
             profile = 'epic-20738-candle-cuda-terminal-v1'
-            cellSemanticsSha256 = 'dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879'
-            artifactSemanticsSha256 = '5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932'
+            cellSemanticsSha256 = '2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1'
+            artifactSemanticsSha256 = '1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255'
           } | ConvertTo-Json
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [IO.File]::WriteAllText((Join-Path $candidate 'artifact-metadata.json'), $metadata + [Environment]::NewLine, $utf8NoBom)
