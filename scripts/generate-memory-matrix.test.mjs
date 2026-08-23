@@ -3217,10 +3217,11 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // re-stamped it to main's sc-20523 pin; sc-18650 (the epic-final bump) re-stamped it to the
   // inference-main merge of that head (f17c82544, tree-identical to 2881696cd); the true epic-final
   // bump re-stamped it again to the #726 inference-main merge (4013049764), then epic 20738's
-  // final pin advanced it to the feature train's inference-main merge (b646a6f89). The literal is
+  // final pin advanced it to the feature train's inference-main merge (b646a6f89), then the LTX
+  // GroupNorm broadcast correction advanced it to 31e02510a. The literal is
   // re-stamped rather than relaxed to a shape check: the assertion below only means something
   // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "b646a6f89ba9f6b07efe53dd583d8a42e21e9871");
+  assert.equal(pin, "31e02510ad6e9e1a3c3d205058576329d724c60d");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
