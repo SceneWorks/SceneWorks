@@ -1543,6 +1543,17 @@ pub(super) fn video_admission_overlay(
             .map_err(WorkerError::InvalidPayload)?,
         );
     }
+    if input.engine_id == "bernini" && input.video_mode.as_deref() == Some("ads2v") {
+        overlays.push(
+            crate::video_admission::bernini_ads2v_source_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
     Ok((!overlays.is_empty()).then(|| overlays.join("+")))
 }
 
@@ -1595,6 +1606,14 @@ pub(super) fn video_admission_reference_shape(
     {
         return "multi_video";
     }
+    if model_id == "bernini"
+        && mode == "ads2v"
+        && matches!(conditioning,
+        [Conditioning::VideoClip { .. }, Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }]
+        if (1..=8).contains(&images.len()))
+    {
+        return "ads2v";
+    }
     match mode {
         "image_to_video" => "image",
         "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
@@ -1629,6 +1648,15 @@ pub(super) fn video_admission_reference_count(
             .all(|entry| matches!(entry, Conditioning::VideoClip { .. }))
     {
         return u32::try_from(conditioning.len()).unwrap_or(u32::MAX);
+    }
+    if model_id == "bernini" && mode == "ads2v" {
+        if let [Conditioning::VideoClip { .. }, Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }] =
+            conditioning
+        {
+            return u32::try_from(images.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(2);
+        }
     }
     u32::try_from(conditioning.len()).unwrap_or(u32::MAX)
 }

@@ -957,6 +957,59 @@ fn bernini_mv2v_curve_identity_excludes_only_the_request_seal() {
 }
 
 #[test]
+fn bernini_ads2v_receipt_binds_distinct_clip_roles_images_and_three_to_four_source_boundary() {
+    let clip = |pixel| gen_core::Conditioning::VideoClip {
+        frames: vec![
+            gen_core::Image {
+                width: 848,
+                height: 480,
+                pixels: vec![pixel; 848 * 480 * 3]
+            };
+            45
+        ],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let mut first = vec![
+        clip(7),
+        clip(13),
+        gen_core::Conditioning::MultiReference {
+            images: vec![gen_core::Image {
+                width: 640,
+                height: 360,
+                pixels: vec![29; 640 * 360 * 3],
+            }],
+        },
+    ];
+    let receipt = bernini_ads2v_source_receipt(VideoLane::Mlx, 848, 480, &first).unwrap();
+    assert!(receipt.contains("count-3:"));
+    assert!(receipt.contains("source-ids-1,2,3"));
+    assert!(
+        receipt.contains("source-video:")
+            && receipt.contains("reference-video:")
+            && receipt.contains("image-1:")
+    );
+    let curve = video_curve_overlay(Some(&format!("provider_video_mode:ads2v+{receipt}"))).unwrap();
+    assert!(!curve.contains(BERNINI_ADS2V_SEAL_DOMAIN));
+    let mut swapped = first.clone();
+    swapped.swap(0, 1);
+    assert_ne!(
+        receipt,
+        bernini_ads2v_source_receipt(VideoLane::Mlx, 848, 480, &swapped).unwrap()
+    );
+    let gen_core::Conditioning::MultiReference { images } = &mut first[2] else {
+        unreachable!()
+    };
+    images.push(gen_core::Image {
+        width: 360,
+        height: 640,
+        pixels: vec![31; 360 * 640 * 3],
+    });
+    let four = bernini_ads2v_source_receipt(VideoLane::Candle, 848, 480, &first).unwrap();
+    assert!(four.contains("count-4:") && four.contains("source-ids-1,1.666667,2.333333,3"));
+}
+
+#[test]
 fn bernini_full_vae_shape_matches_providers_two_stage_bankers_rounding() {
     assert_eq!(bernini_full_vae_shape(24, 625), (32, 624));
 }

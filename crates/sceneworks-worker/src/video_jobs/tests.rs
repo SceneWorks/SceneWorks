@@ -282,6 +282,55 @@ fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
+fn bernini_ads2v_admission_keeps_two_clip_roles_and_flattened_images() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let conditioning = vec![
+        clip(1),
+        clip(2),
+        Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![3; 12],
+                },
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![4; 12],
+                },
+            ],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &conditioning),
+        "ads2v"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "ads2v", &conditioning),
+        4
+    );
+    let mut crossed = conditioning.clone();
+    crossed.swap(1, 2);
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &crossed),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
 fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
     for reference_asset_ids in [
         Vec::<&str>::new(),
