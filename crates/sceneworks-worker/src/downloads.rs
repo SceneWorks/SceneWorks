@@ -973,6 +973,9 @@ pub(crate) async fn download_snapshot(
             tokio::fs::create_dir_all(parent).await?;
         }
         let _lock = DownloadLock::acquire_async(&target_path).await?;
+        progress
+            .record_existing_file(&target_path, file.size)
+            .await?;
         download_file(
             context,
             &file.download_url,
@@ -1030,6 +1033,7 @@ pub(crate) async fn download_snapshot_into_cache(
             .unwrap_or_else(|| blob_fallback_name(&file.path));
         let blob_path = blobs_dir.join(&etag);
         let _lock = DownloadLock::acquire_async(&blob_path).await?;
+        progress.record_existing_file(&blob_path, file.size).await?;
         download_file(
             context,
             &file.download_url,
@@ -2265,6 +2269,23 @@ impl<'a> DownloadProgress<'a> {
         self.transferred_bytes = self.transferred_bytes.saturating_add(bytes);
     }
 
+    /// Add only the bytes already present for the exact snapshot file about to be handled.
+    ///
+    /// Snapshot callers used to seed `started_bytes` from the whole destination directory. That is
+    /// incorrect for filtered Hugging Face repositories: downloading `q4/*` would count cached q8,
+    /// bf16, and stale blobs in the numerator while [`HuggingFaceSnapshot::total_bytes`] contained
+    /// only q4 in the denominator. Account after taking the per-file download lock so a peer cannot
+    /// change the target between the size check and the cache-hit/resume decision.
+    async fn record_existing_file(
+        &mut self,
+        path: &Path,
+        expected_size: Option<u64>,
+    ) -> WorkerResult<()> {
+        let bytes = existing_download_bytes(path, expected_size).await?;
+        self.started_bytes = self.started_bytes.saturating_add(bytes);
+        Ok(())
+    }
+
     /// Reset the stall watchdog to "made progress just now", granting the next
     /// (re)connect a full stall window before it can be judged hung. Called at the
     /// start of each attempt so the idle gap spent re-issuing the request is not
@@ -2773,5 +2794,37 @@ mod stall_watchdog_tests {
         assert!(progress.is_stalled(Duration::from_millis(1), DOWNLOAD_STALL_MIN_PROGRESS));
         progress.reset_stall_clock();
         assert!(!progress.is_stalled(Duration::from_secs(3600), DOWNLOAD_STALL_MIN_PROGRESS));
+    }
+}
+
+/// Snapshot progress must use the same selected-file scope as the snapshot total. In particular,
+/// another precision tier in the shared Hugging Face `blobs/` directory is not progress toward the
+/// tier currently being downloaded.
+#[cfg(test)]
+mod snapshot_progress_tests {
+    use super::DownloadProgress;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn ignores_unrelated_cached_blobs() {
+        let cache = tempfile::tempdir().expect("cache dir");
+        let selected = cache.path().join("selected-blob");
+        let unrelated = cache.path().join("unrelated-bf16-blob");
+        std::fs::write(&selected, b"q4!").expect("selected partial blob");
+        std::fs::write(&unrelated, vec![0_u8; 64]).expect("unrelated cached tier");
+
+        let mut progress =
+            DownloadProgress::new("owner/model", 0, Some(10), Duration::from_secs(5));
+        progress
+            .record_existing_file(&selected, Some(10))
+            .await
+            .expect("selected bytes are counted");
+
+        let payload = progress.payload();
+        assert!(
+            payload.message.contains("3 B of 10 B (7 B left)"),
+            "only the selected blob belongs in snapshot progress: {}",
+            payload.message
+        );
     }
 }
