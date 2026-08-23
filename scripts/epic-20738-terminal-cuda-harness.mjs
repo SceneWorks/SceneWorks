@@ -49,7 +49,17 @@ const FROZEN_INFERENCE_PIN = "b646a6f89ba9f6b07efe53dd583d8a42e21e9871";
 const LTX_CURRENT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_APPROVED_PARENT_REVISION = "254989c3ca7ee691187647f350b112c0c448789d";
 const IMPORTED_PREFIX_CELLS = 7;
+const RECOVERY_IMPORTED_PREFIX_CELLS = 9;
 const PREFIX_ARTIFACT = `sc-20945-epic-20738-${LEGACY_SCENEWORKS_HEAD}-`;
+const RECOVERY_ARTIFACT_ID = "9488587517";
+const RECOVERY_ARTIFACT_NAME = "sc-20945-epic-20738-62be42127e2b4ff07321e2c369de92fc6edef526-32616545132-1";
+const RECOVERY_ARTIFACT_SIZE = 4_322_200;
+const RECOVERY_ARTIFACT_DIGEST = "sha256:765c8f4ed419e7a7d0fbc20dcd65f5be6f0be7ce9ed9f151915208bf541692bf";
+const RECOVERY_RUN_ID = "32616545132";
+const RECOVERY_RUN_ATTEMPT = "1";
+const RECOVERY_SCENEWORKS_HEAD = "62be42127e2b4ff07321e2c369de92fc6edef526";
+const RECOVERY_REMAINING_AUTHORITIES = 14;
+const RECOVERY_REMAINING_FILES = 160;
 const LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES = 173_667_044_229;
 const REVIEWED_ALL_AT_ONCE_SOURCE_BYTES = 179_028_698_264;
 const REVIEWED_JIT_SOURCE_PEAK_BYTES = 56_156_615_634;
@@ -94,6 +104,34 @@ function canonicalize(value) {
 
 function canonicalSha256(value) {
   return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
+}
+
+const DOWNLOADED_FILE_FIELDS = ["path", "bytes", "sha256", "lfsSha256", "commitSha"];
+
+function canonicalDownloadedFiles(files, label) {
+  if (!Array.isArray(files)) fail(`${label} must be an array`);
+  const paths = new Set();
+  return files.map((file, index) => {
+    object(file, `${label}[${index}]`);
+    exactKeys(file, DOWNLOADED_FILE_FIELDS, `${label}[${index}]`);
+    if (typeof file.path !== "string" || !file.path || file.path.includes("\\")
+      || file.path.startsWith("/") || file.path.includes("..")
+      || !Number.isSafeInteger(file.bytes) || file.bytes < 1
+      || !/^[0-9a-f]{64}$/.test(file.sha256) || !/^[0-9a-f]{64}$/.test(file.lfsSha256)
+      || !SHA40.test(file.commitSha) || paths.has(file.path)) {
+      fail(`${label}[${index}] is malformed or ambiguous`);
+    }
+    paths.add(file.path);
+    return Object.fromEntries(DOWNLOADED_FILE_FIELDS.map((field) => [field, file[field]]));
+  });
+}
+
+export function assertExactDownloadedFilePartition(actual, expected, label) {
+  const left = canonicalDownloadedFiles(actual, `${label} actual`);
+  const right = canonicalDownloadedFiles(expected, `${label} expected`);
+  if (left.length !== right.length || left.some((file, index) => (
+    JSON.stringify(file) !== JSON.stringify(right[index])
+  ))) fail(`${label} drifted from the frozen downloaded-file partition`);
 }
 
 export function authorityLifetimePlan(profile, startIndex, sourceAudits) {
@@ -1460,6 +1498,239 @@ export async function importPrefixEvidence(prefix, output) {
   };
 }
 
+async function validateArchivedReceipt({ root, ordinalName, cell, profile, metadata }) {
+  const cellDir = path.join(root, ordinalName);
+  const receipt = JSON.parse(await readFile(path.join(cellDir, "receipt.json"), "utf8"));
+  if (receipt.status !== "passed" || receipt.cell?.ordinal !== cell.ordinal
+    || receipt.cell?.id !== cell.id || receipt.repositories?.sceneworks?.sha !== metadata.headSha
+    || receipt.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || receipt.execution?.headSha !== metadata.headSha || receipt.execution?.runId !== metadata.runId
+    || receipt.execution?.runAttempt !== metadata.runAttempt) {
+    fail(`recovery receipt ${ordinalName} is not an exact PASS from the bound recovery run`);
+  }
+  validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+  validateReceipt(receipt, cell, profile);
+  const rehashed = await evidenceFiles(cellDir);
+  for (const field of ["inputs", "outputs", "logs"]) {
+    if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+      fail(`recovery receipt ${ordinalName} failed ${field} rehash`);
+    }
+  }
+  return { cell, ordinalName, receipt, root: cellDir };
+}
+
+function validateRecoveryMetadata(metadata) {
+  exactKeys(metadata, [
+    "artifactId", "artifactName", "artifactSize", "artifactDigest", "runId", "runAttempt", "headSha",
+    "inferenceSha", "profile", "cellSemanticsSha256", "artifactSemanticsSha256",
+  ], "recovery artifact metadata");
+  if (metadata.artifactId !== RECOVERY_ARTIFACT_ID || metadata.artifactName !== RECOVERY_ARTIFACT_NAME
+    || metadata.artifactSize !== RECOVERY_ARTIFACT_SIZE || metadata.artifactDigest !== RECOVERY_ARTIFACT_DIGEST
+    || metadata.runId !== RECOVERY_RUN_ID || metadata.runAttempt !== RECOVERY_RUN_ATTEMPT
+    || metadata.headSha !== RECOVERY_SCENEWORKS_HEAD || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    || metadata.profile !== PROFILE_NAME || metadata.cellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || metadata.artifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256) {
+    fail("recovery artifact metadata does not bind the audited partial run");
+  }
+}
+
+async function validateRecoveryCacheEvidence(evidenceRoot, currentProfile) {
+  const expectedArtifactIds = [...new Set(currentProfile.cells.slice(IMPORTED_PREFIX_CELLS).flatMap(
+    (cell) => cell.artifactIds,
+  ))];
+  const evidence = JSON.parse(await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8"));
+  const artifactExpectedFiles = expectedArtifactFilesFromEvidence(currentProfile, evidence);
+  if (expectedArtifactIds.length !== 16 || expectedArtifactIds.reduce(
+    (sum, id) => sum + artifactExpectedFiles[id].length, 0,
+  ) !== 199) fail("audited partial-run cache scope drifted");
+  for (const filename of ["cache-preflight-initial.json", "cache-preflight.json"]) {
+    const document = JSON.parse(await readFile(path.join(evidenceRoot, filename), "utf8"));
+    validateCachePreflightEvidence(document, {
+      remainingArtifactIds: expectedArtifactIds,
+      artifactExpectedFiles,
+      downloadEvidenceSha256: REVIEWED_DOWNLOAD_EVIDENCE_SHA256,
+      guard: { cacheRoot: document.sourceCacheRoot },
+      stagingRoot: document.campaignStagingRoot,
+      derivedSidecarRoot: document.derivedSidecarRoot,
+      missingStore: document.missingFileStore,
+      expectedNonModelPaths: document.diskPlan?.nonModelPaths ?? [],
+      profile: currentProfile,
+    });
+  }
+}
+
+async function validateRecoveryFailureLineage(evidenceRoot, summary, currentProfile, metadata) {
+  const staleName = `10-${currentProfile.cells[9].id}`;
+  const staleDir = path.join(evidenceRoot, staleName);
+  const stale = JSON.parse(await readFile(path.join(staleDir, "receipt.json"), "utf8"));
+  validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, stale);
+  validateReceipt(stale, currentProfile.cells[9], currentProfile);
+  const staleFiles = await evidenceFiles(staleDir);
+  if (stale.status !== "failed" || stale.error !== "cell has not completed"
+    || stale.authorityLifecycle?.providerExecution !== "not-attempted"
+    || JSON.stringify(staleFiles.logs) === JSON.stringify(stale.logs)) {
+    fail("recovery artifact stale cell-10 sentinel is not the audited non-prefix receipt");
+  }
+  const failures = [];
+  for (let index = RECOVERY_IMPORTED_PREFIX_CELLS; index < currentProfile.cells.length; index += 1) {
+    const cell = currentProfile.cells[index];
+    const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    const receiptDir = path.join(evidenceRoot, "_emergency", ordinalName);
+    const receipt = JSON.parse(await readFile(path.join(receiptDir, "receipt.json"), "utf8"));
+    validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+    validateReceipt(receipt, cell, currentProfile);
+    const rehashed = await evidenceFiles(receiptDir);
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`recovery emergency receipt ${ordinalName} failed ${field} rehash`);
+      }
+    }
+    if (receipt.status !== "failed" || receipt.execution.runId !== metadata.runId) {
+      fail(`recovery emergency receipt ${ordinalName} is not retained failure lineage`);
+    }
+    failures.push({
+      ordinal: index + 1, cellId: cell.id, status: "failed", path: `_emergency/${ordinalName}/receipt.json`,
+    });
+  }
+  if (JSON.stringify(summary.receipts.slice(RECOVERY_IMPORTED_PREFIX_CELLS).map((receipt) => ({
+    ordinal: currentProfile.cells.findIndex((cell) => cell.id === receipt.id) + 1,
+    cellId: receipt.id, status: receipt.status, path: receipt.receipt,
+  }))) !== JSON.stringify(failures)) {
+    fail("recovery campaign summary does not retain the audited emergency failure lineage");
+  }
+  return { staleSentinel: { ordinal: 10, cellId: currentProfile.cells[9].id, path: `${staleName}/receipt.json` }, failures };
+}
+
+export async function selectRecoveryContinuation(prefixCandidates, currentProfile) {
+  const root = path.resolve(prefixCandidates);
+  const entries = await readdir(root, { withFileTypes: true });
+  if (entries.length !== 1 || !entries[0].isDirectory() || entries[0].isSymbolicLink()) {
+    fail("expected exactly one audited recovery-continuation artifact candidate");
+  }
+  const candidate = path.join(root, entries[0].name);
+  const metadata = JSON.parse(await readFile(path.join(candidate, "artifact-metadata.json"), "utf8"));
+  validateRecoveryMetadata(metadata);
+  const evidenceRoot = path.join(candidate, "evidence");
+  const files = await ordinaryTreeFiles(evidenceRoot);
+  const allowedTop = new Set([
+    "_imported-prefix", "_imported-boundary-residue", "08-flux1-dev-q8", "09-flux1-schnell-q4",
+    "10-flux1-schnell-q8", "_emergency", "cache-preflight-initial.json", "cache-preflight.json",
+    "campaign-summary.json",
+  ]);
+  if (files.some((file) => !allowedTop.has(path.relative(evidenceRoot, file).split(path.sep)[0]))) {
+    fail("recovery artifact contains unreviewed evidence outside the audited partial run");
+  }
+  const summary = JSON.parse(await readFile(path.join(evidenceRoot, "campaign-summary.json"), "utf8"));
+  if (summary.schemaVersion !== 1 || summary.profile !== PROFILE_NAME
+    || summary.repositories?.sceneworks?.sha !== metadata.headSha
+    || summary.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || summary.execution?.runId !== metadata.runId || summary.execution?.runAttempt !== metadata.runAttempt
+    || summary.execution?.headSha !== metadata.headSha || !Array.isArray(summary.receipts)
+    || summary.receipts.length !== currentProfile.cells.length || summary.passed !== RECOVERY_IMPORTED_PREFIX_CELLS
+    || summary.failed !== currentProfile.cells.length - RECOVERY_IMPORTED_PREFIX_CELLS) {
+    fail("recovery campaign summary does not bind the audited partial run");
+  }
+  await validateRecoveryCacheEvidence(evidenceRoot, currentProfile);
+  const cacheRecord = summary.cachePreflight;
+  const cachePath = path.join(evidenceRoot, cacheRecord?.path ?? "");
+  const cacheMetadata = await stat(cachePath);
+  if (cacheRecord?.path !== "cache-preflight.json" || cacheRecord.bytes !== cacheMetadata.size
+    || cacheRecord.sha256 !== await sha256File(cachePath)) fail("recovery summary cache-preflight hash drifted");
+  const originalLineage = JSON.parse(await readFile(path.join(evidenceRoot, "_imported-prefix", "lineage.json"), "utf8"));
+  exactKeys(originalLineage, [
+    "kind", "sourceArtifactId", "sourceArtifactName", "sourceArtifactDigest", "sourceRunId", "sourceRunAttempt",
+    "sourceHeadSha", "sourceInferenceSha", "sourceProfile", "sourceCellSemanticsSha256",
+    "sourceArtifactSemanticsSha256", "importedOrdinals", "quarantinedBoundaryResidue",
+  ], "recovery original lineage");
+  if (originalLineage.kind !== "contiguous-pass-prefix" || originalLineage.sourceArtifactId !== "9477529627"
+    || originalLineage.sourceArtifactName !== "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1"
+    || originalLineage.sourceArtifactDigest !== "sha256:f3164a32a485fdedd671f4e11f30038213d30a7eb2b541bda90bef30e63188f3"
+    || originalLineage.sourceRunId !== "32570707303" || originalLineage.sourceRunAttempt !== "1"
+    || originalLineage.sourceHeadSha !== LEGACY_SCENEWORKS_HEAD || originalLineage.sourceInferenceSha !== FROZEN_INFERENCE_PIN
+    || originalLineage.sourceProfile !== PROFILE_NAME || originalLineage.sourceCellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || originalLineage.sourceArtifactSemanticsSha256 !== LEGACY_ARTIFACT_SEMANTICS_SHA256
+    || JSON.stringify(originalLineage.importedOrdinals) !== JSON.stringify([1, 2, 3, 4, 5, 6, 7])) {
+    fail("recovery artifact original lineage is not the exact audited 1-7 import");
+  }
+  if (canonicalSha256(summary.lineage?.imported) !== canonicalSha256(originalLineage)
+    || summary.lineage?.continuation?.runId !== metadata.runId
+    || summary.lineage?.continuation?.runAttempt !== metadata.runAttempt
+    || summary.lineage?.continuation?.headSha !== metadata.headSha
+    || summary.lineage?.continuation?.inferenceSha !== FROZEN_INFERENCE_PIN
+    || summary.lineage?.continuation?.profileCellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || summary.lineage?.continuation?.profileArtifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256
+    || summary.lineage?.continuation?.startOrdinal !== IMPORTED_PREFIX_CELLS + 1) {
+    fail("recovery campaign summary lineage does not bind the original and partial-run segments");
+  }
+  const legacy = legacyPrefixProfile(currentProfile);
+  const receipts = [];
+  for (let index = 0; index < IMPORTED_PREFIX_CELLS; index += 1) {
+    const cell = { ...legacy.cells[index], ordinal: index + 1 };
+    const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    const receipt = JSON.parse(await readFile(path.join(evidenceRoot, "_imported-prefix", ordinalName, "receipt.json"), "utf8"));
+    validateTrustedLegacyImportedReceiptDocument(receipt);
+    validateReceiptInternal(receipt, cell, legacy, null, TRUSTED_LEGACY_IMPORT_CONTEXT);
+    const rehashed = await evidenceFiles(path.join(evidenceRoot, "_imported-prefix", ordinalName));
+    for (const field of ["inputs", "outputs", "logs"]) if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) fail(`recovery imported receipt ${ordinalName} failed ${field} rehash`);
+    receipts.push({ cell: currentProfile.cells[index], ordinalName, receipt, root: path.join(evidenceRoot, "_imported-prefix", ordinalName) });
+  }
+  for (let index = IMPORTED_PREFIX_CELLS; index < RECOVERY_IMPORTED_PREFIX_CELLS; index += 1) {
+    const cell = { ...currentProfile.cells[index], ordinal: index + 1 };
+    receipts.push(await validateArchivedReceipt({
+      root: evidenceRoot, ordinalName: `${String(index + 1).padStart(2, "0")}-${cell.id}`,
+      cell, profile: currentProfile, metadata,
+    }));
+  }
+  if (summary.receipts.slice(0, RECOVERY_IMPORTED_PREFIX_CELLS).some((receipt, index) => (
+    receipt.id !== currentProfile.cells[index].id || receipt.status !== "passed"
+  ))) fail("recovery campaign summary PASS prefix is not exactly cells 1-9");
+  const failureLineage = await validateRecoveryFailureLineage(evidenceRoot, summary, currentProfile, metadata);
+  return { candidate, evidenceRoot, metadata, receipts, originalLineage, failureLineage };
+}
+
+export async function importRecoveryContinuation(prefix, output) {
+  const destination = path.join(output, "_imported-prefix");
+  await mkdir(destination);
+  for (const receipt of prefix.receipts) {
+    await cp(receipt.root, path.join(destination, receipt.ordinalName), {
+      recursive: true, errorOnExist: true, force: false, dereference: false,
+    });
+  }
+  await ordinaryTreeFiles(destination);
+  for (const { ordinalName, receipt } of prefix.receipts) {
+    const rehashed = await evidenceFiles(path.join(destination, ordinalName));
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`copied recovery prefix ${ordinalName} failed ${field} rehash`);
+      }
+    }
+  }
+  const lineage = {
+    kind: "recovery-continuation-prefix",
+    original: prefix.originalLineage,
+    recovery: {
+      sourceArtifactId: prefix.metadata.artifactId, sourceArtifactName: prefix.metadata.artifactName,
+      sourceArtifactSize: prefix.metadata.artifactSize, sourceArtifactDigest: prefix.metadata.artifactDigest,
+      sourceRunId: prefix.metadata.runId, sourceRunAttempt: prefix.metadata.runAttempt,
+      sourceHeadSha: prefix.metadata.headSha, sourceInferenceSha: prefix.metadata.inferenceSha,
+      sourceProfile: prefix.metadata.profile, sourceCellSemanticsSha256: prefix.metadata.cellSemanticsSha256,
+      sourceArtifactSemanticsSha256: prefix.metadata.artifactSemanticsSha256, startOrdinal: 8,
+    },
+    importedOrdinals: Array.from({ length: RECOVERY_IMPORTED_PREFIX_CELLS }, (_, index) => index + 1),
+    quarantined: prefix.failureLineage,
+  };
+  await writeFile(path.join(destination, "lineage.json"), `${JSON.stringify(lineage, null, 2)}\n`, {
+    encoding: "utf8", flag: "wx",
+  });
+  return {
+    lineage,
+    outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
+      id: cell.id, status: "passed", receipt: `_imported-prefix/${ordinalName}/receipt.json`,
+      error: null, emergencyReceiptError: null, source: "imported-recovery",
+    })),
+  };
+}
+
 async function writeArtifactRequest({ id, artifact, expectedFiles, scratch, phase }) {
   const requestDir = path.join(scratch, `${phase}-requests`);
   await mkdir(requestDir, { recursive: true });
@@ -2194,13 +2465,14 @@ export function validateCachePreflightEvidence(document, {
   if (JSON.stringify(document.frozenMissingFiles) !== JSON.stringify(frozen)) {
     fail("cache preflight frozen missing-file census drifted");
   }
-  if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256
-    && profile.cells.length === 19 && remainingArtifactIds.length === 16
-    && remainingArtifactIds.reduce(
-      (sum, id) => sum + artifactExpectedFiles[id].length,
-      0,
-    ) !== 199) {
-    fail("continuation must bind the exact logical 16-authority/199-file census");
+  if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256 && profile.cells.length === 19) {
+    const exactScope = new Map([[16, 199], [RECOVERY_REMAINING_AUTHORITIES, RECOVERY_REMAINING_FILES]]);
+    const expectedFiles = exactScope.get(remainingArtifactIds.length);
+    if (expectedFiles !== undefined && remainingArtifactIds.reduce(
+      (sum, id) => sum + artifactExpectedFiles[id].length, 0,
+    ) !== expectedFiles) {
+      fail(`continuation must bind the exact logical ${remainingArtifactIds.length}-authority/${expectedFiles}-file census`);
+    }
   }
   for (const row of document.phases.staging) {
     if (JSON.stringify([
@@ -2494,9 +2766,14 @@ export async function runCampaign(args, options = {}) {
     cleanup: options.operations?.cleanup ?? safeRemoveTree,
     sample: options.operations?.sample ?? sampleGpuBestEffort,
   };
-  const startIndex = options.startIndex ?? IMPORTED_PREFIX_CELLS;
+  const startIndex = options.startIndex ?? (options.importedPrefix
+    ? IMPORTED_PREFIX_CELLS : RECOVERY_IMPORTED_PREFIX_CELLS);
   let imported = { lineage: null, outcomes: [] };
-  if (startIndex === IMPORTED_PREFIX_CELLS) {
+  if (startIndex === RECOVERY_IMPORTED_PREFIX_CELLS) {
+    const selected = options.prefixSelection
+      ?? await selectRecoveryContinuation(prefixCandidates, profile);
+    imported = options.importedPrefix ?? await importRecoveryContinuation(selected, output);
+  } else if (startIndex === IMPORTED_PREFIX_CELLS) {
     const selected = options.prefixSelection
       ?? await selectImportedPrefix(prefixCandidates, profile);
     imported = options.importedPrefix ?? await importPrefixEvidence(selected, output);
@@ -2520,6 +2797,13 @@ export async function runCampaign(args, options = {}) {
   const remainingArtifactIds = [...new Set(
     profile.cells.slice(startIndex).flatMap((cell) => cell.artifactIds),
   )];
+  const remainingFileCount = remainingArtifactIds.reduce(
+    (sum, id) => sum + artifactExpectedFiles[id].length, 0,
+  );
+  if (startIndex === RECOVERY_IMPORTED_PREFIX_CELLS && (remainingArtifactIds.length !== RECOVERY_REMAINING_AUTHORITIES
+    || remainingFileCount !== RECOVERY_REMAINING_FILES)) {
+    fail(`recovery continuation scope drifted: expected ${RECOVERY_REMAINING_AUTHORITIES} authorities / ${RECOVERY_REMAINING_FILES} files`);
+  }
   const sourceAudits = new Map();
   const cacheProvisioning = { sourceCensus: [], staging: [], finalOffline: [] };
   const censusErrors = [];
@@ -2833,9 +3117,10 @@ export async function runCampaign(args, options = {}) {
         }
         const expectedDownloaded = missingDownload?.id === artifactId
           ? missingDownload.downloadedFiles : [];
-        if (JSON.stringify(staged.downloadedFiles ?? []) !== JSON.stringify(expectedDownloaded)) {
-          fail(`offline JIT stage changed the frozen download partition for ${artifactId}`);
-        }
+        assertExactDownloadedFilePartition(
+          staged.downloadedFiles ?? [], expectedDownloaded,
+          `offline JIT stage downloaded-file partition for ${artifactId}`,
+        );
         cacheProvisioning.staging.push({
           id: artifactId,
           repository: profile.artifacts[artifactId].repository,

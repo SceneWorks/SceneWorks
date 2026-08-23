@@ -11,6 +11,7 @@ import {
   PROFILE_SCHEMA_PATH,
   RECEIPT_SCHEMA_PATH,
   CACHE_PREFLIGHT_SCHEMA_PATH,
+  assertExactDownloadedFilePartition,
   authorityLifetimePlan,
   cellSemanticsSha256,
   directoryInventory,
@@ -28,7 +29,9 @@ import {
   receiptSkeleton,
   runCampaign,
   safeRemoveTree,
+  importRecoveryContinuation,
   selectImportedPrefix,
+  selectRecoveryContinuation,
   validateCampaignPaths,
   validateCachePreflightEvidence,
   validateDocumentWithSchema,
@@ -129,6 +132,31 @@ test("download evidence freezes the exact 23-authority filename census", async (
   assert.throws(
     () => expectedArtifactFilesFromEvidence(checked, missingRow),
     /missing exact authority/,
+  );
+});
+
+test("downloaded-file partition compares exact semantics but ignores object insertion order", () => {
+  const expected = [{
+    path: "transformer/model.safetensors", bytes: 200, sha256: "a".repeat(64),
+    lfsSha256: "b".repeat(64), commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+  }];
+  const reordered = [{
+    commitSha: expected[0].commitSha, lfsSha256: expected[0].lfsSha256,
+    sha256: expected[0].sha256, bytes: expected[0].bytes, path: expected[0].path,
+  }];
+  assert.doesNotThrow(() => assertExactDownloadedFilePartition(reordered, expected, "fixture"));
+  for (const field of ["path", "bytes", "sha256", "lfsSha256", "commitSha"]) {
+    const drifted = structuredClone(expected);
+    drifted[0][field] = field === "path" ? "other.safetensors"
+      : field === "bytes" ? 201 : "f".repeat(field === "commitSha" ? 40 : 64);
+    assert.throws(() => assertExactDownloadedFilePartition(drifted, expected, "fixture"), /partition/);
+  }
+  for (const malformed of [null, [], [{ ...expected[0], extra: true }], [{ ...expected[0], path: "../escape" }]]) {
+    assert.throws(() => assertExactDownloadedFilePartition(malformed, expected, "fixture"), /array|fields|malformed|partition/);
+  }
+  assert.throws(
+    () => assertExactDownloadedFilePartition([...expected, structuredClone(expected[0])], expected, "fixture"),
+    /ambiguous/,
   );
 });
 
@@ -774,6 +802,183 @@ async function writePrefixCandidate(root, candidateName = "12345") {
   );
   return { candidate, evidence, metadata };
 }
+
+async function writeRecoveryCandidate(root) {
+  const legacyRoot = path.join(path.dirname(root), `${path.basename(root)}-legacy-source`);
+  await mkdir(legacyRoot);
+  const legacy = await writePrefixCandidate(legacyRoot);
+  const candidate = path.join(root, "9488587517");
+  const evidence = path.join(candidate, "evidence");
+  await mkdir(evidence, { recursive: true });
+  const originalLineage = {
+    kind: "contiguous-pass-prefix",
+    sourceArtifactId: "9477529627",
+    sourceArtifactName: "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1",
+    sourceArtifactDigest: "sha256:f3164a32a485fdedd671f4e11f30038213d30a7eb2b541bda90bef30e63188f3",
+    sourceRunId: "32570707303",
+    sourceRunAttempt: "1",
+    sourceHeadSha: "8886a9e69f26beec05688c81b414859bd102f6d0",
+    sourceInferenceSha: "b646a6f89ba9f6b07efe53dd583d8a42e21e9871",
+    sourceProfile: PROFILE_NAME,
+    sourceCellSemanticsSha256: "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879",
+    sourceArtifactSemanticsSha256: "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e",
+    importedOrdinals: [1, 2, 3, 4, 5, 6, 7],
+    quarantinedBoundaryResidue: {
+      ordinal: 8, cellId: "flux1-dev-q8", path: "_imported-boundary-residue/08-flux1-dev-q8",
+      disposition: "non-executed-pre-provision-skeleton-excluded-from-prefix", files: [],
+    },
+  };
+  const imported = path.join(evidence, "_imported-prefix");
+  await mkdir(imported);
+  for (let index = 0; index < 7; index += 1) {
+    const cell = profile().cells[index];
+    const ordinal = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    await cp(path.join(legacy.evidence, ordinal), path.join(imported, ordinal), { recursive: true });
+  }
+  await writeFile(path.join(imported, "lineage.json"), `${JSON.stringify(originalLineage, null, 2)}\n`);
+  const recoveryMetadata = {
+    artifactId: "9488587517",
+    artifactName: "sc-20945-epic-20738-62be42127e2b4ff07321e2c369de92fc6edef526-32616545132-1",
+    artifactSize: 4_322_200,
+    artifactDigest: "sha256:765c8f4ed419e7a7d0fbc20dcd65f5be6f0be7ce9ed9f151915208bf541692bf",
+    runId: "32616545132", runAttempt: "1", headSha: "62be42127e2b4ff07321e2c369de92fc6edef526",
+    inferenceSha: "b646a6f89ba9f6b07efe53dd583d8a42e21e9871", profile: PROFILE_NAME,
+    cellSemanticsSha256: "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879",
+    artifactSemanticsSha256: "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932",
+  };
+  await writeFile(path.join(candidate, "artifact-metadata.json"), `${JSON.stringify(recoveryMetadata, null, 2)}\n`);
+  async function writeCurrentReceipt(parent, index, status) {
+    const cell = profile().cells[index];
+    const ordinal = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    const cellDir = path.join(parent, ordinal);
+    await mkdir(cellDir, { recursive: true });
+    await writeFile(path.join(cellDir, "cell.json"), `{"id":"${cell.id}"}\n`);
+    await writeFile(path.join(cellDir, "runtime-result.json"), "{}\n");
+    await writeFile(path.join(cellDir, "controller.log"), `${status} ${cell.id}\n`);
+    const receipt = fixtureReceipt(status, index);
+    receipt.repositories.sceneworks.sha = recoveryMetadata.headSha;
+    receipt.repositories.inference.sha = recoveryMetadata.inferenceSha;
+    receipt.execution.headSha = recoveryMetadata.headSha;
+    receipt.execution.runId = recoveryMetadata.runId;
+    receipt.execution.runAttempt = recoveryMetadata.runAttempt;
+    const files = await hashedFiles(cellDir);
+    receipt.inputs = files.filter((file) => file.path === "cell.json");
+    receipt.outputs = files.filter((file) => file.path === "runtime-result.json");
+    receipt.logs = files.filter((file) => file.path === "controller.log");
+    await writeFile(path.join(cellDir, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+    return { cell, ordinal, receipt };
+  }
+  const recovered = [];
+  for (const index of [7, 8]) recovered.push(await writeCurrentReceipt(evidence, index, "passed"));
+  const staleCell = profile().cells[9];
+  const staleDir = path.join(evidence, `10-${staleCell.id}`);
+  await mkdir(staleDir);
+  await writeFile(path.join(staleDir, "controller.log"), "stale sentinel changed after receipt\n");
+  const stale = receiptSkeleton({
+    cell: staleCell, ordinal: 10,
+    repositories: { sceneworks: { sha: recoveryMetadata.headSha, clean: true }, inference: { sha: recoveryMetadata.inferenceSha, clean: true } },
+    artifacts: fixtureReceipt("failed", 9).artifacts,
+    execution: { ...fixtureReceipt("failed", 9).execution, runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha },
+    gpuIdentity: fixtureReceipt("failed", 9).hardware.gpuIdentity,
+    systemMemory: fixtureReceipt("failed", 9).hardware.systemMemory, startedAt: "2026-08-23T00:00:00.000Z",
+  });
+  stale.hardware.rawVramSamples = [{ raw: "fixture raw" }];
+  stale.logs = [{ path: "controller.log", bytes: 1, sha256: "0".repeat(64) }];
+  stale.authorityLifecycle = {
+    ordinal: 10, cellId: staleCell.id, staged: [], activeArtifactIds: [...staleCell.artifactIds],
+    providerExecution: "not-attempted", requestMemoryStrategy: null, verifiedBefore: false,
+    verifiedAfter: false, derivedAfter: [], released: [], diskProbes: [],
+  };
+  await writeFile(path.join(staleDir, "receipt.json"), `${JSON.stringify(stale, null, 2)}\n`);
+  const emergency = path.join(evidence, "_emergency");
+  const failures = [];
+  for (let index = 9; index < 19; index += 1) {
+    const row = await writeCurrentReceipt(emergency, index, "failed");
+    failures.push({ id: row.cell.id, status: "failed", receipt: `_emergency/${row.ordinal}/receipt.json` });
+  }
+  const expected = expectedArtifactFilesFromEvidence(profile(), JSON.parse(await readFile(
+    "config/download-pattern-evidence.json", "utf8",
+  )));
+  const ids = [...new Set(profile().cells.slice(7).flatMap((cell) => cell.artifactIds))];
+  const sourceCensus = ids.map((id) => {
+    const artifact = profile().artifacts[id];
+    const reusedFiles = expected[id].map((file) => ({ path: file, bytes: 1, sha256: "a".repeat(64) }));
+    return { id, repository: artifact.repository, revision: artifact.revision, subdirectory: artifact.subdirectory,
+      allowPatterns: artifact.allowPatterns, expectedFiles: expected[id], complete: true, missingFiles: [], reusedFiles };
+  });
+  const cacheBase = {
+    schemaVersion: 1, profile: PROFILE_NAME, status: "failed", error: "fixture partial failure",
+    downloadEvidenceSha256: "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b",
+    expectedArtifactIds: ids, sourceCacheRoot: "fixture-cache", campaignStagingRoot: "fixture-stage",
+    derivedSidecarRoot: "fixture-derived", missingFileStore: "fixture-missing", frozenMissingFiles: [],
+    sidecarObstructions: [], reusedFiles: sourceCensus.flatMap((row) => row.reusedFiles.map((file) => ({ artifactId: row.id, ...file }))),
+    downloadedFiles: [], networkDownloadCount: 0, phases: { sourceCensus, staging: [], finalOffline: [] },
+    lifetimePlan: [], diskPlan: null, derivedSidecarLifecycle: { initial: null, afterCells: [] }, offlineBeforeCells: true,
+  };
+  await writeFile(path.join(evidence, "cache-preflight-initial.json"), `${JSON.stringify({ ...cacheBase, evidencePhase: "initial" }, null, 2)}\n`);
+  await writeFile(path.join(evidence, "cache-preflight.json"), `${JSON.stringify({ ...cacheBase, evidencePhase: "final" }, null, 2)}\n`);
+  const cacheBytes = await readFile(path.join(evidence, "cache-preflight.json"));
+  const summary = {
+    schemaVersion: 1, profile: PROFILE_NAME,
+    repositories: { sceneworks: { sha: recoveryMetadata.headSha, clean: true }, inference: { sha: recoveryMetadata.inferenceSha, clean: true } },
+    execution: { runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha },
+    receipts: [
+      ...profile().cells.slice(0, 7).map((cell, index) => ({ id: cell.id, status: "passed", receipt: `_imported-prefix/${String(index + 1).padStart(2, "0")}-${cell.id}/receipt.json` })),
+      ...recovered.map((row) => ({ id: row.cell.id, status: "passed", receipt: `${row.ordinal}/receipt.json` })), ...failures,
+    ],
+    lineage: {
+      imported: originalLineage,
+      continuation: {
+        runId: recoveryMetadata.runId, runAttempt: recoveryMetadata.runAttempt, headSha: recoveryMetadata.headSha,
+        inferenceSha: recoveryMetadata.inferenceSha,
+        profileCellSemanticsSha256: recoveryMetadata.cellSemanticsSha256,
+        profileArtifactSemanticsSha256: recoveryMetadata.artifactSemanticsSha256, startOrdinal: 8,
+      },
+    },
+    cachePreflight: { path: "cache-preflight.json", bytes: cacheBytes.length, sha256: createHash("sha256").update(cacheBytes).digest("hex") },
+    authorityLifecycle: [], diskFreeProbes: [], finalAuthorityLifecycle: [], passed: 9, failed: 10, campaignErrors: ["fixture"],
+  };
+  await writeFile(path.join(evidence, "campaign-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+  return { candidate, evidence, summary };
+}
+
+test("recovery continuation imports only audited PASS cells and rejects ambiguity or tampering", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-21252-recovery-"));
+  try {
+    const validRoot = path.join(temporary, "valid");
+    await mkdir(validRoot);
+    const fixture = await writeRecoveryCandidate(validRoot);
+    const selected = await selectRecoveryContinuation(validRoot, profile());
+    assert.deepEqual(selected.receipts.map(({ ordinalName }) => ordinalName), [
+      "01-chroma1-base-q4", "02-chroma1-base-q8", "03-chroma1-flash-q4", "04-chroma1-flash-q8",
+      "05-chroma1-hd-q4", "06-chroma1-hd-q8", "07-flux1-dev-q4", "08-flux1-dev-q8", "09-flux1-schnell-q4",
+    ]);
+    const output = path.join(temporary, "output");
+    await mkdir(output);
+    const imported = await importRecoveryContinuation(selected, output);
+    assert.equal(imported.outcomes.length, 9);
+    assert.equal(imported.outcomes.some((outcome) => outcome.id === "flux1-schnell-q8"), false);
+    assert.equal((await readdir(path.join(output, "_imported-prefix"))).includes("10-flux1-schnell-q8"), false);
+    for (const [label, mutate, pattern] of [
+      ["metadata", async (candidate) => { const file = path.join(candidate, "artifact-metadata.json"); const value = JSON.parse(await readFile(file)); value.artifactDigest = "sha256:" + "0".repeat(64); await writeFile(file, JSON.stringify(value)); }, /metadata/],
+      ["summary", async (candidate) => { const file = path.join(candidate, "evidence", "campaign-summary.json"); const value = JSON.parse(await readFile(file)); value.passed = 8; await writeFile(file, JSON.stringify(value)); }, /summary/],
+      ["receipt", async (candidate) => { await writeFile(path.join(candidate, "evidence", "08-flux1-dev-q8", "controller.log"), "tampered\n"); }, /rehash/],
+    ]) {
+      const root = path.join(temporary, label);
+      await mkdir(root);
+      await cp(fixture.candidate, path.join(root, "9488587517"), { recursive: true });
+      await mutate(path.join(root, "9488587517"));
+      await assert.rejects(selectRecoveryContinuation(root, profile()), pattern, label);
+    }
+    const ambiguous = path.join(temporary, "ambiguous");
+    await mkdir(ambiguous);
+    await cp(fixture.candidate, path.join(ambiguous, "9488587517"), { recursive: true });
+    await cp(fixture.candidate, path.join(ambiguous, "duplicate"), { recursive: true });
+    await assert.rejects(selectRecoveryContinuation(ambiguous, profile()), /exactly one/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
 
 test("prefix discovery accepts exactly one rehashed contiguous old-profile PASS prefix", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-prefix-"));
@@ -2301,10 +2506,11 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /--prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"/);
   assert.match(terminalBlock, /HF_HUB_OFFLINE: "1"/);
   assert.match(terminalBlock, /TRANSFORMERS_OFFLINE: "1"/);
-  assert.match(terminalBlock, /gh api "repos\/\$env:GITHUB_REPOSITORY\/actions\/artifacts\?per_page=100&page=\$page"/);
-  assert.match(terminalBlock, /gh run download \$runId --name \$artifact\.name --dir \$evidence/);
-  assert.match(terminalBlock, /artifactDigest = \[string\]\$artifact\.digest/);
-  assert.match(terminalBlock, /8886a9e69f26beec05688c81b414859bd102f6d0/);
+  assert.match(terminalBlock, /actions\/artifacts\/\$artifactId/);
+  assert.match(terminalBlock, /9488587517[\s\S]*?4322200[\s\S]*?765c8f4ed419e7a7d0fbc20dcd65f5be6f0be7ce9ed9f151915208bf541692bf/);
+  assert.match(terminalBlock, /\$artifact\.expired[\s\S]*?\$artifact\.size_in_bytes[\s\S]*?\$artifact\.digest/);
+  assert.match(terminalBlock, /gh run download \$runId --name \$artifactName --dir \$evidence/);
+  assert.match(terminalBlock, /62be42127e2b4ff07321e2c369de92fc6edef526/);
   assert.doesNotMatch(terminalBlock, /snapshot_download/);
   assert.match(terminalBlock, /python -m venv \$venv/);
   assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);
@@ -2314,6 +2520,10 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /__version__ == '0\.36\.0'/);
   assert.match(terminalBlock, /q8\/transformer\/model\.safetensors/);
   const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
+  assert.match(controller, /RECOVERY_IMPORTED_PREFIX_CELLS = 9[\s\S]*?RECOVERY_REMAINING_AUTHORITIES = 14[\s\S]*?RECOVERY_REMAINING_FILES = 160/);
+  assert.match(controller, /stale cell-10 sentinel/);
+  assert.match(controller, /selectRecoveryContinuation[\s\S]*?importRecoveryContinuation/);
+  assert.doesNotMatch(controller, /JSON\.stringify\(staged\.downloadedFiles/);
   assert.match(controller, /async function downloadReviewedMissing[\s\S]*?HF_HUB_OFFLINE: "0"/);
   assert.match(controller, /async function stageArtifact[\s\S]*?HF_HUB_OFFLINE: "1"/);
   assert.match(controller, /HF_HUB_OFFLINE: "1"[\s\S]*TRANSFORMERS_OFFLINE: "1"/);
