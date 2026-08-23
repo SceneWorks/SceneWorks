@@ -1743,6 +1743,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         // and not symmetry for its own sake.
         "config/engine-capabilities/audio/capabilities.candle.json",
         "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
+        "scripts/fetch-prebuilt-mlx.sh", // both jobs run it to fetch the prebuilt libmlx (sc-21382)
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the MLX revision the whole lane compiles
         "rust-toolchain.toml", // governs the toolchain cargo resolves under the dtolnay install
