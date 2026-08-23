@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "f17c82544558666f8d843b4e344e3efa0fd08ed7",
+    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -118,7 +118,7 @@
     {
       "id": "boogu_image",
       "modality": "image",
-      "supportsPreview": false,
+      "supportsPreview": true,
       "denoiserOutputLatentSpace": {
         "channels": 16,
         "spatialCompression": {
@@ -139,7 +139,7 @@
     {
       "id": "boogu_image_edit",
       "modality": "image",
-      "supportsPreview": false,
+      "supportsPreview": true,
       "denoiserOutputLatentSpace": {
         "channels": 16,
         "spatialCompression": {
@@ -160,7 +160,7 @@
     {
       "id": "boogu_image_turbo",
       "modality": "image",
-      "supportsPreview": false,
+      "supportsPreview": true,
       "denoiserOutputLatentSpace": {
         "channels": 16,
         "spatialCompression": {
@@ -1130,7 +1130,8 @@
       "supportsLokr": true,
       "supportedQuants": [
         "q4",
-        "q8"
+        "q8",
+        "nvfp4"
       ],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,
@@ -1148,7 +1149,8 @@
       "supportsLokr": true,
       "supportedQuants": [
         "q4",
-        "q8"
+        "q8",
+        "nvfp4"
       ],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,
@@ -1166,7 +1168,8 @@
       "supportsLokr": true,
       "supportedQuants": [
         "q4",
-        "q8"
+        "q8",
+        "nvfp4"
       ],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,
@@ -1190,7 +1193,9 @@
       "source": "fused_checkpoint",
       "operation": "generate",
       "providerId": "sdxl",
-      "conditioning": [],
+      "conditioning": [
+        "control"
+      ],
       "supportsLora": true,
       "supportsLokr": true,
       "supportedQuants": [

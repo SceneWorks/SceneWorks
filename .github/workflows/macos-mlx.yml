@@ -63,12 +63,12 @@ on:
       # windows-candle.yml / desktop-windows.yml filters). sc-8617.
       - "config/manifests/**"
       # The stage-1 MLX facts dump this lane is the sole producer of (sc-17119). Without this entry
-      # the "real dump, not a restamp" step below is unreachable for the one edit it exists to
-      # catch: a restamp touches ONLY config/engine-capabilities/capabilities.mlx.json, matching no
-      # other path here, so the lane would not run at all on the PR that made the file wrong.
+      # the native content-verification step below is unreachable when an edit touches ONLY
+      # config/engine-capabilities/capabilities.mlx.json, so the lane would not run on the PR that
+      # made the file wrong.
       #
       # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also matched
-      # capabilities.candle.json, so a candle-only restamp woke this whole macOS job -- including the
+      # capabilities.candle.json, so a candle-only facts edit woke this whole macOS job -- including the
       # bare `cargo test` over every default member -- for a file its verify step never opens.
       # Self-hosted runners are the fleet's most constrained resource. Nothing here reads the sibling
       # file: no Rust reads the facts directory at all (`default_facts_dir()` only builds the dumper
@@ -76,10 +76,9 @@ on:
       # previewSupportCatalog.test.js runs in check.yml's hosted Linux `web` job, and
       # generate-preview-support.mjs / bump-inference.mjs are manual scripts no workflow invokes.
       #
-      # No coverage is lost. A restamp is the only edit this drops, and it is exactly the edit this
-      # lane cannot check; a *material* sibling change also regenerates
+      # No coverage is lost. A *material* sibling change also regenerates
       # config/manifests/builtin.preview-support.jsonc, and `config/manifests/**` above still wakes
-      # both lanes. Path filters match DELETES and ADDS too, so a restamp, delete or re-add of this
+      # both lanes. Path filters match DELETES and ADDS too, so a delete or re-add of this
       # file still triggers the lane.
       - "config/engine-capabilities/capabilities.mlx.json"
       - "config/engine-capabilities/runtime/capabilities.mlx.json"
@@ -93,6 +92,11 @@ on:
       # matching the audio file. Demonstrated on `97a7655a9`, an audio-only re-dump that woke neither
       # stage-1 lane -- declared but unreachable, for exactly the edit the step exists to catch.
       - "config/engine-capabilities/audio/capabilities.candle.json"
+      # The native producer below delegates its content comparison to this script. A script-only
+      # change must exercise the lane it governs.
+      - "scripts/compare-engine-capability-facts.mjs"
+      # Both jobs below run this to fetch the prebuilt libmlx; an edit to it must exercise them.
+      - "scripts/fetch-prebuilt-mlx.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       # sc-17703 (Michael's call — a deliberate under-trigger fix): rust-toolchain.toml
@@ -352,7 +356,7 @@ jobs:
       # `jobs:`; pointing the two at different directories caches nothing and says nothing,
       # which is exactly what the first version of this step did.
       # Save only on `main` — see the note on the `parity-rust` cache step in check.yml.
-      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Ensure Metal compiler
@@ -364,6 +368,26 @@ jobs:
             sudo xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun metal --version || true
+      - name: Fetch prebuilt MLX (sc-21382)
+        # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on a hosted runner on every cache miss
+        # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
+        # commit (`prebuilt-<sha12>` releases, cell = target × deployment target × Debug/Release);
+        # scripts/fetch-prebuilt-mlx.sh picks the asset for the mlx-rs rev pinned in Cargo.lock
+        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and build.rs
+        # links it from PMETAL_MLX_PREBUILT_DIR only after checking the manifest against its own
+        # key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
+        # published for this rev" (exit 1): the right answer then is the source build, surfaced
+        # as a workflow annotation. Anything else is an error. Same step as inference ci.yml.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -401,10 +425,10 @@ jobs:
         run: cargo test -- --skip nax_16bit_sdpa_is_correct
 
       # sc-17119/sc-18477. This is an ordinary weights-free registry walk, so it belongs on the
-      # hosted half rather than the scarce M5/NAX pool. A pin bump deliberately makes descriptor-
-      # backed workspace tests fail closed until the fresh facts are committed; `always()` lets the
-      # producer and its paired upload break that bootstrap cycle without hand-authoring Mac data.
-      - name: Verify capabilities.mlx.json is a real dump, not a restamp
+      # hosted half rather than the scarce M5/NAX pool. `always()` preserves a fresh native artifact
+      # even when an earlier workspace test reports descriptor drift, so the mismatch can be repaired
+      # without hand-authoring Mac data.
+      - name: Verify capabilities.mlx.json content against a fresh dump
         if: ${{ always() }}
         run: |
           set -euo pipefail
@@ -412,25 +436,28 @@ jobs:
           rm -rf "$scratch"
           mkdir -p "$scratch"
           cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$scratch"
-          if ! diff -u config/engine-capabilities/capabilities.mlx.json \
-                     "$scratch/capabilities.mlx.json"; then
-            echo "::error::config/engine-capabilities/capabilities.mlx.json does not match a fresh"\
-                 "dump at this pin. Re-dump it on a Mac:"\
+          if ! node scripts/compare-engine-capability-facts.mjs \
+                    config/engine-capabilities/capabilities.mlx.json \
+                    "$scratch/capabilities.mlx.json"; then
+            echo "::error::config/engine-capabilities/capabilities.mlx.json differs in capability"\
+                 "content from a fresh dump. Re-dump it on a Mac:"\
                  "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
                  "then (cd apps/web && npm run gen:preview-support)."
             exit 1
           fi
-          if ! diff -u config/engine-capabilities/runtime/capabilities.mlx.json \
-                     "$scratch/runtime/capabilities.mlx.json"; then
+          if ! node scripts/compare-engine-capability-facts.mjs \
+                    config/engine-capabilities/runtime/capabilities.mlx.json \
+                    "$scratch/runtime/capabilities.mlx.json"; then
             echo "::error::config/engine-capabilities/runtime/capabilities.mlx.json does not"\
                  " match inference's fresh runtime capability snapshot. Download the"\
                  " backend-capability-facts-mlx artifact from this run; never hand-author it."
             exit 1
           fi
-          if ! diff -u config/engine-capabilities/audio/capabilities.candle.json \
-                     "$scratch/audio/capabilities.candle.json"; then
+          if ! node scripts/compare-engine-capability-facts.mjs \
+                    config/engine-capabilities/audio/capabilities.candle.json \
+                    "$scratch/audio/capabilities.candle.json"; then
             echo "::error::config/engine-capabilities/audio/capabilities.candle.json does not"\
-                 "match a fresh dump at this pin. Either box re-dumps it --"\
+                 "match the capability content of a fresh dump. Either box re-dumps it --"\
                  "cargo run -p sceneworks-worker --bin dump-engine-capabilities"\
                  "[--no-default-features --features backend-candle] --"\
                  "then (cd apps/web && npm run gen:preview-support)."
@@ -532,6 +559,26 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy
+      - name: Fetch prebuilt MLX (sc-21382)
+        # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on every cache miss; this self-hosted runner keeps the extracted tarball in ~/.cache/pmetal/prebuilt across runs
+        # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
+        # commit (`prebuilt-<sha12>` releases, cell = target × deployment target × Debug/Release);
+        # scripts/fetch-prebuilt-mlx.sh picks the asset for the mlx-rs rev pinned in Cargo.lock
+        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and build.rs
+        # links it from PMETAL_MLX_PREBUILT_DIR only after checking the manifest against its own
+        # key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
+        # published for this rev" (exit 1): the right answer then is the source build, surfaced
+        # as a workflow annotation. Anything else is an error. Same step as inference ci.yml.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"

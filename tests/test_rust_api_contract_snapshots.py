@@ -23,6 +23,7 @@ from rust_api_harness import (
     PNG_1X1,
     enable_api_listening_log,
     safetensors_bytes,
+    spawn_env,
     spawn_process,
     wait_for_health,
 )
@@ -199,7 +200,20 @@ class ServerApiHarness:
         self.root = root
         self.runtime = "rust"
         write_contract_manifests(root / "config")
-        env = os.environ.copy()
+        # sc-19708: the catalog now reports the configured model-library root
+        # (`modelResolution.configuredLibraryPath`). That root is environment-derived — the API
+        # resolves HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE / HF_HOME and otherwise falls back to the
+        # OS Hugging Face home under $HOME — so without a pin the golden would record WHOSE
+        # machine recorded it (a macOS dev box bakes in /Users/<name>/..., which then fails on
+        # every Linux runner, and re-recording there just flips which machine is broken).
+        # HF_HUB_CACHE has top precedence, so pinning it under `root` makes the value identical on
+        # every machine and lets the existing per-runtime redaction render it <runtime-root>/...,
+        # exactly like every other path in the contract. It also keeps the contract run off the
+        # developer's real Hugging Face cache. The assertion still discriminates: the field must
+        # be present, a string, and this exact configured root. The pin lives in the shared
+        # `spawn_env` helper; the e2e harness lacked it and paid a 22.6s install-state sweep
+        # against the host cache on a developer box.
+        env = spawn_env(root)
         env.update(
             {
                 "SCENEWORKS_API_HOST": "127.0.0.1",
@@ -215,20 +229,6 @@ class ServerApiHarness:
                 "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
             }
         )
-        # sc-19708: the catalog now reports the configured model-library root
-        # (`modelResolution.configuredLibraryPath`). That root is environment-derived — the API
-        # resolves HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE / HF_HOME and otherwise falls back to the
-        # OS Hugging Face home under $HOME — so without a pin the golden would record WHOSE
-        # machine recorded it (a macOS dev box bakes in /Users/<name>/..., which then fails on
-        # every Linux runner, and re-recording there just flips which machine is broken).
-        # HF_HUB_CACHE has top precedence, so pinning it under `root` makes the value identical on
-        # every machine and lets the existing per-runtime redaction render it <runtime-root>/...,
-        # exactly like every other path in the contract. It also keeps the contract run off the
-        # developer's real Hugging Face cache. The assertion still discriminates: the field must
-        # be present, a string, and this exact configured root.
-        env["HF_HUB_CACHE"] = str(root / "data" / "cache" / "huggingface" / "hub")
-        for inherited in ("HUGGINGFACE_HUB_CACHE", "HF_HOME"):
-            env.pop(inherited, None)
         enable_api_listening_log(env)
         rust_binary = os.getenv("SCENEWORKS_RUST_API_BINARY")
         command = (

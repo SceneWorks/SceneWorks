@@ -644,8 +644,10 @@ if (process.argv.includes("--self-test")) {
         evidence: "self-test fixture",
       },
     ];
+    const brandNewUnclassified =
+      'crate "crates/media/mlx-gen/mlx-gen-brand-new" in the pinned inference revision is UNCLASSIFIED';
     if (validateCrateCoverage(classified, components, renderCrates(crates), null)
-        .some((error) => error.includes("UNCLASSIFIED"))) {
+        .some((error) => error.includes(brandNewUnclassified))) {
       console.error("self-test: a classified crate was still reported unclassified (guard is not discriminating)");
       process.exit(1);
     }
@@ -662,7 +664,7 @@ if (process.argv.includes("--self-test")) {
       },
     ];
     if (validateCrateCoverage(ported, components, renderCrates(crates), null)
-        .some((error) => error.includes("UNCLASSIFIED"))) {
+        .some((error) => error.includes(brandNewUnclassified))) {
       console.error("self-test: a ported-area-covered crate was still reported unclassified");
       process.exit(1);
     }

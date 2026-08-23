@@ -3739,6 +3739,27 @@ mod download_receipt_tests {
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
     }
 
+    /// Manifest `files` entries are match patterns, not literal names — Eros's shared Gemma
+    /// encoder ships as `"gemma/*"`. Seeding must write a CONCRETE file the pattern matches:
+    /// `snapshot_contains_pattern` globs the snapshot, so any real name under `gemma/` reads
+    /// exactly like the literal `*` file this helper used to write. That literal only ever worked
+    /// because `*` is a legal filename on macOS/Linux; on Windows `fs::write` fails with
+    /// `ERROR_INVALID_NAME` (os error 123), which reddened the seeded-cache Eros tests on the dev
+    /// box while the Linux `cargo test` lane stayed green.
+    fn seeded_file_path(pattern: &str) -> String {
+        pattern
+            .split('/')
+            .map(|segment| match segment {
+                "*" => "seeded.safetensors".to_owned(),
+                segment if pattern_contains_glob(segment) => {
+                    segment.replace('*', "seeded").replace('?', "0")
+                }
+                segment => segment.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     fn seed_manifest_download(data_dir: &FsPath, download: &Value) {
         let repo = download.get("repo").and_then(Value::as_str).unwrap();
         let revision = download.get("revision").and_then(Value::as_str).unwrap();
@@ -3747,7 +3768,7 @@ mod download_receipt_tests {
             .join("snapshots")
             .join(revision);
         for file in string_array_field(download, "files") {
-            let path = snapshot.join(file);
+            let path = snapshot.join(seeded_file_path(&file));
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"legacy Eros weights").unwrap();
         }
@@ -3769,8 +3790,8 @@ mod download_receipt_tests {
     /// `apply_model_catalog_entry`, yet the snapshot pipeline still runs size enrichment on it.
     /// The refresh must no-op for tombstones while staying a hard error for real entries —
     /// this exact mismatch 500'd the whole catalog for machines holding legacy Eros weights.
-    /// (Platform-neutral twin of the seeded-cache Eros tests below, which cannot run on Windows:
-    /// their setup writes the literal `gemma/*` manifest pattern as a filename.)
+    /// (Platform-neutral twin of the seeded-cache Eros tests below, which reach the same tombstone
+    /// through a real on-disk install — see `seeded_file_path` for why that seeding is glob-aware.)
     #[test]
     fn size_refresh_tolerates_a_cleanup_tombstone_without_variants() {
         let mut tombstone = json!({
@@ -5216,7 +5237,7 @@ mod download_receipt_tests {
                     .join(revision);
                 std::fs::create_dir_all(&snapshot).unwrap();
                 for file in string_array_field(co_requisite, "files") {
-                    let path = snapshot.join(&file);
+                    let path = snapshot.join(seeded_file_path(&file));
                     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                     std::fs::write(path, b"weights").unwrap();
                 }
@@ -5254,7 +5275,7 @@ mod download_receipt_tests {
             let legacy_repo = huggingface_repo_cache_path(data_dir, rename.legacy_repo).unwrap();
             let legacy_snapshot = legacy_repo.join("snapshots").join(clip_revision);
             for file in &clip_files {
-                let path = legacy_snapshot.join(file);
+                let path = legacy_snapshot.join(seeded_file_path(file));
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 #[cfg(unix)]
                 {
@@ -5360,7 +5381,7 @@ mod download_receipt_tests {
                 .join(codec_rev);
             std::fs::create_dir_all(&codec_snapshot).unwrap();
             for file in string_array_field(codec, "files") {
-                let path = codec_snapshot.join(&file);
+                let path = codec_snapshot.join(seeded_file_path(&file));
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, b"weights").unwrap();
             }

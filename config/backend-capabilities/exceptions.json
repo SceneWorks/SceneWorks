@@ -130,25 +130,6 @@
       ]
     },
     {
-      "id": "epic-8588-conditioning-sequencing",
-      "category": "conditioning",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying these exact six MLX-only conditioning cells under epic-8588 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
-      "approver": "Michael Trefry",
-      "authority": "epic-8588",
-      "approvedDate": "2026-08-14",
-      "userFacingBehavior": "Unsupported Candle conditioning controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
-      "revisitCondition": "Revisit when epic-8588 ships the named Candle conditioning work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
-      "cells": [
-        "models/illustrious_xl_v1/conditioningShape/control",
-        "models/illustrious_xl_v2/conditioningShape/control",
-        "models/realvisxl/conditioningShape/control",
-        "models/realvisxl_lightning/conditioningShape/control",
-        "models/scail2_14b/conditioningShape/multiReference",
-        "models/sdxl/conditioningShape/control"
-      ]
-    },
-    {
       "id": "epic-7434-cfg-pp-guidance-sequencing",
       "category": "guidance",
       "decisionType": "sequencing_choice",

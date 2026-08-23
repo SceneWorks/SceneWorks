@@ -566,6 +566,21 @@ impl KreaRuntimeEvidenceContext {
 /// the encoder and tokenizer contracts. An empty path therefore no longer represents a valid source.
 /// Keep the tests on the real lookup seam with a structurally truthful fixture; no model tensor is
 /// materialized and no memory evidence is measured or rewritten here.
+///
+/// ## Windows disk discipline (StorageFull incident, 2026-08-20)
+///
+/// "Sparse" above was only true on APFS/ext4. `gen_core_testkit::write_encoder_contract_fixture`
+/// ends with a multi-gigabyte `set_len` — the encoder's dense logical size, which must stay because
+/// the weight-bytes gates read it — and on NTFS that allocates in FULL. This fixture was measured
+/// costing 21.84 GB of `C:` per test process, and because it lives in a `static` (never dropped)
+/// every process left that behind permanently. Two mitigations, both load-bearing:
+///
+/// 1. Each tier's `.safetensors` tail is released right after the tier is written
+///    ([`crate::test_fixture_disk::sparsify_written_safetensors`]). Logical size and every written
+///    header byte are unchanged, so the gates read exactly the same numbers.
+/// 2. Initialization sweeps prior runs' leftovers, which a `static`'s guard can never do for
+///    itself. The directory name carries this process's PID so the sweep can tell its own from
+///    another concurrent run's.
 #[cfg(test)]
 fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
     struct Fixture {
@@ -573,9 +588,18 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
         root: std::path::PathBuf,
     }
 
+    /// Distinctive enough that the sweep can match nothing else under the shared temp root.
+    const FIXTURE_FAMILY: &str = "sceneworks-krea-memfix-";
+
     static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
-        let temp = tempfile::tempdir().expect("Krea memory-contract fixture root");
+        crate::test_fixture_disk::sweep_stale_fixtures(FIXTURE_FAMILY);
+        let temp = tempfile::Builder::new()
+            .prefix(&crate::test_fixture_disk::process_keyed_prefix(
+                FIXTURE_FAMILY,
+            ))
+            .tempdir()
+            .expect("Krea memory-contract fixture root");
         let root = temp.path().to_path_buf();
         let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
             .expect("Krea encoder contract");
@@ -586,6 +610,9 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
                 contract,
             )
             .expect("write sparse Krea encoder fixture");
+            // Per tier, not once at the end: the moment between the testkit's `set_len` and the
+            // release is the only fully-allocated one, and this bounds it to ONE tier's file.
+            crate::test_fixture_disk::sparsify_written_safetensors(&tier_root.join("text_encoder"));
             if let Some(bits) = bits {
                 let transformer = tier_root.join("transformer");
                 std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
@@ -5439,11 +5466,9 @@ mod tests {
         for tier in ["q4", "q8"] {
             for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
                 let path = root.join(tier).join(component).join("model.safetensors");
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::File::create(&path)
-                    .unwrap()
-                    .set_len(5_000_000_000)
-                    .unwrap();
+                // 8 x 5 GB. Sparse, or this one test allocates 40 GB of NTFS (see
+                // `crate::test_fixture_disk`); the gate reads the length, not the bytes.
+                crate::test_fixture_disk::create_sparse_weights(&path, 5_000_000_000);
             }
         }
 
