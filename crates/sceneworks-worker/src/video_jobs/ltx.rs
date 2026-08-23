@@ -860,6 +860,7 @@ pub(super) fn resolve_ltx_conditioning(
     }
     match request.source_asset_id.as_deref() {
         Some(asset_id) => {
+            let strength = ltx_i2v_conditioning_strength(request)?;
             let image = load_reference_image(
                 &settings.data_dir,
                 &request.project_id,
@@ -878,13 +879,30 @@ pub(super) fn resolve_ltx_conditioning(
             )?;
             Ok(vec![Conditioning::Reference {
                 image,
-                strength: None,
+                strength: Some(strength),
             }])
         }
         None => Err(WorkerError::InvalidPayload(
             "image_to_video requires a source image (sourceAssetId).".to_owned(),
         )),
     }
+}
+
+/// The SC20772 conditioned memory cells are calibrated only for a fully pinned starting image.
+/// Keep the public advanced knob explicit: accepting another value and silently borrowing the
+/// 1.0 receipt would admit a different workload under the same evidence identity.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx_i2v_conditioning_strength(request: &VideoRequest) -> WorkerResult<f32> {
+    let strength = advanced::f32(&request.advanced, "imageConditioningStrength", 1.0);
+    if strength.to_bits() != 1.0f32.to_bits() {
+        return Err(WorkerError::InvalidPayload(
+            "LTX image_to_video memory coverage requires imageConditioningStrength 1.0.".to_owned(),
+        ));
+    }
+    Ok(strength)
 }
 
 /// Read an `advanced` boolean flag (JSON bool), default `false` (Python `bool(.get(k))`).

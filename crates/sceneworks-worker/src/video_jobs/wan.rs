@@ -1500,6 +1500,22 @@ pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
     if let Some(video_mode) = input.video_mode.as_deref() {
         overlays.push(format!("provider_video_mode:{video_mode}"));
     }
+    if matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled") {
+        let mut references = input.conditioning.iter().filter_map(|conditioning| {
+            let Conditioning::Reference { image, strength } = conditioning else {
+                return None;
+            };
+            Some((image, strength.unwrap_or(1.0)))
+        });
+        if let (Some((image, strength)), None) = (references.next(), references.next()) {
+            overlays.push(format!(
+                "reference:image:{}x{}:strength:{:08x}",
+                image.width,
+                image.height,
+                strength.to_bits()
+            ));
+        }
+    }
     (!overlays.is_empty()).then(|| overlays.join("+"))
 }
 
