@@ -182,6 +182,11 @@ fn resolve_imported_krea_dit_pin(
     {
         return Ok(None);
     }
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven route;
+    // this bespoke lane never also claims it, so one entry has exactly one owner.
+    if request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
     // A builtin Krea engine id (in `MODEL_TABLE`) loads from its snapshot turnkey via the normal MLX
     // lane — never through the single-file entrypoint. Leaving those to the existing path is what keeps
     // builtin Krea rendering byte-identical (S0c requirement #3).
@@ -1899,13 +1904,9 @@ async fn generate_krea_imported_stream(
     let cold_admission = {
         // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
         // not be double-priced. A selected encoder is already represented by the spec's prepared
-        // contract receipt, so only admit the bundled encoder dir for the default path.
-        let text_encoder = base_dir.join("text_encoder");
-        let vae = base_dir.join("vae");
-        let mut companions = vec![vae];
-        if spec.text_encoder.is_none() {
-            companions.push(text_encoder);
-        }
+        // contract receipt, so only admit the bundled encoder dir for the default path. Shared with
+        // the plan-driven route so both are admitted on the identical floor (sc-20634).
+        let companions = imported_base_snapshot_companions(&base_dir, spec.text_encoder.is_some());
         let companion_refs = companions
             .iter()
             .map(PathBuf::as_path)

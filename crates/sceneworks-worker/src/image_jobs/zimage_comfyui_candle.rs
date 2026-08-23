@@ -137,6 +137,12 @@ pub(super) fn prepare_zimage_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiZImagePaths>> {
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven
+    // route; this bespoke lane never also claims it, so one entry has exactly one owner. Explicit
+    // rather than left to arm ordering in the resolver (sc-20634 review): ordering is not a claim.
+    if super::request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
     let descriptor = super::imported_generate_request_supported(
         request,
         "z-image",

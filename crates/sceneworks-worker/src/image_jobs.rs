@@ -796,6 +796,25 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::CheckpointPlan => {
+                // Plan-driven checkpoint (epic 20398, sc-20634): a persisted ImportPlanV1 resolved
+                // and re-verified before load; provider selected by family/source/operation through
+                // the registry. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::CheckpointPlan(sources) = route else {
+                    unreachable!("checkpoint plan route missing its prepared sources")
+                };
+                generate_checkpoint_plan_stream(
+                    api,
+                    settings,
+                    job,
+                    *sources,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::KreaImportedControl => {
                 // Imported single-file Krea 2 checkpoint + strict-pose set: the trained pose
                 // control-branch overlay rides the file-loaded imported DiT (the imported twin of
@@ -1366,6 +1385,22 @@ pub(crate) async fn run_image_generate_job(
                         api,
                         settings,
                         job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::CheckpointPlan => {
+                    let PreparedCandleImageRoute::CheckpointPlan(sources) = route else {
+                        unreachable!("checkpoint plan route missing its prepared sources")
+                    };
+                    generate_checkpoint_plan_stream(
+                        api,
+                        settings,
+                        job,
+                        *sources,
                         &plan,
                         &project_path,
                         backend,
@@ -3181,6 +3216,16 @@ include!("image_jobs/krea_control.rs");
 // loaded through the selected runtime's native single-file entrypoint, bypassing the registry
 // snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
 include!("image_jobs/krea_imported.rs");
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+// Plan-driven checkpoint routing (epic 20398, sc-20634): a user model bound to a persisted
+// `ImportPlanV1` (`importPlan.checkpointId` on its manifest entry) is resolved and re-verified
+// through the checkpoint plan store, its provider selected by family + source shape + operation
+// through the registry's imported-model authority, and rendered through the shared cached-generator
+// seam. Backend-neutral: the same file serves MLX and Candle.
+include!("image_jobs/checkpoint_plan.rs");
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

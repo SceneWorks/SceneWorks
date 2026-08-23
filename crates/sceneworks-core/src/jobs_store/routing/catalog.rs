@@ -1374,6 +1374,19 @@ pub fn imported_backend_declares_route(payload: &Map<String, Value>, backend: &s
     imported_backend_declared_route(payload, backend).is_some()
 }
 
+/// The persisted checkpoint identity a plan-backed manifest entry carries (`importPlan.checkpointId`,
+/// epic 20398). The worker's plan-driven route is the only consumer that loads through it; the
+/// scheduler treats it purely as the entry's source hint.
+pub fn checkpoint_plan_checkpoint_id(entry: &Map<String, Value>) -> Option<&str> {
+    entry
+        .get("importPlan")
+        .and_then(Value::as_object)
+        .and_then(|plan| plan.get("checkpointId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
 fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
     match entry.get("importSourceShape").and_then(Value::as_str) {
         Some(
@@ -1491,6 +1504,10 @@ pub fn imported_image_request_provider_eligible(
     if native_nvfp4 && backend != "candle" {
         return false;
     }
+    // The source hint: an installed/linked path for the bespoke imported lanes, or — for a
+    // plan-backed entry (epic 20398, sc-20634) — the persisted checkpoint identity the worker's
+    // plan-driven route resolves through the checkpoint plan store. Either is a claim that the
+    // worker then verifies fail-closed; neither is consumed for loading here.
     let has_nonempty_path = entry
         .get("modelPath")
         .and_then(Value::as_str)
@@ -1511,7 +1528,7 @@ pub fn imported_image_request_provider_eligible(
         })
         .map(str::trim)
         .is_some_and(|path| !path.is_empty());
-    if !has_nonempty_path {
+    if !has_nonempty_path && checkpoint_plan_checkpoint_id(entry).is_none() {
         return false;
     }
 
@@ -2651,6 +2668,61 @@ mod tests {
         assert!(!imported_image_request_provider_eligible(
             imported_id,
             missing_source.as_object().expect("probe is an object"),
+            "mlx"
+        ));
+    }
+
+    /// sc-20634: a plan-backed manifest entry (`importPlan.checkpointId`, no installed path) is an
+    /// admissible imported Generate claim on its own; blank/missing identities and a missing source
+    /// shape stay fail-closed.
+    #[test]
+    fn plan_backed_entry_is_an_imported_provider_claim_without_an_installed_path() {
+        let imported_id = "user_linked_kreamania";
+        let plan_backed = serde_json::json!({
+            "model": imported_id,
+            "modelManifestEntry": {
+                "id": imported_id,
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "importPlan": { "checkpointId": "linked/root-0123456789abcdef/kreamania.safetensors" }
+            }
+        });
+        assert!(imported_image_request_provider_eligible(
+            imported_id,
+            plan_backed.as_object().unwrap(),
+            "mlx"
+        ));
+        assert!(imported_image_request_provider_eligible(
+            imported_id,
+            plan_backed.as_object().unwrap(),
+            "candle"
+        ));
+
+        let mut blank = plan_backed.clone();
+        blank["modelManifestEntry"]["importPlan"]["checkpointId"] = serde_json::json!("   ");
+        assert!(!imported_image_request_provider_eligible(
+            imported_id,
+            blank.as_object().unwrap(),
+            "mlx"
+        ));
+        let mut no_plan = plan_backed.clone();
+        no_plan["modelManifestEntry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("importPlan");
+        assert!(!imported_image_request_provider_eligible(
+            imported_id,
+            no_plan.as_object().unwrap(),
+            "mlx"
+        ));
+        let mut no_shape = plan_backed;
+        no_shape["modelManifestEntry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("importSourceShape");
+        assert!(!imported_image_request_provider_eligible(
+            imported_id,
+            no_shape.as_object().unwrap(),
             "mlx"
         ));
     }
