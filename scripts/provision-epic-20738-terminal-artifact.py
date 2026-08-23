@@ -389,6 +389,34 @@ def _mkdir_confined(root: Path, relative: Path, label: str) -> Path:
     return current
 
 
+def _resolved_ordinary_download_file(path: Path, snapshot: Path, label: str) -> Path:
+    lexical = Path(os.path.abspath(path))
+    for current in lexical.parents:
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError as error:
+            raise RuntimeError(f"{label} parent is missing: {str(current)!r}") from error
+        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+            raise RuntimeError(
+                f"{label} parent is not an ordinary non-reparse directory: {str(current)!r}"
+            )
+    try:
+        metadata = lexical.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError(f"{label} is missing: {str(lexical)!r}") from error
+    if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
+        raise RuntimeError(
+            f"{label} is not an ordinary non-reparse file: {str(lexical)!r}"
+        )
+    resolved = lexical.resolve(strict=True)
+    if not _inside(snapshot, resolved):
+        raise RuntimeError(
+            f"{label} escaped the exact destination snapshot after strict resolution: "
+            f"{str(resolved)!r}"
+        )
+    return resolved
+
+
 def _receipt_path(root: Path, request: dict) -> Path:
     owner, name = request["repository"].split("/", 1)
     return root / "download-receipts" / f"{owner}--{name}@{request['revision']}.json"
@@ -480,10 +508,22 @@ def download_reviewed_missing(request: dict, cache_root: Path, missing_store: Pa
                 local_files_only=False,
             )
         )
-        if downloaded != destination or not destination.is_file():
-            raise RuntimeError("pinned missing-file download did not materialize the exact store path")
-        if destination.is_symlink() or _is_reparse(destination.lstat()):
-            raise RuntimeError("pinned missing-file download produced a reparse target")
+        resolved_snapshot = _ordinary_directory(
+            destination_snapshot, "exact campaign missing-file destination snapshot"
+        )
+        if not _inside(destination_root, resolved_snapshot):
+            raise RuntimeError("exact campaign missing-file destination snapshot escaped its store")
+        resolved_destination = _resolved_ordinary_download_file(
+            destination, resolved_snapshot, "pinned missing-file expected destination"
+        )
+        resolved_downloaded = _resolved_ordinary_download_file(
+            downloaded, resolved_snapshot, "pinned missing-file returned path"
+        )
+        if resolved_downloaded != resolved_destination:
+            raise RuntimeError(
+                "pinned missing-file download resolved to a different file: "
+                f"returned={str(resolved_downloaded)!r}, expected={str(resolved_destination)!r}"
+            )
         actual_sha = _sha256(destination)
         expected_sha = reviewed_sha or etag
         if destination.stat().st_size != metadata.size or actual_sha != expected_sha:

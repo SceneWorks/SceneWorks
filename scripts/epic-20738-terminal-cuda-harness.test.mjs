@@ -2911,6 +2911,11 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     assert.deepEqual(hydrated.runtimeCells.map(({ id }) => id), [
       "ltx-2-3-q8", "illustrious-v1-openpose", "illustrious-v2-openpose",
     ], hydrated.result.summary.campaignErrors.join("\n"));
+    assert.deepEqual(hydrated.result.summary.campaignErrors, [], mode);
+    assert.equal(hydrated.cacheEvidence.evidencePhase, "final", mode);
+    assert.equal(hydrated.cacheEvidence.status, "passed", mode);
+    assert.equal(hydrated.cacheEvidence.error, null, mode);
+    assert.ok(hydrated.continuationReceipts.every(({ status }) => status === "passed"), mode);
     assert.equal(hydrated.cacheEvidence.downloadedFiles.length, expectedDownloads, mode);
     assert.equal(hydrated.cacheEvidence.networkDownloadCount, expectedDownloads, mode);
     assert.equal(hydrated.cacheEvidence.diskPlan.persistentMissingBytes, expectedPersistentBytes, mode);

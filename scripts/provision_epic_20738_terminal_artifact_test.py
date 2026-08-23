@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import sys
 import tempfile
 import types
@@ -424,6 +425,84 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             )
             self.assertTrue(staged_result["complete"])
             self.assertEqual(staged_result["matchedFiles"], sorted(inventory))
+
+    def test_download_accepts_only_the_same_resolved_ordinary_confined_file(self) -> None:
+        payload = b"exact download"
+        inventory = {"config.json": (len(payload), hashlib.sha256(payload).hexdigest())}
+        authority = {(self.CURRENT_REPOSITORY, self.CURRENT_REVISION): inventory}
+
+        for mode, expected_error in [
+            ("normalized-alias", None),
+            ("different", "resolved to a different file"),
+            ("missing-destination", "expected destination is missing"),
+            ("missing-returned", "returned path is missing"),
+            ("escape", "returned path escaped the exact destination snapshot"),
+            ("reparse", "expected destination is not an ordinary non-reparse file"),
+        ]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
+                    tempfile.TemporaryDirectory() as stored, tempfile.TemporaryDirectory() as outside, \
+                    mock.patch.dict(MODULE.REVIEWED_HYDRATION_AUTHORITIES, authority, clear=True):
+                cache = Path(directory).resolve()
+                missing_store = Path(stored).resolve()
+                outside_file = Path(outside).resolve() / "outside.bin"
+
+                def url(**kwargs):
+                    return f"https://huggingface.invalid/{kwargs['filename']}"
+
+                def metadata(_url, token):
+                    self.assertFalse(token)
+                    return types.SimpleNamespace(
+                        commit_hash=self.CURRENT_REVISION,
+                        etag="c" * 40,
+                        size=len(payload),
+                    )
+
+                def download(**kwargs):
+                    destination = Path(kwargs["local_dir"]) / kwargs["filename"]
+                    if mode != "missing-destination":
+                        destination.write_bytes(payload)
+                    if mode == "normalized-alias":
+                        alias = str(
+                            destination.parent / ".." / destination.parent.name / destination.name
+                        )
+                        return alias.swapcase().replace("\\", "/") if os.name == "nt" else alias
+                    if mode in {"different", "missing-destination"}:
+                        different = destination.with_name("different.bin")
+                        different.write_bytes(payload)
+                        return str(different)
+                    if mode == "missing-returned":
+                        return str(destination.with_name("missing.bin"))
+                    if mode == "escape":
+                        outside_file.write_bytes(payload)
+                        return str(outside_file)
+                    return str(destination)
+
+                fake_hf = types.SimpleNamespace(
+                    __version__="0.36.0", hf_hub_url=url,
+                    get_hf_file_metadata=metadata, hf_hub_download=download,
+                )
+                reparse = mock.patch.object(
+                    MODULE,
+                    "_is_reparse",
+                    side_effect=lambda value: mode == "reparse" and stat.S_ISREG(value.st_mode),
+                )
+                with mock.patch.dict(sys.modules, {"huggingface_hub": fake_hf}), reparse:
+                    if expected_error is not None:
+                        with self.assertRaisesRegex(RuntimeError, expected_error):
+                            MODULE.download_reviewed_missing(
+                                self.current_request(inventory), cache, missing_store
+                            )
+                        continue
+                    downloaded = MODULE.download_reviewed_missing(
+                        self.current_request(inventory), cache, missing_store
+                    )
+                self.assertEqual(downloaded["downloadedFiles"], [{
+                    "path": "config.json",
+                    "bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "lfsSha256": hashlib.sha256(payload).hexdigest(),
+                    "commitSha": self.CURRENT_REVISION,
+                }])
 
     def test_request_rejects_unreviewed_floating_or_escaping_fields(self) -> None:
         self.assertEqual(self.parse(self.request())["allowPatterns"], ["q4/*"])
