@@ -31,7 +31,7 @@
     "sidecarObstructions": { "type": "array", "items": { "$ref": "#/$defs/obstruction" } },
     "reusedFiles": { "type": "array", "items": { "$ref": "#/$defs/artifactFile" } },
     "downloadedFiles": { "type": "array", "items": { "$ref": "#/$defs/downloadedArtifactFile" } },
-    "networkDownloadCount": { "type": "integer", "minimum": 0, "maximum": 1 },
+    "networkDownloadCount": { "type": "integer", "minimum": 0, "maximum": 39 },
     "phases": {
       "type": "object",
       "additionalProperties": false,
@@ -333,7 +333,8 @@
       "required": [
         "freeBytes", "persistentMissingBytes", "nonModelReserveBytes", "nonModelPaths",
         "legacyNaiveLinkLengthSourceBytes", "reviewedAllAtOnceSourceBytes",
-        "reviewedJitSourcePeakBytes", "logicalSourceBytes", "allAtOnceSourceBytes",
+        "preHydrationJitSourcePeakBytes", "reviewedJitSourcePeakBytes",
+        "logicalSourceBytes", "allAtOnceSourceBytes",
         "allAtOnceRequiredBytes", "peakOrdinal", "peakArtifactIds", "peakStagedBytes",
         "peakSidecarReserveBytes", "peakModelAndSidecarBytes", "peakRequiredAdditionalBytes", "admitted", "cells"
       ],
@@ -356,6 +357,7 @@
         },
         "legacyNaiveLinkLengthSourceBytes": { "type": "integer", "minimum": 1 },
         "reviewedAllAtOnceSourceBytes": { "type": "integer", "minimum": 1 },
+        "preHydrationJitSourcePeakBytes": { "type": "integer", "minimum": 1 },
         "reviewedJitSourcePeakBytes": { "type": "integer", "minimum": 1 },
         "logicalSourceBytes": { "type": "integer", "minimum": 1 },
         "allAtOnceSourceBytes": { "type": "integer", "minimum": 1 },

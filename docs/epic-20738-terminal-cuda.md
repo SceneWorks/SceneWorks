@@ -91,20 +91,28 @@ Authorities are copied just in time into campaign-owned staging under `RUNNER_TE
 before their first selected consumer, and are retained only through their exact last selected
 consumer. The LTX q8/Gemma pair is staged together for cell 14. The four shared SDXL helpers live
 across sparse cells 18-19 while the two Illustrious primaries rotate after one cell. Existing valid
-files are never overwritten or downloaded. Because Schnell is outside this sparse scope, any missing
-file fails preflight; the campaign performs zero network downloads and forces offline mode before
-the first selected cell. LTX q8 and Gemma use the complete production-approved cached parent revision
-`254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. Network mode stays
-offline for every JIT stage and cell.
+files are never overwritten or downloaded. The exact current Illustrious v1/v2 q4 snapshots may be
+fully or partially absent: their frozen 19-file inventories are the only sparse authorities approved
+for hydration. Every present file must match its reviewed size and SHA-256, and every missing file is
+downloaded by exact repository, revision, path, size, and content SHA (plus LFS SHA where applicable)
+into the isolated campaign store.
+Unexpected entries, old revisions, file-list/evidence drift, corrupt bytes, and unsafe links fail the
+source census before transfer. LTX q8 and Gemma use the complete production-approved cached parent
+revision `254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. Network mode
+stays offline after the reviewed fill, for every JIT stage and cell; the combined staged authority is
+audited again without weakening the post-download byte checks.
 
 The disk admission model binds exact source bytes, the conservative streamed-FLUX sidecar ceilings
 (494 files; q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file
 reserve), and a
 40-GiB non-model reserve for Cargo target, output, the pinned venv, logs, and filesystem fluctuation.
-The largest model-plus-sidecar live set is therefore the LTX pair itself at
-56,156,615,634 bytes, so the controller requires at least 99,106,288,594 free bytes. It checks that
-floor after the missing-file fill, before every authority stage, and before every GPU process. The
-former all-at-once plan is deterministically refused.
+Before hydration, the largest model-plus-sidecar live set is the LTX pair at 56,156,615,634 bytes.
+A fully absent pair of current Illustrious q4 snapshots adds 3,911,656,986 and 3,911,656,662
+persistent bytes before ordinal 14, producing the reviewed 63,979,929,282-byte physical peak. With
+the 40-GiB reserve, the controller therefore requires at least 106,929,602,242 free bytes. It checks
+that floor after the missing-file fill, before every authority stage, and before every GPU process.
+Each downloaded authority store becomes that authority's stage root and is released at its exact
+ordinal-18/19 lifetime boundary. The former all-at-once plan is deterministically refused.
 
 Output and scratch must be fresh, distinct, non-nested descendants of the resolved `RUNNER_TEMP`,
 outside both repositories. Every recursive removal rechecks that confinement and rejects

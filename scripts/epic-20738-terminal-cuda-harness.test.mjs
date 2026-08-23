@@ -28,6 +28,7 @@ import {
   loadProfile,
   parseNvidiaSmi,
   receiptSkeleton,
+  reviewedMissingDownloadPlan,
   runCampaign,
   safeRemoveTree,
   importSparseRecovery,
@@ -214,6 +215,56 @@ test("current and legacy Illustrious download selectors fail closed independentl
   );
 });
 
+test("current Illustrious hydration plans bind full and partial exact q4 censuses", async () => {
+  const checked = profile();
+  const current = expectedCurrentArtifactFilesFromEvidenceBytes(
+    checked, await readFile("config/download-pattern-evidence.json"),
+  );
+  const id = "illustrious-v1-q4";
+  const artifact = checked.artifacts[id];
+  const frozen = current.artifactExpectedFiles[id].map((file) => ({
+    artifactId: id,
+    repository: artifact.repository,
+    revision: artifact.revision,
+    file: `q4/${file}`,
+  }));
+  assert.deepEqual(reviewedMissingDownloadPlan({
+    frozenMissing: frozen,
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  }), [{ id, missingFiles: frozen.map(({ file }) => file) }]);
+  assert.deepEqual(reviewedMissingDownloadPlan({
+    frozenMissing: frozen.slice(3, 7),
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  })[0].missingFiles, frozen.slice(3, 7).map(({ file }) => file));
+
+  assert.throws(() => reviewedMissingDownloadPlan({
+    frozenMissing: frozen,
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b",
+  }), /exact current q4 authority/);
+  const driftedFiles = structuredClone(current.artifactExpectedFiles);
+  driftedFiles[id] = driftedFiles[id].slice(1);
+  assert.throws(() => reviewedMissingDownloadPlan({
+    frozenMissing: frozen,
+    profile: checked,
+    artifactExpectedFiles: driftedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  }), /exact current q4 authority/);
+  const unexpected = structuredClone(frozen);
+  unexpected[0].file = "q4/unexpected.bin";
+  assert.throws(() => reviewedMissingDownloadPlan({
+    frozenMissing: unexpected,
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  }), /exact current q4 authority/);
+});
+
 test("download evidence freezes the exact 23-authority filename census", async () => {
   const checked = profile();
   const evidence = JSON.parse(await readFile("config/download-pattern-evidence.json", "utf8"));
@@ -262,7 +313,7 @@ test("downloaded-file partition compares exact semantics but ignores object inse
   );
 });
 
-test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99GB floor", () => {
+test("JIT disk estimator uses followed targets, exact lifetimes, and the hydrated floor", () => {
   const file = (key, bytes, persistent = false) => ({ key, bytes, persistent });
   const row = (artifactId, firstOrdinal, lastOrdinal, files) => ({
     artifactId,
@@ -292,7 +343,7 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
     row("sdxl-tokenizer-bigg", 15, 19, [file("sdxl-tokenizer-bigg", 2_224_041)]),
     row("sdxl-vae-fix", 15, 19, [file("sdxl-vae-fix", 334_643_238)]),
   ];
-  const floor = 99_106_288_594;
+  const floor = 106_929_602_242;
   const admitted = estimateJitDiskPlan(lifetimes, floor, persistent.bytes);
   assert.equal(admitted.logicalSourceBytes, 179_028_698_654);
   assert.equal(admitted.allAtOnceSourceBytes, 179_028_698_654);
@@ -306,6 +357,8 @@ test("JIT disk estimator uses followed target bytes, exact lifetimes, and the 99
   assert.equal(admitted.cells.find((entry) => entry.ordinal === 10).modelAndSidecarBytes, 30_581_137_431);
   assert.equal(admitted.cells.find((entry) => entry.ordinal === 13).modelAndSidecarBytes, 32_067_131_269);
   assert.equal(admitted.cells.find((entry) => entry.ordinal === 14).stagedBytes, 56_156_615_634);
+  assert.equal(admitted.preHydrationJitSourcePeakBytes, 56_156_615_634);
+  assert.equal(admitted.reviewedJitSourcePeakBytes, 63_979_929_282);
   assert.equal(admitted.peakModelAndSidecarBytes, 56_156_615_634);
   assert.equal(admitted.peakRequiredAdditionalBytes, floor);
   assert.equal(admitted.admitted, true);
@@ -356,11 +409,13 @@ test("sparse execution lifetimes cover only 14, 18, and 19 while retaining share
     assert.equal(lifetime.firstOrdinal, 18);
     assert.equal(lifetime.lastOrdinal, 19);
   }
-  const plan = estimateJitDiskPlan(lifetimes, 99_106_288_594, 0);
+  const plan = estimateJitDiskPlan(lifetimes, 106_929_602_242, 0);
   assert.deepEqual(plan.cells.map(({ ordinal }) => ordinal), [14, 18, 19]);
   assert.equal(plan.logicalSourceBytes, 66_821_159_668);
   assert.equal(plan.peakModelAndSidecarBytes, 56_156_615_634);
-  assert.equal(plan.peakRequiredAdditionalBytes, 99_106_288_594);
+  assert.equal(plan.preHydrationJitSourcePeakBytes, 56_156_615_634);
+  assert.equal(plan.reviewedJitSourcePeakBytes, 63_979_929_282);
+  assert.equal(plan.peakRequiredAdditionalBytes, 106_929_602_242);
 });
 
 test("profile validator rejects count, order, every semantic tuple mutation, blocked, and authority drift", async () => {
@@ -687,13 +742,13 @@ function fixtureReceipt(status = "passed", cellIndex = 0, checked = profile()) {
       ordinal: cellIndex + 1,
       root: path.resolve("fixture-runner", "scratch"),
       freeBytes: 128 * 1024 ** 3,
-      requiredFreeBytes: 99_106_288_594,
+      requiredFreeBytes: 106_929_602_242,
     }] : []), {
       phase: "before-execution",
       ordinal: cellIndex + 1,
       root: path.resolve("fixture-runner", "scratch"),
       freeBytes: 128 * 1024 ** 3,
-      requiredFreeBytes: 99_106_288_594,
+      requiredFreeBytes: 106_929_602_242,
     }],
   };
   return receipt;
@@ -1574,8 +1629,10 @@ test("start-10 cache preflight binds the reviewed remaining census without weake
     assert.equal(startTen.diskPlan.logicalSourceBytes, 151_407_075_690);
     assert.equal(startTen.diskPlan.allAtOnceSourceBytes, 151_407_075_690);
     assert.equal(startTen.diskPlan.reviewedAllAtOnceSourceBytes, 179_028_698_264);
+    assert.equal(startTen.diskPlan.preHydrationJitSourcePeakBytes, 56_156_615_634);
+    assert.equal(startTen.diskPlan.reviewedJitSourcePeakBytes, 63_979_929_282);
     assert.equal(startTen.diskPlan.peakModelAndSidecarBytes, 56_156_615_634);
-    assert.equal(startTen.diskPlan.peakRequiredAdditionalBytes, 99_106_288_594);
+    assert.equal(startTen.diskPlan.peakRequiredAdditionalBytes, 106_929_602_242);
     assert.doesNotThrow(() => validateCachePreflightEvidence(startTen, validation));
 
     const shiftedIds = [...new Set(checked.cells.slice(10).flatMap((cell) => cell.artifactIds))];
@@ -2073,7 +2130,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     derivedContractDrift = null, diskFreeValues = [256 * 1024 ** 3],
     runtimeResultMode = "valid", providerRuntimeFailureAt = null,
     providerFailureDerivedMode = "empty", successfulFluxDerivedMode = "resident",
-    runtimeMemoryMode = "current", sparse = false,
+    runtimeMemoryMode = "current", sparse = false, illustriousHydration = null,
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -2089,14 +2146,98 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     await mkdir(output);
     await mkdir(scratch);
     const checked = profile();
-    const artifactExpectedFiles = Object.fromEntries(Object.keys(checked.artifacts).map(
+    let downloadEvidenceSha256 = "d".repeat(64);
+    let artifactExpectedFiles = Object.fromEntries(Object.keys(checked.artifacts).map(
       (id) => [id, id === "flux1-schnell-q8"
         ? ["model_index.json", "transformer/model.safetensors"]
         : ["model_index.json"]],
     ));
+    if (illustriousHydration) {
+      const current = expectedCurrentArtifactFilesFromEvidenceBytes(
+        checked, await readFile("config/download-pattern-evidence.json"),
+      );
+      artifactExpectedFiles = current.artifactExpectedFiles;
+      downloadEvidenceSha256 = current.downloadEvidenceSha256;
+    }
     if (missingId && missingId !== "flux1-schnell-q8") {
       artifactExpectedFiles[missingId] = ["unreviewed-missing.safetensors"];
     }
+    const sparseSourceBytes = new Map([
+      ["ltx23-q8", 29_728_720_716],
+      ["ltx23-gemma", 26_427_894_918],
+      ["illustrious-v1-q4", 3_911_656_986],
+      ["illustrious-v2-q4", 3_911_656_662],
+      ["sdxl-openpose", 2_502_139_104],
+      ["sdxl-tokenizer-l", 2_224_003],
+      ["sdxl-tokenizer-bigg", 2_224_041],
+      ["sdxl-vae-fix", 334_643_238],
+    ]);
+    const illustriousMissing = new Map();
+    const illustriousDownloadedBytes = new Map();
+    if (illustriousHydration) {
+      for (const id of ["illustrious-v1-q4", "illustrious-v2-q4"]) {
+        const selectedFiles = illustriousHydration === "full"
+          ? artifactExpectedFiles[id] : ["model_index.json"];
+        const total = illustriousHydration === "full"
+          ? sparseSourceBytes.get(id) : 708;
+        const bytes = new Map(selectedFiles.map((file, index) => [
+          file, index === 0 ? total - (selectedFiles.length - 1) : 1,
+        ]));
+        illustriousMissing.set(id, selectedFiles.map((file) => `q4/${file}`));
+        illustriousDownloadedBytes.set(id, bytes);
+      }
+    }
+    const missingFilesFor = (id, artifact) => {
+      if (illustriousMissing.has(id)) return illustriousMissing.get(id);
+      if (id !== missingId) return [];
+      return [id === "flux1-schnell-q8"
+        ? "q8/transformer/model.safetensors"
+        : `${artifact.subdirectory}/unreviewed-missing.safetensors`];
+    };
+    const fixtureAudit = (id, artifact) => {
+      const missingFiles = missingFilesFor(id, artifact);
+      const prefix = artifact.subdirectory === "." ? "" : `${artifact.subdirectory}/`;
+      const missingSelected = new Set(missingFiles.map((file) => (
+        prefix && file.startsWith(prefix) ? file.slice(prefix.length) : file
+      )));
+      const presentFiles = artifactExpectedFiles[id].filter((file) => !missingSelected.has(file));
+      const downloadedBytes = illustriousDownloadedBytes.get(id);
+      const missingBytes = downloadedBytes
+        ? [...downloadedBytes.values()].reduce((sum, bytes) => sum + bytes, 0)
+        : id === missingId && id === "flux1-schnell-q8" ? 200 : 0;
+      const sourceBytes = illustriousHydration && sparseSourceBytes.has(id)
+        ? sparseSourceBytes.get(id) : presentFiles.length * 100 + missingBytes;
+      const presentBytes = sourceBytes - missingBytes;
+      return {
+        missingFiles,
+        reusedFiles: presentFiles.map((file, index) => ({
+          path: file,
+          bytes: index === 0 ? presentBytes - (presentFiles.length - 1) : 1,
+          sha256: "a".repeat(64),
+        })),
+      };
+    };
+    const fixtureDownloads = (id, artifact, missingFiles) => {
+      if (illustriousDownloadedBytes.has(id)) {
+        return missingFiles.map((file) => {
+          const selected = file.slice(`${artifact.subdirectory}/`.length);
+          return {
+            path: selected,
+            bytes: illustriousDownloadedBytes.get(id).get(selected),
+            sha256: "b".repeat(64),
+            lfsSha256: "b".repeat(64),
+            commitSha: artifact.revision,
+          };
+        });
+      }
+      return [{
+        path: "transformer/model.safetensors",
+        bytes: 200,
+        sha256: "b".repeat(64),
+        lfsSha256: "b".repeat(64),
+        commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+      }];
+    };
     const events = [];
     const runtimeCells = [];
     let verificationCalls = 0;
@@ -2105,58 +2246,36 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     const operations = {
       auditArtifact: async ({ id, artifact }) => {
         events.push(`audit:${id}`);
-        const missingFiles = id === missingId
-          ? [id === "flux1-schnell-q8"
-            ? "q8/transformer/model.safetensors"
-            : `${artifact.subdirectory}/unreviewed-missing.safetensors`]
-          : [];
-        const missingSelected = new Set(missingFiles.map((file) => (
-          file.startsWith(`${artifact.subdirectory}/`)
-            ? file.slice(artifact.subdirectory.length + 1) : file
-        )));
+        const { missingFiles, reusedFiles } = fixtureAudit(id, artifact);
         return {
           id, ...artifact, complete: missingFiles.length === 0, missingFiles,
-          reusedFiles: artifactExpectedFiles[id].filter((file) => !missingSelected.has(file)).map(
-            (file) => ({ path: file, bytes: 100, sha256: "a".repeat(64) }),
-          ),
+          reusedFiles,
         };
       },
-      downloadReviewedMissing: async ({ id, missingStore }) => {
+      downloadReviewedMissing: async ({ id, artifact, missingFiles, missingStore }) => {
         events.push(`download:${id}`);
         if (!downloadSucceeds) throw new Error("fixture exact missing-file transfer failed");
         return {
           id,
           storeRoot: missingStore,
-          downloadedFiles: [{
-            path: "transformer/model.safetensors",
-            bytes: 200,
-            sha256: "b".repeat(64),
-            lfsSha256: "b".repeat(64),
-            commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-          }],
+          downloadedFiles: fixtureDownloads(id, artifact, missingFiles),
         };
       },
       stageArtifact: async ({ id, artifact, stagingRoot, missingStore }) => {
         events.push(`stage:${id}`);
-        const usesMissing = id === "flux1-schnell-q8" && missingId === id;
+        const { missingFiles, reusedFiles } = fixtureAudit(id, artifact);
+        const usesMissing = missingFiles.length > 0;
+        if (usesMissing) assert.equal(stagingRoot, missingStore);
         return {
           id, ...artifact,
-          reusedFiles: artifactExpectedFiles[id].filter((file) => !(
-            usesMissing && file === "transformer/model.safetensors"
-          )).map((file, index) => ({
-            path: file,
-            bytes: 100,
+          reusedFiles: reusedFiles.map((file, index) => ({
+            ...file,
             sha256: mutateSourceAtStage
               && events.filter((event) => event.startsWith("stage:")).length === 1
-              && index === 0 ? "c".repeat(64) : "a".repeat(64),
+              && index === 0 ? "c".repeat(64) : file.sha256,
           })),
-          downloadedFiles: usesMissing && missingStore ? [{
-            path: "transformer/model.safetensors",
-            bytes: 200,
-            sha256: "b".repeat(64),
-            lfsSha256: "b".repeat(64),
-            commitSha: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-          }] : [],
+          downloadedFiles: usesMissing && missingStore
+            ? fixtureDownloads(id, artifact, missingFiles) : [],
           selectedRoot: path.join(stagingRoot, id, artifact.subdirectory),
         };
       },
@@ -2351,7 +2470,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           sceneworksRoot: sceneworks,
           python: "python",
           artifactExpectedFiles,
-          downloadEvidenceSha256: "d".repeat(64),
+          downloadEvidenceSha256,
         },
         prefixSelection: {},
         importedPrefix,
@@ -2387,7 +2506,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
             (ordinal) => checked.cells[ordinal - 1].artifactIds,
           ))],
           artifactExpectedFiles,
-          downloadEvidenceSha256: "d".repeat(64),
+          downloadEvidenceSha256,
           guard,
           stagingRoot: path.join(scratch, "authority-stage"),
           derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
@@ -2404,7 +2523,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           lifetimeById: new Map(cacheEvidence.lifetimePlan.map((row) => [row.artifactId, row])),
           scratchRoot: scratch,
           requiredFreeBytes: cacheEvidence.diskPlan?.peakRequiredAdditionalBytes
-            ?? 99_106_288_594,
+            ?? 106_929_602_242,
           completeLifecycle: true,
         },
       };
@@ -2723,6 +2842,45 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       "sdxl-tokenizer-bigg", "sdxl-vae-fix",
     ],
   );
+
+  for (const [mode, expectedPersistentBytes, expectedPeak, expectedDownloads] of [
+    ["full", 7_823_313_648, 63_979_929_282, 38],
+    ["partial", 1_416, 56_156_617_050, 2],
+  ]) {
+    const hydrated = await scenario({
+      sparse: true, illustriousHydration: mode, downloadSucceeds: true,
+    });
+    assert.deepEqual(hydrated.events.filter((event) => event.startsWith("download:")), [
+      "download:illustrious-v1-q4", "download:illustrious-v2-q4",
+    ], mode);
+    assert.deepEqual(hydrated.runtimeCells.map(({ id }) => id), [
+      "ltx-2-3-q8", "illustrious-v1-openpose", "illustrious-v2-openpose",
+    ], hydrated.result.summary.campaignErrors.join("\n"));
+    assert.equal(hydrated.cacheEvidence.downloadedFiles.length, expectedDownloads, mode);
+    assert.equal(hydrated.cacheEvidence.networkDownloadCount, expectedDownloads, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.persistentMissingBytes, expectedPersistentBytes, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.preHydrationJitSourcePeakBytes, 56_156_615_634, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.reviewedJitSourcePeakBytes, 63_979_929_282, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.logicalSourceBytes, 66_821_159_668, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.peakOrdinal, 14, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.peakModelAndSidecarBytes, expectedPeak, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.peakRequiredAdditionalBytes, 106_929_602_242, mode);
+    assert.equal(hydrated.cacheEvidence.diskPlan.admitted, true, mode);
+    for (const [ordinal, id] of [[18, "illustrious-v1-q4"], [19, "illustrious-v2-q4"]]) {
+      const lifecycle = hydrated.result.summary.authorityLifecycle.find((row) => (
+        row.ordinal === ordinal
+      ));
+      const expectedStore = path.join(hydrated.cacheValidation.missingStore, id);
+      assert.equal(lifecycle.staged.find((row) => row.artifactId === id).stageRoot, expectedStore, mode);
+      const release = lifecycle.released.find((row) => row.artifactId === id);
+      assert.equal(release.stageRoot, expectedStore, mode);
+      assert.equal(release.stageRemoved, true, mode);
+    }
+    assert.equal(hydrated.result.summary.finalAuthorityLifecycle.missingStoreAbsent, true, mode);
+    assert.doesNotThrow(() => validateCachePreflightEvidence(
+      hydrated.cacheEvidence, hydrated.cacheValidation,
+    ), mode);
+  }
 
   const residentReceipt = passed.continuationReceipts[0];
   assert.equal(
