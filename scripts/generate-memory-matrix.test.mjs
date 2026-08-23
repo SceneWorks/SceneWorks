@@ -24,6 +24,7 @@ import {
   isImplemented,
   isPublishableCell,
   memoryCharacterization,
+  parseCandleBespokeStagedLanes,
   OUT_OF_MATRIX_CELL_STATES,
   plannedCellIds,
   RUNG4_APPLICABILITIES,
@@ -6276,4 +6277,47 @@ test("`fitted` may not be published on fewer geometries than the form has coeffi
       ),
     /coveredFrameBound is only meaningful on a fitted curve/,
   );
+});
+
+test("receipt-backed bespoke Candle staged coverage is visible and census-fenced (sc-20799)", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const staged = matrix.cells.filter(
+    (cell) =>
+      cell.modelId === "kolors" && cell.backend === "candle" && cell.rung === "staged_residency",
+  );
+  const implemented = staged.filter((cell) => isImplemented(cell.state));
+  // SC-20790 delivered request-authoritative admission for the Kolors ip/control bespoke lanes
+  // with no manifest declaration (writing one would flip `declared_candle_request_strategy_contract`
+  // relevance on the base lane). SHAPE, not a count: the delivered lanes must be visible, must be
+  // exactly the conditioning overlays, and the undelivered plain lane must stay Missing.
+  assert.ok(
+    implemented.length > 0,
+    "the delivered SC-20790 kolors bespoke lanes must not publish as Missing",
+  );
+  assert.ok(
+    implemented.every((cell) => ["identity", "control"].includes(cell.overlay)),
+    "bespoke request authority covers only the conditioning overlays",
+  );
+  assert.ok(
+    implemented.some((cell) => cell.overlay === "identity") &&
+      implemented.some((cell) => cell.overlay === "control"),
+    "both censused providers must surface, not just one",
+  );
+  assert.ok(
+    staged
+      .filter((cell) => cell.overlay === "none")
+      .every((cell) => cell.state === "Missing"),
+    "plain kolors Candle staged stays Missing — no borrowed bespoke evidence",
+  );
+
+  // The census fence: a worker-censused provider without a generator lane map fails generation
+  // closed instead of silently publishing a delivered lane as Missing.
+  assert.throws(
+    () =>
+      parseCandleBespokeStagedLanes(
+        'const CANDLE_BESPOKE_REQUEST_PROVIDERS: &[&str] = &["candle_new_provider"];',
+      ),
+    /unmapped=candle_new_provider/,
+  );
+  assert.throws(() => parseCandleBespokeStagedLanes("// nothing here"), /could not derive/);
 });

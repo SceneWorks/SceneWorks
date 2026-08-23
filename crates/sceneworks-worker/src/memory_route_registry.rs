@@ -1162,6 +1162,16 @@ fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> boo
     matching_rules(selector).any(|rule| !rule.requires_sequential_selection || sequential_selected)
 }
 
+/// The Candle bespoke providers whose request admission `declared_candle_bespoke_request` is
+/// authoritative for (SC-20790). Load-bearing in two places: the admission below refuses any
+/// provider outside this census, and `scripts/generate-memory-matrix.mjs` reads this const AS TEXT
+/// (`parseCandleBespokeRequestProviders`) so the published matrix can see receipt-backed bespoke
+/// coverage that no manifest declaration row carries (sc-20799). Growing the census without
+/// teaching the generator's lane map about the new provider fails the matrix build closed rather
+/// than publishing a delivered lane as `Missing`.
+pub(crate) const CANDLE_BESPOKE_REQUEST_PROVIDERS: &[&str] =
+    &["candle_kolors_ipadapter", "candle_kolors_control"];
+
 /// Exact typed authority for bespoke Candle providers whose physical contract is assembled from
 /// request-local component paths instead of the registered catalog loader. This is intentionally
 /// independent of legacy load shaping: absence or a crossed coordinate is a terminal pre-load
@@ -1187,11 +1197,15 @@ pub(crate) fn declared_candle_bespoke_request(
     if context.mode != mode || context.use_pid != spec.pid.is_some() || context.has_phases {
         return false;
     }
-    let reference_shape_matches = match runtime_provider {
-        "candle_kolors_ipadapter" => context.reference_count == 1 && !context.use_pid,
-        "candle_kolors_control" => context.reference_count == 0,
-        _ => false,
-    };
+    // The census gate and the per-provider shape arms are one conjunction: a provider outside
+    // `CANDLE_BESPOKE_REQUEST_PROVIDERS` can never admit, and a censused provider still has to
+    // satisfy its exact reference shape.
+    let reference_shape_matches = CANDLE_BESPOKE_REQUEST_PROVIDERS.contains(&runtime_provider)
+        && match runtime_provider {
+            "candle_kolors_ipadapter" => context.reference_count == 1 && !context.use_pid,
+            "candle_kolors_control" => context.reference_count == 0,
+            _ => false,
+        };
     reference_shape_matches
         && rule_matches(
             MemoryRouteSelector {
@@ -8434,6 +8448,63 @@ mod tests {
                 reference_count: 0,
                 use_pid: false,
                 has_phases: true,
+            },
+        ));
+    }
+
+    /// SC-20799: the census const, the shape arms, and the RULES table stay in lockstep. Every
+    /// censused provider must have at least one admitting coordinate (so dropping one from the
+    /// const, its shape arm, or its RULES entry reds here), and a provider outside the census can
+    /// never admit — the census is what `scripts/generate-memory-matrix.mjs` reads to publish
+    /// receipt-backed bespoke coverage, so this sweep is what keeps that page truthful.
+    #[test]
+    fn candle_bespoke_request_census_matches_the_shape_arms_and_rules() {
+        for provider in CANDLE_BESPOKE_REQUEST_PROVIDERS {
+            let (mode, profile, reference_count) = match *provider {
+                "candle_kolors_ipadapter" => (
+                    MemoryRouteMode::CharacterImage,
+                    MemoryRouteLoadProfile::IpAdapter,
+                    1,
+                ),
+                "candle_kolors_control" => (
+                    MemoryRouteMode::TextToImage,
+                    MemoryRouteLoadProfile::SingleControl,
+                    0,
+                ),
+                unknown => panic!(
+                    "censused bespoke provider {unknown} has no admitting coordinate in this \
+                     sweep — add one so the census stays load-bearing"
+                ),
+            };
+            let load = spec(MemoryRouteTier::Q4, profile);
+            assert!(
+                declared_candle_bespoke_request(
+                    provider,
+                    Some("q4"),
+                    mode.as_str(),
+                    &load,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                ),
+                "{provider}: censused provider must admit its exact coordinate"
+            );
+        }
+        // Outside the census nothing admits, even on a real registered route's coordinate shape.
+        let load = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain);
+        assert!(!declared_candle_bespoke_request(
+            "kolors",
+            Some("q4"),
+            "text_to_image",
+            &load,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
             },
         ));
     }

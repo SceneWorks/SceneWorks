@@ -17,6 +17,7 @@ import {
 import {
   reconcileMemoryContracts,
 } from "./lib/memory-contract-reconciliation.mjs";
+import { contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
@@ -1578,21 +1579,15 @@ function matrixOverlayFor(recordOverlay) {
   return /^control:\d+$/.test(recordOverlay) ? "control" : recordOverlay;
 }
 
-function overlaysFor(model, backend) {
+function overlaysFor(model, backend, route) {
   // Some public variants always provision a built-in LoRA. When the backend's exact contract
-  // declares only the LoRA load profile, publishing `none` creates plain cells that cannot reach
-  // the provider and lets their staged/decode/attention/resident rows look applicable by accident.
-  const implementations = model[backend]?.memoryStrategyContract?.implementations ?? [];
-  const loraOnlyContract =
-    model.id === "qwen_image_edit_2511_lightning" &&
-    implementations.length > 0 &&
-    implementations.every(
-      (implementation) =>
-        Array.isArray(implementation.overlays) &&
-        implementation.overlays.length === 1 &&
-        implementation.overlays[0] === "lora",
-    );
-  const overlays = loraOnlyContract ? ["lora"] : ["none"];
+  // declares only the LoRA load profile for the model's base provider, publishing `none` creates
+  // plain cells that cannot reach the provider and lets their staged/decode/attention/resident rows
+  // look applicable by accident. One shared STRUCTURAL predicate (sc-20799) — `catalogAxes` mirrors
+  // this same call.
+  const overlays = contractIsLoraOnly(model, backend, route.engineFor(backend))
+    ? ["lora"]
+    : ["none"];
   if (model.loraCompatibility) overlays.push("lora");
   // A DECLARED lane, not a measured one — see CONTROL_LANE_MODELS.
   if (CONTROL_LANE_MODELS.includes(model.id)) overlays.push("control");
@@ -2688,6 +2683,78 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
  * evaluator below rather than here, because it is a fact about the provider's declaration and not
  * about what this lane makes available.
  */
+/**
+ * SC-20790 delivered receipt-backed, request-authoritative Candle admission for these bespoke
+ * providers with NO manifest declaration row, on purpose: a `staged_residency` row carrying
+ * `requestContexts` on the host model would make `declared_candle_request_strategy_contract`
+ * treat the base lane's manifest as "relevant" and terminally refuse crossed coordinates, changing
+ * runtime behavior a visibility fix must not touch. The worker census const
+ * (`memory_route_registry.rs#CANDLE_BESPOKE_REQUEST_PROVIDERS`) is the source of truth for WHICH
+ * providers carry this authority; this map binds each to the exact catalog coordinates its lane
+ * serves (from the provider's RULES entry + `declared_candle_bespoke_request` shape arm), and
+ * `parseCandleBespokeStagedLanes` fails generation when the two drift — a delivered lane without a
+ * coordinate map must red the build, never publish as `Missing` (sc-20799).
+ */
+const CANDLE_BESPOKE_REQUEST_LANE_COORDINATES = new Map([
+  [
+    "candle_kolors_ipadapter",
+    {
+      modelId: "kolors",
+      overlays: ["identity"],
+      modes: ["character_image"],
+      tiers: ["bf16", "q4", "q8"],
+    },
+  ],
+  [
+    "candle_kolors_control",
+    {
+      modelId: "kolors",
+      overlays: ["control"],
+      modes: ["text_to_image", "style_variations", "character_image"],
+      tiers: ["bf16", "q4", "q8"],
+    },
+  ],
+]);
+
+/** `model.id:overlay:mode:tier` coordinates with receipt-backed bespoke Candle staged coverage. */
+export function parseCandleBespokeStagedLanes(registrySource) {
+  const match = registrySource.match(
+    /const\s+CANDLE_BESPOKE_REQUEST_PROVIDERS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/,
+  );
+  if (!match) {
+    throw new Error(
+      "memory-matrix: could not derive CANDLE_BESPOKE_REQUEST_PROVIDERS from memory_route_registry.rs",
+    );
+  }
+  const providers = [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+  if (providers.length === 0) {
+    throw new Error("memory-matrix: CANDLE_BESPOKE_REQUEST_PROVIDERS parsed to zero providers");
+  }
+  const mapped = new Set(CANDLE_BESPOKE_REQUEST_LANE_COORDINATES.keys());
+  const unmapped = providers.filter((provider) => !mapped.has(provider)).sort();
+  const stale = [...mapped].filter((provider) => !providers.includes(provider)).sort();
+  if (unmapped.length || stale.length) {
+    throw new Error(
+      "memory-matrix: candle bespoke request lanes disagree with the worker census " +
+        `(censused but unmapped=${unmapped.join(",") || "none"}; ` +
+        `mapped but no longer censused=${stale.join(",") || "none"}). ` +
+        "A delivered receipt-backed lane without a coordinate map would publish as Missing (sc-20799).",
+    );
+  }
+  const lanes = new Set();
+  for (const provider of providers) {
+    const lane = CANDLE_BESPOKE_REQUEST_LANE_COORDINATES.get(provider);
+    for (const overlay of lane.overlays) {
+      for (const mode of lane.modes) {
+        for (const tier of lane.tiers) {
+          lanes.add(`${lane.modelId}:${overlay}:${mode}:${tier}`);
+        }
+      }
+    }
+  }
+  return lanes;
+}
+
 export function stagedResidencyIsAvailable({
   backend,
   model,
@@ -2698,6 +2765,7 @@ export function stagedResidencyIsAvailable({
   overlay,
   stagedResidencyEngines,
   manifestById,
+  candleBespokeStagedLanes,
 }) {
   const contract = model[backend]?.memoryStrategyContract;
   const declaredStagedResidency = contract?.implementations?.some(
@@ -2721,7 +2789,10 @@ export function stagedResidencyIsAvailable({
     ? stagedResidencyEngines.has(route.engineFor("mlx"))
     : declaredModel.candle?.supportsSequentialOffload === true ||
         declaredModel.candle?.sequentialPeakGb !== undefined ||
-        declaredModel.candle?.turboFit !== undefined;
+        declaredModel.candle?.turboFit !== undefined ||
+        // sc-20799: receipt-backed bespoke request admission (SC-20790) — coverage the worker
+        // census declares and no manifest row may carry (see the lane map's docstring).
+        (candleBespokeStagedLanes?.has(`${model.id}:${overlay}:${mode}:${tier}`) ?? false);
 }
 
 /**
@@ -3137,6 +3208,7 @@ export function strategyStatus({
   rung4ContractPrerequisites,
   manifestById,
   inferenceClosureDigests,
+  candleBespokeStagedLanes,
 }) {
   // A route-local row is authoritative for its exact provider coordinate. Missing sibling rungs may
   // still inherit the resolved provider's declaration (the established MLX alias behavior), but a
@@ -3189,6 +3261,7 @@ export function strategyStatus({
         overlay,
         stagedResidencyEngines,
         manifestById,
+        candleBespokeStagedLanes,
       }));
   const staticImplementation = staticContractCoversProvider(staticMemoryContract, provider)
     ? staticMemoryContract.implementations.find(
@@ -3366,6 +3439,7 @@ export function strategyStatus({
       overlay,
       stagedResidencyEngines,
       manifestById,
+      candleBespokeStagedLanes,
     })
   ) {
     return {
@@ -3503,6 +3577,7 @@ export function strategyStatus({
         overlay,
         stagedResidencyEngines,
         manifestById,
+        candleBespokeStagedLanes,
       });
     if (verdict.structuralApplicability === "none") {
       return {
@@ -4119,6 +4194,10 @@ export const SOURCE_PATHS = Object.freeze({
   videoRouteKreaRealtime: "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
   videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
   mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+  // sc-20799: in SOURCE_PATHS because it DECIDES cell state — `CANDLE_BESPOKE_REQUEST_PROVIDERS`
+  // is where receipt-backed bespoke Candle staged coverage is declared, and a source that changes a
+  // cell but sits outside the fingerprint is a provenance hole.
+  memoryRouteRegistry: "crates/sceneworks-worker/src/memory_route_registry.rs",
   memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
   vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -4249,6 +4328,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     routingMlx: bodies.routingMlx,
   });
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
+  const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
   const pin = inferencePin(cargoBody);
   // NUL-separated (sc-16268): normalisation strips each body's trailing newline, so concatenating
@@ -4334,10 +4414,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     // does not exist. These four lists ARE the cross-product (tiers x modes x overlays x rungs), so a
     // reader can see every coordinate the catalog resolves whether or not one was published.
     modelSummary.axes = {};
+    const axesRoute = resolveRoute(model, routes, videoRoutes, modelSummary.backends);
     for (const backend of modelSummary.backends) {
       const tiers = tiersFor(model, backend, backendTierOverrides);
       const modes = modesFor(model);
-      const overlays = overlaysFor(model, backend);
+      const overlays = overlaysFor(model, backend, axesRoute);
       modelSummary.axes[backend] = { tiers, modes, overlays, rungs: [...RUNGS] };
       cellInventoryExpectations.set(`${model.id}:${backend}`, {
         tiers: tiers.length,
@@ -4361,7 +4442,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       const owningModelStory = modelSummary.owningModelStories[backend];
       for (const tier of tiersFor(model, backend, backendTierOverrides)) {
         for (const mode of modesFor(model)) {
-          for (const overlay of overlaysFor(model, backend)) {
+          for (const overlay of overlaysFor(model, backend, route)) {
             const provider = providerFor(model, backend, overlay, route);
             for (const rung of RUNGS) {
               const status = strategyStatus({
@@ -4378,6 +4459,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 rung4ContractPrerequisites,
                 manifestById,
                 inferenceClosureDigests,
+                candleBespokeStagedLanes,
               });
               const fingerprint =
                 status.state === "Missing"
@@ -5078,8 +5160,16 @@ function renderMarkdown(matrix) {
         : row.states["Runtime verified"]
           ? "Runtime verified"
           : "Implemented/unverified";
+      // sc-20799: a lane whose EVERY staged coordinate is structurally exempt is not `Missing` —
+      // "nobody has written it yet" and "the architecture has no separable component to stage" are
+      // different claims, and conflating them is how a resident-only-by-design lane reads as
+      // undelivered work. A mixed lane (some exempt, some genuinely absent) still reads `Missing`.
+      const structuralOnly =
+        !staged &&
+        row.coordinates > 0 &&
+        (row.states["Structurally N/A"] ?? 0) === row.coordinates;
       lines.push(
-        `| \`${model.id}\` | ${model.modality} | ${backend} | \`${model.resolvedRoutes[backend]}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | ${model.owningModelStories[backend] === null ? "—" : `SC-${model.owningModelStories[backend]}`} | ${staged ? stagedState : "Missing"} |`,
+        `| \`${model.id}\` | ${model.modality} | ${backend} | \`${model.resolvedRoutes[backend]}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | ${model.owningModelStories[backend] === null ? "—" : `SC-${model.owningModelStories[backend]}`} | ${staged ? stagedState : structuralOnly ? "Structurally N/A" : "Missing"} |`,
       );
     }
   }

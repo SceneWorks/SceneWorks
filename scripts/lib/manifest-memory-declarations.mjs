@@ -241,6 +241,41 @@ export function rustStringSlice(source, name) {
 }
 
 /**
+ * True when this backend's exact contract names ONLY the LoRA load profile, so the model cannot
+ * serve a plain public coordinate on that backend at all (sc-20799 — Qwen Edit Lightning's
+ * always-provisioned built-in LoRA is the current case). Publishing `none` for such a contract
+ * creates plain cells that cannot reach the provider and lets their staged/decode/attention/resident
+ * rows look applicable by accident.
+ *
+ * STRUCTURAL on purpose: the predicate reads the contract's own shape and never a model id, so the
+ * next always-provisioned-LoRA variant inherits the suppression without an edit here. Shared by
+ * `catalogAxes` (this projection) and the matrix generator's `overlaysFor` so the two mirrors of the
+ * overlay axis cannot drift.
+ *
+ * Only rows attributed to `baseProvider` — the engine the model's own route resolves to (the
+ * `MODEL_TABLE` join, `route.engineFor(backend)` in the matrix) — are counted. A row on any other
+ * provider belongs to a sibling lane (a strict-control split, or a route-local edit provider like
+ * Krea Turbo's `krea_2_turbo_edit`) and says nothing about whether the base model's plain route
+ * exists. A contract whose only rows are sibling-owned therefore does NOT suppress `none`.
+ */
+export function contractIsLoraOnly(model, backend, baseProvider) {
+  const contract = model[backend]?.memoryStrategyContract;
+  const baseRows = (contract?.implementations ?? []).filter(
+    (implementation) =>
+      (implementation.runtimeProvider ?? contract.provider) === baseProvider,
+  );
+  return (
+    baseRows.length > 0 &&
+    baseRows.every(
+      (implementation) =>
+        Array.isArray(implementation.overlays) &&
+        implementation.overlays.length === 1 &&
+        implementation.overlays[0] === "lora",
+    )
+  );
+}
+
+/**
  * What the CATALOG can actually ask of this model on this backend.
  *
  * The third source of truth, alongside the engine contract (capability) and the route witnesses
@@ -250,7 +285,7 @@ export function rustStringSlice(source, name) {
  * the matrix's `modesFor`/`overlaysFor` derive a cell's axes, so the projection cannot declare a
  * coordinate the matrix has no cell for.
  */
-export function catalogAxes(model, backend, poseFamilies) {
+export function catalogAxes(model, backend, poseFamilies, baseProvider) {
   const modes = (model.capabilities ?? []).filter((capability) =>
     GENERATION_CAPABILITIES.has(capability),
   );
@@ -266,19 +301,10 @@ export function catalogAxes(model, backend, poseFamilies) {
     model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
   const advertised =
     backend === "candle" && measured.length ? measured : [...measured, ...downloads, ...dense];
-  // Mirror the matrix generator: a backend whose exact contract names only the LoRA load profile
-  // cannot serve a plain public coordinate (Qwen Edit Lightning is the current case).
-  const implementations = model[backend]?.memoryStrategyContract?.implementations ?? [];
-  const loraOnlyContract =
-    model.id === "qwen_image_edit_2511_lightning" &&
-    implementations.length > 0 &&
-    implementations.every(
-      (implementation) =>
-        Array.isArray(implementation.overlays) &&
-        implementation.overlays.length === 1 &&
-        implementation.overlays[0] === "lora",
-    );
-  const overlays = loraOnlyContract ? ["lora"] : ["none"];
+  // Mirror the matrix generator through the ONE shared predicate: a backend whose exact contract
+  // names only the LoRA load profile for the model's base provider cannot serve a plain public
+  // coordinate.
+  const overlays = contractIsLoraOnly(model, backend, baseProvider) ? ["lora"] : ["none"];
   if (model.loraCompatibility) overlays.push("lora");
   if (poseFamilies[backend]?.has(model.id)) overlays.push("control");
   if ((model.capabilities ?? []).includes("character_image")) overlays.push("identity");
@@ -650,7 +676,7 @@ export function planProjection({
       engine,
       witnesses: witnessIndex.get(key),
       withhold,
-      axes: catalogAxes(host.model, backend, poseFamilies),
+      axes: catalogAxes(host.model, backend, poseFamilies, routes.get(host.model.id)),
     });
     for (const entry of projected.skipped) {
       skipped.push({ backend, provider, modelId: host.model.id, ...entry });
