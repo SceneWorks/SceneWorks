@@ -67,10 +67,13 @@ export function ModelLibraryRestartDialog({
       </p>
       {/* Say what happened to the work they were doing. From the user's seat they pressed Generate,
           answered a dialog, and got a settings message: without this line, the missing job reads as
-          a bug rather than the deliberate consequence of relocating. */}
-      <p className="discard-confirm-body">
-        The generation you started was not queued. Submit it again after SceneWorks restarts.
-      </p>
+          a bug rather than the deliberate consequence of relocating. Only when there WAS a
+          submission — a relocation started from Settings dropped nothing. */}
+      {relocation.droppedSubmission ? (
+        <p className="discard-confirm-body">
+          The generation you started was not queued. Submit it again after SceneWorks restarts.
+        </p>
+      ) : null}
       <p className="model-library-path">
         <span className="model-library-path-label">New location</span>
         <code>{relocation.hfHome ?? relocation.libraryRoot}</code>
