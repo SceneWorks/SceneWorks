@@ -48,8 +48,11 @@ const IDEOGRAM_TURBO_ADAPTER_PREFIX: &str = "ideogram.turbo-time.sha256:";
 const IDEOGRAM_PID_PREFIX: &str = "ideogram.pid.flux2.sha256:";
 const IDEOGRAM_PHYSICAL_RECEIPT_PREFIX: &str = "ideogram.physical.sha256:";
 const SANA_PHYSICAL_RECEIPT_PREFIX: &str = "sana.candle.dense.physical.sha256:";
+const SD35_PHYSICAL_RECEIPT_PREFIX: &str = "sd3.5.candle.physical.sha256:";
+const SD35_ADAPTER_RECEIPT_PREFIX: &str = "sd3.5.adapters.ordered-additive.sha256:";
 pub(crate) const KOLORS_REQUEST_EVIDENCE_REVISION: &str = "kolors-candle-request-contract-v1";
 const SANA_REQUEST_EVIDENCE_REVISION: &str = "sana-candle-dense-request-contract-v1";
+const SD35_REQUEST_EVIDENCE_REVISION: &str = "sd3.5-candle-request-contract-v1";
 const KOLORS_PHYSICAL_RECEIPT_PREFIX: &str = "kolors.physical.sha256:";
 const KOLORS_ADAPTER_RECEIPT_PREFIX: &str = "kolors.adapters.ordered.sha256:";
 const KOLORS_IP_RECEIPT_PREFIX: &str = "kolors.ip.sha256:";
@@ -68,6 +71,13 @@ fn is_sana(engine_id: &str) -> bool {
     matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
 }
 
+pub(crate) fn is_sd35(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium"
+    )
+}
+
 fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
     matches!(
         engine_id,
@@ -79,8 +89,94 @@ fn is_receipt_priced(engine_id: &str) -> bool {
     is_chroma(engine_id)
         || is_ideogram(engine_id)
         || is_sana(engine_id)
+        || is_sd35(engine_id)
         || engine_id == "kolors"
         || is_sealed_kolors_bespoke(engine_id)
+}
+
+fn sd35_provider_overlay_identity(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+    declared_overlay: Option<&str>,
+) -> WorkerResult<Option<String>> {
+    let components = contract.resident_components();
+    let adapters = components
+        .iter()
+        .filter(|component| component.id.starts_with(SD35_ADAPTER_RECEIPT_PREFIX))
+        .collect::<Vec<_>>();
+    let valid = adapters.iter().all(|component| {
+        component.kind == gen_core::MemoryComponentKind::AdapterStack
+            && component.resident_bytes > 0
+            && component.id.len() == SD35_ADAPTER_RECEIPT_PREFIX.len() + 64
+            && component.id[SD35_ADAPTER_RECEIPT_PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    });
+    if !valid || adapters.len() > 1 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} returned malformed ordered additive-adapter facts"
+        )));
+    }
+    match (declared_overlay, adapters.as_slice()) {
+        (None, []) => Ok(None),
+        (Some("lora"), [component]) => Ok(Some(component.id.clone())),
+        (None, _) => Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} plain load crossed an adapter receipt"
+        ))),
+        (Some("lora"), _) => Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} adapter load lacks its exact provider receipt"
+        ))),
+        (Some(other), _) => Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} does not advertise overlay {other}"
+        ))),
+    }
+}
+
+fn validate_sd35_asset_facts(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+) -> WorkerResult<String> {
+    let facts = contract.asset_facts;
+    let physical = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.id.starts_with(SD35_PHYSICAL_RECEIPT_PREFIX))
+        .collect::<Vec<_>>();
+    let complete = is_sd35(engine_id)
+        && contract.provider_id == engine_id
+        && facts.conditioning_bytes > 0
+        && facts.transformer_bytes > 0
+        && facts.decoder_bytes > 0
+        && facts.base_bytes
+            == facts
+                .conditioning_bytes
+                .saturating_add(facts.transformer_bytes)
+                .saturating_add(facts.decoder_bytes)
+        && contract.auxiliary_resident_bytes() == facts.overlay_bytes
+        && matches!(physical.as_slice(), [component]
+            if component.id.len() == SD35_PHYSICAL_RECEIPT_PREFIX.len() + 64
+                && component.id[SD35_PHYSICAL_RECEIPT_PREFIX.len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                && component.kind == gen_core::MemoryComponentKind::TransformerSubStack(
+                    gen_core::TransformerComponent::Dit
+                )
+                && component.resident_bytes == facts.transformer_bytes
+                && component.bounded_by == Some(MemoryStrategy::StagedResidency)
+                && component.residency == gen_core::MemoryComponentResidency::WholeRender);
+    if !complete {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} returned incomplete or crossed SD3.5 physical facts"
+        )));
+    }
+    Ok(physical[0].id.clone())
+}
+
+pub(crate) fn sd35_physical_receipt_identity(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+) -> WorkerResult<String> {
+    validate_sd35_asset_facts(engine_id, contract)
 }
 
 /// Resolve the public `lora` cell to the exact ordered adapter load identity sealed by the
@@ -1428,6 +1524,7 @@ fn evaluate_shared_image_inner(
         "ideogram_4" | "ideogram_4_turbo" => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
         "kolors" => KOLORS_REQUEST_EVIDENCE_REVISION,
         "sana_1600m" | "sana_sprint_1600m" => SANA_REQUEST_EVIDENCE_REVISION,
+        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => SD35_REQUEST_EVIDENCE_REVISION,
         _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -1449,7 +1546,7 @@ fn evaluate_shared_image_inner(
         Some(peak) => peak,
         // SANA's certified provider receipt prices the selected dense snapshot from its real
         // safetensor headers. It deliberately has no per-story measured manifest curve.
-        None if is_sana(engine_id) && artifact_is_certified => 0.0,
+        None if (is_sana(engine_id) || is_sd35(engine_id)) && artifact_is_certified => 0.0,
         None => {
             if receipt_priced && artifact_is_certified {
                 return Err(WorkerError::InvalidPayload(format!(
@@ -1492,6 +1589,9 @@ fn evaluate_shared_image_inner(
             )));
         }
         None
+    } else if is_sd35(engine_id) {
+        validate_sd35_asset_facts(engine_id, &contract)?;
+        sd35_provider_overlay_identity(engine_id, &contract, provider_overlay)?
     } else if engine_id == "kolors" {
         let exact = kolors_overlay_receipt_identity(engine_id, &contract, use_pid)?;
         let has_declared_adapters = provider_overlay.is_some();
@@ -2191,6 +2291,67 @@ mod tests {
                 bounded_by: Some(MemoryStrategy::StagedResidency),
                 residency: gen_core::MemoryComponentResidency::WholeRender,
             }],
+        };
+        contract
+    }
+
+    fn sd35_probe_contract(
+        provider: &str,
+        adapter_identity: Option<&str>,
+    ) -> gen_core::MemoryProviderContract {
+        let adapter_bytes = adapter_identity.map_or(0, |_| gib(1));
+        let mut contract = chroma_probe_contract(None, 0, 0);
+        contract.provider_id = provider.to_owned();
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| gen_core::MemoryStrategyCapability {
+                strategy,
+                support: if matches!(
+                    strategy,
+                    MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+                ) {
+                    gen_core::MemoryStrategySupport::Implemented
+                } else {
+                    gen_core::MemoryStrategySupport::Missing
+                },
+                parameters: Default::default(),
+            })
+            .collect();
+        let mut resident_components = vec![gen_core::MemoryResidentComponent {
+            id: format!("{SD35_PHYSICAL_RECEIPT_PREFIX}{}", "a".repeat(64)),
+            kind: gen_core::MemoryComponentKind::TransformerSubStack(
+                gen_core::TransformerComponent::Dit,
+            ),
+            resident_bytes: gib(10),
+            bounded_by: Some(MemoryStrategy::StagedResidency),
+            residency: gen_core::MemoryComponentResidency::WholeRender,
+        }];
+        if let Some(identity) = adapter_identity {
+            resident_components.push(gen_core::MemoryResidentComponent {
+                id: identity.to_owned(),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: adapter_bytes,
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![
+                gen_core::MemoryFormulaVariable::AssetBytes,
+                gen_core::MemoryFormulaVariable::PixelCount,
+                gen_core::MemoryFormulaVariable::BatchCount,
+                gen_core::MemoryFormulaVariable::ConditioningTokenCount,
+                gen_core::MemoryFormulaVariable::OverlayBytes,
+            ],
+            resident_components,
+        };
+        contract.asset_facts = gen_core::MemoryAssetFacts {
+            conditioning_bytes: gib(6),
+            transformer_bytes: gib(10),
+            decoder_bytes: gib(2),
+            base_bytes: gib(18),
+            overlay_bytes: adapter_bytes,
         };
         contract
     }
@@ -3001,6 +3162,304 @@ mod tests {
                 Ok(_) => panic!("crossed Base/Sprint identity must refuse before selection"),
             };
             assert!(crossed.to_string().contains("crossed SANA physical facts"));
+        }
+    }
+
+    #[test]
+    fn sd35_exact_receipts_cover_every_route_tier_profile_and_mode() {
+        let manifest = json!({ "candle": {} })
+            .as_object()
+            .expect("SD3.5 structural manifest")
+            .clone();
+        let base_geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let adapter_identity = format!("{SD35_ADAPTER_RECEIPT_PREFIX}{}", "b".repeat(64));
+
+        for provider in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            for tier in ["q4", "q8", "bf16"] {
+                let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from(format!(
+                    "sealed-{provider}-{tier}"
+                ))))
+                .with_resolved_route(provider);
+                for (public_overlay, provider_overlay, receipt) in [
+                    (None, None, None),
+                    (Some("lora"), Some("lora"), Some(adapter_identity.as_str())),
+                ] {
+                    for (mode, references, has_reference) in
+                        [("text_to_image", 0, false), ("image_to_image", 1, true)]
+                    {
+                        let evaluate = |free_gb| {
+                            evaluate_shared_image_inner(
+                                provider,
+                                provider,
+                                &spec,
+                                true,
+                                &manifest,
+                                tier,
+                                mode,
+                                public_overlay,
+                                provider_overlay,
+                                MemoryGeometry {
+                                    reference_count: references,
+                                    ..base_geometry
+                                },
+                                has_reference,
+                                false,
+                                false,
+                                false,
+                                Some(VramBudget {
+                                    free_gb,
+                                    total_gb: 48.0,
+                                }),
+                                None,
+                                0,
+                                MemoryCacheState::Cold,
+                                None,
+                                Some(sd35_probe_contract(provider, receipt)),
+                                Some(SD35_REQUEST_EVIDENCE_REVISION),
+                            )
+                        };
+                        let staged = evaluate(16.0)
+                            .expect("sealed SD3.5 receipt evaluates")
+                            .expect("staged phase envelope fits");
+                        assert_eq!(
+                            staged.context.selection.strategy,
+                            MemoryStrategy::StagedResidency,
+                            "{provider}/{tier}/{public_overlay:?}/{mode}"
+                        );
+                        let expected_mode = match mode {
+                            "text_to_image" => MemoryMode::TextToImage,
+                            "image_to_image" => MemoryMode::ImageToImage,
+                            _ => unreachable!("the fixture enumerates only SD3.5 public modes"),
+                        };
+                        assert_eq!(staged.context.mode, expected_mode);
+                        assert_eq!(staged.context.has_reference, has_reference);
+                        assert_eq!(staged.context.geometry.reference_count, references);
+                        assert_eq!(
+                            staged.context.overlay.as_deref(),
+                            receipt,
+                            "public lora labels must become exact ordered provider receipts"
+                        );
+                        assert_eq!(
+                            staged.context.evidence_revision,
+                            SD35_REQUEST_EVIDENCE_REVISION
+                        );
+
+                        let resident = evaluate(24.0)
+                            .expect("sealed SD3.5 receipt evaluates")
+                            .expect("resident envelope fits");
+                        assert_eq!(
+                            resident.context.selection.strategy,
+                            MemoryStrategy::Resident
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sd35_receipts_refuse_crossed_physical_adapter_context_and_no_fit() {
+        let manifest = json!({ "candle": {} })
+            .as_object()
+            .expect("SD3.5 structural manifest")
+            .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-sd35-q4")))
+            .with_resolved_route("sd3_5_large");
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let adapter_identity = format!("{SD35_ADAPTER_RECEIPT_PREFIX}{}", "b".repeat(64));
+        let evaluate = |free_gb: f64,
+                        public_overlay: Option<&str>,
+                        provider_overlay: Option<&str>,
+                        contract| {
+            evaluate_shared_image_inner(
+                "sd3_5_large",
+                "sd3_5_large",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                public_overlay,
+                provider_overlay,
+                geometry,
+                false,
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 48.0,
+                }),
+                None,
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(contract),
+                Some(SD35_REQUEST_EVIDENCE_REVISION),
+            )
+        };
+
+        let no_fit = match evaluate(13.0, None, None, sd35_probe_contract("sd3_5_large", None)) {
+            Err(error) => error,
+            Ok(_) => panic!("a budget below the exact staged envelope must refuse"),
+        };
+        assert!(no_fit.to_string().contains("no exact resident or staged"));
+
+        let crossed_route =
+            match evaluate(24.0, None, None, sd35_probe_contract("sd3_5_medium", None)) {
+                Err(error) => error,
+                Ok(_) => panic!("crossed provider identity must refuse"),
+            };
+        assert!(crossed_route
+            .to_string()
+            .contains("incomplete or crossed SD3.5 physical facts"));
+
+        let mut crossed_physical = sd35_probe_contract("sd3_5_large", None);
+        if let gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+            resident_components,
+            ..
+        } = &mut crossed_physical.formula
+        {
+            resident_components[0].id = format!("other.physical.sha256:{}", "a".repeat(64));
+        }
+        let crossed_physical = match evaluate(24.0, None, None, crossed_physical) {
+            Err(error) => error,
+            Ok(_) => panic!("crossed physical receipt must refuse"),
+        };
+        assert!(crossed_physical
+            .to_string()
+            .contains("incomplete or crossed SD3.5 physical facts"));
+
+        let missing_adapter = match evaluate(
+            24.0,
+            Some("lora"),
+            Some("lora"),
+            sd35_probe_contract("sd3_5_large", None),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("missing ordered adapter receipt must refuse"),
+        };
+        assert!(missing_adapter
+            .to_string()
+            .contains("lacks its exact provider receipt"));
+
+        let crossed_plain = match evaluate(
+            24.0,
+            None,
+            None,
+            sd35_probe_contract("sd3_5_large", Some(&adapter_identity)),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("plain request crossed with adapter facts must refuse"),
+        };
+        assert!(crossed_plain
+            .to_string()
+            .contains("plain load crossed an adapter receipt"));
+
+        let unsupported_overlay = match evaluate(
+            24.0,
+            Some("lokr"),
+            Some("lokr"),
+            sd35_probe_contract("sd3_5_large", Some(&adapter_identity)),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("unsupported public overlay must refuse"),
+        };
+        assert!(unsupported_overlay
+            .to_string()
+            .contains("does not advertise overlay lokr"));
+
+        assert!(evaluate_shared_image_inner(
+            "sd3_5_large",
+            "sd3_5_large",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "image_to_image",
+            None,
+            None,
+            MemoryGeometry {
+                reference_count: 1,
+                ..geometry
+            },
+            true,
+            false,
+            true,
+            true,
+            Some(VramBudget {
+                free_gb: 24.0,
+                total_gb: 48.0,
+            }),
+            None,
+            0,
+            MemoryCacheState::Cold,
+            None,
+            Some(sd35_probe_contract("sd3_5_large", None)),
+            Some(SD35_REQUEST_EVIDENCE_REVISION),
+        )
+        .expect("unsupported Hires context returns no candidate")
+        .is_none());
+    }
+
+    #[test]
+    fn sd35_manifest_declares_only_exact_resident_and_staged_cells() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .expect("embedded model manifest");
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
+        let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+        for provider in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            let model = root["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|model| model["id"] == provider)
+                .expect("SD3.5 model");
+            let contract = &model["candle"]["memoryStrategyContract"];
+            assert_eq!(contract["provider"], provider);
+            assert_eq!(contract["exhaustive"], true);
+            let rows = contract["implementations"]
+                .as_array()
+                .expect("SD3.5 implementations");
+            assert_eq!(rows.len(), 4);
+            for row in rows {
+                assert!(matches!(
+                    row["rung"].as_str(),
+                    Some("resident" | "staged_residency")
+                ));
+                assert_eq!(row["tiers"], json!(["q4", "q8", "bf16"]));
+                assert_eq!(row["modes"], json!(["text_to_image", "image_to_image"]));
+                assert_eq!(row["sourceKinds"], json!(["dir"]));
+                assert_eq!(row["pid"], Value::Null);
+                let contexts = row["requestContexts"]
+                    .as_array()
+                    .expect("exact request contexts");
+                assert_eq!(contexts.len(), 2);
+                assert_eq!(contexts[0]["referenceCounts"], json!([0]));
+                assert_eq!(contexts[1]["referenceCounts"], json!([1]));
+                assert_eq!(contexts[0]["hasPhases"], false);
+                assert_eq!(contexts[1]["hasPhases"], false);
+                if row["rung"] == "staged_residency" {
+                    assert_eq!(row["requiredOffloadPolicy"], "sequential");
+                } else {
+                    assert_eq!(row["requiredOffloadPolicy"], Value::Null);
+                }
+            }
         }
     }
 

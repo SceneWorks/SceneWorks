@@ -3324,16 +3324,24 @@ pub(super) fn candle_certified_load_spec(
         })
 }
 
-/// Seal every file the Chroma provider can read before selector evaluation. The same finalized
-/// `LoadSpec` is moved into the generator cache, so a cold or warm load cannot silently re-resolve
-/// a pathname after admission.
+/// Seal every file recursively-inventoried receipt provider can read before selector evaluation.
+/// The same finalized `LoadSpec` reaches the generator cache, so cold/warm execution cannot
+/// silently re-resolve a pathname after admission.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-fn seal_chroma_load_spec(
+fn seal_recursive_receipt_load_spec(
     engine_id: &str,
     artifact_is_certified: bool,
     spec: &mut LoadSpec,
 ) -> WorkerResult<()> {
-    if !matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+    if !matches!(
+        engine_id,
+        "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+    )
         || !artifact_is_certified
     {
         return Ok(());
@@ -3342,34 +3350,34 @@ fn seal_chroma_load_spec(
     fn visit(root: &Path, files: &mut Vec<PathBuf>) -> WorkerResult<()> {
         for entry in std::fs::read_dir(root).map_err(|error| {
             WorkerError::InvalidPayload(format!(
-                "Chroma artifact inventory cannot read {}: {error}",
+                "Receipt artifact inventory cannot read {}: {error}",
                 root.display()
             ))
         })? {
             let path = entry
-                .map_err(|error| WorkerError::InvalidPayload(format!("Chroma artifact inventory failed: {error}")))?
+                .map_err(|error| WorkerError::InvalidPayload(format!("Receipt artifact inventory failed: {error}")))?
                 .path();
             let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
                 WorkerError::InvalidPayload(format!(
-                    "Chroma artifact member cannot be inspected: {error}"
+                    "Receipt artifact member cannot be inspected: {error}"
                 ))
             })?;
             if metadata.file_type().is_symlink() {
                 let target = std::fs::metadata(&path).map_err(|error| {
                     WorkerError::InvalidPayload(format!(
-                        "Chroma artifact symlink target cannot be inspected: {error}"
+                        "Receipt artifact symlink target cannot be inspected: {error}"
                     ))
                 })?;
                 if target.is_file() {
                     files.push(std::path::absolute(&path).map_err(|error| {
                         WorkerError::InvalidPayload(format!(
-                            "Chroma artifact member cannot be absolutized: {error}"
+                            "Receipt artifact member cannot be absolutized: {error}"
                         ))
                     })?);
                     continue;
                 }
                 return Err(WorkerError::InvalidPayload(format!(
-                    "Chroma artifact symlink must resolve directly to a file: {}",
+                    "Receipt artifact symlink must resolve directly to a file: {}",
                     path.display()
                 )));
             }
@@ -3378,7 +3386,7 @@ fn seal_chroma_load_spec(
             } else if metadata.is_file() {
                 files.push(std::path::absolute(&path).map_err(|error| {
                     WorkerError::InvalidPayload(format!(
-                        "Chroma artifact member cannot be absolutized: {error}"
+                        "Receipt artifact member cannot be absolutized: {error}"
                     ))
                 })?);
             }
@@ -3392,7 +3400,7 @@ fn seal_chroma_load_spec(
         .map(std::path::absolute)
         .collect::<std::io::Result<Vec<_>>>()
         .map_err(|error| WorkerError::InvalidPayload(format!(
-            "Chroma file source cannot be absolutized: {error}"
+            "Receipt file source cannot be absolutized: {error}"
         )))?;
     for root in spec.directory_source_paths() {
         visit(root, &mut files)?;
@@ -3401,19 +3409,19 @@ fn seal_chroma_load_spec(
     files.dedup();
     if files.is_empty() {
         return Err(WorkerError::InvalidPayload(
-            "Chroma artifact inventory is empty".to_owned(),
+            "Receipt artifact inventory is empty".to_owned(),
         ));
     }
     let pins = files
         .iter()
         .map(|path| {
             gen_core::PinnedWeightsFile::pin(path)
-                .map_err(|error| crate::classify_engine_error("Chroma load pin", error))
+                .map_err(|error| crate::classify_engine_error("Receipt load pin", error))
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "Chroma load preparation")?;
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "Receipt load preparation")?;
     spec.validate_prepared_file_pins()
-        .map_err(|error| crate::classify_engine_error("Chroma load preparation", error))
+        .map_err(|error| crate::classify_engine_error("Receipt load preparation", error))
 }
 
 /// Seal exactly the files the Ideogram Candle loader reads. Direct component safetensors,
@@ -3536,21 +3544,23 @@ mod chroma_load_seal_tests {
 
     #[test]
     fn exact_inventory_is_carried_to_cache_load_and_mutation_fails_closed() {
-        let temp = tempfile::tempdir().expect("temporary Chroma artifact");
-        let root = temp.path().join("q4");
-        std::fs::create_dir_all(root.join("transformer")).expect("artifact directory");
-        let config = root.join("transformer/config.json");
-        std::fs::write(&config, b"{}").expect("artifact member");
-        let mut spec = LoadSpec::new(WeightsSource::Dir(root))
-            .with_resolved_route("chroma1_base");
+        for provider in ["chroma1_base", "sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            let temp = tempfile::tempdir().expect("temporary receipt artifact");
+            let root = temp.path().join("q4");
+            std::fs::create_dir_all(root.join("transformer")).expect("artifact directory");
+            let config = root.join("transformer/config.json");
+            std::fs::write(&config, b"{}").expect("artifact member");
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root)).with_resolved_route(provider);
 
-        seal_chroma_load_spec("chroma1_base", true, &mut spec).expect("seal Chroma load");
-        assert!(spec.prepared_file_pins().is_prepared());
-        assert_eq!(spec.prepared_file_pins().len(), 1);
-        spec.validate_prepared_file_pins().expect("stable prepared spec");
+            seal_recursive_receipt_load_spec(provider, true, &mut spec)
+                .expect("seal recursive receipt load");
+            assert!(spec.prepared_file_pins().is_prepared());
+            assert_eq!(spec.prepared_file_pins().len(), 1);
+            spec.validate_prepared_file_pins().expect("stable prepared spec");
 
-        std::fs::write(config, b"{\"changed\":true}").expect("mutate artifact member");
-        assert!(spec.validate_prepared_file_pins().is_err());
+            std::fs::write(config, b"{\"changed\":true}").expect("mutate artifact member");
+            assert!(spec.validate_prepared_file_pins().is_err(), "{provider}");
+        }
     }
 }
 
@@ -3919,7 +3929,13 @@ fn optimized_shared_memory_context(
     (context.selection.strategy.is_optimized()
         || matches!(
             engine_id,
-            "ideogram_4" | "ideogram_4_turbo" | "sana_1600m" | "sana_sprint_1600m"
+            "ideogram_4"
+                | "ideogram_4_turbo"
+                | "sana_1600m"
+                | "sana_sprint_1600m"
+                | "sd3_5_large"
+                | "sd3_5_large_turbo"
+                | "sd3_5_medium"
         ))
     .then_some(context)
 }
@@ -3940,6 +3956,11 @@ fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -
         || (matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
             && matches!(request_mode, "image_generation" | "text_to_image"))
         || (matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(
+            engine_id,
+            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium"
+        )
             && matches!(request_mode, "image_generation" | "text_to_image"))
     {
         "text_to_image"
@@ -4601,7 +4622,11 @@ pub(super) fn candle_adapter_resident_bytes(
     // forward-time residuals for dense bf16 as well as packed tiers, so both families must reserve
     // the exact adapter source bytes at every precision. Other generic Candle providers fold dense
     // factors and retain residuals only on packed tiers.
-    if engine_id.starts_with("krea_2_") || engine_id.starts_with("z_image") || tier != "bf16" {
+    if engine_id.starts_with("krea_2_")
+        || engine_id.starts_with("z_image")
+        || crate::candle_memory_strategy::is_sd35(engine_id)
+        || tier != "bf16"
+    {
         measured_source_bytes
     } else {
         0
@@ -5111,12 +5136,20 @@ mod candle_image_load_shape_tests {
     }
 
     #[test]
-    fn ideogram_resident_context_remains_request_scoped() {
+    fn receipt_priced_resident_context_remains_request_scoped() {
         let context = resident_context();
-        assert_eq!(
-            optimized_shared_memory_context("ideogram_4", context.clone()),
-            Some(context)
-        );
+        for provider in [
+            "ideogram_4",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+        ] {
+            assert_eq!(
+                optimized_shared_memory_context(provider, context.clone()),
+                Some(context.clone()),
+                "{provider}"
+            );
+        }
     }
 }
 
@@ -8926,6 +8959,19 @@ mod candle_request_residency_tests {
             assert!(!rejects_unverified_shared_memory_fallback(engine, true));
             assert_eq!(verified_only_memory_family_label(engine), Some("Chroma1"));
         }
+        for engine in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "image_generation"),
+                "text_to_image"
+            );
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "text_to_image"),
+                "text_to_image"
+            );
+            for refused in ["edit_image", "image_inpaint", "style_variations"] {
+                assert_eq!(candle_base_memory_request_mode(engine, refused), refused);
+            }
+        }
         for engine in ["ideogram_4", "ideogram_4_turbo"] {
             assert_eq!(
                 candle_base_memory_request_mode(engine, "image_generation"),
@@ -9362,6 +9408,9 @@ mod krea_turbo_memory_route_tests {
         );
         assert_eq!(candle_adapter_resident_bytes("sdxl", "bf16", 321), 0);
         assert_eq!(candle_adapter_resident_bytes("sdxl", "q4", 321), 321);
+        for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            assert_eq!(candle_adapter_resident_bytes(model, "bf16", 321), 321);
+        }
 
         let missing = vec![gen_core::AdapterSpec::new(
             root.join("missing.safetensors"),
@@ -9613,7 +9662,12 @@ fn candle_quant_for_resolved_tier(
     // setting it would request a second on-the-fly quantization and the provider correctly refuses.
     if matches!(
         request.model.as_str(),
-        "chroma1_hd" | "chroma1_base" | "chroma1_flash"
+        "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
     ) {
         return (None, resolved_bits);
     }
@@ -9668,8 +9722,15 @@ mod candle_resolved_tier_contract_tests {
     }
 
     #[test]
-    fn chroma_packed_turnkeys_keep_load_quantization_none_for_every_public_route() {
-        for model in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+    fn packed_turnkeys_keep_load_quantization_none_for_every_public_route() {
+        for model in [
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+        ] {
             for (tier, expected_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
                 let request = ImageRequest::from_payload(
                     json!({
@@ -9956,6 +10017,7 @@ async fn generate_candle_stream(
     };
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
     let is_sana = matches!(engine_id, "sana_1600m" | "sana_sprint_1600m");
+    let is_sd35 = crate::candle_memory_strategy::is_sd35(engine_id);
     // Standard-tier weight resolution, SHARED with the MLX lane (sc-9092, epic 9083 gap #3). Every
     // candle image family — Ideogram / Boogu / Krea / Lens included — now packed-loads the SAME
     // SceneWorks MLX-packed per-tier turnkey the macOS path uses: as of the candle-gen rollout all 11
@@ -10528,6 +10590,9 @@ async fn generate_candle_stream(
             | "ideogram_4_turbo"
             | "sana_1600m"
             | "sana_sprint_1600m"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
     );
     let shared_predicted_peak_gb = if provider_receipt_priced {
         crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
@@ -10628,7 +10693,7 @@ async fn generate_candle_stream(
         &request.model_manifest_entry,
         tier,
     );
-    seal_chroma_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
+    seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
@@ -10714,7 +10779,7 @@ async fn generate_candle_stream(
         hires_first_pass_memory_context =
             optimized_shared_memory_context(engine_id, evaluation.context);
     }
-    if is_sana
+    if (is_sana || is_sd35)
         && (selected_memory_strategy_context.is_none()
             || (hires_fix.is_some() && hires_first_pass_memory_context.is_none()))
     {
@@ -10767,9 +10832,10 @@ async fn generate_candle_stream(
             _ => {}
         }
     }
-    let sana_selector_authoritative = is_sana && selected_memory_strategy_context.is_some();
+    let receipt_selector_authoritative =
+        (is_sana || is_sd35) && selected_memory_strategy_context.is_some();
     let use_sequential =
-        if sana_selector_authoritative {
+        if receipt_selector_authoritative {
             generation_memory.is_some_and(|memory| memory.stage_residency)
         } else if let Some(crate::vram_gate::KreaTurboFit::Resident {
             peak_gb,
@@ -11152,7 +11218,7 @@ async fn generate_candle_stream(
             evidence_revision: krea_evidence_revision(),
         })
     }));
-    if !sana_selector_authoritative {
+    if !receipt_selector_authoritative {
         apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
     }
     // Reuse the exact selector spec, including Mage's split text-encoder/VAE component paths. Only
@@ -11235,7 +11301,7 @@ async fn generate_candle_stream(
               external_committed_bytes,
               tx,
               cancel| {
-            if is_ideogram || is_sana {
+            if is_ideogram || is_sana || is_sd35 {
                 // Receipt-priced providers require the exact pre-load selector result to reach the
                 // cached generator. Ideogram may preserve a tighter pre-admitted staged sibling;
                 // SANA's cache key must exactly retain the selector's own resident/staged policy.
@@ -11304,6 +11370,10 @@ async fn generate_candle_stream(
                 let facts = contract.asset_facts;
                 let physical_receipt = if is_sana {
                     crate::candle_memory_strategy::sana_physical_receipt_identity(
+                        engine_id, contract,
+                    )?
+                } else if is_sd35 {
+                    crate::candle_memory_strategy::sd35_physical_receipt_identity(
                         engine_id, contract,
                     )?
                 } else {
