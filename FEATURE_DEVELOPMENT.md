@@ -77,7 +77,7 @@ A story that changes both repositories uses the same story branch name in both.
 | --- | --- | --- |
 | `main` rulesets | `Require MR` 17708030 + `Main Ruleset` 20886480 | `Require MR` 20481541 |
 | `main` required checks | `web`, `parity`, `candle`, `build-windows`, `check-linux`, `check-macos`, `macOS build, lint and workspace tests (hosted)` | `CI gate` |
-| `main` up-to-date required | **no** (`strict: false`) | **yes** (`strict: true`) |
+| `main` up-to-date required | **no** (`strict: false`) | **no** (`strict: false` since 2026-08-23; it drifted back to `strict: true` twice — do not re-enable) |
 | `main` merge methods | merge / squash / rebase | merge commit only |
 | `feature/*` base policy | 20638194 — same 7 checks, `strict: false`, **merge commit only** | 20638200 — `CI gate`, `strict: false`, merge commit only |
 | `feature/*` deletion guard | 20638197 (deletion rule only, no bypass actors) | 20638201 (same) |
@@ -88,8 +88,9 @@ Consequences:
 - `gh pr merge --squash` fails on a feature-target PR in either repository. Use
   `--merge`.
 - A story PR whose base advanced is still mergeable (`strict: false`); update the
-  branch only when the base change can affect the story. An inference
-  feature→`main` PR must be up to date (`strict: true`).
+  branch only when the base change can affect the story. The same holds for an
+  inference feature→`main` PR (`strict: false` since 2026-08-23); merge `main`
+  in yourself when the base moved in a way that can affect the branch.
 - `feature/*` protection is ruleset-managed; the legacy branch-protection
   endpoint returns 404 for a feature branch even though it is protected. Both
   wildcard rulesets are permanent — there is no per-epic ruleset to stage,
@@ -258,7 +259,7 @@ Ordered because SceneWorks consumes inference by exact commit:
    Stories that land after the pin bump (step 4) get their ordinary per-story
    review; the feature-end review is not repeated for them.
 3. Merge inference `feature/sc-<epic-id>-<slug>` → inference `main` through `CI
-   gate` (`strict: true`: the branch must contain current `main`). Record the
+   gate` (`strict: false`; merge current `main` in first if it moved). Record the
    resulting inference `main` merge commit. An open PR is not a merged dependency.
 4. **The epic's one pin bump**: on a `story/*` branch off the SceneWorks feature
    branch, `node scripts/bump-inference.mjs --sha <inference-main-sha40>`,
