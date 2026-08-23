@@ -1052,13 +1052,15 @@
       "appliesToModels": [
         "sdxl",
         "realvisxl",
-        "realvisxl_lightning"
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2"
       ],
       "name": "xinsir SDXL ControlNet utilities",
       "publisher": "xinsir",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/xinsir",
-      "usage": "OpenPose ControlNet for the three accepted SDXL-family pose-guided models and Tile ControlNet for SDXL-architecture upscaling (shared optional components). Model Manager provisions the pinned upstream OpenPose component alongside each compatible backbone and installs Tile explicitly; SceneWorks does not re-host either artifact, and both routes resolve only installed snapshots during their jobs.",
+      "usage": "OpenPose ControlNet for the five accepted SDXL-family pose-guided models and Tile ControlNet for SDXL-architecture upscaling (shared optional components). Model Manager provisions the pinned upstream OpenPose component alongside each compatible backbone and installs Tile explicitly; SceneWorks does not re-host either artifact, and both routes resolve only installed snapshots during their jobs.",
       "documents": [
         {
           "label": "Apache License 2.0",

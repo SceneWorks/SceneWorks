@@ -25,6 +25,8 @@ const SDXL_CONTROL_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
     "realvisxl_lightning",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
 ];
 
 fn is_sdxl_control_model(model: &str) -> bool {
@@ -52,14 +54,7 @@ fn has_material_sdxl_control_intent(advanced: &JsonObject) -> bool {
             .is_some_and(|value| !value.is_null())
 }
 
-/// Illustrious remains a terminal-evidence-only OpenPose input. Its shared SDXL descriptor must not
-/// let any explicit control carrier fall through to generic T2I after the product route was removed.
-fn unsupported_illustrious_control_candidate(request: &ImageRequest) -> bool {
-    matches!(request.model.as_str(), "illustrious_xl_v1" | "illustrious_xl_v2")
-        && has_material_sdxl_control_intent(&request.advanced)
-}
-
-/// A material pose carrier on one of the exact three supported models. This deliberately does not
+/// A material pose carrier on one of the exact five supported models. This deliberately does not
 /// validate or weight-gate: it wins routing first, then [`validate_sdxl_control_request`] reports a
 /// typed error for conflicts/malformed/count violations and the stream reports missing weights.
 fn sdxl_control_candidate(request: &ImageRequest) -> bool {
@@ -799,10 +794,16 @@ mod sdxl_control_tests {
     }
 
     #[test]
-    fn exact_three_model_family_and_material_candidate_are_pinned() {
+    fn exact_five_model_family_and_material_candidate_are_pinned() {
         assert_eq!(
             SDXL_CONTROL_MODELS,
-            ["sdxl", "realvisxl", "realvisxl_lightning"]
+            [
+                "sdxl",
+                "realvisxl",
+                "realvisxl_lightning",
+                "illustrious_xl_v1",
+                "illustrious_xl_v2",
+            ]
         );
         for model in SDXL_CONTROL_MODELS {
             assert!(sdxl_control_candidate(&request(json!({
@@ -814,12 +815,6 @@ mod sdxl_control_tests {
             "model": "instantid_realvisxl",
             "advanced": { "poses": [{ "keypoints": [] }] }
         }))));
-        for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
-            assert!(!sdxl_control_candidate(&request(json!({
-                "model": model,
-                "advanced": { "poses": [{ "keypoints": [] }] }
-            }))));
-        }
         assert!(!sdxl_control_candidate(&request(json!({
             "model": "sdxl",
             "advanced": { "poses": [] }
@@ -841,7 +836,7 @@ mod sdxl_control_tests {
             "advanced": { "controlMode": "  " }
         }))));
 
-        for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
+        for model in SDXL_CONTROL_MODELS {
             for advanced in [
                 json!({ "poses": "malformed" }),
                 json!({ "poses": [null] }),
@@ -850,7 +845,7 @@ mod sdxl_control_tests {
                 json!({ "controlImage": "asset" }),
                 json!({ "controlWeights": {} }),
             ] {
-                assert!(unsupported_illustrious_control_candidate(&request(json!({
+                assert!(sdxl_control_candidate(&request(json!({
                     "model": model,
                     "advanced": advanced,
                 }))));
@@ -1193,7 +1188,7 @@ mod sdxl_control_tests {
         } else {
             assert_eq!(sdxl_control_native_backend(), "candle");
         }
-        for model in ["sdxl", "realvisxl"] {
+        for model in ["sdxl", "realvisxl", "illustrious_xl_v1", "illustrious_xl_v2"] {
             assert!(validate_sdxl_control_backend(model, "mlx").is_ok());
         }
     }

@@ -191,8 +191,14 @@ mod tests {
     }
 
     #[test]
-    fn sdxl_openpose_is_one_shared_soft_component_on_the_exact_three_backbones() {
-        const SDXL_BACKBONES: [&str; 3] = ["sdxl", "realvisxl", "realvisxl_lightning"];
+    fn sdxl_openpose_is_one_shared_soft_component_on_the_exact_five_backbones() {
+        const SDXL_BACKBONES: [&str; 5] = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
         let artifact = shipped_control_weight(
             "sdxl",
             "xinsir/controlnet-openpose-sdxl-1.0",
@@ -204,7 +210,7 @@ mod tests {
             models
                 .iter()
                 .all(|model| model["id"] != "controlnet_openpose_sdxl"),
-            "OpenPose is a component of the three accepted SDXL capability rows, not a fake utility model"
+            "OpenPose is a component of the five accepted SDXL capability rows, not a fake utility model"
         );
 
         for model_id in SDXL_BACKBONES {
@@ -250,7 +256,7 @@ mod tests {
         assert_eq!(
             declaring_models.len(),
             SDXL_BACKBONES.len(),
-            "no utility or fourth backbone may acquire the component"
+            "no utility or sixth backbone may acquire the component"
         );
     }
 }

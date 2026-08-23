@@ -911,9 +911,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
-    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; q4 is the
-    // proven product route. The terminal q8 cell did not execute the package's fixed eight-step
-    // recipe and therefore remains fail-closed. Other video providers remain dense and fail closed.
+    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; terminal
+    // acceptance proves its exact q4/q8 product packages. Other video providers remain dense and
+    // fail closed for positive tier requests.
     if (candle_request_wants_quant(payload) || model == "ltx_2_3")
         && !candle_video_tier_select_eligible(model, payload)
     {
@@ -928,8 +928,7 @@ enum CandleLtxTier {
     Q8,
 }
 
-/// Parse only the exact packed tiers published by the shared LTX bundle. Recognizing q8 here is
-/// source readiness, not product admission.
+/// Parse only the exact packed tiers published by the shared LTX bundle.
 fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
     let value = payload
         .get("advanced")
@@ -959,7 +958,7 @@ fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<Strin
                 | "video_bridge"
                 | "replace_person"
         )
-        && candle_ltx_requested_tier(payload) == Some(CandleLtxTier::Q4)
+        && candle_ltx_requested_tier(payload).is_some()
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -1215,9 +1214,15 @@ pub(crate) fn is_sdxl_family_candle_model(model: &str) -> bool {
 
 /// The exact SDXL-family ids that share the generic OpenPose ControlNet provider. This is
 /// deliberately wider than the accepted editable subset by one distilled checkpoint: RealVisXL
-/// Lightning supports the pose-only provider recipe, while the two Illustrious q4 packages remain
-/// excluded because terminal cells 18-19 did not prove packed package authority.
-pub(crate) const SDXL_CONTROL_MODELS: &[&str] = &["sdxl", "realvisxl", "realvisxl_lightning"];
+/// Lightning supports the pose-only provider recipe, and the two Illustrious q4 packages share the
+/// exact SDXL provider/control composition proven by terminal cells 18-19.
+pub(crate) const SDXL_CONTROL_MODELS: &[&str] = &[
+    "sdxl",
+    "realvisxl",
+    "realvisxl_lightning",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
+];
 
 pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
     SDXL_CONTROL_MODELS.contains(&model)
@@ -1844,12 +1849,14 @@ pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool
 }
 
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
-/// z_image + flux_dev sc-8379 / sc-8412, plus the exact three-model SDXL OpenPose lane).
+/// z_image + flux_dev sc-8379 / sc-8412, plus the exact five-model SDXL OpenPose lane).
 /// An `advanced.poses` job on any OTHER candle-routed model has no pose path on candle.
 pub(crate) const CANDLE_POSE_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
     "realvisxl_lightning",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
     "qwen_image",
     "kolors",
     "z_image_turbo",
