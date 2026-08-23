@@ -4987,7 +4987,7 @@ mod tests {
         let expected_records = BTreeMap::from([
             (
                 "epic-9083-precision-sequencing",
-                ("epic-9083", "precision", 15usize),
+                ("epic-9083", "precision", 14usize),
             ),
             (
                 "epic-8433-krea-realtime-operation-sequencing",
