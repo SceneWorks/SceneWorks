@@ -20845,6 +20845,14 @@ fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
 /// replaced transformer and that the resulting byte totals agree. It runs on every lane rather
 /// than only the candle one: `cargo test` cannot link the candle cfg on a Mac, so a candle-gated
 /// assertion here would first execute on CI (see `scripts/check-candle-build.mjs`).
+///
+/// Gated to the lanes where `base.rs` is actually included (see `image_jobs.rs`) — macOS or
+/// candle. The Linux/candle-off `parity` lane compiles this file but NOT `base.rs`, so an ungated
+/// `#[test]` here cannot see `imported_base_snapshot_companions` and breaks that lane's build.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
     let temp = tempfile::Builder::new()
