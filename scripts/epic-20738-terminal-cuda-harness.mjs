@@ -41,13 +41,17 @@ const EXPECTED_CELLS = [
 const SDXL_POSE_MODELS = [
   "sdxl", "realvisxl", "realvisxl_lightning", "illustrious_xl_v1", "illustrious_xl_v2",
 ];
-const EXPECTED_CELL_SEMANTICS_SHA256 = "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879";
+const EXPECTED_CELL_SEMANTICS_SHA256 = "2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1";
+const LEGACY_CELL_SEMANTICS_SHA256 = "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879";
 const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932";
+const LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256 = "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932";
 const LEGACY_ARTIFACT_SEMANTICS_SHA256 = "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e";
 const LEGACY_SCENEWORKS_HEAD = "8886a9e69f26beec05688c81b414859bd102f6d0";
 const FROZEN_INFERENCE_PIN = "b646a6f89ba9f6b07efe53dd583d8a42e21e9871";
 const LTX_CURRENT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_APPROVED_PARENT_REVISION = "254989c3ca7ee691187647f350b112c0c448789d";
+const ILLUSTRIOUS_V1_LEGACY_REVISION = "c5a92a902dd4e6ee99c2a57981ecf66209905dd1";
+const ILLUSTRIOUS_V2_LEGACY_REVISION = "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473";
 const IMPORTED_PREFIX_CELLS = 7;
 const RECOVERY_IMPORTED_PREFIX_CELLS = 9;
 const PREFIX_ARTIFACT = `sc-20945-epic-20738-${LEGACY_SCENEWORKS_HEAD}-`;
@@ -66,6 +70,22 @@ const RECOVERY_REMAINING_ARTIFACT_IDS = [
   "sdxl-base-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg",
   "sdxl-vae-fix", "realvisxl-q4", "realvisxl-lightning-q4", "illustrious-v1-q4",
   "illustrious-v2-q4",
+];
+const SPARSE_RECOVERY_ARTIFACT_ID = "9492288293";
+const SPARSE_RECOVERY_ARTIFACT_NAME = "sc-20945-epic-20738-43c718b7e9a852bd5029448d18841fed0f508c3a-32628540694-1";
+const SPARSE_RECOVERY_ARTIFACT_SIZE = 15_452_320;
+const SPARSE_RECOVERY_ARTIFACT_DIGEST = "sha256:dbae4c7d67d824bb8568909231614c6bcc268868087eb19974ce013bfc557724";
+const SPARSE_RECOVERY_RUN_ID = "32628540694";
+const SPARSE_RECOVERY_RUN_ATTEMPT = "1";
+const SPARSE_RECOVERY_SCENEWORKS_HEAD = "43c718b7e9a852bd5029448d18841fed0f508c3a";
+const SPARSE_EXECUTION_ORDINALS = [14, 18, 19];
+const SPARSE_IMPORTED_ORDINALS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17];
+const SPARSE_REMAINING_AUTHORITIES = 8;
+const SPARSE_REMAINING_FILES = 70;
+const SPARSE_REMAINING_SOURCE_BYTES = 66_821_159_278;
+const SPARSE_REMAINING_ARTIFACT_IDS = [
+  "ltx23-q8", "ltx23-gemma", "illustrious-v1-q4", "sdxl-openpose",
+  "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix", "illustrious-v2-q4",
 ];
 const RECOVERY_ORIGINAL_ARTIFACT_ID = "9477529627";
 const RECOVERY_ORIGINAL_ARTIFACT_NAME = "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1";
@@ -148,13 +168,25 @@ export function assertExactDownloadedFilePartition(actual, expected, label) {
   ))) fail(`${label} drifted from the frozen downloaded-file partition`);
 }
 
-export function authorityLifetimePlan(profile, startIndex, sourceAudits) {
-  const cells = profile.cells.slice(startIndex);
+function exactExecutionOrdinals(profile, ordinals, label = "execution ordinals") {
+  if (!Array.isArray(ordinals) || ordinals.length === 0
+    || ordinals.some((ordinal) => !Number.isInteger(ordinal)
+      || ordinal < 1 || ordinal > profile.cells.length)
+    || new Set(ordinals).size !== ordinals.length
+    || ordinals.some((ordinal, index) => index > 0 && ordinal <= ordinals[index - 1])) {
+    fail(`${label} must be a non-empty strictly increasing in-range integer list`);
+  }
+  return [...ordinals];
+}
+
+export function authorityLifetimePlan(profile, executionOrdinals, sourceAudits) {
+  const ordinals = exactExecutionOrdinals(profile, executionOrdinals);
+  const cells = ordinals.map((ordinal) => profile.cells[ordinal - 1]);
   const ids = [...new Set(cells.flatMap((cell) => cell.artifactIds))];
   return ids.map((artifactId) => {
     const uses = [];
-    for (let index = startIndex; index < profile.cells.length; index += 1) {
-      if (profile.cells[index].artifactIds.includes(artifactId)) uses.push(index + 1);
+    for (const ordinal of ordinals) {
+      if (profile.cells[ordinal - 1].artifactIds.includes(artifactId)) uses.push(ordinal);
     }
     const audit = sourceAudits instanceof Map ? sourceAudits.get(artifactId) : sourceAudits[artifactId];
     if (!audit) fail(`source audit is missing lifetime authority ${artifactId}`);
@@ -1261,11 +1293,26 @@ async function evidenceFiles(cellDir) {
 
 function legacyPrefixProfile(currentProfile) {
   const legacy = structuredClone(currentProfile);
+  legacy.cells[SPARSE_EXECUTION_ORDINALS[0] - 1].request.steps = 4;
   legacy.artifacts["ltx23-q8"].revision = LTX_CURRENT_REVISION;
   legacy.artifacts["ltx23-gemma"].revision = LTX_CURRENT_REVISION;
-  if (cellSemanticsSha256(legacy.cells) !== EXPECTED_CELL_SEMANTICS_SHA256
+  legacy.artifacts["illustrious-v1-q4"].revision = ILLUSTRIOUS_V1_LEGACY_REVISION;
+  legacy.artifacts["illustrious-v2-q4"].revision = ILLUSTRIOUS_V2_LEGACY_REVISION;
+  if (cellSemanticsSha256(legacy.cells) !== LEGACY_CELL_SEMANTICS_SHA256
     || canonicalSha256(legacy.artifacts) !== LEGACY_ARTIFACT_SEMANTICS_SHA256) {
     fail("legacy prefix compatibility profile drifted");
+  }
+  return legacy;
+}
+
+function legacyRecoveryProfile(currentProfile) {
+  const legacy = structuredClone(currentProfile);
+  legacy.cells[SPARSE_EXECUTION_ORDINALS[0] - 1].request.steps = 4;
+  legacy.artifacts["illustrious-v1-q4"].revision = ILLUSTRIOUS_V1_LEGACY_REVISION;
+  legacy.artifacts["illustrious-v2-q4"].revision = ILLUSTRIOUS_V2_LEGACY_REVISION;
+  if (cellSemanticsSha256(legacy.cells) !== LEGACY_CELL_SEMANTICS_SHA256
+    || canonicalSha256(legacy.artifacts) !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256) {
+    fail("legacy recovery compatibility profile drifted");
   }
   return legacy;
 }
@@ -1314,7 +1361,7 @@ async function validatePrefixCandidate(candidate, currentProfile) {
     || metadata.headSha !== LEGACY_SCENEWORKS_HEAD
     || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
     || metadata.profile !== PROFILE_NAME
-    || metadata.cellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || metadata.cellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
     || metadata.artifactSemanticsSha256 !== LEGACY_ARTIFACT_SEMANTICS_SHA256) {
     fail("imported prefix artifact metadata does not bind the reviewed old run/profile");
   }
@@ -1551,7 +1598,7 @@ function expectedRecoveryOriginalLineage() {
     sourceHeadSha: LEGACY_SCENEWORKS_HEAD,
     sourceInferenceSha: FROZEN_INFERENCE_PIN,
     sourceProfile: PROFILE_NAME,
-    sourceCellSemanticsSha256: EXPECTED_CELL_SEMANTICS_SHA256,
+    sourceCellSemanticsSha256: LEGACY_CELL_SEMANTICS_SHA256,
     sourceArtifactSemanticsSha256: LEGACY_ARTIFACT_SEMANTICS_SHA256,
     importedOrdinals: [1, 2, 3, 4, 5, 6, 7],
     quarantinedBoundaryResidue: {
@@ -1606,8 +1653,8 @@ function validateRecoveryMetadata(metadata) {
     || metadata.artifactSize !== RECOVERY_ARTIFACT_SIZE || metadata.artifactDigest !== RECOVERY_ARTIFACT_DIGEST
     || metadata.runId !== RECOVERY_RUN_ID || metadata.runAttempt !== RECOVERY_RUN_ATTEMPT
     || metadata.headSha !== RECOVERY_SCENEWORKS_HEAD || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
-    || metadata.profile !== PROFILE_NAME || metadata.cellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
-    || metadata.artifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256) {
+    || metadata.profile !== PROFILE_NAME || metadata.cellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
+    || metadata.artifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256) {
     fail("recovery artifact metadata does not bind the audited partial run");
   }
 }
@@ -1806,6 +1853,7 @@ export async function selectRecoveryContinuation(prefixCandidates, currentProfil
   const candidate = path.join(root, entries[0].name);
   const metadata = JSON.parse(await readFile(path.join(candidate, "artifact-metadata.json"), "utf8"));
   validateRecoveryMetadata(metadata);
+  const recoveryProfile = legacyRecoveryProfile(currentProfile);
   const evidenceRoot = path.join(candidate, "evidence");
   const files = await ordinaryTreeFiles(evidenceRoot);
   const allowedTop = new Set([
@@ -1817,8 +1865,8 @@ export async function selectRecoveryContinuation(prefixCandidates, currentProfil
     fail("recovery artifact contains unreviewed evidence outside the audited partial run");
   }
   const summary = JSON.parse(await readFile(path.join(evidenceRoot, "campaign-summary.json"), "utf8"));
-  validateRecoverySummary(summary, currentProfile, metadata);
-  const cacheEvidence = await validateRecoveryCacheEvidence(evidenceRoot, currentProfile);
+  validateRecoverySummary(summary, recoveryProfile, metadata);
+  const cacheEvidence = await validateRecoveryCacheEvidence(evidenceRoot, recoveryProfile);
   if (cacheEvidence.final.error !== summary.campaignErrors[0]) {
     fail("recovery final cache evidence does not bind the campaign failure");
   }
@@ -1842,8 +1890,8 @@ export async function selectRecoveryContinuation(prefixCandidates, currentProfil
     || summary.lineage?.continuation?.runAttempt !== metadata.runAttempt
     || summary.lineage?.continuation?.headSha !== metadata.headSha
     || summary.lineage?.continuation?.inferenceSha !== FROZEN_INFERENCE_PIN
-    || summary.lineage?.continuation?.profileCellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
-    || summary.lineage?.continuation?.profileArtifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256
+    || summary.lineage?.continuation?.profileCellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
+    || summary.lineage?.continuation?.profileArtifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256
     || summary.lineage?.continuation?.startOrdinal !== IMPORTED_PREFIX_CELLS + 1) {
     fail("recovery campaign summary lineage does not bind the original and partial-run segments");
   }
@@ -1863,16 +1911,18 @@ export async function selectRecoveryContinuation(prefixCandidates, currentProfil
     receipts.push({ cell: currentProfile.cells[index], ordinalName, receipt, root: path.join(evidenceRoot, "_imported-prefix", ordinalName) });
   }
   for (let index = IMPORTED_PREFIX_CELLS; index < RECOVERY_IMPORTED_PREFIX_CELLS; index += 1) {
-    const cell = { ...currentProfile.cells[index], ordinal: index + 1 };
+    const cell = { ...recoveryProfile.cells[index], ordinal: index + 1 };
     receipts.push(await validateArchivedReceipt({
       root: evidenceRoot, ordinalName: `${String(index + 1).padStart(2, "0")}-${cell.id}`,
-      cell, profile: currentProfile, metadata,
+      cell, profile: recoveryProfile, metadata,
     }));
   }
   if (summary.receipts.slice(0, RECOVERY_IMPORTED_PREFIX_CELLS).some((receipt, index) => (
     receipt.id !== currentProfile.cells[index].id || receipt.status !== "passed"
   ))) fail("recovery campaign summary PASS prefix is not exactly cells 1-9");
-  const failureLineage = await validateRecoveryFailureLineage(evidenceRoot, summary, currentProfile, metadata);
+  const failureLineage = await validateRecoveryFailureLineage(
+    evidenceRoot, summary, recoveryProfile, metadata,
+  );
   return { candidate, evidenceRoot, metadata, receipts, originalLineage, failureLineage };
 }
 
@@ -1915,6 +1965,313 @@ export async function importRecoveryContinuation(prefix, output) {
     outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
       id: cell.id, status: "passed", receipt: `_imported-prefix/${ordinalName}/receipt.json`,
       error: null, emergencyReceiptError: null, source: "imported-recovery",
+    })),
+  };
+}
+
+function expectedSparseSourceLineage() {
+  return {
+    kind: "recovery-continuation-prefix",
+    original: expectedRecoveryOriginalLineage(),
+    recovery: {
+      sourceArtifactId: RECOVERY_ARTIFACT_ID,
+      sourceArtifactName: RECOVERY_ARTIFACT_NAME,
+      sourceArtifactSize: RECOVERY_ARTIFACT_SIZE,
+      sourceArtifactDigest: RECOVERY_ARTIFACT_DIGEST,
+      sourceRunId: RECOVERY_RUN_ID,
+      sourceRunAttempt: RECOVERY_RUN_ATTEMPT,
+      sourceHeadSha: RECOVERY_SCENEWORKS_HEAD,
+      sourceInferenceSha: FROZEN_INFERENCE_PIN,
+      sourceProfile: PROFILE_NAME,
+      sourceCellSemanticsSha256: LEGACY_CELL_SEMANTICS_SHA256,
+      sourceArtifactSemanticsSha256: LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256,
+      startOrdinal: 8,
+    },
+    importedOrdinals: Array.from({ length: RECOVERY_IMPORTED_PREFIX_CELLS }, (_, index) => index + 1),
+    quarantined: {
+      staleSentinel: { ordinal: 10, cellId: "flux1-schnell-q8", path: "10-flux1-schnell-q8/receipt.json" },
+      failures: Array.from({ length: 10 }, (_, offset) => {
+        const ordinal = offset + 10;
+        return {
+          ordinal,
+          cellId: EXPECTED_CELLS[ordinal - 1],
+          status: "failed",
+          path: `_emergency/${String(ordinal).padStart(2, "0")}-${EXPECTED_CELLS[ordinal - 1]}/receipt.json`,
+        };
+      }),
+    },
+  };
+}
+
+function validateSparseRecoveryMetadata(metadata) {
+  exactKeys(metadata, [
+    "artifactId", "artifactName", "artifactSize", "artifactDigest", "runId", "runAttempt", "headSha",
+    "inferenceSha", "profile", "cellSemanticsSha256", "artifactSemanticsSha256",
+  ], "sparse recovery artifact metadata");
+  if (metadata.artifactId !== SPARSE_RECOVERY_ARTIFACT_ID
+    || metadata.artifactName !== SPARSE_RECOVERY_ARTIFACT_NAME
+    || metadata.artifactSize !== SPARSE_RECOVERY_ARTIFACT_SIZE
+    || metadata.artifactDigest !== SPARSE_RECOVERY_ARTIFACT_DIGEST
+    || metadata.runId !== SPARSE_RECOVERY_RUN_ID
+    || metadata.runAttempt !== SPARSE_RECOVERY_RUN_ATTEMPT
+    || metadata.headSha !== SPARSE_RECOVERY_SCENEWORKS_HEAD
+    || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    || metadata.profile !== PROFILE_NAME
+    || metadata.cellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
+    || metadata.artifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256) {
+    fail("sparse recovery artifact metadata does not bind exact artifact 9492288293");
+  }
+}
+
+async function validateSparseRecoveryCacheEvidence(evidenceRoot, legacyProfile, summary) {
+  const executionOrdinals = Array.from({ length: 10 }, (_, index) => index + 10);
+  const expectedArtifactIds = [...new Set(executionOrdinals.flatMap(
+    (ordinal) => legacyProfile.cells[ordinal - 1].artifactIds,
+  ))];
+  const evidence = JSON.parse(await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8"));
+  const artifactExpectedFiles = expectedArtifactFilesFromEvidence(legacyProfile, evidence);
+  const documents = new Map();
+  for (const filename of ["cache-preflight-initial.json", "cache-preflight.json"]) {
+    const file = path.join(evidenceRoot, filename);
+    const document = JSON.parse(await readFile(file, "utf8"));
+    validateCachePreflightEvidence(document, {
+      remainingArtifactIds: expectedArtifactIds,
+      artifactExpectedFiles,
+      downloadEvidenceSha256: REVIEWED_DOWNLOAD_EVIDENCE_SHA256,
+      guard: { cacheRoot: document.sourceCacheRoot },
+      stagingRoot: document.campaignStagingRoot,
+      derivedSidecarRoot: document.derivedSidecarRoot,
+      missingStore: document.missingFileStore,
+      expectedNonModelPaths: document.diskPlan?.nonModelPaths ?? [],
+      profile: legacyProfile,
+      executionOrdinals,
+    });
+    if (document.status !== "passed" || document.error !== null
+      || document.offlineBeforeCells !== true || document.networkDownloadCount !== 1
+      || document.evidencePhase !== (filename.includes("initial") ? "initial" : "final")) {
+      fail(`sparse recovery ${filename} is not the audited passing cache phase`);
+    }
+    documents.set(filename, { file, document });
+  }
+  const final = documents.get("cache-preflight.json").file;
+  const bytes = await stat(final);
+  if (summary.cachePreflight?.path !== "cache-preflight.json"
+    || summary.cachePreflight.bytes !== bytes.size
+    || summary.cachePreflight.sha256 !== await sha256File(final)) {
+    fail("sparse recovery summary cache-preflight hash drifted");
+  }
+}
+
+function validateSparseRecoverySummary(summary, legacyProfile, metadata) {
+  exactKeys(summary, [
+    "schemaVersion", "profile", "repositories", "execution", "receipts", "lineage", "cachePreflight",
+    "authorityLifecycle", "diskFreeProbes", "finalAuthorityLifecycle", "passed", "failed", "campaignErrors",
+  ], "sparse recovery campaign summary");
+  if (summary.schemaVersion !== 1 || summary.profile !== PROFILE_NAME
+    || summary.repositories?.sceneworks?.sha !== metadata.headSha
+    || summary.repositories.sceneworks.clean !== true
+    || summary.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || summary.repositories.inference.clean !== true
+    || summary.execution?.runId !== metadata.runId
+    || summary.execution?.runAttempt !== metadata.runAttempt
+    || summary.execution?.headSha !== metadata.headSha
+    || summary.execution?.headRef !== "refs/heads/feature/sc-20738-candle-cuda-parity"
+    || summary.execution?.workflow !== "Windows Candle worker"
+    || summary.execution?.runnerName !== "cuda-windows-2"
+    || summary.execution?.runnerOs !== "Windows" || summary.execution?.runnerArch !== "X64"
+    || !Array.isArray(summary.receipts) || summary.receipts.length !== legacyProfile.cells.length
+    || summary.passed !== SPARSE_IMPORTED_ORDINALS.length
+    || summary.failed !== SPARSE_EXECUTION_ORDINALS.length
+    || !Array.isArray(summary.campaignErrors) || summary.campaignErrors.length !== 0
+    || !Array.isArray(summary.authorityLifecycle) || summary.authorityLifecycle.length !== 10
+    || !Array.isArray(summary.diskFreeProbes) || summary.diskFreeProbes.length !== 24) {
+    fail("sparse recovery campaign summary does not bind the audited 16-PASS/3-failure run");
+  }
+  const failed = new Set(SPARSE_EXECUTION_ORDINALS);
+  for (let index = 0; index < legacyProfile.cells.length; index += 1) {
+    const ordinal = index + 1;
+    const cell = legacyProfile.cells[index];
+    const row = summary.receipts[index];
+    const imported = ordinal <= RECOVERY_IMPORTED_PREFIX_CELLS;
+    const expectedStatus = failed.has(ordinal) ? "failed" : "passed";
+    const ordinalName = `${String(ordinal).padStart(2, "0")}-${cell.id}`;
+    const expectedPath = imported ? `_imported-prefix/${ordinalName}/receipt.json`
+      : `${ordinalName}/receipt.json`;
+    const expectedSource = imported ? "imported-recovery" : "continuation";
+    if (row?.id !== cell.id || row.status !== expectedStatus || row.receipt !== expectedPath
+      || row.source !== expectedSource
+      || (expectedStatus === "passed" ? row.error !== null
+        : typeof row.error !== "string" || row.error.length === 0)) {
+      fail(`sparse recovery summary receipt ${ordinalName} drifted from exact path/source/status`);
+    }
+  }
+  const sourceLineage = expectedSparseSourceLineage();
+  if (canonicalSha256(summary.lineage?.imported) !== canonicalSha256(sourceLineage)
+    || summary.lineage?.continuation?.runId !== metadata.runId
+    || summary.lineage?.continuation?.runAttempt !== metadata.runAttempt
+    || summary.lineage?.continuation?.headSha !== metadata.headSha
+    || summary.lineage?.continuation?.inferenceSha !== FROZEN_INFERENCE_PIN
+    || summary.lineage?.continuation?.profileCellSemanticsSha256 !== LEGACY_CELL_SEMANTICS_SHA256
+    || summary.lineage?.continuation?.profileArtifactSemanticsSha256 !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256
+    || summary.lineage?.continuation?.startOrdinal !== 10) {
+    fail("sparse recovery campaign lineage does not bind its exact imported and continuation segments");
+  }
+  const empty = createHash("sha256").digest("hex");
+  if (summary.finalAuthorityLifecycle?.stage?.files !== 0
+    || summary.finalAuthorityLifecycle?.stage?.bytes !== 0
+    || summary.finalAuthorityLifecycle?.stage?.sha256 !== empty
+    || summary.finalAuthorityLifecycle?.derived?.files !== 0
+    || summary.finalAuthorityLifecycle?.derived?.bytes !== 0
+    || summary.finalAuthorityLifecycle?.derived?.sha256 !== empty
+    || summary.finalAuthorityLifecycle?.derivedNamespaces?.length !== 0
+    || summary.finalAuthorityLifecycle?.missingStoreAbsent !== true) {
+    fail("sparse recovery final authority cleanup is not exact and empty");
+  }
+}
+
+export async function selectSparseRecovery(prefixCandidates, currentProfile) {
+  validateProfile(currentProfile);
+  const root = path.resolve(prefixCandidates);
+  const entries = await readdir(root, { withFileTypes: true });
+  if (entries.length !== 1 || !entries[0].isDirectory() || entries[0].isSymbolicLink()) {
+    fail("expected exactly one exact sparse-recovery artifact candidate");
+  }
+  const candidate = path.join(root, entries[0].name);
+  const metadata = JSON.parse(await readFile(path.join(candidate, "artifact-metadata.json"), "utf8"));
+  validateSparseRecoveryMetadata(metadata);
+  const evidenceRoot = path.join(candidate, "evidence");
+  const files = await ordinaryTreeFiles(evidenceRoot);
+  const allowedTop = new Set([
+    "_imported-prefix", ...Array.from({ length: 10 }, (_, index) => {
+      const ordinal = index + 10;
+      return `${String(ordinal).padStart(2, "0")}-${EXPECTED_CELLS[ordinal - 1]}`;
+    }),
+    "cache-preflight-initial.json", "cache-preflight.json", "campaign-summary.json",
+  ]);
+  if (files.some((file) => !allowedTop.has(path.relative(evidenceRoot, file).split(path.sep)[0]))) {
+    fail("sparse recovery artifact contains evidence outside the exact audited campaign");
+  }
+  const legacyProfile = legacyRecoveryProfile(currentProfile);
+  const archivedLineage = JSON.parse(await readFile(
+    path.join(evidenceRoot, "_imported-prefix", "lineage.json"), "utf8",
+  ));
+  if (canonicalSha256(archivedLineage) !== canonicalSha256(expectedSparseSourceLineage())) {
+    fail("sparse recovery archived lineage file drifted from the exact audited 1-9 source");
+  }
+  const summary = JSON.parse(await readFile(path.join(evidenceRoot, "campaign-summary.json"), "utf8"));
+  validateSparseRecoverySummary(summary, legacyProfile, metadata);
+  await validateSparseRecoveryCacheEvidence(evidenceRoot, legacyProfile, summary);
+
+  const receipts = [];
+  const failures = [];
+  const compatibility = [];
+  const archivedLifecycles = [];
+  for (let index = 0; index < legacyProfile.cells.length; index += 1) {
+    const ordinal = index + 1;
+    const cell = { ...legacyProfile.cells[index], ordinal };
+    const ordinalName = `${String(ordinal).padStart(2, "0")}-${cell.id}`;
+    const imported = ordinal <= RECOVERY_IMPORTED_PREFIX_CELLS;
+    const cellDir = path.join(evidenceRoot, ...(imported ? ["_imported-prefix", ordinalName] : [ordinalName]));
+    const receipt = JSON.parse(await readFile(path.join(cellDir, "receipt.json"), "utf8"));
+    const provenance = ordinal <= IMPORTED_PREFIX_CELLS
+      ? { headSha: LEGACY_SCENEWORKS_HEAD, runId: "32570707303", runAttempt: "1" }
+      : ordinal <= RECOVERY_IMPORTED_PREFIX_CELLS
+        ? { headSha: RECOVERY_SCENEWORKS_HEAD, runId: RECOVERY_RUN_ID, runAttempt: RECOVERY_RUN_ATTEMPT }
+        : metadata;
+    validateRecoveryReceiptProvenance(receipt, cell, provenance, `sparse recovery receipt ${ordinalName}`);
+    if (ordinal <= IMPORTED_PREFIX_CELLS) {
+      validateTrustedLegacyImportedReceiptDocument(receipt);
+      const originalProfile = legacyPrefixProfile(currentProfile);
+      validateReceiptInternal(receipt, { ...originalProfile.cells[index], ordinal }, originalProfile, null, TRUSTED_LEGACY_IMPORT_CONTEXT);
+    } else {
+      validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+      validateReceipt(receipt, cell, legacyProfile);
+    }
+    const rehashed = await evidenceFiles(cellDir);
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`sparse recovery receipt ${ordinalName} failed ${field} rehash`);
+      }
+    }
+    const expectedStatus = SPARSE_EXECUTION_ORDINALS.includes(ordinal) ? "failed" : "passed";
+    if (receipt.status !== expectedStatus) {
+      fail(`sparse recovery receipt ${ordinalName} is not the exact audited ${expectedStatus.toUpperCase()}`);
+    }
+    if (expectedStatus === "failed") {
+      failures.push({ ordinal, cellId: cell.id, path: `${ordinalName}/receipt.json`, status: "failed" });
+      if (!imported) archivedLifecycles.push(receipt.authorityLifecycle);
+      continue;
+    }
+    const currentCellSha256 = canonicalSha256(currentProfile.cells[index]);
+    const legacyCellSha256 = canonicalSha256(legacyProfile.cells[index]);
+    if (legacyCellSha256 !== currentCellSha256) {
+      fail(`sparse recovery PASS ${ordinalName} is incompatible with the corrected profile`);
+    }
+    compatibility.push({ ordinal, cellId: cell.id, cellSemanticsSha256: currentCellSha256 });
+    receipts.push({ cell: currentProfile.cells[index], ordinalName, receipt, root: cellDir });
+    if (!imported) archivedLifecycles.push(receipt.authorityLifecycle);
+  }
+  if (JSON.stringify(receipts.map(({ cell }) => currentProfile.cells.indexOf(cell) + 1))
+    !== JSON.stringify(SPARSE_IMPORTED_ORDINALS)
+    || JSON.stringify(failures.map(({ ordinal }) => ordinal)) !== JSON.stringify(SPARSE_EXECUTION_ORDINALS)) {
+    fail("sparse recovery PASS/failure partition drifted from [1-13,15-17]/[14,18,19]");
+  }
+  if (canonicalSha256(summary.authorityLifecycle) !== canonicalSha256(archivedLifecycles)
+    || canonicalSha256(summary.diskFreeProbes)
+      !== canonicalSha256(archivedLifecycles.flatMap((lifecycle) => lifecycle.diskProbes))) {
+    fail("sparse recovery summary lifecycle/probes drifted from the rehashed receipts");
+  }
+  return {
+    candidate, evidenceRoot, metadata, receipts, failures, compatibility,
+    sourceLineage: summary.lineage,
+  };
+}
+
+export async function importSparseRecovery(prefix, output) {
+  const destination = path.join(output, "_imported-prefix");
+  await mkdir(destination);
+  for (const receipt of prefix.receipts) {
+    await cp(receipt.root, path.join(destination, receipt.ordinalName), {
+      recursive: true, errorOnExist: true, force: false, dereference: false,
+    });
+  }
+  await ordinaryTreeFiles(destination);
+  for (const { ordinalName, receipt } of prefix.receipts) {
+    const rehashed = await evidenceFiles(path.join(destination, ordinalName));
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`copied sparse recovery PASS ${ordinalName} failed ${field} rehash`);
+      }
+    }
+  }
+  const lineage = {
+    kind: "sparse-pass-recovery",
+    sourceArtifactId: prefix.metadata.artifactId,
+    sourceArtifactName: prefix.metadata.artifactName,
+    sourceArtifactSize: prefix.metadata.artifactSize,
+    sourceArtifactDigest: prefix.metadata.artifactDigest,
+    sourceRunId: prefix.metadata.runId,
+    sourceRunAttempt: prefix.metadata.runAttempt,
+    sourceHeadSha: prefix.metadata.headSha,
+    sourceInferenceSha: prefix.metadata.inferenceSha,
+    sourceProfile: prefix.metadata.profile,
+    sourceCellSemanticsSha256: prefix.metadata.cellSemanticsSha256,
+    targetCellSemanticsSha256: EXPECTED_CELL_SEMANTICS_SHA256,
+    sourceArtifactSemanticsSha256: prefix.metadata.artifactSemanticsSha256,
+    importedOrdinals: SPARSE_IMPORTED_ORDINALS,
+    executionOrdinals: SPARSE_EXECUTION_ORDINALS,
+    compatibility: prefix.compatibility,
+    quarantinedFailures: prefix.failures,
+    priorLineage: prefix.sourceLineage,
+  };
+  await writeFile(path.join(destination, "lineage.json"), `${JSON.stringify(lineage, null, 2)}\n`, {
+    encoding: "utf8", flag: "wx",
+  });
+  return {
+    lineage,
+    outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
+      id: cell.id, status: "passed", receipt: `_imported-prefix/${ordinalName}/receipt.json`,
+      error: null, emergencyReceiptError: null, source: "imported-sparse-recovery",
     })),
   };
 }
@@ -2608,7 +2965,7 @@ function cachePreflightDocument({
 
 export function validateCachePreflightEvidence(document, {
   remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
-  derivedSidecarRoot, missingStore, expectedNonModelPaths, profile,
+  derivedSidecarRoot, missingStore, expectedNonModelPaths, profile, executionOrdinals = null,
 }) {
   validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
   if (document.profile !== profile.profile
@@ -2654,7 +3011,11 @@ export function validateCachePreflightEvidence(document, {
     fail("cache preflight frozen missing-file census drifted");
   }
   if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256 && profile.cells.length === 19) {
-    const exactScope = new Map([[16, 199], [RECOVERY_REMAINING_AUTHORITIES, RECOVERY_REMAINING_FILES]]);
+    const exactScope = new Map([
+      [16, 199],
+      [RECOVERY_REMAINING_AUTHORITIES, RECOVERY_REMAINING_FILES],
+      [SPARSE_REMAINING_AUTHORITIES, SPARSE_REMAINING_FILES],
+    ]);
     const expectedFiles = exactScope.get(remainingArtifactIds.length);
     if (expectedFiles !== undefined && remainingArtifactIds.reduce(
       (sum, id) => sum + artifactExpectedFiles[id].length, 0,
@@ -2700,13 +3061,22 @@ export function validateCachePreflightEvidence(document, {
     fail("cache preflight records cell lifecycle evidence before network-offline establishment");
   }
   if (document.status === "passed") {
+    const plannedExecutionOrdinals = exactExecutionOrdinals(
+      profile,
+      executionOrdinals ?? document.diskPlan?.cells.map((cell) => cell.ordinal),
+      "cache preflight execution ordinals",
+    );
+    if (executionOrdinals && JSON.stringify(document.diskPlan.cells.map((cell) => cell.ordinal))
+      !== JSON.stringify(plannedExecutionOrdinals)) {
+      fail("cache preflight disk plan omitted explicit execution ordinals");
+    }
     const plannedAudits = new Map(document.phases.sourceCensus.map((row) => [row.id, {
       ...row,
       downloadedFiles: document.downloadedFiles.filter((file) => file.artifactId === row.id),
     }]));
     const expectedLifetimePlan = authorityLifetimePlan(
       profile,
-      profile.cells.length - document.diskPlan.cells.length,
+      plannedExecutionOrdinals,
       plannedAudits,
     );
     if (JSON.stringify(document.lifetimePlan) !== JSON.stringify(expectedLifetimePlan)) {
@@ -2740,22 +3110,27 @@ export function validateCachePreflightEvidence(document, {
       fail("passed cache preflight did not prove sufficient JIT disk capacity");
     }
     if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256) {
-      const startIndex = profile.cells.length - document.diskPlan.cells.length;
-      const expectedRemainingIds = [...new Set(profile.cells.slice(startIndex).flatMap(
-        (cell) => cell.artifactIds,
+      const expectedRemainingIds = [...new Set(plannedExecutionOrdinals.flatMap(
+        (ordinal) => profile.cells[ordinal - 1].artifactIds,
       ))];
       const expectedFileCount = expectedRemainingIds.reduce(
         (sum, id) => sum + artifactExpectedFiles[id].length, 0,
       );
-      const startTen = startIndex === RECOVERY_IMPORTED_PREFIX_CELLS;
+      const startTen = JSON.stringify(plannedExecutionOrdinals)
+        === JSON.stringify(Array.from({ length: 10 }, (_, index) => index + 10));
+      const sparse = JSON.stringify(plannedExecutionOrdinals)
+        === JSON.stringify(SPARSE_EXECUTION_ORDINALS);
       if (JSON.stringify(remainingArtifactIds) !== JSON.stringify(expectedRemainingIds)
         || (startTen && (JSON.stringify(expectedRemainingIds)
           !== JSON.stringify(RECOVERY_REMAINING_ARTIFACT_IDS)
-          || expectedFileCount !== RECOVERY_REMAINING_FILES))) {
-        fail("passed cache preflight continuation start/census drifted from the reviewed profile");
+          || expectedFileCount !== RECOVERY_REMAINING_FILES))
+        || (sparse && (JSON.stringify(expectedRemainingIds)
+          !== JSON.stringify(SPARSE_REMAINING_ARTIFACT_IDS)
+          || expectedFileCount !== SPARSE_REMAINING_FILES))) {
+        fail("passed cache preflight execution/census drifted from the reviewed profile");
       }
-      const expectedSourceBytes = startTen
-        ? RECOVERY_REMAINING_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
+      const expectedSourceBytes = sparse ? SPARSE_REMAINING_SOURCE_BYTES
+        : startTen ? RECOVERY_REMAINING_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
       if (document.diskPlan.reviewedAllAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
         || document.diskPlan.reviewedJitSourcePeakBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
         || document.diskPlan.logicalSourceBytes !== expectedSourceBytes
@@ -2779,10 +3154,9 @@ export function validateCachePreflightEvidence(document, {
           !== JSON.stringify(plannedIds)) {
         fail("final cache preflight omitted an exact staged/offline authority transition");
       }
-      const startIndex = profile.cells.length - document.diskPlan.cells.length;
-      const expectedCells = profile.cells.slice(startIndex).map((cell, offset) => ({
-        ordinal: startIndex + offset + 1,
-        cellId: cell.id,
+      const expectedCells = plannedExecutionOrdinals.map((ordinal) => ({
+        ordinal,
+        cellId: profile.cells[ordinal - 1].id,
       }));
       if (JSON.stringify(document.derivedSidecarLifecycle.afterCells.map(
         ({ ordinal, cellId }) => ({ ordinal, cellId }),
@@ -2971,19 +3345,22 @@ export async function runCampaign(args, options = {}) {
     cleanup: options.operations?.cleanup ?? safeRemoveTree,
     sample: options.operations?.sample ?? sampleGpuBestEffort,
   };
-  const startIndex = options.startIndex ?? (options.importedPrefix
-    ? IMPORTED_PREFIX_CELLS : RECOVERY_IMPORTED_PREFIX_CELLS);
+  const allOrdinals = profile.cells.map((_, index) => index + 1);
+  const legacyContinuationOrdinals = allOrdinals.slice(IMPORTED_PREFIX_CELLS);
+  const requestedOrdinals = options.executionOrdinals ?? (options.importedPrefix
+    ? legacyContinuationOrdinals : SPARSE_EXECUTION_ORDINALS);
+  const executionOrdinals = exactExecutionOrdinals(profile, requestedOrdinals);
   let imported = { lineage: null, outcomes: [] };
-  if (startIndex === RECOVERY_IMPORTED_PREFIX_CELLS) {
+  if (JSON.stringify(executionOrdinals) === JSON.stringify(SPARSE_EXECUTION_ORDINALS)) {
     const selected = options.prefixSelection
-      ?? await selectRecoveryContinuation(prefixCandidates, profile);
-    imported = options.importedPrefix ?? await importRecoveryContinuation(selected, output);
-  } else if (startIndex === IMPORTED_PREFIX_CELLS) {
+      ?? await selectSparseRecovery(prefixCandidates, profile);
+    imported = options.importedPrefix ?? await importSparseRecovery(selected, output);
+  } else if (JSON.stringify(executionOrdinals) === JSON.stringify(legacyContinuationOrdinals)) {
     const selected = options.prefixSelection
       ?? await selectImportedPrefix(prefixCandidates, profile);
     imported = options.importedPrefix ?? await importPrefixEvidence(selected, output);
-  } else if (startIndex !== 0) {
-    fail(`unreviewed terminal continuation start index ${startIndex}`);
+  } else if (JSON.stringify(executionOrdinals) !== JSON.stringify(allOrdinals)) {
+    fail(`unreviewed terminal execution ordinals ${JSON.stringify(executionOrdinals)}`);
   }
   const receipts = [...imported.outcomes];
   const campaignErrors = [];
@@ -3000,14 +3377,17 @@ export async function runCampaign(args, options = {}) {
     { kind: "pythonVenv", path: python ? path.dirname(path.dirname(path.resolve(python))) : "fixture-unavailable" },
   ];
   const remainingArtifactIds = [...new Set(
-    profile.cells.slice(startIndex).flatMap((cell) => cell.artifactIds),
+    executionOrdinals.flatMap((ordinal) => profile.cells[ordinal - 1].artifactIds),
   )];
   const remainingFileCount = remainingArtifactIds.reduce(
     (sum, id) => sum + artifactExpectedFiles[id].length, 0,
   );
-  if (startIndex === RECOVERY_IMPORTED_PREFIX_CELLS && (remainingArtifactIds.length !== RECOVERY_REMAINING_AUTHORITIES
-    || remainingFileCount !== RECOVERY_REMAINING_FILES)) {
-    fail(`recovery continuation scope drifted: expected ${RECOVERY_REMAINING_AUTHORITIES} authorities / ${RECOVERY_REMAINING_FILES} files`);
+  if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256
+    && JSON.stringify(executionOrdinals) === JSON.stringify(SPARSE_EXECUTION_ORDINALS)
+    && (JSON.stringify(remainingArtifactIds) !== JSON.stringify(SPARSE_REMAINING_ARTIFACT_IDS)
+      || remainingArtifactIds.length !== SPARSE_REMAINING_AUTHORITIES
+      || remainingFileCount !== SPARSE_REMAINING_FILES)) {
+    fail(`sparse recovery scope drifted: expected ${SPARSE_REMAINING_AUTHORITIES} authorities / ${SPARSE_REMAINING_FILES} files`);
   }
   const sourceAudits = new Map();
   const cacheProvisioning = { sourceCensus: [], staging: [], finalOffline: [] };
@@ -3098,7 +3478,7 @@ export async function runCampaign(args, options = {}) {
         audit.downloadedFiles = missingDownload?.id === artifactId
           ? missingDownload.downloadedFiles : [];
       }
-      lifetimePlan = authorityLifetimePlan(profile, startIndex, sourceAudits);
+      lifetimePlan = authorityLifetimePlan(profile, executionOrdinals, sourceAudits);
       const freeBytes = await operations.diskFreeBytes(scratch);
       diskPlan = estimateJitDiskPlan(
         lifetimePlan,
@@ -3134,7 +3514,7 @@ export async function runCampaign(args, options = {}) {
   }
   const cacheValidation = {
     remainingArtifactIds, artifactExpectedFiles, downloadEvidenceSha256, guard, stagingRoot,
-    derivedSidecarRoot, missingStore, expectedNonModelPaths, profile,
+    derivedSidecarRoot, missingStore, expectedNonModelPaths, profile, executionOrdinals,
   };
   let initialDocument = cachePreflightDocument({
     evidencePhase: "initial",
@@ -3228,7 +3608,8 @@ export async function runCampaign(args, options = {}) {
     }
     return record;
   };
-  for (let index = startIndex; index < profile.cells.length; index += 1) {
+  for (const ordinal of executionOrdinals) {
+    const index = ordinal - 1;
     const cell = profile.cells[index];
     const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
     let emergencyCleanup = { attempted: false, completed: true, error: null };
@@ -3847,6 +4228,14 @@ export async function runCampaign(args, options = {}) {
     campaignErrors.push(recordError([], "campaign scratch cleanup failed", error));
   }
 
+  receipts.sort((left, right) => (
+    profile.cells.findIndex((cell) => cell.id === left.id)
+      - profile.cells.findIndex((cell) => cell.id === right.id)
+  ));
+  if (receipts.length !== profile.cells.length
+    || receipts.some((receipt, index) => receipt.id !== profile.cells[index].id)) {
+    fail("terminal receipt assembly did not cover each exact profile cell once in serial order");
+  }
   const summary = {
     schemaVersion: 1, profile: PROFILE_NAME, repositories, execution, receipts,
     lineage: {
@@ -3858,7 +4247,7 @@ export async function runCampaign(args, options = {}) {
         inferenceSha: repositories.inference.sha,
         profileCellSemanticsSha256: EXPECTED_CELL_SEMANTICS_SHA256,
         profileArtifactSemanticsSha256: EXPECTED_ARTIFACT_SEMANTICS_SHA256,
-        startOrdinal: startIndex + 1,
+        executionOrdinals,
       },
     },
     cachePreflight: cachePreflightEvidence,
