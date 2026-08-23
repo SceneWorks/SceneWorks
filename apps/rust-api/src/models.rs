@@ -5511,9 +5511,11 @@ mod download_receipt_tests {
     /// The live SCAIL-2 manifest must give off-Mac users all three shared package variants and the
     /// catalog's per-tier install badge must enforce both the provider-required six-file layout and
     /// the exact precision marker. This binds product advertisement, Model Manager filtering, and
-    /// worker loadability without duplicating weights or enabling a mixed package.
+    /// worker loadability without duplicating weights or enabling a mixed package. The product
+    /// description must also advertise the reviewed Candle q4/q8/bf16 routes rather than the
+    /// pre-admission fail-closed wording.
     #[test]
-    fn scail2_shared_variants_are_installable_off_macos_and_fail_closed() {
+    fn scail2_shared_variants_are_installable_off_macos_and_advertise_admitted_candle_tiers() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let original = builtin_models_entry("scail2_14b");
@@ -5654,7 +5656,14 @@ mod download_receipt_tests {
 
         let description = model["ui"]["description"].as_str().unwrap();
         assert!(description.contains("Candle on NVIDIA Windows/Linux"));
-        assert!(description.contains("execution remains fail-closed"));
+        assert!(description.contains("ordered reference character images"));
+        assert!(description.contains(
+            "admit the same installable q4, q8, and bf16 package variants when installed"
+        ));
+        assert!(
+            !description.contains("execution remains fail-closed"),
+            "the pre-admission product wording must not contradict the reviewed Candle routes"
+        );
     }
 }
 
