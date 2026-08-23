@@ -586,7 +586,7 @@ async fn download_snapshot_resumes_existing_partial_blob() {
     };
     let mut progress = DownloadProgress::new(
         "owner/model",
-        4,
+        0,
         snapshot.total_bytes(),
         Duration::from_secs(3600),
     );
@@ -636,7 +636,7 @@ async fn download_snapshot_fresh_retry_discards_partial_blob() {
     };
     let mut progress = DownloadProgress::new(
         "owner/model",
-        3,
+        0,
         snapshot.total_bytes(),
         Duration::from_secs(3600),
     );
