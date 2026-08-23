@@ -140,7 +140,7 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         },
     ];
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some(
             "enhancer:uncensored+keyframe:first:image:768x512:frame:0:strength:3f800000+keyframe:last:image:768x512:frame:-1:strength:3f800000"
         ),
@@ -149,7 +149,7 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
 
     input.conditioning.swap(0, 1);
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some("enhancer:uncensored"),
         "reordered keyframes must not mint the ordered first/last receipt"
     );
@@ -167,7 +167,7 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         strength: 1.0,
     }];
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000"),
         "the one IC-LoRA clip's source-frame count, image shape, appended-token anchor, and strength must be sealed"
     );
@@ -199,14 +199,14 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         },
     ];
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000+clip:append:frames:153:image:768x512:frame:-1:strength:3f800000"),
         "the bridge must preserve both ordered endpoint clips, source-frame domains, latent anchors, and strengths"
     );
 
     input.conditioning.swap(0, 1);
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some("enhancer:uncensored"),
         "reordered bridge clips must not mint the ordered endpoint receipt"
     );
