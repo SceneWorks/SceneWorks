@@ -1544,6 +1544,37 @@ pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
                 last_strength.to_bits()
             ));
         }
+        let clips = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::VideoClip {
+                    frames,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((frames, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(frames, 0, strength)] = clips.as_slice() {
+            if let Some(image) = frames.first() {
+                if frames
+                    .iter()
+                    .all(|frame| frame.width == image.width && frame.height == image.height)
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        frames.len(),
+                        image.width,
+                        image.height,
+                        strength.to_bits()
+                    ));
+                }
+            }
+        }
     }
     (!overlays.is_empty()).then(|| overlays.join("+"))
 }
@@ -2087,7 +2118,20 @@ pub(super) async fn generate_video_using(
                     crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
                 let spec_headroom_bytes =
                     crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
-                let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
+                let reference_count = u32::try_from(
+                    input
+                        .conditioning
+                        .iter()
+                        .filter(|conditioning| {
+                            matches!(
+                                conditioning,
+                                gen_core::Conditioning::Reference { .. }
+                                    | gen_core::Conditioning::Keyframe { .. }
+                            )
+                        })
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
                 // This is the provider-facing carrier, not a synonym for the user-visible mode:
                 // Wan turns clip extension/bridging into pinned keyframes, while I2V reaches the
                 // reference-image encoder. A future measured row must name that real residency
@@ -2097,7 +2141,8 @@ pub(super) async fn generate_video_using(
                 } else {
                     match admission_mode.as_str() {
                         "image_to_video" => "image",
-                        "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
+                        "first_last_frame" => "keyframe",
+                        "extend_clip" => "none",
                         _ => "other",
                     }
                 };

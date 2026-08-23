@@ -153,6 +153,24 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         Some("enhancer:uncensored"),
         "reordered keyframes must not mint the ordered first/last receipt"
     );
+
+    input.conditioning = vec![Conditioning::VideoClip {
+        frames: vec![
+            gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new()
+            };
+            153
+        ],
+        frame_idx: 0,
+        strength: 1.0,
+    }];
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000"),
+        "the one IC-LoRA clip's source-frame count, image shape, appended-token anchor, and strength must be sealed"
+    );
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
