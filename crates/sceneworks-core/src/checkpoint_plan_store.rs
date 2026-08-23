@@ -42,6 +42,14 @@ pub const PLANS_DIR: &str = "plans";
 /// The prefix every inspector-emitted `plan_id` carries; see [`validate_plan_id`].
 pub const PLAN_ID_PREFIX: &str = "checkpoint-plan-";
 pub const BINDINGS_DIR: &str = "bindings";
+/// The advisory file every read-modify-write of the store's SHARED documents serialises on.
+///
+/// `approved-roots.json` and `inventory.json` are each written atomically, but atomic write is not
+/// atomic read-modify-write: the API process (root lifecycle) and the worker process (compile,
+/// invalidate) both load a whole document, edit it, and write it back, so without a cross-process
+/// lock the later writer silently discards whatever the other one committed in between. Same
+/// pattern and same primitive as `resolved_cache::lock_metadata`.
+pub const STORE_LOCK_FILE: &str = ".lock";
 
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
@@ -798,6 +806,43 @@ impl CheckpointPlanStore {
         Ok(self.root.join(BINDINGS_DIR).join(format!("{plan_id}.json")))
     }
 
+    fn store_lock_path(&self) -> PathBuf {
+        self.root.join(STORE_LOCK_FILE)
+    }
+
+    /// Take the store's exclusive cross-process lock for one read-modify-write.
+    ///
+    /// The returned handle IS the lock: dropping the file releases it.
+    ///
+    /// The lock is NOT reentrant — `fs2` locks an open file description, so a second acquisition on
+    /// a fresh descriptor blocks even inside one process. Every mutator therefore takes it exactly
+    /// once and never calls another locking mutator underneath it: `remove_root` does its own
+    /// inventory rewrite rather than calling `invalidate` in a loop, which is also what collapses
+    /// its N document writes into one.
+    fn lock_store(&self) -> Result<fs::File, CheckpointPlanError> {
+        fs::create_dir_all(&self.root).map_err(|error| io_error(&self.root, error))?;
+        let path = self.store_lock_path();
+        // A lock file that is a symlink would let a planted link move the lock (and the writes it
+        // guards) somewhere else; the store owns this path, so anything but a regular file refuses.
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(CheckpointPlanError::Io {
+                    path,
+                    message: "checkpoint store lock is not a regular file".to_owned(),
+                });
+            }
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| io_error(&path, error))?;
+        fs2::FileExt::lock_exclusive(&file).map_err(|error| io_error(&path, error))?;
+        Ok(file)
+    }
+
     fn write_atomic(&self, path: &Path, payload: &[u8]) -> Result<(), CheckpointPlanError> {
         crate::store_util::atomic_write(path, payload).map_err(|error| CheckpointPlanError::Io {
             path: path.to_path_buf(),
@@ -889,12 +934,30 @@ impl CheckpointPlanStore {
         label: Option<&str>,
     ) -> Result<ApprovedRootV1, CheckpointPlanError> {
         let canonical = Self::approvable_canonical_root(path)?;
+        let _guard = self.lock_store()?;
         let mut roots = self.approved_roots()?;
         // Path first, id second. After a `relink_root` a directory is bound to an id that
         // `derive_root_id` would NOT produce for it, and re-approving it must return that existing
         // binding rather than mint a second id for the same files.
         if let Some(existing) = roots.get_by_path(&canonical) {
-            return Ok(existing.clone());
+            let existing_id = existing.root_id.clone();
+            // Re-approving an already-approved directory under a NEW label is a relabel, not a
+            // no-op: the caller asked for that label, and silently discarding it would leave the
+            // library showing a name the user did not choose with nothing to say why.
+            match label {
+                Some(label) if existing.label != label => {
+                    let root = roots
+                        .roots
+                        .iter_mut()
+                        .find(|root| root.root_id == existing_id)
+                        .expect("the root just found by path is in the list");
+                    root.label = label.to_owned();
+                    let relabelled = root.clone();
+                    self.save_approved_roots(&roots)?;
+                    return Ok(relabelled);
+                }
+                _ => return Ok(roots.get(&existing_id).expect("just found").clone()),
+            }
         }
         let root_id = derive_root_id(&canonical);
         if let Some(existing) = roots.get(&root_id) {
@@ -925,6 +988,7 @@ impl CheckpointPlanStore {
         label: &str,
     ) -> Result<ApprovedRootV1, CheckpointPlanError> {
         validate_root_label(label)?;
+        let _guard = self.lock_store()?;
         let mut roots = self.approved_roots()?;
         let root = roots
             .roots
@@ -952,6 +1016,7 @@ impl CheckpointPlanStore {
         path: &Path,
     ) -> Result<ApprovedRootV1, CheckpointPlanError> {
         let canonical = Self::approvable_canonical_root(path)?;
+        let _guard = self.lock_store()?;
         let mut roots = self.approved_roots()?;
         if let Some(existing) = roots.get_by_path(&canonical) {
             if existing.root_id != root_id {
@@ -982,7 +1047,15 @@ impl CheckpointPlanStore {
     /// `<data>/checkpoints/{approved-roots.json,inventory.json,plans/…,bindings/…}`. The library
     /// directory is never opened for writing, never enumerated for deletion, and its files are
     /// never referenced here at all (E6).
+    ///
+    /// The whole removal is ONE read-modify-write under the store lock, and the inventory is
+    /// rewritten once rather than once per checkpoint. The previous per-checkpoint loop rewrote
+    /// `inventory.json` N times with `?` in between and only then saved the root list, so a
+    /// failure part-way left a root that still existed with some of its checkpoints already
+    /// forgotten. Now the only interruptible window is between the two document writes, and it
+    /// leaves a root with no checkpoints — a state a retry of `remove_root` converges from.
     pub fn remove_root(&self, root_id: &str) -> Result<RootRemovalV1, CheckpointPlanError> {
+        let _guard = self.lock_store()?;
         let mut roots = self.approved_roots()?;
         let root = roots
             .get(root_id)
@@ -990,12 +1063,27 @@ impl CheckpointPlanStore {
             .ok_or_else(|| CheckpointPlanError::UnknownRoot {
                 root_id: root_id.to_owned(),
             })?;
-        let removed_checkpoints = self.linked_checkpoint_ids_for_root(root_id)?;
-        for checkpoint_id in &removed_checkpoints {
-            self.invalidate(checkpoint_id)?;
+        let mut removed_checkpoints = Vec::new();
+        let mut orphaned_plans = Vec::new();
+        let mut remaining = Vec::new();
+        for record in self.inventory()?.records {
+            if parse_linked_checkpoint_id(&record.checkpoint_id)
+                .is_some_and(|(id, _)| id == root_id)
+            {
+                removed_checkpoints.push(record.checkpoint_id.clone());
+                orphaned_plans.push(record.plan.plan_id.clone());
+            } else {
+                remaining.push(record);
+            }
         }
+        self.save_inventory(&CheckpointInventoryV1::new(remaining)?)?;
         roots.roots.retain(|existing| existing.root_id != root_id);
         self.save_approved_roots(&roots)?;
+        // Last, and only after both catalogs agree the checkpoints are gone: a failure here can
+        // leave documents nothing references, never a record without its plan.
+        for plan_id in orphaned_plans {
+            self.remove_plan_documents(&plan_id)?;
+        }
         Ok(RootRemovalV1 {
             root,
             removed_checkpoints,
@@ -1108,9 +1196,23 @@ impl CheckpointPlanStore {
                 root_id: root_id.to_owned(),
             })?;
         let mut persisted: BTreeMap<String, LinkedCheckpointStatusV1> = BTreeMap::new();
+        let mut status_diagnostics = Vec::new();
         for checkpoint_id in self.linked_checkpoint_ids_for_root(root_id)? {
-            let status = self.checkpoint_status(&checkpoint_id)?;
-            persisted.insert(status.relative_path.clone(), status);
+            match self.checkpoint_status(&checkpoint_id) {
+                Ok(status) => {
+                    persisted.insert(status.relative_path.clone(), status);
+                }
+                // One unreadable plan or bindings document is a fact about THAT checkpoint, not
+                // about the library. Propagating it made a single corrupt file unlist every other
+                // checkpoint under the root — including the ones a rescan could repair.
+                Err(error) => status_diagnostics.push(CheckpointDiagnosticV1 {
+                    severity: CheckpointDiagnosticSeverityV1::Error,
+                    code: CheckpointDiagnosticCodeV1::Io,
+                    relative_path: parse_linked_checkpoint_id(&checkpoint_id)
+                        .map(|(_, relative_path)| relative_path.to_owned()),
+                    message: error.to_string(),
+                }),
+            }
         }
         if !root.path.is_dir() {
             // An unavailable root has no candidates to offer and nothing to say about bytes: every
@@ -1122,8 +1224,9 @@ impl CheckpointPlanStore {
                     ..status
                 })
                 .collect();
-            return Ok(LinkedRootScanV1 {
-                diagnostics: vec![CheckpointDiagnosticV1 {
+            status_diagnostics.insert(
+                0,
+                CheckpointDiagnosticV1 {
                     severity: CheckpointDiagnosticSeverityV1::Error,
                     code: CheckpointDiagnosticCodeV1::SourceNotFound,
                     relative_path: None,
@@ -1131,7 +1234,10 @@ impl CheckpointPlanStore {
                         "approved root {root_id:?} at {} is not available (unmounted or moved)",
                         root.path.display()
                     ),
-                }],
+                },
+            );
+            return Ok(LinkedRootScanV1 {
+                diagnostics: status_diagnostics,
                 root,
                 available: false,
                 candidates: Vec::new(),
@@ -1139,7 +1245,8 @@ impl CheckpointPlanStore {
             });
         }
         let discovery = discover_library_root(&root.path);
-        let mut diagnostics = discovery.diagnostics;
+        let mut diagnostics = status_diagnostics;
+        diagnostics.extend(discovery.diagnostics);
         let mut candidates = Vec::with_capacity(discovery.candidates.len());
         for candidate in discovery.candidates {
             let checkpoint_id = linked_checkpoint_id(root_id, &candidate.relative_path);
@@ -1344,6 +1451,7 @@ impl CheckpointPlanStore {
     }
 
     fn upsert_record(&self, record: CheckpointCatalogRecordV1) -> Result<(), CheckpointPlanError> {
+        let _guard = self.lock_store()?;
         let inventory = self.inventory()?;
         let mut records = Vec::with_capacity(inventory.records.len() + 1);
         let mut superseded_plan = None;
@@ -1379,6 +1487,7 @@ impl CheckpointPlanStore {
 
     /// Remove a checkpoint's record, plan, and bindings. Never touches the linked source.
     pub fn invalidate(&self, checkpoint_id: &str) -> Result<bool, CheckpointPlanError> {
+        let _guard = self.lock_store()?;
         let inventory = self.inventory()?;
         let Some(record) = inventory
             .records

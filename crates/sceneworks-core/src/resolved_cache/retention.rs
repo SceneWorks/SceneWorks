@@ -658,7 +658,7 @@ impl ResolvedCacheStore {
             self.read_metadata_unlocked(digest)
         };
         #[cfg(test)]
-        run_scan_classification_observer();
+        run_scan_classification_observer(digest);
         match journal {
             Ok(JournalRead::Valid { metadata, .. }) => match metadata.state {
                 ResolvedCacheEntryState::Complete => {
@@ -1118,30 +1118,55 @@ fn run_source_hash_observer() {
     });
 }
 
+/// The scan-classification observer: called with the digest of the entry being classified.
+#[cfg(test)]
+type ScanClassificationObserver = Box<dyn Fn(&str)>;
+
 #[cfg(test)]
 thread_local! {
-    static SCAN_CLASSIFICATION_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    static SCAN_CLASSIFICATION_OBSERVER: std::cell::RefCell<Option<ScanClassificationObserver>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Runs once at the point the retention scan classifies an entry — after its journal has been read
-/// and the metadata lock released, while the rest of the classification is still to come. A test
+/// Runs at the point the retention scan classifies an entry — after its journal has been read and
+/// the metadata lock released, while the rest of the classification is still to come. A test
 /// observes from here which locks are held, because this is exactly the window in which the status
 /// endpoint used to be blocked for the whole sweep (sc-19712 F-2).
+///
+/// It runs for EVERY scanned entry and is handed that entry's digest, which is what lets a test
+/// act on an entry the scan has already classified — the only way to reach `evict_candidate`'s
+/// phase-two guards with the scan-phase ones deliberately left satisfied (sc-20635).
+///
+/// It is a thread-local, and the whole retention suite can run on ONE thread
+/// (`--test-threads=1`), so a test that arms it must disarm it before it returns.
 #[cfg(test)]
-fn set_scan_classification_observer(observer: impl FnOnce() + 'static) {
+fn set_scan_classification_observer(observer: impl Fn(&str) + 'static) {
     SCAN_CLASSIFICATION_OBSERVER.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(observer));
     });
 }
 
 #[cfg(test)]
-fn run_scan_classification_observer() {
+fn clear_scan_classification_observer() {
     SCAN_CLASSIFICATION_OBSERVER.with(|slot| {
-        if let Some(observer) = slot.borrow_mut().take() {
-            observer();
-        }
+        *slot.borrow_mut() = None;
     });
+}
+
+#[cfg(test)]
+fn run_scan_classification_observer(digest: &str) {
+    // Taken OUT of the cell before it is called and put back after, so the observer body may take
+    // the store's own locks (or re-register) without borrowing the cell recursively.
+    let observer = SCAN_CLASSIFICATION_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer(digest);
+        SCAN_CLASSIFICATION_OBSERVER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(observer);
+            }
+        });
+    }
 }
 
 #[cfg(test)]

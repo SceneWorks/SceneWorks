@@ -1588,6 +1588,45 @@ async fn reconcile_deleted_source(
     }
 }
 
+/// Drop the plan-store documents and cached derivatives a deleted LINKED model owned.
+///
+/// Keyed on `importPlan.checkpointId` — the same discriminator the scheduler and the worker's
+/// route selection use — so a model that is not plan-backed does nothing here. Never touches the
+/// linked library and never removes the approved root: only this checkpoint's record, plan,
+/// bindings and derivatives.
+///
+/// Failures become warnings rather than failing the delete: the manifest entry is already gone by
+/// this point, so refusing here would leave the catalog and the plan store disagreeing with no way
+/// to retry.
+async fn forget_linked_checkpoint(state: &AppState, entry: &Value) -> Vec<String> {
+    let Some(checkpoint_id) = entry
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(str::to_owned)
+    else {
+        return Vec::new();
+    };
+    let data_dir = state.settings.data_dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?
+            .invalidate_checkpoint(&checkpoint_id)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(_)) => Vec::new(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "forgetting a linked checkpoint failed after a model delete");
+            vec![format!(
+                "This model's import plan and cached derivatives could not be removed: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "the linked-checkpoint cleanup task failed");
+            vec!["This model's import plan and cached derivatives could not be removed.".to_owned()]
+        }
+    }
+}
+
 pub(crate) async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -1675,6 +1714,12 @@ pub(crate) async fn delete_model(
     }
     let mut warnings =
         catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
+    // A plan-backed (linked) model's bytes are not ours, but its plan documents and derivatives
+    // are. Without this the manifest entry went away and the record, plan, bindings and every
+    // cached derivative stayed behind forever — reachable by nothing, reclaimable by nothing.
+    // E6 still holds exactly: this drops SceneWorks-owned documents, never a library file, and
+    // never the approved root itself (other checkpoints under it stay valid).
+    warnings.extend(forget_linked_checkpoint(&state, cleanup_source).await);
     // The source is gone; reclaim (or surface) every resolved-cache entry that depended on it.
     warnings.extend(
         reconcile_deleted_source(
@@ -2507,13 +2552,20 @@ pub(crate) async fn queue_model_import_job(
         sceneworks_core::checkpoint_plan_store::validate_linked_relative_path(&relative_path)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
         let data_dir = state.settings.data_dir.clone();
+        let probed_root_id = root_id.clone();
         tokio::task::spawn_blocking(move || {
             sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
-                .resolve_root(&root_id)
+                .resolve_root(&probed_root_id)
         })
         .await
         .map_err(|error| ApiError::internal(format!("Approved root lookup failed: {error}")))?
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        // The VALIDATED values are what the job carries. Without this the route validated the
+        // trimmed pair and then serialised the raw one, so `" root-abc "` passed the API and
+        // failed in the worker — and the queued `manifestEntry` (built from the trimmed pair
+        // below) and the job payload disagreed about which checkpoint was being imported.
+        payload.linked_root_id = Some(root_id);
+        payload.linked_relative_path = Some(relative_path);
     } else if option_str_is_empty(payload.repo.as_deref())
         && option_str_is_empty(payload.source_url.as_deref())
         && option_str_is_empty(payload.source_path.as_deref())

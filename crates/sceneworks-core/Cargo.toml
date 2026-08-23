@@ -58,6 +58,9 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+# sc-20635: the checkpoint plan store's cross-process lock is an `fs2` advisory file lock, and the
+# integration test stands in for the other process by taking the SAME lock on its own descriptor.
+fs2 = "0.4"
 jsonschema = "0.28"
 tempfile = "3.13"
 

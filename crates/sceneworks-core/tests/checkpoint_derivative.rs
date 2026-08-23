@@ -438,9 +438,21 @@ fn a_drifted_checkpoint_refuses_before_any_derivative_is_produced() {
 /// AC3: a LEASED derivative is never evicted, and the same entry is evictable the moment the lease
 /// is dropped.
 ///
-/// Failing mutation: make `evict_candidate` ignore leases — replace its
-/// `FileExt::try_lock_exclusive(&artifact_lock)` contended arm with `Ok(())` (or drop the phase-two
-/// lock entirely) — and the first assertion goes red, because the leased entry is then evicted.
+/// The lease here is taken BEFORE the sweep, so it is covered by TWO independent guards and this
+/// test cannot distinguish them:
+///
+/// * the scan phase's `artifact_lock_is_contended` probe (`retention.rs`, inside `scan_entry`),
+///   which retains the entry before it ever becomes an eviction candidate; and
+/// * `evict_candidate`'s phase-two `FileExt::try_lock_exclusive` contended arm.
+///
+/// Measured, one mutation at a time: with only the scan-phase probe no-opped this stays GREEN
+/// (phase two catches it); with only the phase-two arm no-opped it also stays GREEN (the scan
+/// probe catches it); with BOTH removed it goes RED, evicting the leased entry. So the honest
+/// claim is "at least one of the two guards is present", and the two guards are pinned separately:
+/// the scan probe by `the_retention_scan_classifies_without_holding_the_lock_that_blocks_status_reads`
+/// and phase two, alone, by
+/// `retention::tests::the_phase_two_artifact_lock_retains_an_entry_leased_after_it_was_classified`,
+/// which leases in the window between them.
 #[test]
 fn a_leased_derivative_is_never_evicted_and_an_unleased_one_is() {
     let fx = fixture("lease");

@@ -3,6 +3,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
@@ -15,7 +17,7 @@ use sceneworks_core::checkpoint_inspector::{
 };
 use sceneworks_core::checkpoint_plan_store::{
     linked_checkpoint_id, CheckpointPlanError, CheckpointPlanStore, APPROVED_ROOTS_FILE,
-    BINDINGS_DIR, CHECKPOINTS_DIR, INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX,
+    BINDINGS_DIR, CHECKPOINTS_DIR, INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX, STORE_LOCK_FILE,
 };
 
 fn fixture_dir(label: &str) -> TempDir {
@@ -907,6 +909,9 @@ fn a_retargeted_root_managed_locator_and_foreign_bindings_each_refuse_typed() {
 // Linked-library lifecycle and confinement probes (sc-20635, AC1 + AC2)
 // =============================================================================================
 
+// Used only by the `#[cfg(unix)]` symlink probe, and this target now COMPILES on the Windows lane
+// (sc-20635 added it to desktop-windows.yml), where an ungated import is an unused-import warning.
+#[cfg(unix)]
 use sceneworks_core::checkpoint_inspector::CheckpointDiagnosticSeverityV1;
 use sceneworks_core::checkpoint_plan_store::{
     parse_linked_checkpoint_id, validate_linked_relative_path, LinkedCheckpointStateV1,
@@ -1436,6 +1441,16 @@ fn an_approved_root_is_bound_to_its_real_directory() {
 fn a_junction_out_of_the_library_fails_closed() {
     use std::process::Command;
 
+    /// `fs::canonicalize` returns a VERBATIM path (`\\?\C:\…`), and `cmd /C mklink /J` rejects
+    /// that form outright — so both arguments are handed over in their ordinary `C:\…` shape.
+    /// Without this the junction is never created and the probe asserts nothing.
+    fn mklink_argument(path: &std::path::Path) -> String {
+        let text = path.to_string_lossy().into_owned();
+        text.strip_prefix(r"\\?\")
+            .map(str::to_owned)
+            .unwrap_or(text)
+    }
+
     let (fx, root_id, _) = library_fixture("junction");
     let outside = fixture_dir("junction-outside");
     let outside_dir = fs::canonicalize(outside.path()).unwrap();
@@ -1447,12 +1462,16 @@ fn a_junction_out_of_the_library_fails_closed() {
             "/C",
             "mklink",
             "/J",
-            junction.to_str().unwrap(),
-            outside_dir.to_str().unwrap(),
+            &mklink_argument(&junction),
+            &mklink_argument(&outside_dir),
         ])
         .status()
         .expect("mklink runs");
     assert!(status.success(), "creating a junction must succeed");
+    assert!(
+        junction.is_dir(),
+        "SANITY: the junction must exist, or this test proves nothing"
+    );
 
     // Compiling THROUGH the junction refuses: its canonical target is outside the root.
     let error = fx
@@ -1477,4 +1496,338 @@ fn a_junction_out_of_the_library_fails_closed() {
         "{:?}",
         scan.candidates
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// cross-process serialisation of the store's read-modify-writes (sc-20635)
+// ---------------------------------------------------------------------------------------------
+
+/// The lock file every store mutator serialises on, opened the way another PROCESS would open it.
+///
+/// `fs2` locks an open file description, so a second descriptor on the same file contends even
+/// inside one process — which is what lets these tests stand in for the API-process /
+/// worker-process race without spawning a child.
+fn hold_store_lock(data_dir: &Path) -> fs::File {
+    let path = data_dir.join(CHECKPOINTS_DIR).join(STORE_LOCK_FILE);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&file).unwrap();
+    file
+}
+
+/// Run `operation` on another thread and report whether it finished inside `window`.
+fn finishes_within<T: Send + 'static>(
+    operation: impl FnOnce() -> T + Send + 'static,
+    window: Duration,
+) -> (bool, std::thread::JoinHandle<T>) {
+    let (done_tx, done_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let value = operation();
+        let _ = done_tx.send(());
+        value
+    });
+    (done_rx.recv_timeout(window).is_ok(), handle)
+}
+
+/// The API process (root lifecycle) and the worker process (compile, invalidate) both read a whole
+/// shared document, edit it, and write it back. `write_atomic` makes each WRITE atomic; it does
+/// nothing for the read-modify-write PAIR, so without a lock the later writer silently discards
+/// whatever the other one committed in between.
+///
+/// This is that exact interleaving: the test holds the store lock the way the other process would,
+/// starts `remove_root` (which must block), commits a record for a DIFFERENT root while it is
+/// blocked, then releases. With the lock, `remove_root` reads the inventory the other process left
+/// and removes only its own root's checkpoint.
+///
+/// Failing mutation: delete the `let _guard = self.lock_store()?;` line from `remove_root`.
+/// `remove_root` then completes immediately (the first assertion goes red) against the pre-write
+/// inventory, and the record this test commits afterwards is resurrected by nothing — the removal
+/// wrote `[]` before it existed — so the last assertion goes red too.
+#[test]
+fn a_mutator_cannot_lose_a_concurrent_writers_record() {
+    let fx = fixture("lock-lost-update");
+    write_krea_native_file(&fx.library_dir.join("alpha.safetensors"), 0x11);
+    let other_library = fixture_dir("lock-lost-update-other");
+    let other_dir = fs::canonicalize(other_library.path()).unwrap();
+    write_krea_native_file(&other_dir.join("beta.safetensors"), 0x22);
+
+    let doomed = fx.store.approve_root(&fx.library_dir).unwrap();
+    let survivor = fx.store.approve_root(&other_dir).unwrap();
+    // Compile the survivor's checkpoint to capture a REAL record, then take it back out: the
+    // inventory the blocked `remove_root` must not clobber is the one written below, while it is
+    // already blocked.
+    let survivor_checkpoint = fx
+        .store
+        .compile_linked(&survivor.root_id, "beta.safetensors")
+        .unwrap();
+    let survivor_record = survivor_checkpoint.record.clone();
+    assert!(fx
+        .store
+        .invalidate(&survivor_checkpoint.checkpoint_id)
+        .unwrap());
+    let doomed_checkpoint = fx
+        .store
+        .compile_linked(&doomed.root_id, "alpha.safetensors")
+        .unwrap();
+    assert_eq!(
+        fx.store
+            .inventory()
+            .unwrap()
+            .records
+            .iter()
+            .map(|record| record.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![doomed_checkpoint.checkpoint_id.clone()],
+        "SANITY: only the doomed root's checkpoint is on disk before the race"
+    );
+
+    let held = hold_store_lock(&fx.data_dir);
+    let store = CheckpointPlanStore::open(&fx.data_dir);
+    let doomed_id = doomed.root_id.clone();
+    let (finished, handle) = finishes_within(
+        move || store.remove_root(&doomed_id),
+        Duration::from_millis(750),
+    );
+    assert!(
+        !finished,
+        "a mutator must wait for the store lock another process holds"
+    );
+
+    // The other process commits its own read-modify-write while the remover is parked.
+    let inventory = CheckpointInventoryV1::new(vec![
+        doomed_checkpoint.record.clone(),
+        survivor_record.clone(),
+    ])
+    .unwrap();
+    let mut payload = inventory.canonical_json().unwrap().into_bytes();
+    payload.push(b'\n');
+    fs::write(
+        fx.data_dir.join(CHECKPOINTS_DIR).join(INVENTORY_FILE),
+        payload,
+    )
+    .unwrap();
+    fs2::FileExt::unlock(&held).unwrap();
+    drop(held);
+
+    let removal = handle.join().unwrap().unwrap();
+    assert_eq!(
+        removal.removed_checkpoints,
+        vec![doomed_checkpoint.checkpoint_id.clone()]
+    );
+    assert_eq!(
+        fx.store
+            .inventory()
+            .unwrap()
+            .records
+            .iter()
+            .map(|record| record.checkpoint_id.clone())
+            .collect::<Vec<_>>(),
+        vec![survivor_record.checkpoint_id.clone()],
+        "the concurrent writer's record must survive the removal"
+    );
+}
+
+/// Every mutator — not just the one the lost-update test drives — takes the lock.
+///
+/// Failing mutation: delete `let _guard = self.lock_store()?;` from any one of `approve_root_inner`,
+/// `rename_root`, `relink_root`, `remove_root`, `upsert_record` (reached through `compile_linked`)
+/// or `invalidate`, and that mutator's `!finished` assertion goes red.
+#[test]
+fn every_store_mutator_serialises_on_the_store_lock() {
+    let fx = fixture("lock-every-mutator");
+    write_krea_native_file(&fx.library_dir.join("alpha.safetensors"), 0x11);
+    let spare = fixture_dir("lock-every-mutator-spare");
+    let spare_dir = fs::canonicalize(spare.path()).unwrap();
+    let unapproved = fixture_dir("lock-every-mutator-new");
+    let unapproved_dir = fs::canonicalize(unapproved.path()).unwrap();
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let compiled = fx
+        .store
+        .compile_linked(&root.root_id, "alpha.safetensors")
+        .unwrap();
+
+    type Mutator = Box<dyn FnOnce(CheckpointPlanStore) -> bool + Send>;
+    let mutators: Vec<(&str, Mutator)> = vec![
+        (
+            "approve_root",
+            Box::new(move |store: CheckpointPlanStore| store.approve_root(&unapproved_dir).is_ok()),
+        ),
+        (
+            "rename_root",
+            Box::new({
+                let root_id = root.root_id.clone();
+                move |store: CheckpointPlanStore| store.rename_root(&root_id, "renamed").is_ok()
+            }),
+        ),
+        (
+            "relink_root",
+            Box::new({
+                let root_id = root.root_id.clone();
+                move |store: CheckpointPlanStore| store.relink_root(&root_id, &spare_dir).is_ok()
+            }),
+        ),
+        (
+            "invalidate",
+            Box::new({
+                let checkpoint_id = compiled.checkpoint_id.clone();
+                move |store: CheckpointPlanStore| store.invalidate(&checkpoint_id).is_ok()
+            }),
+        ),
+        (
+            "remove_root",
+            Box::new({
+                let root_id = root.root_id.clone();
+                move |store: CheckpointPlanStore| store.remove_root(&root_id).is_ok()
+            }),
+        ),
+    ];
+
+    for (name, mutator) in mutators {
+        let held = hold_store_lock(&fx.data_dir);
+        let store = CheckpointPlanStore::open(&fx.data_dir);
+        let (finished, handle) =
+            finishes_within(move || mutator(store), Duration::from_millis(500));
+        assert!(!finished, "{name} must wait for the store lock");
+        fs2::FileExt::unlock(&held).unwrap();
+        drop(held);
+        assert!(handle.join().unwrap(), "{name} must succeed once unblocked");
+    }
+
+    // `compile_linked` reaches the lock through `upsert_record`, after the (unlocked) inspection
+    // and the plan/bindings writes, so it is driven separately.
+    let fresh = fixture("lock-compile");
+    write_krea_native_file(&fresh.library_dir.join("alpha.safetensors"), 0x33);
+    let fresh_root = fresh.store.approve_root(&fresh.library_dir).unwrap();
+    let held = hold_store_lock(&fresh.data_dir);
+    let store = CheckpointPlanStore::open(&fresh.data_dir);
+    let (finished, handle) = finishes_within(
+        move || {
+            store
+                .compile_linked(&fresh_root.root_id, "alpha.safetensors")
+                .is_ok()
+        },
+        Duration::from_millis(750),
+    );
+    assert!(!finished, "compile_linked must wait for the store lock");
+    fs2::FileExt::unlock(&held).unwrap();
+    drop(held);
+    assert!(handle.join().unwrap(), "compile_linked succeeds unblocked");
+}
+
+/// Re-approving a directory that is already a root under a NEW label relabels it.
+///
+/// The idempotent-by-path branch exists so a relinked library is not re-identified as a second
+/// one; it must not also silently swallow the label the caller asked for — that is the whole
+/// payload of `approve_root_with_label`.
+///
+/// Failing mutation: restore the plain `return Ok(existing.clone())` in the `get_by_path` branch
+/// of `approve_root_inner`.
+#[test]
+fn re_approving_a_root_under_a_new_label_relabels_it() {
+    let fx = fixture("relabel");
+    let first = fx
+        .store
+        .approve_root_with_label(&fx.library_dir, "ComfyUI")
+        .unwrap();
+    assert_eq!(first.label, "ComfyUI");
+
+    let renamed = fx
+        .store
+        .approve_root_with_label(&fx.library_dir, "Shared checkpoints")
+        .unwrap();
+    assert_eq!(renamed.root_id, first.root_id, "identity is unchanged");
+    assert_eq!(renamed.label, "Shared checkpoints");
+    assert_eq!(
+        fx.store.approved_roots().unwrap().roots,
+        vec![renamed.clone()],
+        "the new label is PERSISTED, not just returned"
+    );
+
+    // An unlabelled re-approval is still a no-op: it expresses no preference, so it must not wipe
+    // the label the user chose.
+    assert_eq!(
+        fx.store.approve_root(&fx.library_dir).unwrap().label,
+        "Shared checkpoints"
+    );
+    // And an invalid label never reaches the store.
+    assert!(matches!(
+        fx.store.approve_root_with_label(&fx.library_dir, "  "),
+        Err(CheckpointPlanError::InvalidRootLabel { .. })
+    ));
+    assert_eq!(
+        fx.store.approved_roots().unwrap().roots[0].label,
+        "Shared checkpoints"
+    );
+}
+
+/// One unreadable plan document must not unlist the whole library.
+///
+/// `scan_root` classifies every persisted checkpoint under the root; propagating a `Corrupt` from
+/// any one of them made a single damaged file hide every OTHER checkpoint — including the ones a
+/// rescan could repair, and including the candidates that have no persisted plan at all.
+///
+/// Failing mutation: restore the `?` on `self.checkpoint_status(&checkpoint_id)` in `scan_root`.
+#[test]
+fn one_corrupt_plan_document_does_not_unlist_the_library() {
+    let fx = fixture("corrupt-one");
+    write_krea_native_file(&fx.library_dir.join("alpha.safetensors"), 0x11);
+    write_krea_native_file(&fx.library_dir.join("beta.safetensors"), 0x22);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let broken = fx
+        .store
+        .compile_linked(&root.root_id, "alpha.safetensors")
+        .unwrap();
+    let healthy = fx
+        .store
+        .compile_linked(&root.root_id, "beta.safetensors")
+        .unwrap();
+
+    let bindings = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(BINDINGS_DIR)
+        .join(format!("{}.json", broken.plan.plan_id));
+    assert!(bindings.is_file(), "SANITY: the bindings document is there");
+    fs::write(&bindings, b"{ this is not json").unwrap();
+    assert!(
+        matches!(
+            fx.store.checkpoint_status(&broken.checkpoint_id),
+            Err(CheckpointPlanError::Corrupt { .. })
+        ),
+        "SANITY: the damaged checkpoint's own status still refuses"
+    );
+
+    let scan = fx.store.scan_root(&root.root_id).unwrap();
+    assert!(
+        scan.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == CheckpointDiagnosticCodeV1::Io
+                && diagnostic.relative_path.as_deref() == Some("alpha.safetensors")
+                && diagnostic.message.contains("[checkpoint-plan:corrupt]")
+        }),
+        "the damaged checkpoint surfaces as a diagnostic: {:?}",
+        scan.diagnostics
+    );
+    let healthy_candidate = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.checkpoint_id == healthy.checkpoint_id)
+        .expect("the healthy checkpoint is still listed");
+    assert!(
+        healthy_candidate.selectable,
+        "an undamaged sibling stays selectable: {healthy_candidate:?}"
+    );
+    // The damaged one is still OFFERED as a header-only candidate, just not selectable: its plan
+    // is unreadable, so a rescan is exactly what the user has to do.
+    let broken_candidate = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.checkpoint_id == broken.checkpoint_id)
+        .expect("the damaged checkpoint is still visible as a candidate");
+    assert!(!broken_candidate.selectable);
 }

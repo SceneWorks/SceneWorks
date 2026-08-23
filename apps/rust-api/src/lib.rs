@@ -192,6 +192,9 @@ use dto::{
     TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
+// The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
+// and forget an approved checkpoint library. AC1's six verbs, reachable from a client.
+mod checkpoint_library;
 // The single model-source seam every job-creation path calls (sc-19708): generic carrier
 // attachment + typed external-library availability preflight, all data-driven.
 mod model_library;
@@ -1759,6 +1762,27 @@ fn create_app_with_state_mode(
             post(model_library::relocate_model_library),
         )
         .route("/api/v1/models", get(list_models))
+        // Linked checkpoint libraries (epic 20398, sc-20635). A STATIC sibling of
+        // `/api/v1/models/:model_id`, exactly like `/api/v1/models/import`, so a library
+        // operation is never mistaken for a model id.
+        .route(
+            "/api/v1/models/library-roots",
+            get(checkpoint_library::list_library_roots)
+                .post(checkpoint_library::approve_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id",
+            patch(checkpoint_library::update_library_root)
+                .delete(checkpoint_library::remove_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id/scan",
+            get(checkpoint_library::scan_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id/rescan",
+            post(checkpoint_library::rescan_library_checkpoint),
+        )
         .route("/api/v1/models/:model_id", delete(delete_model))
         .route(
             "/api/v1/models/:model_id/variants/:variant",

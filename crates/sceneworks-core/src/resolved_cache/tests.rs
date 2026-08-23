@@ -4,6 +4,7 @@ use crate::model_artifacts::{
     ArtifactIdentity, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
     ResolvedBundleClosure, ResolvedBundleMember, MODEL_ARTIFACT_CONTRACT_VERSION,
 };
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1462,4 +1463,210 @@ fn cross_process_store_child() {
     while !release.exists() {
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// produced (derived) bundles — publication refusals (sc-20635)
+// ---------------------------------------------------------------------------------------------
+
+/// A derived reservation's staging directory is a WRITE surface with a declared shape, and
+/// publication proves that shape rather than trusting the producer.
+///
+/// `CheckpointDerivativeOutputs::create` refuses an undeclared name and confines every create to
+/// the staging root, so nothing reachable through the public derivative API can produce either of
+/// the trees below — which is exactly why they are exercised here, at the boundary that is the
+/// last line of defence if a producer ever writes to the staging path by some other means.
+fn derived_plan(outputs: &[&str]) -> DerivedArtifactPlan {
+    let identity = ArtifactIdentity::pinned(
+        "sceneworks-checkpoint-derivative/linked",
+        REVISION_A,
+        "derived",
+    )
+    .unwrap();
+    let member = ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: Some("derived-index".to_owned()),
+        source: identity.clone(),
+        tier: None,
+        source_subpath: PathBuf::new(),
+        destination: PathBuf::new(),
+        files: outputs
+            .iter()
+            .map(|output| ArtifactFile::new(output).unwrap())
+            .collect(),
+    };
+    DerivedArtifactPlan::new(identity, vec![member]).unwrap()
+}
+
+fn derived_reservation(
+    store: &ResolvedCacheStore,
+    input: &Path,
+    plan: &DerivedArtifactPlan,
+) -> ResolvedCacheReservation {
+    let reservation = match store
+        .reserve_derived(
+            plan,
+            input,
+            "linked/root-fixture/dit.safetensors",
+            "fixture:model",
+        )
+        .unwrap()
+    {
+        ReservationOutcome::Acquired(reservation) => *reservation,
+        _ => panic!("fixture derived reservation must acquire"),
+    };
+    reservation.prepare_for_materialization().unwrap();
+    reservation
+}
+
+fn journal_slots(store: &ResolvedCacheStore, cache_key: &str) -> Vec<PathBuf> {
+    let digest = cache_key_digest(cache_key).unwrap();
+    let entry = store.root().join("entries").join(digest);
+    (0..=1)
+        .map(|slot| entry.join(format!("metadata.{slot}.json")))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// The two fields a derived entry added (`production`, `derivedFrom`) widen the journal document,
+/// and `ResolvedCacheMetadata` is `deny_unknown_fields`, so a binary that predates them cannot
+/// decode one. sc-20635 therefore writes a derived journal at
+/// [`RESOLVED_CACHE_DERIVED_STORE_VERSION`] and leaves a source copy at
+/// [`RESOLVED_CACHE_STORE_VERSION`] — the version is a property of the DOCUMENT, not of the store.
+///
+/// That split is what makes the bump safe to land on a warm cache: an existing v1 source copy is
+/// unchanged on disk and still readable. Bumping the store-wide constant instead would have
+/// invalidated every entry already there, and retention cannot reclaim an entry it cannot read, so
+/// the whole cache would have been stranded as unreclaimable recovery candidates.
+///
+/// Failing mutations: make `ResolvedCacheProduction::store_version` return
+/// `RESOLVED_CACHE_STORE_VERSION` for `Derived` (the derived assertion goes red) or
+/// `RESOLVED_CACHE_DERIVED_STORE_VERSION` for `SourceCopy` (the byte-shape assertion goes red).
+#[test]
+fn only_a_derived_journal_declares_the_widened_document_version() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+
+    let candidate = source_candidate(&source, REVISION_A);
+    let copy = match store.reserve(&candidate, &source, "fixture:model").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("fixture reservation must acquire"),
+    };
+    let copy_key = candidate.cache_key.clone();
+    drop(copy);
+    for path in journal_slots(&store, &copy_key) {
+        let body: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            body["schemaVersion"],
+            json!(RESOLVED_CACHE_STORE_VERSION),
+            "a source copy stays at the version every older build already reads: {path:?}"
+        );
+        // Byte-shape, not just version: both new keys are absent, so the document a pre-sc-20635
+        // build wrote and the one this build writes are the same document.
+        assert!(
+            body["metadata"].get("production").is_none()
+                && body["metadata"].get("derivedFrom").is_none(),
+            "a source copy must not widen the journal: {body}"
+        );
+    }
+
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let derived = derived_reservation(&store, &input, &plan);
+    let derived_key = plan.cache_key().unwrap();
+    drop(derived);
+    let derived_slots = journal_slots(&store, &derived_key);
+    assert!(!derived_slots.is_empty(), "the derived entry has a journal");
+    for path in &derived_slots {
+        let body: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            body["schemaVersion"],
+            json!(RESOLVED_CACHE_DERIVED_STORE_VERSION),
+            "a derived journal declares the version its extra fields need: {path:?}"
+        );
+        assert_eq!(body["metadata"]["production"], json!("derived"));
+    }
+
+    // And a journal from a NEWER writer is a version refusal, not "your cache is corrupt" — the
+    // classification that manual removal is allowed to clear.
+    for path in &derived_slots {
+        let mut body: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        body["schemaVersion"] = json!(RESOLVED_CACHE_DERIVED_STORE_VERSION + 1);
+        std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+    let error = store.lookup_complete(&derived_key).unwrap_err();
+    assert!(
+        error.to_string().contains(UNSUPPORTED_JOURNAL_VERSION),
+        "{error}"
+    );
+    assert!(
+        !error.is_unrecoverable_metadata(),
+        "a forward-version journal is not proven-corrupt residue: {error}"
+    );
+}
+
+#[test]
+fn a_produced_bundle_holding_an_undeclared_file_is_never_published() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+
+    std::fs::write(staging.join("index.json"), b"{}").unwrap();
+    // Bytes the entry's own accounting would never count, so retention would under-measure the
+    // entry and over-reclaim against it.
+    std::fs::create_dir(staging.join("nested")).unwrap();
+    std::fs::write(staging.join("nested/stowaway.bin"), b"extra").unwrap();
+
+    let error = reservation.publish_produced(&plan).unwrap_err().to_string();
+    assert!(
+        error.contains("staged an undeclared file") && error.contains("stowaway.bin"),
+        "{error}"
+    );
+    assert_eq!(
+        store.lookup_complete(&plan.cache_key().unwrap()).unwrap(),
+        None,
+        "a refused publication leaves nothing complete behind"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_produced_bundle_whose_declared_output_is_a_symlink_is_never_published() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let outside = scratch.path().join("outside.bin");
+    std::fs::write(&outside, b"bytes that live somewhere else").unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+
+    // A declared output that is a LINK publishes an entry whose bytes are not IN the entry: the
+    // target can change or vanish under a lease, and removal would reclaim nothing.
+    symlink(&outside, staging.join("index.json")).unwrap();
+
+    let error = reservation.publish_produced(&plan).unwrap_err().to_string();
+    assert!(
+        error.contains("is linked, reparsed, or not a file") && error.contains("index.json"),
+        "{error}"
+    );
+    assert_eq!(
+        store.lookup_complete(&plan.cache_key().unwrap()).unwrap(),
+        None,
+        "a refused publication leaves nothing complete behind"
+    );
+    assert!(
+        outside.is_file(),
+        "the refusal never touches what the link pointed at"
+    );
 }

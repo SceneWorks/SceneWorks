@@ -21530,3 +21530,91 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
         moved_dir.join("kreamania.safetensors").as_path()
     );
 }
+
+/// The import stamp itself, on EVERY lane (sc-20635).
+///
+/// `linked_checkpoint_manifest_entry` is platform-independent, but the two reachability tests above
+/// need a real MLX-lane compile and are macOS-gated, so the "remove the stamp → nothing can select
+/// this entry" mutation was caught on exactly one of the three build configurations. This asserts
+/// the two properties the stamp exists for, from a hand-built compile result that needs no weights
+/// and no backend: `importPlan.checkpointId` is present (the ONLY selection discriminator), and
+/// `paths.model` is absent (nothing was installed, and a bespoke imported lane would otherwise
+/// claim the entry too).
+///
+/// Failing mutations: delete the `entry.insert("importPlan", …)` line, or delete the
+/// `paths.remove("model")` line.
+#[test]
+fn the_linked_import_stamp_carries_the_plan_identity_and_no_install_path() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, ImportPlanReferenceV1, ImportPlanSummaryV1, ImportPlanV1,
+        CHECKPOINT_IMPORT_CONTRACT_VERSION,
+    };
+    use sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1;
+
+    let checkpoint_id = "linked/root-0123456789abcdef012/kreamania.safetensors";
+    let plan_id = "checkpoint-plan-0123456789abcdef";
+    let semantic_digest = "0".repeat(64);
+    let compiled = CompiledCheckpointV1 {
+        checkpoint_id: checkpoint_id.to_owned(),
+        record: CheckpointCatalogRecordV1 {
+            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+            checkpoint_id: checkpoint_id.to_owned(),
+            plan: ImportPlanReferenceV1 {
+                schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+                plan_id: plan_id.to_owned(),
+                semantic_digest: semantic_digest.clone(),
+                source_binding_identity: checkpoint_id.to_owned(),
+            },
+            summary: ImportPlanSummaryV1 {
+                schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+                family: "krea_2".to_owned(),
+                layer_count: 1,
+                layer_roles: vec!["dit".to_owned()],
+                semantic_digest: semantic_digest.clone(),
+            },
+        },
+        plan: ImportPlanV1 {
+            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+            plan_id: plan_id.to_owned(),
+            family: "krea_2".to_owned(),
+            layers: Vec::new(),
+        },
+    };
+
+    // An entry that arrived carrying an install path — the shape the fetch-import lane produces —
+    // so the removal is exercised rather than merely absent.
+    let queued = json!({
+        "id": "linked_kreamania",
+        "type": "image",
+        "catalogScope": "user",
+        "paths": { "model": "/tmp/should-not-survive" },
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&queued),
+        None,
+        "SANITY: the queued entry is not yet plan-backed"
+    );
+
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled);
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+        Some(checkpoint_id),
+        "without the stamp nothing can select a compiled plan"
+    );
+    assert_eq!(
+        entry["importPlan"]["planId"],
+        Value::String(plan_id.to_owned())
+    );
+    assert_eq!(entry.get("family").and_then(Value::as_str), Some("krea_2"));
+    assert!(
+        entry
+            .get("paths")
+            .and_then(Value::as_object)
+            .and_then(|paths| paths.get("model"))
+            .is_none(),
+        "a linked entry names no install directory: {entry:?}"
+    );
+}

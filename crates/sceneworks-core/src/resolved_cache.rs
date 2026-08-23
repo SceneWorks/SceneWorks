@@ -43,6 +43,22 @@ pub const RESOLVED_CACHE_MAX_BYTES_ENV: &str = "SCENEWORKS_RESOLVED_CACHE_MAX_BY
 pub const RESOLVED_CACHE_INACTIVITY_SECONDS_ENV: &str =
     "SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS";
 pub const RESOLVED_CACHE_STORE_VERSION: u32 = 1;
+/// The journal version a DERIVED entry is written at (sc-20635).
+///
+/// `production` and `derivedFrom` widen the metadata document, and `ResolvedCacheMetadata` is
+/// `deny_unknown_fields`, so a binary that predates them cannot read a derived journal. Declaring
+/// the higher version on exactly the documents that carry the new fields is what makes that a
+/// version statement rather than an unexplained decode failure: a reader that knows about versions
+/// but not about these fields refuses with [`UNSUPPORTED_JOURNAL_VERSION`] naming the version it
+/// found.
+///
+/// A SOURCE-COPY entry keeps writing [`RESOLVED_CACHE_STORE_VERSION`] and, because both new fields
+/// are `skip_serializing_if`-defaulted, its document is byte-for-byte what it was before this
+/// story. That is what makes the bump safe to land warm: an existing cache full of v1 source
+/// copies is still read, still leased and still evicted by this binary.
+pub const RESOLVED_CACHE_DERIVED_STORE_VERSION: u32 = 2;
+/// The typed refusal a journal from a NEWER writer gets, instead of "decode cache metadata: …".
+const UNSUPPORTED_JOURNAL_VERSION: &str = "cache metadata was written by a newer SceneWorks";
 
 const STORE_MARKER: &str = ".sceneworks-resolved-cache-v1";
 const STORE_MARKER_BODY: &[u8] = b"sceneworks-resolved-cache\nschema=1\n";
@@ -316,6 +332,15 @@ impl ResolvedCacheProduction {
 
     pub fn is_derived(&self) -> bool {
         *self == Self::Derived
+    }
+
+    /// The journal version a document with this production mode is written at, and the only
+    /// version a reader accepts for it.
+    fn store_version(&self) -> u32 {
+        match self {
+            Self::SourceCopy => RESOLVED_CACHE_STORE_VERSION,
+            Self::Derived => RESOLVED_CACHE_DERIVED_STORE_VERSION,
+        }
     }
 }
 
@@ -992,7 +1017,9 @@ impl ResolvedCacheStore {
         })?;
         let now = now_seconds()?;
         let mut metadata = ResolvedCacheMetadata {
-            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            // The document's own version, not the store's: only a derived entry carries the
+            // widened fields, so only it declares the higher version.
+            schema_version: production.store_version(),
             cache_key: cache_key.to_owned(),
             production,
             derived_from,
@@ -1590,6 +1617,7 @@ impl ResolvedCacheStore {
         let mut valid = Vec::new();
         let mut had_file = false;
         let mut had_invalid_slot = false;
+        let mut unsupported_version: Option<ResolvedCacheError> = None;
         for slot in 0..=1 {
             let path = entry.join(format!("metadata.{slot}.json"));
             if !path.exists() {
@@ -1613,6 +1641,10 @@ impl ResolvedCacheStore {
                 {
                     valid.push(envelope)
                 }
+                Err(error) if error.to_string().contains(UNSUPPORTED_JOURNAL_VERSION) => {
+                    had_invalid_slot = true;
+                    unsupported_version = Some(error);
+                }
                 _ => had_invalid_slot = true,
             }
         }
@@ -1622,6 +1654,13 @@ impl ResolvedCacheStore {
                 metadata: Box::new(envelope.metadata),
                 had_invalid_slot,
             });
+        }
+        // A journal a NEWER build wrote is not a corrupt store, and saying so matters: the
+        // corrupt classification is the one manual removal is allowed to clear, so reporting a
+        // forward-version entry as corrupt would invite deleting an entry this binary simply
+        // cannot read yet (sc-20635).
+        if let Some(error) = unsupported_version {
+            return Err(error);
         }
         if had_file {
             Err(ResolvedCacheError::new(BOTH_METADATA_SLOTS_CORRUPT))
@@ -2086,7 +2125,9 @@ impl JournalEnvelope {
     fn new(generation: u64, metadata: ResolvedCacheMetadata) -> Result<Self, ResolvedCacheError> {
         let checksum = journal_checksum(generation, &metadata)?;
         Ok(Self {
-            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            // The envelope declares the version of the document it carries: an older reader stops
+            // at the envelope, so a derived document's higher version has to be visible there.
+            schema_version: metadata.schema_version,
             generation,
             checksum,
             metadata,
@@ -2094,7 +2135,7 @@ impl JournalEnvelope {
     }
 
     fn validate(&self) -> Result<(), ResolvedCacheError> {
-        if self.schema_version != RESOLVED_CACHE_STORE_VERSION
+        if self.schema_version != self.metadata.schema_version
             || self.checksum != journal_checksum(self.generation, &self.metadata)?
         {
             return Err(ResolvedCacheError::new(
@@ -2117,14 +2158,14 @@ impl ReceiptEnvelope {
     fn new(metadata: ResolvedCacheMetadata) -> Result<Self, ResolvedCacheError> {
         let checksum = metadata_checksum(&metadata)?;
         Ok(Self {
-            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            schema_version: metadata.schema_version,
             checksum,
             metadata,
         })
     }
 
     fn validate(&self) -> Result<(), ResolvedCacheError> {
-        if self.schema_version != RESOLVED_CACHE_STORE_VERSION
+        if self.schema_version != self.metadata.schema_version
             || self.metadata.state != ResolvedCacheEntryState::Complete
             || self.checksum != metadata_checksum(&self.metadata)?
         {
@@ -2567,7 +2608,7 @@ fn validate_metadata_shape_with(
                 && metadata.session_id.is_none()
         }
     };
-    if metadata.schema_version != RESOLVED_CACHE_STORE_VERSION
+    if metadata.schema_version != metadata.production.store_version()
         || metadata.state == ResolvedCacheEntryState::Evicting
         || cache_key_digest(&metadata.cache_key)? != digest
         || artifact_key != metadata.cache_key
@@ -3143,8 +3184,29 @@ fn metadata_checksum(metadata: &ResolvedCacheMetadata) -> Result<String, Resolve
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
+/// The envelope's declared version, read WITHOUT decoding the document it wraps.
+///
+/// `ResolvedCacheMetadata` is `deny_unknown_fields`, so a journal a future writer widened fails to
+/// decode before anything gets to look at its version. Probing the version first turns that into a
+/// version statement — the reader can say "this was written by a newer SceneWorks" instead of
+/// reporting the store as corrupt, which is the difference between "upgrade" and "your cache is
+/// broken". sc-20635's derived entries are the first documents to use it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JournalVersionProbe {
+    schema_version: u32,
+}
+
 fn read_journal(path: &Path) -> Result<JournalEnvelope, ResolvedCacheError> {
     let body = std::fs::read(path)?;
+    if let Ok(probe) = serde_json::from_slice::<JournalVersionProbe>(&body) {
+        if probe.schema_version > RESOLVED_CACHE_DERIVED_STORE_VERSION {
+            return Err(ResolvedCacheError::new(format!(
+                "{UNSUPPORTED_JOURNAL_VERSION} (journal version {}, newest supported {})",
+                probe.schema_version, RESOLVED_CACHE_DERIVED_STORE_VERSION
+            )));
+        }
+    }
     let envelope: JournalEnvelope = serde_json::from_slice(&body)
         .map_err(|error| ResolvedCacheError::new(format!("decode cache metadata: {error}")))?;
     envelope.validate()?;
