@@ -1,5 +1,6 @@
 /// The xinsir tile ControlNet repo (parity with Python `TILE_CONTROLNET_REPO`).
 const TILE_CONTROLNET_REPO: &str = "xinsir/controlnet-tile-sdxl-1.0";
+const TILE_CONTROLNET_REVISION: &str = "1ae8d9529efe58f7362a987363ff86a7904dc84f";
 const DETAIL_DEFAULT_PROMPT: &str = "ultra detailed, sharp focus, fine texture, high quality";
 const DETAIL_DEFAULT_NEGATIVE: &str = "blurry, soft, lowres, smooth, plastic";
 
@@ -53,34 +54,15 @@ fn engine_dim(value: u32) -> u32 {
     value.div_ceil(8).saturating_mul(8).clamp(512, 2048)
 }
 
-/// Validate and resolve the Candle-only inputs before the detail provider loads. The raw Batch
-/// Detail route stamps a dense request, but the shared standard-tier resolver deliberately falls
-/// back to an installed sibling when the requested tier is absent. That behavior is useful for
-/// ordinary generation and unsafe here: packed SDXL detail is unsupported. Require the actual
-/// resolved standard-layout directory to be `bf16`, then resolve the descriptor-owned components.
-/// Flat custom SDXL directories remain valid dense inputs; they have no packed tier basename and
-/// are already protected by the `quantized` check.
+/// Resolve the descriptor-owned Candle components for the exact physical q4/q8/bf16 tier. Packed
+/// SDXL detail is supported by the same packed-aware UNet/adapter loader as the registered control
+/// route; the shared admission validates the actual tensor headers before construction.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_candle_detail_components(
     request: &ImageRequest,
     settings: &Settings,
-    weights_dir: &Path,
-    quantized: bool,
+    _weights_dir: &Path,
 ) -> WorkerResult<(WeightsSource, WeightsSource, WeightsSource)> {
-    if quantized {
-        return Err(WorkerError::InvalidPayload(
-            "SDXL detail on Candle requires a dense SDXL-family base; packed/request-quantized detail is not supported"
-                .to_owned(),
-        ));
-    }
-    if uses_standard_tier_layout(request)
-        && tier_key_from_resolved_dir(weights_dir) != Some("bf16")
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "SDXL detail on Candle requires the installed dense bf16 model tier; the requested tier resolved to {}",
-            weights_dir.display()
-        )));
-    }
     resolve_sdxl_components(&request.model_manifest_entry, settings)
 }
 
@@ -280,8 +262,10 @@ fn refine_tiled_detail(
             let tile_w = params.tile.min(width - x0);
             let tile_h = params.tile.min(height - y0);
             let crop = image::imageops::crop_imm(source, x0, y0, tile_w, tile_h).to_image();
-            // Run at an engine-valid size (mult-8, ≥512), then resize the refined tile back.
-            let (eng_w, eng_h) = (engine_dim(tile_w), engine_dim(tile_h));
+            // Every tile runs at the one exact request geometry admitted before the model load.
+            // Boundary crops are resized to that square and then restored for feathering; allowing
+            // the final row/column to silently mint a second geometry would bypass the selector.
+            let (eng_w, eng_h) = (engine_dim(params.tile), engine_dim(params.tile));
             let eng_crop = if (eng_w, eng_h) == (tile_w, tile_h) {
                 crop
             } else {
@@ -380,6 +364,7 @@ fn detail_result(
     width: u32,
     height: u32,
     adapter: &str,
+    memory_receipt: Option<&(String, String)>,
 ) -> JsonObject {
     let source_asset_id = request.source_asset_id.clone().unwrap_or_default();
     let detail_settings = json!({
@@ -396,6 +381,11 @@ fn detail_result(
         "width": width,
         "height": height,
     });
+    let mut raw_adapter_settings = json!({ "detail": detail_settings, "realModelInference": true });
+    if let Some((strategy, revision)) = memory_receipt {
+        raw_adapter_settings["memoryStrategy"] = Value::String(strategy.clone());
+        raw_adapter_settings["memoryEvidenceRevision"] = Value::String(revision.clone());
+    }
     let fact = json!({
         "assetId": asset_id,
         "mediaPath": media_rel,
@@ -417,7 +407,7 @@ fn detail_result(
         "loras": [],
         "stylePreset": "",
         "sourceAssetId": source_asset_id,
-        "rawAdapterSettings": { "detail": detail_settings, "realModelInference": true },
+        "rawAdapterSettings": raw_adapter_settings,
         "parents": [source_asset_id],
         "extra": {
             "isDetailEnhanced": true,
@@ -533,6 +523,11 @@ pub(crate) async fn run_image_detail_job(
         "tileControlNetRepo",
         TILE_CONTROLNET_REPO,
     );
+    if control_repo != TILE_CONTROLNET_REPO {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SDXL detail requires the immutable {TILE_CONTROLNET_REPO}@{TILE_CONTROLNET_REVISION} tile ControlNet; arbitrary overrides are not admitted"
+        )));
+    }
     let control_dir =
         huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -547,40 +542,56 @@ pub(crate) async fn run_image_detail_job(
     })?;
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let candle_paths = {
+    let (candle_paths, candle_provider_spec, candle_memory_context, detail_memory_receipt) = {
         // Resolve the exact three descriptor-declared SDXL co-requisites from the Model Manager's
         // installed cache. Detail jobs must never create an ad-hoc cache or download model weights;
         // a packed fallback or missing component fails here, before provider load, with an
         // actionable error.
         let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
-            resolve_candle_detail_components(
-                &request,
-                settings,
-                &weights_dir,
-                quant.is_some(),
-            )?;
-        let mut admission_paths = vec![
-            weights_dir.as_path(),
-            control_file.as_path(),
-            crate::conditioning_fit::weights_source_path(&vae_fp16_fix),
-        ];
-        admission_paths.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
-        admit_candle_base_floor(
-            &model,
-            "SDXL detail",
-            settings,
-            &admission_paths,
-        )
-        .await?;
-        runtime_cuda::providers::sdxl::SdxlDetailPaths {
+            resolve_candle_detail_components(&request, settings, &weights_dir)?;
+        let paths = runtime_cuda::providers::sdxl::SdxlDetailPaths {
             sdxl_base: weights_dir.clone(),
-            tokenizer_clip_l,
-            tokenizer_clip_bigg,
-            vae_fp16_fix,
+            tokenizer_clip_l: tokenizer_clip_l.clone(),
+            tokenizer_clip_bigg: tokenizer_clip_bigg.clone(),
+            vae_fp16_fix: vae_fp16_fix.clone(),
             tile_controlnet: WeightsSource::File(control_file.clone()),
             adapters: adapters.clone(),
-        }
+        };
+        let provider_spec = LoadSpec::new(WeightsSource::Dir(weights_dir.clone()))
+            .with_resolved_route(request.model.clone())
+            .with_component("tokenizer_clip_l", tokenizer_clip_l)
+            .with_component("tokenizer_clip_bigg", tokenizer_clip_bigg)
+            .with_component("vae_fp16_fix", vae_fp16_fix)
+            .with_control(WeightsSource::File(control_file.clone()))
+            .with_adapters(adapters.clone());
+        let control_certified = candle_certified_hf_artifact_path(
+            settings,
+            TILE_CONTROLNET_REPO,
+            TILE_CONTROLNET_REVISION,
+            Path::new("diffusion_pytorch_model.safetensors"),
+            &control_file,
+        );
+        let edge = engine_dim(params.tile);
+        let (evaluation, provider_spec) = admit_sdxl_bespoke_memory(
+            &request,
+            settings,
+            provider_spec,
+            "image_detail",
+            edge,
+            edge,
+            1,
+            false,
+            control_certified,
+        )
+        .await?;
+        let receipt = (
+            format!("{:?}", evaluation.context.selection.strategy),
+            evaluation.context.evidence_revision.clone(),
+        );
+        (paths, provider_spec, evaluation.context, Some(receipt))
     };
+    #[cfg(target_os = "macos")]
+    let detail_memory_receipt: Option<(String, String)> = None;
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -650,7 +661,11 @@ pub(crate) async fn run_image_detail_job(
         };
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let blocking = tokio::task::spawn_blocking(move || {
-            let detail = runtime_cuda::providers::sdxl::SdxlDetail::load(&candle_paths)
+            let detail = runtime_cuda::providers::sdxl::SdxlDetail::load_admitted(
+                &candle_paths,
+                &candle_provider_spec,
+                candle_memory_context,
+            )
                 .map_err(|error| WorkerError::Engine(format!("SDXL detail load failed: {error}")))?;
             let preview_tx = tx.clone();
             let preview = gen_core::PreviewSink::new(move |frame| {
@@ -864,6 +879,7 @@ pub(crate) async fn run_image_detail_job(
         } else {
             "candle_sdxl_detail"
         },
+        detail_memory_receipt.as_ref(),
     );
     update_job(
         api,

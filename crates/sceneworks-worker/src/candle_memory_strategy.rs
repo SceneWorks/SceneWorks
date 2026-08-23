@@ -35,8 +35,10 @@ const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-sco
 const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
 const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
 const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
-const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
+pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15839-candle-pulid-flux-request-scope-v1";
 const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
+pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 pub(crate) struct CandleMemoryEvaluation {
@@ -724,6 +726,10 @@ pub(crate) fn evaluate_shared_image(
         .as_ref()
         .map(|overlay| overlay.as_deref())
         .unwrap_or(overlay);
+    let exact_sdxl_overlay = (engine_id == "sdxl")
+        .then(|| sdxl_provider_overlay(spec))
+        .flatten();
+    let provider_overlay = exact_sdxl_overlay.as_deref().or(provider_overlay);
     evaluate_shared_image_inner(
         engine_id,
         model_id,
@@ -749,6 +755,24 @@ pub(crate) fn evaluate_shared_image(
     )
 }
 
+/// Exact ordered physical overlay identity shared by registered and bespoke SDXL admissions.
+pub(crate) fn sdxl_provider_overlay(spec: &LoadSpec) -> Option<String> {
+    let mut parts = Vec::new();
+    if spec.control.is_some() {
+        parts.push(format!("control:{}", 1 + spec.extra_controls.len()));
+    }
+    if spec.ip_adapter.is_some() {
+        parts.push("ip-adapter".to_owned());
+    }
+    if spec.pid.is_some() {
+        parts.push("pid".to_owned());
+    }
+    if let Some(adapters) = gen_core::adapter_stack_identity(&spec.adapters) {
+        parts.push(adapters);
+    }
+    (!parts.is_empty()).then(|| parts.join("+"))
+}
+
 /// Shared-selector entry point for a bespoke Candle provider whose exact contract is built from
 /// caller-provisioned paths rather than the registered provider catalog.
 #[allow(clippy::too_many_arguments)]
@@ -770,7 +794,13 @@ pub(crate) fn evaluate_shared_bespoke_image(
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
     contract: gen_core::MemoryProviderContract,
+    evidence_revision: &'static str,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    let exact_provider_overlay = if engine_id == "sdxl" {
+        sdxl_provider_overlay(spec)
+    } else {
+        overlay.map(str::to_owned)
+    };
     evaluate_shared_image_inner(
         engine_id,
         model_id,
@@ -780,7 +810,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
         tier_key,
         request_mode_value,
         overlay,
-        overlay,
+        exact_provider_overlay.as_deref(),
         geometry,
         has_reference,
         use_pid,
@@ -792,7 +822,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
         cache_state,
         None,
         Some(contract),
-        Some(PULID_FLUX_REQUEST_EVIDENCE_REVISION),
+        Some(evidence_revision),
     )
 }
 
@@ -810,7 +840,7 @@ fn evaluate_shared_image_inner(
     geometry: MemoryGeometry,
     has_reference: bool,
     use_pid: bool,
-    worker_multipass: bool,
+    _worker_multipass: bool,
     request_has_phases: bool,
     budget: Option<VramBudget>,
     predicted_peak_gb: Option<f64>,
@@ -834,14 +864,11 @@ fn evaluate_shared_image_inner(
         | "mage_flow_edit_base"
         | "mage_flow_edit"
         | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
+        "sdxl" => SDXL_REQUEST_EVIDENCE_REVISION,
         _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
-    // Hires-fix is two independently shaped denoise passes. The generic generation harness still
-    // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
-    // Keep that surface on its established path until it mints one scope per pass.
-    if worker_multipass {
-        return Ok(None);
-    }
+    // A multipass caller supplies the exact final-pass identity here and derives a separate first-
+    // pass context at the generation call site. Never stretch one scope over both geometries.
     let mode =
         request_mode_with_provider_override(engine_id, request_mode_value, provider_mode_override);
     let Some(tier) = numeric_tier(engine_id, tier_key) else {
