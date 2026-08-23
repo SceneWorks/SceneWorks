@@ -3394,6 +3394,120 @@ fn seal_chroma_load_spec(
         .map_err(|error| crate::classify_engine_error("Chroma load preparation", error))
 }
 
+/// Seal exactly the files the Ideogram Candle loader reads. Direct component safetensors,
+/// transformer configs, the tokenizer, TurboTime residual, ordered user adapters, and PiD assets
+/// are load identity; nested files below a component are deliberately ignored because the provider
+/// does not enumerate them.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn seal_ideogram_load_spec(
+    engine_id: &str,
+    artifact_is_certified: bool,
+    spec: &mut LoadSpec,
+) -> WorkerResult<()> {
+    if !matches!(engine_id, "ideogram_4" | "ideogram_4_turbo") || !artifact_is_certified {
+        return Ok(());
+    }
+    let WeightsSource::Dir(root) = &spec.weights else {
+        return Err(WorkerError::InvalidPayload(
+            "Ideogram certified load must resolve to one tier directory".to_owned(),
+        ));
+    };
+    let root = root.clone();
+    let mut files = Vec::new();
+    for component in ["transformer", "unconditional_transformer", "text_encoder", "vae"] {
+        let dir = root.join(component);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Ideogram artifact inventory cannot read {}: {error}",
+                dir.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Ideogram artifact inventory failed: {error}"
+                    ))
+                })?
+                .path();
+            if path.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("safetensors")
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.push(root.join("transformer/config.json"));
+    if engine_id == "ideogram_4" {
+        files.push(root.join("unconditional_transformer/config.json"));
+    } else {
+        files.push(root.join("turbo_lora.safetensors"));
+    }
+    files.push(root.join("tokenizer/tokenizer.json"));
+    files.extend(spec.file_source_paths().into_iter().map(Path::to_path_buf));
+    if let Some(pid) = spec.pid.as_ref() {
+        let WeightsSource::Dir(gemma) = &pid.gemma else {
+            return Err(WorkerError::InvalidPayload(
+                "Ideogram PiD Gemma must resolve to one directory".to_owned(),
+            ));
+        };
+        let merged = gemma.join("gemma-2-2b-it.safetensors");
+        if merged.is_file() {
+            files.push(merged);
+        } else {
+            for entry in std::fs::read_dir(gemma).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "Ideogram PiD inventory cannot read {}: {error}",
+                    gemma.display()
+                ))
+            })? {
+                let path = entry
+                    .map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "Ideogram PiD inventory failed: {error}"
+                        ))
+                    })?
+                    .path();
+                if path.is_file()
+                    && path.extension().and_then(|extension| extension.to_str())
+                        == Some("safetensors")
+                {
+                    files.push(path);
+                }
+            }
+        }
+        files.push(gemma.join("tokenizer.json"));
+    }
+    files = files
+        .into_iter()
+        .map(std::path::absolute)
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Ideogram load member cannot be absolutized: {error}"
+            ))
+        })?;
+    files.sort();
+    files.dedup();
+    if files.is_empty() || files.iter().any(|path| !path.is_file()) {
+        return Err(WorkerError::InvalidPayload(
+            "Ideogram loader-visible artifact inventory is incomplete".to_owned(),
+        ));
+    }
+    let pins = files
+        .iter()
+        .map(|path| {
+            gen_core::PinnedWeightsFile::pin(path)
+                .map_err(|error| crate::classify_engine_error("Ideogram load pin", error))
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "Ideogram load preparation")?;
+    spec.validate_prepared_file_pins()
+        .map_err(|error| crate::classify_engine_error("Ideogram load preparation", error))
+}
+
 #[cfg(test)]
 mod chroma_load_seal_tests {
     use super::*;
@@ -3415,6 +3529,52 @@ mod chroma_load_seal_tests {
 
         std::fs::write(config, b"{\"changed\":true}").expect("mutate artifact member");
         assert!(spec.validate_prepared_file_pins().is_err());
+    }
+}
+
+#[cfg(test)]
+mod ideogram_load_seal_tests {
+    use super::*;
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn seals_only_loader_visible_inventory_and_detects_same_length_mutation() {
+        for (provider, turbo) in [("ideogram_4", false), ("ideogram_4_turbo", true)] {
+            let temp = tempfile::tempdir().expect("temporary Ideogram artifact");
+            let root = temp.path().join("q4");
+            for component in ["transformer", "text_encoder", "vae"] {
+                write(&root.join(component).join("model.safetensors"), b"tensor-a");
+            }
+            write(&root.join("transformer/config.json"), b"{}");
+            write(&root.join("tokenizer/tokenizer.json"), b"{}");
+            if turbo {
+                write(&root.join("turbo_lora.safetensors"), b"turbo---");
+            } else {
+                write(
+                    &root.join("unconditional_transformer/model.safetensors"),
+                    b"tensor-b",
+                );
+                write(&root.join("unconditional_transformer/config.json"), b"{}");
+            }
+            let nested = root.join("transformer/nested/ignored.safetensors");
+            write(&nested, b"ignored-a");
+            let direct = root.join("transformer/model.safetensors");
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root)).with_resolved_route(provider);
+
+            seal_ideogram_load_spec(provider, true, &mut spec).expect("seal Ideogram load");
+            assert!(spec.prepared_file_pins().is_prepared());
+            spec.validate_prepared_file_pins().expect("stable prepared spec");
+
+            write(&nested, b"ignored-b");
+            spec.validate_prepared_file_pins()
+                .expect("provider-ignored nested member stays outside the receipt");
+            write(&direct, b"tensor-z");
+            assert!(spec.validate_prepared_file_pins().is_err());
+        }
     }
 }
 
@@ -3731,9 +3891,12 @@ fn krea_evidence_revision() -> String {
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn optimized_shared_memory_context(
+    engine_id: &str,
     context: gen_core::MemoryRunContext,
 ) -> Option<gen_core::MemoryRunContext> {
-    context.selection.strategy.is_optimized().then_some(context)
+    (context.selection.strategy.is_optimized()
+        || matches!(engine_id, "ideogram_4" | "ideogram_4_turbo"))
+    .then_some(context)
 }
 
 /// The registered FLUX.2-dev generator is a text-to-image provider even when the catalog surface
@@ -3748,6 +3911,8 @@ fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -
         || (engine_id == "flux2_klein_9b"
             && matches!(request_mode, "image_generation" | "text_to_image"))
         || (matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
             && matches!(request_mode, "image_generation" | "text_to_image"))
     {
         "text_to_image"
@@ -4903,7 +5068,7 @@ mod candle_image_load_shape_tests {
             }),
             ..Default::default()
         };
-        let context = optimized_shared_memory_context(resident_context());
+        let context = optimized_shared_memory_context("legacy_provider", resident_context());
         assert!(context.is_none(), "Resident is a fallback sentinel, not an execution scope");
 
         crate::memory_strategy::generate_with_scope(
@@ -4916,6 +5081,15 @@ mod candle_image_load_shape_tests {
 
         assert_eq!(*observed.lock().unwrap(), Some(true));
         assert!(request.memory.unwrap().stage_residency);
+    }
+
+    #[test]
+    fn ideogram_resident_context_remains_request_scoped() {
+        let context = resident_context();
+        assert_eq!(
+            optimized_shared_memory_context("ideogram_4", context.clone()),
+            Some(context)
+        );
     }
 }
 
@@ -6484,6 +6658,7 @@ fn generate_one_with_hires(
     text_style_gain: Option<f32>,
     memory: Option<gen_core::GenerationMemory>,
     memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    hires_first_pass_memory_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
     hires_fix: Option<HiresFixPlan>,
     preview: gen_core::PreviewSink,
@@ -6521,13 +6696,19 @@ fn generate_one_with_hires(
         );
     };
 
-    let first_pass_context = memory_strategy_context.map(|context| {
-        hires_first_pass_context(
-            context,
-            width,
-            height,
-            lane_reference_count(reference.is_some(), multi_references.len(), edit_mask.is_some()),
-        )
+    let first_pass_context = hires_first_pass_memory_context.cloned().or_else(|| {
+        memory_strategy_context.map(|context| {
+            hires_first_pass_context(
+                context,
+                width,
+                height,
+                lane_reference_count(
+                    reference.is_some(),
+                    multi_references.len(),
+                    edit_mask.is_some(),
+                ),
+            )
+        })
     });
     let combined_steps = steps.saturating_add(hires.steps);
     let mut first_progress = |progress| match progress {
@@ -8258,6 +8439,7 @@ async fn generate_stream(
                         text_style_gain,
                         Some(memory_evaluation.memory),
                         Some(&memory_evaluation.context),
+                        None,
                         &enhance,
                         hires_fix,
                         preview.clone(),
@@ -8714,6 +8896,15 @@ mod candle_request_residency_tests {
             assert!(rejects_unverified_shared_memory_fallback(engine, false));
             assert!(!rejects_unverified_shared_memory_fallback(engine, true));
             assert_eq!(verified_only_memory_family_label(engine), Some("Chroma1"));
+        }
+        for engine in ["ideogram_4", "ideogram_4_turbo"] {
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "image_generation"),
+                "text_to_image"
+            );
+            for mode in ["text_to_image", "image_to_image", "edit_image", "image_inpaint"] {
+                assert_eq!(candle_base_memory_request_mode(engine, mode), mode);
+            }
         }
         assert!(!rejects_unverified_shared_memory_fallback(
             "z_image", true
@@ -10292,16 +10483,20 @@ async fn generate_candle_stream(
     // generic source-file adapter bytes here would double-charge adapters, omit PiD's materialized
     // student/Gemma footprint, and let the public `lora` cell stand in for load identity. Other
     // providers retain their established source-byte accounting.
-    let chroma_receipt_priced = matches!(
+    let provider_receipt_priced = matches!(
         engine_id,
-        "chroma1_hd" | "chroma1_base" | "chroma1_flash"
+        "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "ideogram_4"
+            | "ideogram_4_turbo"
     );
-    let shared_predicted_peak_gb = if chroma_receipt_priced {
+    let shared_predicted_peak_gb = if provider_receipt_priced {
         crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
     } else {
         needed
     };
-    let shared_runtime_overlay_bytes = if chroma_receipt_priced {
+    let shared_runtime_overlay_bytes = if provider_receipt_priced {
         0
     } else {
         adapter_resident_bytes
@@ -10316,6 +10511,13 @@ async fn generate_candle_stream(
     let mut generation_memory: Option<gen_core::GenerationMemory> = None;
     let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
     let mut selected_memory_strategy_context: Option<gen_core::MemoryRunContext> = None;
+    let mut hires_first_pass_memory_context: Option<gen_core::MemoryRunContext> = None;
+    let mut ideogram_warm_staged: Option<
+        crate::candle_memory_strategy::CandleWarmStagedEvaluation,
+    > = None;
+    let mut ideogram_hires_first_warm_staged: Option<
+        crate::candle_memory_strategy::CandleWarmStagedEvaluation,
+    > = None;
     let mut adapted_peak_gb: Option<f64> = None;
     // Every adopting provider uses the same worker-owned selector. Static
     // Implemented/unverified declarations do not authorize optimized execution: this bridge always
@@ -10348,13 +10550,28 @@ async fn generate_candle_stream(
     shared_contract_spec =
         attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    // An Ideogram Hires refinement is a fresh one-reference TextToImage/img2img request even when
+    // the caller's first pass was Edit or Inpaint. Admit that final-pass identity independently;
+    // the original mode/reference/geometry is admitted below for the first pass.
+    let shared_admission_mode = if hires_fix.is_some()
+        && matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+    {
+        "image_to_image"
+    } else {
+        shared_request_mode
+    };
     shared_contract_spec = apply_declared_candle_image_load_shape(
         engine_id,
         Some(tier),
-        shared_request_mode,
+        shared_admission_mode,
         &request.model_manifest_entry,
         shared_contract_spec,
         false,
+    );
+    let first_pass_reference_count = lane_reference_count(
+        edit_reference.is_some() || img2img_reference.is_some(),
+        edit_refs.len(),
+        edit_mask.is_some(),
     );
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
@@ -10370,6 +10587,7 @@ async fn generate_candle_stream(
         tier,
     );
     seal_chroma_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
+    seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
@@ -10377,7 +10595,7 @@ async fn generate_candle_stream(
         artifact_is_certified,
         &request.model_manifest_entry,
         tier,
-        shared_request_mode,
+        shared_admission_mode,
         (adapter_count > 0).then_some("lora"),
         gen_core::MemoryGeometry {
             width: memory_width,
@@ -10399,14 +10617,76 @@ async fn generate_candle_stream(
             gen_core::MemoryCacheState::Cold
         },
     )?;
+    let mut first_pass_shared_memory = if hires_fix.is_some()
+        && matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+    {
+        crate::candle_memory_strategy::evaluate_shared_image(
+            engine_id,
+            &request.model,
+            &shared_contract_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            shared_request_mode,
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: first_pass_reference_count,
+            },
+            first_pass_reference_count > 0,
+            use_pid,
+            false,
+            false,
+            budget,
+            shared_predicted_peak_gb,
+            shared_runtime_overlay_bytes,
+            if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+        )?
+    } else {
+        None
+    };
+    if let (Some(final_pass), Some(first_pass)) = (&shared_memory, &mut first_pass_shared_memory) {
+        if final_pass.context.selection != first_pass.context.selection {
+            // The smaller first pass may independently prefer Resident while the larger refinement
+            // requires Staged. Execute both under the more conservative final-pass strategy and
+            // envelope; never weaken a final-pass selection for the first request.
+            if final_pass.context.selection.strategy == gen_core::MemoryStrategy::StagedResidency
+                && first_pass.context.selection.strategy == gen_core::MemoryStrategy::Resident
+            {
+                first_pass.context.selection = final_pass.context.selection;
+                first_pass.context.predicted_peak_bytes = final_pass.context.predicted_peak_bytes;
+                first_pass.context.optimization_authority =
+                    final_pass.context.optimization_authority;
+                first_pass.memory = final_pass.memory;
+            } else {
+                return Err(WorkerError::InvalidPayload(
+                    "Ideogram Hires passes selected crossed memory strategies".to_owned(),
+                ));
+            }
+        }
+    }
     if let Some(evaluation) = shared_memory {
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
+        ideogram_warm_staged = evaluation.warm_staged;
         // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
         // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
         // Resident scope would then overwrite that request memory back to resident in configure_request.
-        selected_memory_strategy_context = optimized_shared_memory_context(evaluation.context);
+        selected_memory_strategy_context =
+            optimized_shared_memory_context(engine_id, evaluation.context);
+    }
+    if let Some(evaluation) = first_pass_shared_memory {
+        ideogram_hires_first_warm_staged = evaluation.warm_staged;
+        hires_first_pass_memory_context =
+            optimized_shared_memory_context(engine_id, evaluation.context);
     }
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
@@ -10771,7 +11051,7 @@ async fn generate_candle_stream(
     if let Some(peak_gb) = incurred_peak {
         crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
     }
-    let memory_strategy_context = selected_memory_strategy_context.or_else(|| memory_strategy_selection.and_then(|selection| {
+    let mut memory_strategy_context = selected_memory_strategy_context.or_else(|| memory_strategy_selection.and_then(|selection| {
         let budget = budget?;
         let predicted_peak_gb = adapted_peak_gb?;
         let turbo_fit = request.model_manifest_entry.get("candle")?.get("turboFit")?;
@@ -10841,7 +11121,7 @@ async fn generate_candle_stream(
     spec = apply_declared_candle_image_load_shape(
         engine_id,
         Some(tier),
-        shared_request_mode,
+        shared_admission_mode,
         &request.model_manifest_entry,
         spec,
         use_sequential,
@@ -10902,13 +11182,120 @@ async fn generate_candle_stream(
     .await;
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("candle {engine_id} load failed"),
-        move |generator, tx, cancel| {
+        move |generator,
+              cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            if is_ideogram {
+                // The cold selector above remains terminal: no provider/cache load occurs when no
+                // exact strategy fits. Once the exact key resolves, bind the run to the cache's
+                // ACTUAL state. If the resident instance was loaded under Sequential, keep that
+                // tighter already-materialized policy using the staged sibling selected by the same
+                // pre-load evidence pass; never promote a warm staged instance back to Resident.
+                let context = memory_strategy_context.as_mut().ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "Ideogram cache access is missing its exact pre-load memory context".to_owned(),
+                    )
+                })?;
+                crate::candle_memory_strategy::bind_ideogram_cache_execution(
+                    context,
+                    &mut generation_memory,
+                    &mut ideogram_warm_staged,
+                    cache_state,
+                    loaded_policy.offload_policy,
+                )?;
+                if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                    crate::candle_memory_strategy::bind_ideogram_cache_execution(
+                        first_pass,
+                        &mut generation_memory,
+                        &mut ideogram_hires_first_warm_staged,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                    )?;
+                }
+                let stages = context.selection.strategy == gen_core::MemoryStrategy::StagedResidency;
+                warm_policy.settle_with_selection(if stages {
+                    crate::execution_planner::GrantOutcome::AlreadyStaged
+                } else {
+                    crate::execution_planner::GrantOutcome::NoStagedCandidate
+                });
+                let cache_state_label = match cache_state {
+                    gen_core::MemoryCacheState::Cold => "cold",
+                    gen_core::MemoryCacheState::Warm => "warm",
+                };
+                let strategy_label = match context.selection.strategy {
+                    gen_core::MemoryStrategy::Resident => "resident",
+                    gen_core::MemoryStrategy::StagedResidency => "staged_residency",
+                    gen_core::MemoryStrategy::BoundedDecode => "bounded_decode",
+                    gen_core::MemoryStrategy::BoundedAttention => "bounded_attention",
+                    gen_core::MemoryStrategy::BoundedTransformerResidency => {
+                        "bounded_transformer_residency"
+                    }
+                };
+                let authority_label = match context.optimization_authority {
+                    gen_core::MemoryOptimizationAuthority::Resident => "resident",
+                    gen_core::MemoryOptimizationAuthority::Estimated => "estimated",
+                    gen_core::MemoryOptimizationAuthority::Calibrated => "calibrated",
+                };
+                let facts = generator
+                    .memory_strategy_contract()
+                    .map(|contract| contract.asset_facts)
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "Ideogram loaded provider omitted its sealed memory contract".to_owned(),
+                        )
+                    })?;
+                tracing::info!(
+                    event = "image_memory_strategy_selected",
+                    route = engine_id,
+                    actual_tier = tier,
+                    strategy = strategy_label,
+                    authority = authority_label,
+                    cache_state = cache_state_label,
+                    predicted_peak_bytes = context.predicted_peak_bytes,
+                    base_bytes = facts.base_bytes,
+                    conditioning_bytes = facts.conditioning_bytes,
+                    transformer_bytes = facts.transformer_bytes,
+                    decoder_bytes = facts.decoder_bytes,
+                    overlay_bytes = facts.overlay_bytes,
+                    external_committed_bytes,
+                    evidence_revision = %context.evidence_revision,
+                    "Ideogram exact receipt-backed memory strategy selected"
+                );
+                emit_event(
+                    "image_memory_strategy_selected",
+                    serde_json::json!({
+                        "backend": "candle",
+                        "route": engine_id,
+                        "actualTier": tier,
+                        "strategy": strategy_label,
+                        "authority": authority_label,
+                        "cacheState": cache_state_label,
+                        "predictedPeakBytes": context.predicted_peak_bytes,
+                        "physicalFloor": {
+                            "baseBytes": facts.base_bytes,
+                            "conditioningBytes": facts.conditioning_bytes,
+                            "transformerBytes": facts.transformer_bytes,
+                            "decoderBytes": facts.decoder_bytes,
+                            "overlayBytes": facts.overlay_bytes,
+                        },
+                        "evidenceRevision": context.evidence_revision,
+                    }),
+                );
+            } else {
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+            }
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
                     crate::face_likeness::build_face_likeness_scorer(dir, source)
@@ -10956,6 +11343,7 @@ async fn generate_candle_stream(
                         text_style_gain,
                         generation_memory,
                         memory_strategy_context.as_ref(),
+                        hires_first_pass_memory_context.as_ref(),
                         &enhance,
                         hires_fix,
                         preview.clone(),

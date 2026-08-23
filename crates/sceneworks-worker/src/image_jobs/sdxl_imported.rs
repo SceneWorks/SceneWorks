@@ -590,6 +590,7 @@ async fn generate_sdxl_imported_stream(
                         None,
                         None,
                         None,
+                        None,
                         &enhance,
                         Some(hires_fix),
                         preview,

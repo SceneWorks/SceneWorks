@@ -36,13 +36,26 @@ const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-req
 const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
 const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
 const CHROMA_REQUEST_EVIDENCE_REVISION: &str = "sc-20788-candle-chroma-staged-residency-v2";
+const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-20789-candle-ideogram-request-scoped-staged-residency-v1";
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
+const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additive.sha256:";
+const IDEOGRAM_TURBO_ADAPTER_PREFIX: &str = "ideogram.turbo-time.sha256:";
+const IDEOGRAM_PID_PREFIX: &str = "ideogram.pid.flux2.sha256:";
 
 fn is_chroma(engine_id: &str) -> bool {
     matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+}
+
+fn is_ideogram(engine_id: &str) -> bool {
+    matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+}
+
+fn is_receipt_priced(engine_id: &str) -> bool {
+    is_chroma(engine_id) || is_ideogram(engine_id)
 }
 
 /// Resolve the public `lora` cell to the exact ordered adapter load identity sealed by the
@@ -92,6 +105,63 @@ fn chroma_provider_overlay_identity(
     }
 }
 
+fn ideogram_provider_overlay_identity(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+    declared_overlay: Option<&str>,
+) -> WorkerResult<Option<String>> {
+    let components = contract.resident_components();
+    let user = components
+        .iter()
+        .filter(|component| component.id.starts_with(IDEOGRAM_ADAPTER_OVERLAY_PREFIX))
+        .collect::<Vec<_>>();
+    let turbo = components
+        .iter()
+        .filter(|component| component.id.starts_with(IDEOGRAM_TURBO_ADAPTER_PREFIX))
+        .collect::<Vec<_>>();
+    let pid = components
+        .iter()
+        .filter(|component| component.id.starts_with(IDEOGRAM_PID_PREFIX))
+        .collect::<Vec<_>>();
+    let valid = |component: &&gen_core::MemoryResidentComponent, prefix: &str| {
+        component.kind == gen_core::MemoryComponentKind::AdapterStack
+            && component.resident_bytes > 0
+            && component.id.len() == prefix.len() + 64
+            && component.id[prefix.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    };
+    if user
+        .iter()
+        .any(|component| !valid(component, IDEOGRAM_ADAPTER_OVERLAY_PREFIX))
+        || turbo
+            .iter()
+            .any(|component| !valid(component, IDEOGRAM_TURBO_ADAPTER_PREFIX))
+        || pid
+            .iter()
+            .any(|component| !valid(component, IDEOGRAM_PID_PREFIX))
+        || (engine_id == "ideogram_4" && !turbo.is_empty())
+        || (engine_id == "ideogram_4_turbo" && turbo.len() != 1)
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Ideogram provider returned malformed or crossed physical adapter receipts".to_owned(),
+        ));
+    }
+    match declared_overlay {
+        None if user.is_empty() => Ok(None),
+        Some("lora") if user.len() == 1 => Ok(Some(user[0].id.clone())),
+        None => Err(WorkerError::InvalidPayload(
+            "Ideogram plain load crossed a provider user-adapter receipt".to_owned(),
+        )),
+        Some("lora") => Err(WorkerError::InvalidPayload(
+            "Ideogram adapter load is missing its singular exact provider receipt".to_owned(),
+        )),
+        Some(other) => Err(WorkerError::InvalidPayload(format!(
+            "Ideogram does not advertise provider overlay {other}"
+        ))),
+    }
+}
+
 fn validate_chroma_asset_facts(contract: &gen_core::MemoryProviderContract) -> WorkerResult<()> {
     let facts = contract.asset_facts;
     let complete = facts.conditioning_bytes > 0
@@ -111,6 +181,36 @@ fn validate_chroma_asset_facts(contract: &gen_core::MemoryProviderContract) -> W
     Ok(())
 }
 
+fn validate_ideogram_asset_facts(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+    use_pid: bool,
+) -> WorkerResult<()> {
+    let facts = contract.asset_facts;
+    let pid_receipts = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.id.starts_with(IDEOGRAM_PID_PREFIX))
+        .count();
+    let complete = facts.conditioning_bytes > 0
+        && facts.transformer_bytes > 0
+        && facts.decoder_bytes > 0
+        && facts.base_bytes
+            == facts
+                .conditioning_bytes
+                .saturating_add(facts.transformer_bytes)
+                .saturating_add(facts.decoder_bytes)
+        && contract.auxiliary_resident_bytes() == facts.overlay_bytes
+        && pid_receipts == usize::from(use_pid)
+        && matches!(engine_id, "ideogram_4" | "ideogram_4_turbo");
+    if !complete {
+        return Err(WorkerError::InvalidPayload(
+            "Ideogram provider returned incomplete or crossed materialized asset facts".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn chroma_base_phase_floor_bytes(contract: &gen_core::MemoryProviderContract) -> u64 {
     let facts = contract.asset_facts;
     facts
@@ -119,10 +219,74 @@ fn chroma_base_phase_floor_bytes(contract: &gen_core::MemoryProviderContract) ->
         .max(facts.decoder_bytes)
 }
 
+fn receipt_base_phase_floor_bytes(contract: &gen_core::MemoryProviderContract) -> u64 {
+    chroma_base_phase_floor_bytes(contract)
+}
+
+fn scale_ideogram_hires_envelope(
+    engine_id: &str,
+    mode: &MemoryMode,
+    manifest: &JsonObject<String, Value>,
+    geometry: MemoryGeometry,
+    bytes: u64,
+) -> u64 {
+    if !is_ideogram(engine_id) || *mode != MemoryMode::ImageToImage {
+        return bytes;
+    }
+    let measured_pixels = manifest
+        .get("candle")
+        .and_then(|value| value.get("vramMeasuredPixels"))
+        .and_then(Value::as_u64)
+        .filter(|pixels| *pixels > 0)
+        .unwrap_or(1_048_576);
+    let request_pixels = u64::from(geometry.width).saturating_mul(u64::from(geometry.height));
+    let numerator = request_pixels.max(measured_pixels);
+    bytes
+        .saturating_mul(numerator)
+        .saturating_add(measured_pixels - 1)
+        / measured_pixels
+}
+
 pub(crate) struct CandleMemoryEvaluation {
     pub memory: Option<GenerationMemory>,
     pub context: MemoryRunContext,
     pub predicted_peak_gb: f64,
+    /// The exact lower-peak staged candidate for a receipt-priced provider. A warm cache entry may
+    /// already have been loaded under `Sequential` even when this request's least-cost cold
+    /// selection is Resident. In that case the cache policy requires the tighter loaded shape; this
+    /// pre-admitted sibling lets the caller preserve that shape without inventing a post-load rung.
+    pub warm_staged: Option<CandleWarmStagedEvaluation>,
+}
+
+pub(crate) struct CandleWarmStagedEvaluation {
+    pub memory: GenerationMemory,
+    pub context: MemoryRunContext,
+}
+
+/// Bind an already admitted Ideogram request to the cache entry that will actually execute it.
+/// A warm entry loaded under Sequential is a lower-peak shape than a newly selected Resident
+/// request, so execution must retain the exact staged sibling selected during pre-load admission.
+pub(crate) fn bind_ideogram_cache_execution(
+    context: &mut MemoryRunContext,
+    memory: &mut Option<GenerationMemory>,
+    warm_staged: &mut Option<CandleWarmStagedEvaluation>,
+    cache_state: MemoryCacheState,
+    loaded_offload_policy: gen_core::OffloadPolicy,
+) -> WorkerResult<()> {
+    if loaded_offload_policy == gen_core::OffloadPolicy::Sequential
+        && context.selection.strategy == MemoryStrategy::Resident
+    {
+        let staged = warm_staged.take().ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Ideogram warm Sequential cache entry has no exact pre-admitted staged strategy"
+                    .to_owned(),
+            )
+        })?;
+        *memory = Some(staged.memory);
+        *context = staged.context;
+    }
+    context.cache_state = cache_state;
+    Ok(())
 }
 
 #[cfg(any(
@@ -630,12 +794,14 @@ fn synthesize_estimate_floors(
     request_evidence_revision: &str,
 ) -> Vec<(MemorySelection, MemoryEvidence)> {
     let calibration = contract.calibration.as_ref();
-    let staged_floor_bytes = if is_chroma(engine_id) {
-        let structural = chroma_base_phase_floor_bytes(contract)
+    let staged_floor_bytes = if is_receipt_priced(engine_id) {
+        let structural = receipt_base_phase_floor_bytes(contract)
             .saturating_add((crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64);
         let declared = crate::vram_gate::predicted_sequential_peak_gb(manifest, tier_key)
             .map(|gb| (gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64)
             .unwrap_or(0);
+        let declared =
+            scale_ideogram_hires_envelope(engine_id, &mode.mode, manifest, geometry, declared);
         contract
             .predicted_peak_from_base(declared.max(structural))
             .predicted_peak_bytes()
@@ -650,7 +816,7 @@ fn synthesize_estimate_floors(
     // Chroma claims a staged saving only when the receipt-derived largest phase plus exact
     // auxiliaries is genuinely below its receipt-derived co-resident floor. Equal or crossed rows
     // are not an optimized strategy and cannot become selectable through a tier label.
-    if is_chroma(engine_id) && staged_floor_bytes >= resident_peak_bytes {
+    if is_receipt_priced(engine_id) && staged_floor_bytes >= resident_peak_bytes {
         return Vec::new();
     }
     let mut synthesized = Vec::new();
@@ -934,12 +1100,13 @@ fn evaluate_shared_image_inner(
         | "mage_flow_edit"
         | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => CHROMA_REQUEST_EVIDENCE_REVISION,
+        "ideogram_4" | "ideogram_4_turbo" => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
         _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
     // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
     // Keep that surface on its established path until it mints one scope per pass.
-    if worker_multipass {
+    if worker_multipass && !is_ideogram(engine_id) {
         return Ok(None);
     }
     let mode =
@@ -950,17 +1117,17 @@ fn evaluate_shared_image_inner(
     let Some(budget) = budget else {
         return Ok(None);
     };
-    let chroma = is_chroma(engine_id);
+    let receipt_priced = is_receipt_priced(engine_id);
     let Some(resident_peak_gb) = predicted_peak_gb else {
-        if chroma && artifact_is_certified {
+        if receipt_priced && artifact_is_certified {
             return Err(WorkerError::InvalidPayload(format!(
                 "{engine_id}/{tier_key} is missing its structural resident peak row"
             )));
         }
         return Ok(None);
     };
-    if chroma && !artifact_is_certified {
-        // Chroma's optimized contract is tied to the immutable turnkey revision and physical tier.
+    if receipt_priced && !artifact_is_certified {
+        // Receipt-priced optimized contracts are tied to the immutable turnkey revision and physical tier.
         // An imported/custom root retains the historical resident path and receives no estimate.
         return Ok(None);
     }
@@ -978,9 +1145,12 @@ fn evaluate_shared_image_inner(
             contract
         }
     };
-    let provider_overlay = if chroma {
+    let provider_overlay = if is_chroma(engine_id) {
         validate_chroma_asset_facts(&contract)?;
         chroma_provider_overlay_identity(&contract, provider_overlay)?
+    } else if is_ideogram(engine_id) {
+        validate_ideogram_asset_facts(engine_id, &contract, use_pid)?;
+        ideogram_provider_overlay_identity(engine_id, &contract, provider_overlay)?
     } else {
         provider_overlay.map(str::to_owned)
     };
@@ -1020,8 +1190,14 @@ fn evaluate_shared_image_inner(
         inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned(),
         harness_version: String::new(),
         predicted_peak_bytes: {
-            let declared = (resident_peak_gb * BYTES_PER_GIB).ceil() as u64;
-            if chroma {
+            let declared = scale_ideogram_hires_envelope(
+                engine_id,
+                &mode.mode,
+                manifest,
+                geometry,
+                (resident_peak_gb * BYTES_PER_GIB).ceil() as u64,
+            );
+            if receipt_priced {
                 let structural = contract
                     .asset_facts
                     .base_bytes
@@ -1086,7 +1262,7 @@ fn evaluate_shared_image_inner(
     // the common selector performs its fit check. Legacy resident estimates already include the
     // caller's source-byte charge and must not be adjusted twice. Chroma instead ignores that raw
     // value and uses the provider receipt's materialized adapter + PiD aggregate here and above.
-    let runtime_overlay_bytes = if chroma {
+    let runtime_overlay_bytes = if receipt_priced {
         contract.asset_facts.overlay_bytes
     } else {
         runtime_overlay_bytes
@@ -1178,66 +1354,78 @@ fn evaluate_shared_image_inner(
             },
         )
         .collect::<Vec<_>>();
+    let request_scope = RequestScope {
+        resolved_route: engine_id,
+        backend: "candle",
+        tier,
+        mode: &mode.scope_key,
+        overlay: provider_overlay,
+        geometry,
+        // sc-17774: one mechanism, same as every other lane. `unwrap_or_default` fails closed.
+        expected_closure_digest: &live_closure_digest,
+    };
+    let selector_budget = Some(Budget {
+        available_gb: budget.free_gb,
+        reclaimable_gb: 0.0,
+        total_gb: budget.total_gb,
+        reserved_headroom_gb: 2.0,
+    });
     let selected = crate::memory_strategy::select_strategy(
-        RequestScope {
-            resolved_route: engine_id,
-            backend: "candle",
-            tier,
-            mode: &mode.scope_key,
-            overlay: provider_overlay,
-            geometry,
-            // sc-17774: one mechanism, same as every other lane. `unwrap_or_default` fails closed.
-            expected_closure_digest: &live_closure_digest,
-        },
+        request_scope,
         &contract,
-        Some(Budget {
-            available_gb: budget.free_gb,
-            reclaimable_gb: 0.0,
-            total_gb: budget.total_gb,
-            reserved_headroom_gb: 2.0,
-        }),
+        selector_budget,
         &candidates,
     );
     let Selection::Selected { selection, .. } = selected else {
-        if chroma {
+        if receipt_priced {
             return Err(WorkerError::InvalidPayload(format!(
                 "{engine_id} has no exact resident or staged strategy that fits the sealed provider receipt"
             )));
         }
         return Ok(None);
     };
-    let matches_selection = |item: &MemoryEvidence| {
-        item.key.strategy == selection.strategy
-            && item.key.parameters == selection.parameters
-            && item.key.tier == selection.tier
+    let evidence_for_selection = |selection: MemorySelection| {
+        let matches_selection = |item: &&MemoryEvidence| {
+            item.key.strategy == selection.strategy
+                && item.key.parameters == selection.parameters
+                && item.key.tier == selection.tier
+        };
+        if selection.strategy == MemoryStrategy::Resident {
+            Some((&resident, false))
+        } else if let Some(item) = verified.iter().find(matches_selection) {
+            Some((item, false))
+        } else {
+            synthesized
+                .iter()
+                .map(|(_, item)| item)
+                .find(matches_selection)
+                // sc-18097: synthesized floors are estimate-scoped, never calibrated evidence.
+                .map(|item| (item, true))
+        }
     };
-    let (selected_evidence, estimate_scoped) = if selection.strategy == MemoryStrategy::Resident {
-        (&resident, false)
-    } else if let Some(item) = verified.iter().find(|item| matches_selection(item)) {
-        (item, false)
-    } else if let Some((_, item)) = synthesized.iter().find(|(_, item)| matches_selection(item)) {
-        // sc-18097: a synthesized floor was selected — legacy-scoped telemetry below, exactly like
-        // the resident estimate (no measured harness version to claim).
-        (item, true)
-    } else {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{engine_id} selected a memory strategy without exact packaged evidence"
-        )));
-    };
+    let (selected_evidence, estimate_scoped) =
+        evidence_for_selection(selection).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} selected a memory strategy without exact packaged evidence"
+            ))
+        })?;
     let to_bytes = |gb: f64| (gb * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64;
-    Ok(Some(CandleMemoryEvaluation {
-        memory: memory_for_selection(&contract, selection),
-        predicted_peak_gb: selected_evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB,
-        context: MemoryRunContext {
+    let context_for = |selection: MemorySelection,
+                       selected_evidence: &MemoryEvidence,
+                       estimate_scoped: bool|
+     -> MemoryRunContext {
+        MemoryRunContext {
             selection,
-            optimization_authority: if estimate_scoped {
+            optimization_authority: if selection.strategy == MemoryStrategy::Resident {
+                gen_core::MemoryOptimizationAuthority::Resident
+            } else if estimate_scoped {
                 gen_core::MemoryOptimizationAuthority::Estimated
             } else {
                 gen_core::MemoryOptimizationAuthority::Calibrated
             },
             calibration_abi: selected_evidence.calibration_abi,
             calibration_fingerprint: selected_evidence.calibration_fingerprint.clone(),
-            mode: mode.mode,
+            mode: mode.mode.clone(),
             load_shape: contract.load_shape,
             has_reference,
             use_pid,
@@ -1258,7 +1446,58 @@ fn evaluate_shared_image_inner(
             } else {
                 selected_evidence.harness_version.clone()
             },
-        },
+        }
+    };
+    let selected_context = context_for(selection, selected_evidence, estimate_scoped);
+
+    // A loaded Sequential cache entry is a tighter peak shape than a new Resident request. Keep an
+    // exact, independently selected staged sibling so the cache callback can honor that already
+    // materialized shape. This is not an admission bypass: the same authoritative request scope,
+    // evidence set, estimate margin, and budget select it here before the load/cache access.
+    let warm_staged = if is_ideogram(engine_id) {
+        let staged_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                contract.engages(
+                    candidate.selection.strategy,
+                    MemoryStrategy::StagedResidency,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        match crate::memory_strategy::select_strategy(
+            request_scope,
+            &contract,
+            selector_budget,
+            &staged_candidates,
+        ) {
+            Selection::Selected {
+                selection: staged_selection,
+                ..
+            } => {
+                let (evidence, estimate_scoped) = evidence_for_selection(staged_selection)
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "{engine_id} selected a warm staged strategy without exact evidence"
+                        ))
+                    })?;
+                contract.generation_memory(&staged_selection).map(|memory| {
+                    CandleWarmStagedEvaluation {
+                        memory,
+                        context: context_for(staged_selection, evidence, estimate_scoped),
+                    }
+                })
+            }
+            Selection::Reject { .. } | Selection::Unverified { .. } => None,
+        }
+    } else {
+        None
+    };
+    Ok(Some(CandleMemoryEvaluation {
+        memory: memory_for_selection(&contract, selection),
+        predicted_peak_gb: selected_evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB,
+        context: selected_context,
+        warm_staged,
     }))
 }
 
@@ -1327,6 +1566,104 @@ mod tests {
 
     fn gib(value: u64) -> u64 {
         value.saturating_mul(BYTES_PER_GIB as u64)
+    }
+
+    fn ideogram_cache_context(strategy: MemoryStrategy) -> MemoryRunContext {
+        MemoryRunContext {
+            selection: MemorySelection {
+                strategy,
+                parameters: Default::default(),
+                tier: numeric_tier("ideogram_4", "q4").expect("q4 tier"),
+            },
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Estimated,
+            calibration_abi: 0,
+            calibration_fingerprint: String::new(),
+            mode: MemoryMode::TextToImage,
+            load_shape: gen_core::LoadShape::EagerMaterialization,
+            has_reference: false,
+            use_pid: false,
+            has_phases: false,
+            geometry: MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            overlay: None,
+            budget: gen_core::MemoryBudget {
+                total_bytes: gib(48),
+                committed_bytes: gib(4),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: gib(2),
+            },
+            predicted_peak_bytes: gib(if strategy == MemoryStrategy::Resident {
+                38
+            } else {
+                34
+            }),
+            cache_state: MemoryCacheState::Cold,
+            evidence_revision: IDEOGRAM_REQUEST_EVIDENCE_REVISION.to_owned(),
+        }
+    }
+
+    #[test]
+    fn ideogram_cache_binding_reports_actual_state_and_preserves_a_loaded_staged_shape() {
+        let mut context = ideogram_cache_context(MemoryStrategy::Resident);
+        let staged_memory = GenerationMemory {
+            stage_residency: true,
+            ..Default::default()
+        };
+        let mut memory = None;
+        let mut staged = Some(CandleWarmStagedEvaluation {
+            memory: staged_memory,
+            context: ideogram_cache_context(MemoryStrategy::StagedResidency),
+        });
+        bind_ideogram_cache_execution(
+            &mut context,
+            &mut memory,
+            &mut staged,
+            MemoryCacheState::Warm,
+            gen_core::OffloadPolicy::Sequential,
+        )
+        .expect("warm staged cache binding");
+        assert_eq!(context.selection.strategy, MemoryStrategy::StagedResidency);
+        assert_eq!(context.cache_state, MemoryCacheState::Warm);
+        assert_eq!(memory, Some(staged_memory));
+        assert!(staged.is_none(), "the exact fallback is once-only");
+
+        let mut cold_context = ideogram_cache_context(MemoryStrategy::Resident);
+        let mut cold_memory = None;
+        let mut no_fallback = None;
+        bind_ideogram_cache_execution(
+            &mut cold_context,
+            &mut cold_memory,
+            &mut no_fallback,
+            MemoryCacheState::Cold,
+            gen_core::OffloadPolicy::Resident,
+        )
+        .expect("cold resident binding");
+        assert_eq!(cold_context.cache_state, MemoryCacheState::Cold);
+        assert_eq!(cold_context.selection.strategy, MemoryStrategy::Resident);
+        assert_eq!(cold_memory, None);
+    }
+
+    #[test]
+    fn ideogram_warm_sequential_binding_fails_closed_without_exact_staged_evidence() {
+        let mut context = ideogram_cache_context(MemoryStrategy::Resident);
+        let mut memory = None;
+        let mut missing = None;
+        let error = bind_ideogram_cache_execution(
+            &mut context,
+            &mut memory,
+            &mut missing,
+            MemoryCacheState::Warm,
+            gen_core::OffloadPolicy::Sequential,
+        )
+        .expect_err("missing warm staged evidence must refuse");
+        assert!(error.to_string().contains("no exact pre-admitted staged"));
+        assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+        assert_eq!(context.cache_state, MemoryCacheState::Cold);
     }
 
     fn chroma_probe_contract(
@@ -1420,6 +1757,61 @@ mod tests {
         .as_object()
         .expect("Chroma structural manifest")
         .clone()
+    }
+
+    fn ideogram_probe_contract(
+        provider: &str,
+        user_identity: Option<&str>,
+        include_turbo: bool,
+        include_pid: bool,
+    ) -> gen_core::MemoryProviderContract {
+        let mut contract = chroma_probe_contract(None, 0, 0);
+        contract.provider_id = provider.to_owned();
+        let mut components = Vec::new();
+        if let Some(identity) = user_identity {
+            components.push(gen_core::MemoryResidentComponent {
+                id: identity.to_owned(),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: gib(2),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        if include_turbo {
+            components.push(gen_core::MemoryResidentComponent {
+                id: format!("{IDEOGRAM_TURBO_ADAPTER_PREFIX}{}", "b".repeat(64)),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: gib(1),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        if include_pid {
+            components.push(gen_core::MemoryResidentComponent {
+                id: format!("{IDEOGRAM_PID_PREFIX}{}", "c".repeat(64)),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: gib(3),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        let overlay_bytes = components
+            .iter()
+            .map(|component| component.resident_bytes)
+            .sum();
+        contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![
+                gen_core::MemoryFormulaVariable::AssetBytes,
+                gen_core::MemoryFormulaVariable::PixelCount,
+                gen_core::MemoryFormulaVariable::BatchCount,
+                gen_core::MemoryFormulaVariable::ConditioningTokenCount,
+                gen_core::MemoryFormulaVariable::OverlayBytes,
+            ],
+            resident_components: components,
+        };
+        contract.asset_facts.overlay_bytes = overlay_bytes;
+        contract
     }
 
     #[test]
@@ -1538,6 +1930,132 @@ mod tests {
             .err()
             .expect("typed adapter/PiD bytes must equal the aggregate footprint");
         assert!(crossed.to_string().contains("materialized asset facts"));
+    }
+
+    #[test]
+    fn ideogram_selects_exact_receipt_priced_staged_and_refuses_crossed_auxiliaries() {
+        let identity = format!("{IDEOGRAM_ADAPTER_OVERLAY_PREFIX}{}", "a".repeat(64));
+        let contract = ideogram_probe_contract("ideogram_4_turbo", Some(&identity), true, true);
+        let manifest = chroma_structural_manifest();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-ideogram-q4")))
+            .with_resolved_route("ideogram_4_turbo");
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let evaluate = |free_gb: f64, contract| {
+            evaluate_shared_image_inner(
+                "ideogram_4_turbo",
+                "ideogram_4_turbo",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                Some("lora"),
+                Some("lora"),
+                geometry,
+                false,
+                true,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                }),
+                crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
+                gib(80),
+                MemoryCacheState::Warm,
+                Some("text_to_image"),
+                Some(contract),
+                Some(IDEOGRAM_REQUEST_EVIDENCE_REVISION),
+            )
+        };
+
+        let staged = evaluate(23.0, contract.clone())
+            .expect("exact Ideogram evaluation")
+            .expect("staged strategy fits");
+        assert_eq!(
+            staged.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert_eq!(staged.context.overlay.as_deref(), Some(identity.as_str()));
+        assert_eq!(staged.context.cache_state, MemoryCacheState::Warm);
+        assert_eq!(
+            staged.context.optimization_authority,
+            gen_core::MemoryOptimizationAuthority::Estimated
+        );
+
+        let hires = evaluate_shared_image_inner(
+            "ideogram_4_turbo",
+            "ideogram_4_turbo",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "image_to_image",
+            Some("lora"),
+            Some("lora"),
+            MemoryGeometry {
+                width: 2048,
+                height: 2048,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            true,
+            true,
+            false,
+            Some(VramBudget {
+                free_gb: 80.0,
+                total_gb: 128.0,
+            }),
+            crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
+            gib(80),
+            MemoryCacheState::Cold,
+            Some("image_to_image"),
+            Some(contract.clone()),
+            Some(IDEOGRAM_REQUEST_EVIDENCE_REVISION),
+        )
+        .expect("Hires structural estimate")
+        .expect("scaled Hires staged strategy fits");
+        assert_eq!(hires.context.mode, MemoryMode::ImageToImage);
+        assert_eq!(
+            hires.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert_eq!(hires.context.predicted_peak_bytes, gib(58));
+
+        assert!(evaluate(20.0, contract.clone()).is_err());
+        assert!(evaluate(
+            23.0,
+            ideogram_probe_contract("ideogram_4_turbo", Some(&identity), false, true),
+        )
+        .err()
+        .expect("missing mandatory TurboTime must fail")
+        .to_string()
+        .contains("physical adapter receipts"));
+        assert!(evaluate(
+            23.0,
+            ideogram_probe_contract("ideogram_4_turbo", Some(&identity), true, false),
+        )
+        .err()
+        .expect("missing PiD receipt must fail")
+        .to_string()
+        .contains("materialized asset facts"));
+        let crossed = format!("{CHROMA_ADAPTER_OVERLAY_PREFIX}{}", "d".repeat(64));
+        assert!(evaluate(
+            23.0,
+            ideogram_probe_contract("ideogram_4_turbo", Some(&crossed), true, true),
+        )
+        .err()
+        .expect("crossed user adapter receipt must fail")
+        .to_string()
+        .contains("singular exact provider receipt"));
     }
 
     #[test]
@@ -2301,6 +2819,11 @@ mod tests {
         let roomy = evaluate(64.0).expect("resident admits on a roomy card");
         assert_eq!(roomy.context.selection.strategy, MemoryStrategy::Resident);
         assert!(roomy.memory.is_none());
+        assert_eq!(
+            roomy.context.optimization_authority,
+            gen_core::MemoryOptimizationAuthority::Resident,
+            "a live resident estimate must not be labeled as calibrated evidence"
+        );
 
         // sc-18097 review (major): the floors are gated on artifact certification, the SAME
         // conjunct that gates the packaged records. The manifest rows describe the certified

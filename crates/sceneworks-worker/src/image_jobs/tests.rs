@@ -816,6 +816,7 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
         None,
         None,
         None,
+        None,
         &PromptEnhance::default(),
         Some(HiresFixPlan {
             width: 8,
@@ -897,6 +898,7 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
         None,
         None,
         false,
+        None,
         None,
         None,
         None,
@@ -1002,6 +1004,7 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         None,
         None,
         context,
+        None,
         &PromptEnhance::default(),
         Some(hires_fix),
         gen_core::PreviewSink::default(),
@@ -1033,12 +1036,11 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
 /// that differs from the admitted geometry, and gen-core's shared safety check rejects a
 /// `has_reference` disagreeing with `reference_count > 0`.
 ///
-/// Hires fix runs TWO passes under ONE admission: the base-size first pass, then the upscaled
-/// refinement. Admission describes the upscaled pass (it sets the memory ceiling), so running the
-/// first pass under that same context declared the WRONG width/height (and, with no request
-/// reference, the wrong count) and refused the first pass of every hires render on a scope-adopting
-/// provider. This grades what each pass DECLARED against what that same pass SENT, so neither side
-/// can be restated wrongly without the test failing.
+/// Hires fix runs two pass-specific admissions: the base-size first pass, then the upscaled
+/// refinement. The final pass sets the memory ceiling, while the first retains its own
+/// mode/reference/geometry identity under the same conservative strategy. This grades what each
+/// pass declared against what that same pass sent, so neither side can be restated wrongly without
+/// the test failing.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1048,7 +1050,7 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     let generator = HiresProbeGenerator::new();
     let cancel = CancelFlag::new();
     // The admission the lane makes for a hires job: the FINAL pass's geometry.
-    let admitted = hires_memory_context(gen_core::MemorySelection {
+    let mut admitted = hires_memory_context(gen_core::MemorySelection {
         strategy: gen_core::MemoryStrategy::Resident,
         parameters: Default::default(),
         tier: gen_core::MemoryNumericTier {
@@ -1057,6 +1059,9 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
             component_precision_floors: &[],
         },
     });
+    admitted.mode = gen_core::MemoryMode::ImageToImage;
+    let mut first_pass = hires_first_pass_context(&admitted, 4, 4, 0);
+    first_pass.mode = gen_core::MemoryMode::TextToImage;
 
     generate_one_with_hires(
         &generator,
@@ -1082,6 +1087,7 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
         None,
         None,
         Some(&admitted),
+        Some(&first_pass),
         &PromptEnhance::default(),
         Some(HiresFixPlan {
             width: 8,
@@ -1140,6 +1146,8 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     }
     // The final pass is the one admission was made for, and it is unchanged.
     assert_eq!(contexts[1].geometry, admitted.geometry);
+    assert_eq!(contexts[0].mode, gen_core::MemoryMode::TextToImage);
+    assert_eq!(contexts[1].mode, gen_core::MemoryMode::ImageToImage);
 }
 
 /// Production-seam regression for the normal imported-Krea lane. This invokes the exact driver

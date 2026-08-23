@@ -417,6 +417,12 @@ const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
     MemoryRouteMode::StyleVariations,
 ];
 const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
+const IDEOGRAM_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::ImageToImage,
+    MemoryRouteMode::EditImage,
+    MemoryRouteMode::ImageInpaint,
+];
 const QWEN_EDIT_MODES: &[MemoryRouteMode] =
     &[MemoryRouteMode::EditImage, MemoryRouteMode::CharacterImage];
 const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
@@ -843,6 +849,27 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "chroma1_flash",
         tiers: BF16_Q4_Q8,
         modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    // SC-20789: Ideogram Base and Turbo share the public request surface but retain distinct
+    // provider receipts (Base owns two DiTs; Turbo owns one DiT plus its mandatory bundled
+    // TurboTime adapter). Native/PiD and ordered user-adapter loads are exact typed profiles.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "ideogram_4",
+        tiers: BF16_Q4_Q8,
+        modes: IDEOGRAM_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "ideogram_4_turbo",
+        tiers: BF16_Q4_Q8,
+        modes: IDEOGRAM_MODES,
         load_profiles: PLAIN_LORA_PID,
         requires_sequential_selection: false,
         legacy_shaping: false,
@@ -1278,6 +1305,11 @@ fn expected_provider_mode(
         ) if (2..=8).contains(&context.reference_count) => "edit_image",
         ("flux2_dev_control", MemoryRouteMode::TextToImage) if context.reference_count == 1 => {
             "text_to_image"
+        }
+        ("ideogram_4" | "ideogram_4_turbo", MemoryRouteMode::ImageInpaint)
+            if context.reference_count == 2 =>
+        {
+            "edit_image"
         }
         (_, MemoryRouteMode::EditImage) => "edit_image",
         (_, MemoryRouteMode::CharacterImage) if context.reference_count == 1 => "image_to_image",
@@ -6999,6 +7031,8 @@ mod tests {
                 "chroma1_base",
                 "chroma1_flash",
                 "chroma1_hd",
+                "ideogram_4",
+                "ideogram_4_turbo",
                 "krea_2_edit",
                 "krea_2_raw",
                 "krea_2_turbo_edit",
@@ -7006,7 +7040,7 @@ mod tests {
             ]
             .into()
         );
-        assert_eq!(witnesses.len(), 72);
+        assert_eq!(witnesses.len(), 168);
         assert!(witnesses.iter().all(|witness| {
             matches!(
                 witness.tier,
@@ -7131,6 +7165,132 @@ mod tests {
                 &crossed_route,
                 context(false),
                 |_| Some(staged_contract("chroma1_hd")),
+            ),
+            DeclaredCandleStrategyContract::Refused
+        ));
+    }
+
+    #[test]
+    fn shipped_ideogram_candle_declarations_bind_exact_modes_references_tiers_and_profiles() {
+        let contexts = [
+            (MemoryRouteMode::TextToImage, 0, "text_to_image"),
+            (MemoryRouteMode::TextToImage, 1, "image_to_image"),
+            (MemoryRouteMode::ImageToImage, 1, "image_to_image"),
+            (MemoryRouteMode::EditImage, 1, "edit_image"),
+            (MemoryRouteMode::ImageInpaint, 2, "edit_image"),
+        ];
+        for provider in ["ideogram_4", "ideogram_4_turbo"] {
+            let manifest = shipped_model(provider);
+            assert_eq!(
+                manifest["candle"]["memoryStrategyContract"]["exhaustive"],
+                true
+            );
+            for tier in ["bf16", "q4", "q8"] {
+                let resident = manifest["candle"]["vramGbByTier"][tier]
+                    .as_f64()
+                    .expect("Ideogram resident row");
+                let staged = manifest["candle"]["sequentialPeakGb"][tier]
+                    .as_f64()
+                    .expect("Ideogram staged row");
+                assert!(staged > 0.0 && staged < resident, "{provider}:{tier}");
+                for profile in [
+                    MemoryRouteLoadProfile::Plain,
+                    MemoryRouteLoadProfile::Lora,
+                    MemoryRouteLoadProfile::Pid,
+                    MemoryRouteLoadProfile::LoraPid,
+                ] {
+                    let mut load =
+                        spec(MemoryRouteTier::from_resolved_tier(tier).unwrap(), profile)
+                            .with_resolved_route(provider);
+                    load.quantize = None;
+                    let use_pid = matches!(
+                        profile,
+                        MemoryRouteLoadProfile::Pid | MemoryRouteLoadProfile::LoraPid
+                    );
+                    for (mode, reference_count, expected_provider_mode) in contexts {
+                        let applied = declared_candle_request_strategy_contract_with(
+                            provider,
+                            Some(tier),
+                            &manifest,
+                            &load,
+                            MemoryRouteRequestContext {
+                                mode,
+                                reference_count,
+                                use_pid,
+                                has_phases: false,
+                            },
+                            |_| Some(staged_contract(provider)),
+                        );
+                        assert!(
+                            matches!(
+                                applied,
+                                DeclaredCandleStrategyContract::Applied { provider_mode, .. }
+                                    if provider_mode == expected_provider_mode
+                            ),
+                            "{provider}:{tier}:{profile:?}:{mode:?}:{reference_count}"
+                        );
+                    }
+                }
+            }
+
+            let plain =
+                LoadSpec::new(WeightsSource::Dir("fixture".into())).with_resolved_route(provider);
+            for crossed in [
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 2,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    reference_count: 2,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::ImageInpaint,
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: false,
+                    has_phases: true,
+                },
+            ] {
+                assert!(matches!(
+                    declared_candle_request_strategy_contract_with(
+                        provider,
+                        Some("q4"),
+                        &manifest,
+                        &plain,
+                        crossed,
+                        |_| Some(staged_contract(provider)),
+                    ),
+                    DeclaredCandleStrategyContract::Refused
+                ));
+            }
+        }
+
+        let manifest = shipped_model("ideogram_4");
+        let crossed = LoadSpec::new(WeightsSource::Dir("fixture".into()))
+            .with_resolved_route("ideogram_4_turbo");
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "ideogram_4",
+                Some("q4"),
+                &manifest,
+                &crossed,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                |_| Some(staged_contract("ideogram_4")),
             ),
             DeclaredCandleStrategyContract::Refused
         ));
