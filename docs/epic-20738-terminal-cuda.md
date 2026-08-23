@@ -32,9 +32,16 @@ The four deliberately dismantled pin-keyed gates are not used or changed. This p
 evidence, so it must not be added to routine measurement, calibration, canary, or memory-matrix runs.
 LTX-2.3 distilled uses its fixed eight-step schedule; any four-, seven-, or nine-step profile
 mutation fails closed. The corrected ordered cell digest is
-`2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1`; the reviewed 23-authority
-digest after the truthful LTX parent change is
-`5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932`.
+`2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1`; the current reviewed
+23-authority digest is
+`1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255`.
+
+The current Illustrious primaries select published immutable revisions
+`778c3f02b7703b0c2755d0c0447592897193c6b5` (v1) and
+`672e9851ede4dc856fa945649b6691975c9d74a3` (v2). Their q4 text encoder, second text encoder, and
+UNet configs must each carry the exact `bits: 4`, `group_size: 64` marker represented by the closed
+profile marker. The current download inventory is independently digest-bound as
+`1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee`.
 
 ## Dispatch contract
 
@@ -68,7 +75,8 @@ their resolved blobs remain inside that trusted root; broken, empty, or escaping
 The sparse recovery census is exactly eight logical authorities and 70 files: the LTX q8/Gemma pair,
 the two Illustrious primaries, and the four shared SDXL helpers. File sizes and hashes follow valid
 Hugging Face links to their trusted blob targets; link-entry length is never used as model-byte
-accounting. The exact followed-target total is 66,821,159,278 bytes.
+accounting. The exact followed-target total is 66,821,159,668 bytes; the 390-byte increase is the six
+reviewed q4 config markers across the two current Illustrious authorities.
 
 Authorities are copied just in time into campaign-owned staging under `RUNNER_TEMP`, immediately
 before their first selected consumer, and are retained only through their exact last selected
@@ -147,6 +155,14 @@ and rehashed input/output/log evidence for all 19 receipts. It then compares eac
 canonical tuple independently with the corrected profile. A global digest match is never used to
 waive a per-cell mismatch. Ordinals 14, 18, and 19 must remain failures and are recorded as
 quarantined; any attempt to promote one invalidates the candidate.
+
+Artifact `9492288293` remains bound to the frozen pre-marker Illustrious revisions
+`c5a92a902dd4e6ee99c2a57981ecf66209905dd1` (v1) and
+`7c5c8b2bb75a8f38a7365e70bdf84d38d6204473` (v2), artifact-authority digest
+`5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932`, and download-evidence
+digest `9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b`. The current inventory
+retains those exact legacy rows only for importer selection; it never re-labels old receipts with
+the new revisions or digest.
 
 The closed Draft 2020-12 `cache-preflight.json` binds the download-evidence SHA-256, authoritative
 filename census, followed target bytes/hashes, hit/download partition, first/last-use plan, persistent

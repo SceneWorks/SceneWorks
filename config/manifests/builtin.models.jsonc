@@ -15981,26 +15981,26 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
-          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+          "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 3911461825,
-          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 3911462020,
+          "footprint": { "diskSizeBytes": 3911462020, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
-          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+          "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 5385646417,
-          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 5385646612,
+          "footprint": { "diskSizeBytes": 5385646612, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
-          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+          "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498305,
@@ -16925,26 +16925,26 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
-          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+          "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 3911461501,
-          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 3911461696,
+          "footprint": { "diskSizeBytes": 3911461696, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
-          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+          "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 5385646137,
-          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 5385646332,
+          "footprint": { "diskSizeBytes": 5385646332, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
-          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+          "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498177,

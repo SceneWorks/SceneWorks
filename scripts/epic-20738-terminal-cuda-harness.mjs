@@ -43,7 +43,7 @@ const SDXL_POSE_MODELS = [
 ];
 const EXPECTED_CELL_SEMANTICS_SHA256 = "2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1";
 const LEGACY_CELL_SEMANTICS_SHA256 = "dc0e529b40e898727eb9401562a928345b958b4c94677d0206ccc70471f6f879";
-const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932";
+const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255";
 const LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256 = "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932";
 const LEGACY_ARTIFACT_SEMANTICS_SHA256 = "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e";
 const LEGACY_SCENEWORKS_HEAD = "8886a9e69f26beec05688c81b414859bd102f6d0";
@@ -52,6 +52,13 @@ const LTX_CURRENT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_APPROVED_PARENT_REVISION = "254989c3ca7ee691187647f350b112c0c448789d";
 const ILLUSTRIOUS_V1_LEGACY_REVISION = "c5a92a902dd4e6ee99c2a57981ecf66209905dd1";
 const ILLUSTRIOUS_V2_LEGACY_REVISION = "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473";
+const ILLUSTRIOUS_CURRENT_AUTHORITIES = new Map([
+  ["illustrious-v1-q4", "778c3f02b7703b0c2755d0c0447592897193c6b5"],
+  ["illustrious-v2-q4", "672e9851ede4dc856fa945649b6691975c9d74a3"],
+]);
+const ILLUSTRIOUS_Q4_MARKER = {
+  bits: 4, groupSize: 64, components: ["text_encoder", "text_encoder_2", "unet"],
+};
 const IMPORTED_PREFIX_CELLS = 7;
 const RECOVERY_IMPORTED_PREFIX_CELLS = 9;
 const PREFIX_ARTIFACT = `sc-20945-epic-20738-${LEGACY_SCENEWORKS_HEAD}-`;
@@ -64,7 +71,8 @@ const RECOVERY_RUN_ATTEMPT = "1";
 const RECOVERY_SCENEWORKS_HEAD = "62be42127e2b4ff07321e2c369de92fc6edef526";
 const RECOVERY_REMAINING_AUTHORITIES = 14;
 const RECOVERY_REMAINING_FILES = 160;
-const RECOVERY_REMAINING_SOURCE_BYTES = 151_407_075_690;
+const RECOVERY_REMAINING_SOURCE_BYTES = 151_407_076_080;
+const LEGACY_RECOVERY_REMAINING_SOURCE_BYTES = 151_407_075_690;
 const RECOVERY_REMAINING_ARTIFACT_IDS = [
   "flux1-schnell-q8", "scail2-q4", "scail2-q8", "ltx23-q8", "ltx23-gemma",
   "sdxl-base-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg",
@@ -82,7 +90,8 @@ const SPARSE_EXECUTION_ORDINALS = [14, 18, 19];
 const SPARSE_IMPORTED_ORDINALS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17];
 const SPARSE_REMAINING_AUTHORITIES = 8;
 const SPARSE_REMAINING_FILES = 70;
-const SPARSE_REMAINING_SOURCE_BYTES = 66_821_159_278;
+const SPARSE_REMAINING_SOURCE_BYTES = 66_821_159_668;
+const LEGACY_SPARSE_REMAINING_SOURCE_BYTES = 66_821_159_278;
 const SPARSE_REMAINING_ARTIFACT_IDS = [
   "ltx23-q8", "ltx23-gemma", "illustrious-v1-q4", "sdxl-openpose",
   "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix", "illustrious-v2-q4",
@@ -95,7 +104,8 @@ const RECOVERY_BOUNDARY_LOG = {
   sha256: "6043cbeeeed54deec723c1ab5fcec6b36a8de4f7b31928c6b57222fd7dfec770",
 };
 const LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES = 173_667_044_229;
-const REVIEWED_ALL_AT_ONCE_SOURCE_BYTES = 179_028_698_264;
+const REVIEWED_ALL_AT_ONCE_SOURCE_BYTES = 179_028_698_654;
+const LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES = 179_028_698_264;
 const REVIEWED_JIT_SOURCE_PEAK_BYTES = 56_156_615_634;
 const NON_MODEL_DISK_RESERVE_BYTES = 40 * 1024 ** 3;
 const REVIEWED_FREE_FLOOR_BYTES = 99_106_288_594;
@@ -108,7 +118,8 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-const REVIEWED_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee";
+const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
 function fail(message) {
@@ -223,9 +234,11 @@ export function estimateJitDiskPlan(
   freeBytes,
   persistentMissingBytes = 0,
   nonModelPaths = [],
+  reviewedAllAtOnceSourceBytes = REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
 ) {
   if (!Number.isSafeInteger(freeBytes) || freeBytes < 0
-    || !Number.isSafeInteger(persistentMissingBytes) || persistentMissingBytes < 0) {
+    || !Number.isSafeInteger(persistentMissingBytes) || persistentMissingBytes < 0
+    || !Number.isSafeInteger(reviewedAllAtOnceSourceBytes) || reviewedAllAtOnceSourceBytes < 0) {
     fail("disk estimator requires exact non-negative byte counts");
   }
   const ordinals = [...new Set(lifetimes.flatMap((row) => [row.firstOrdinal, row.lastOrdinal]))]
@@ -290,8 +303,8 @@ export function estimateJitDiskPlan(
     fail(`persistent missing-file byte census drifted: plan=${persistentBytesFromPlan}, input=${persistentMissingBytes}`);
   }
   const allAtOnceSidecarReserveBytes = Math.max(FLUX_Q4_SIDECAR_BYTES, FLUX_Q8_SIDECAR_BYTES);
-  if (logicalSourceBytes === REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
-    && (allAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+  if (logicalSourceBytes === reviewedAllAtOnceSourceBytes
+    && (allAtOnceSourceBytes !== reviewedAllAtOnceSourceBytes
       || (persistentMissingBytes > 0
         ? peak.modelAndSidecarBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
         : peak.modelAndSidecarBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES))) {
@@ -303,7 +316,7 @@ export function estimateJitDiskPlan(
     nonModelReserveBytes: NON_MODEL_DISK_RESERVE_BYTES,
     nonModelPaths,
     legacyNaiveLinkLengthSourceBytes: LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES,
-    reviewedAllAtOnceSourceBytes: REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
+    reviewedAllAtOnceSourceBytes,
     reviewedJitSourcePeakBytes: REVIEWED_JIT_SOURCE_PEAK_BYTES,
     logicalSourceBytes,
     allAtOnceSourceBytes,
@@ -494,7 +507,14 @@ export function validateProfile(profile) {
 
   for (const [id, artifact] of Object.entries(profile.artifacts)) {
     if (!SAFE_ID.test(id)) fail(`artifact id is not safe: ${id}`);
-    exactKeys(artifact, ["authority", "role", "repository", "revision", "subdirectory", "allowPatterns"], `artifact ${id}`);
+    const illustriousRevision = ILLUSTRIOUS_CURRENT_AUTHORITIES.get(id);
+    exactKeys(
+      artifact,
+      illustriousRevision
+        ? ["authority", "role", "repository", "revision", "subdirectory", "allowPatterns", "quantizationMarker"]
+        : ["authority", "role", "repository", "revision", "subdirectory", "allowPatterns"],
+      `artifact ${id}`,
+    );
     object(artifact.authority, `artifact ${id}.authority`);
     if (artifact.authority.kind === "manifest") {
       const selectors = ["variant", "componentId", "component"].filter((key) => artifact.authority[key]);
@@ -506,6 +526,10 @@ export function validateProfile(profile) {
       fail(`artifact ${id} has unknown authority kind ${artifact.authority.kind}`);
     }
     if (!SHA40.test(artifact.revision)) fail(`artifact ${id} revision must be exact lowercase 40-hex`);
+    if (illustriousRevision && (artifact.revision !== illustriousRevision
+      || canonicalSha256(artifact.quantizationMarker) !== canonicalSha256(ILLUSTRIOUS_Q4_MARKER))) {
+      fail(`artifact ${id} must bind its exact current revision and q4/group-64 component markers`);
+    }
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(artifact.repository)) {
       fail(`artifact ${id} repository must be exact owner/name`);
     }
@@ -622,6 +646,34 @@ export function expectedArtifactFilesFromEvidence(profile, evidence) {
     result[id] = expectedFiles;
   }
   return result;
+}
+
+export function expectedCurrentArtifactFilesFromEvidenceBytes(profile, evidenceBytes) {
+  const digest = createHash("sha256").update(evidenceBytes).digest("hex");
+  if (digest !== CURRENT_DOWNLOAD_EVIDENCE_SHA256) {
+    fail(`current download-pattern evidence digest drifted: ${digest}`);
+  }
+  let evidence;
+  try {
+    evidence = JSON.parse(evidenceBytes);
+  } catch (error) {
+    fail(`current download-pattern evidence is not JSON: ${error.message}`);
+  }
+  return {
+    artifactExpectedFiles: expectedArtifactFilesFromEvidence(profile, evidence),
+    downloadEvidenceSha256: digest,
+  };
+}
+
+function expectedLegacyArtifactFilesFromEvidence(profile, evidence) {
+  const v1 = profile.artifacts?.["illustrious-v1-q4"];
+  const v2 = profile.artifacts?.["illustrious-v2-q4"];
+  if (v1?.revision !== ILLUSTRIOUS_V1_LEGACY_REVISION
+    || v2?.revision !== ILLUSTRIOUS_V2_LEGACY_REVISION
+    || v1.quantizationMarker !== undefined || v2.quantizationMarker !== undefined) {
+    fail("legacy download-pattern selector is not bound to the frozen Illustrious authorities");
+  }
+  return expectedArtifactFilesFromEvidence(profile, evidence);
 }
 
 export function validateManifestAuthorities(profile, manifest) {
@@ -1298,6 +1350,8 @@ function legacyPrefixProfile(currentProfile) {
   legacy.artifacts["ltx23-gemma"].revision = LTX_CURRENT_REVISION;
   legacy.artifacts["illustrious-v1-q4"].revision = ILLUSTRIOUS_V1_LEGACY_REVISION;
   legacy.artifacts["illustrious-v2-q4"].revision = ILLUSTRIOUS_V2_LEGACY_REVISION;
+  delete legacy.artifacts["illustrious-v1-q4"].quantizationMarker;
+  delete legacy.artifacts["illustrious-v2-q4"].quantizationMarker;
   if (cellSemanticsSha256(legacy.cells) !== LEGACY_CELL_SEMANTICS_SHA256
     || canonicalSha256(legacy.artifacts) !== LEGACY_ARTIFACT_SEMANTICS_SHA256) {
     fail("legacy prefix compatibility profile drifted");
@@ -1310,6 +1364,8 @@ function legacyRecoveryProfile(currentProfile) {
   legacy.cells[SPARSE_EXECUTION_ORDINALS[0] - 1].request.steps = 4;
   legacy.artifacts["illustrious-v1-q4"].revision = ILLUSTRIOUS_V1_LEGACY_REVISION;
   legacy.artifacts["illustrious-v2-q4"].revision = ILLUSTRIOUS_V2_LEGACY_REVISION;
+  delete legacy.artifacts["illustrious-v1-q4"].quantizationMarker;
+  delete legacy.artifacts["illustrious-v2-q4"].quantizationMarker;
   if (cellSemanticsSha256(legacy.cells) !== LEGACY_CELL_SEMANTICS_SHA256
     || canonicalSha256(legacy.artifacts) !== LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256) {
     fail("legacy recovery compatibility profile drifted");
@@ -1664,7 +1720,7 @@ async function validateRecoveryCacheEvidence(evidenceRoot, currentProfile) {
     (cell) => cell.artifactIds,
   ))];
   const evidence = JSON.parse(await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8"));
-  const artifactExpectedFiles = expectedArtifactFilesFromEvidence(currentProfile, evidence);
+  const artifactExpectedFiles = expectedLegacyArtifactFilesFromEvidence(currentProfile, evidence);
   if (expectedArtifactIds.length !== 16 || expectedArtifactIds.reduce(
     (sum, id) => sum + artifactExpectedFiles[id].length, 0,
   ) !== 199) fail("audited partial-run cache scope drifted");
@@ -1679,7 +1735,7 @@ async function validateRecoveryCacheEvidence(evidenceRoot, currentProfile) {
     ], `recovery ${filename}`);
     if (document.schemaVersion !== 1 || document.profile !== PROFILE_NAME
       || JSON.stringify(document.expectedArtifactIds) !== JSON.stringify(expectedArtifactIds)
-      || document.downloadEvidenceSha256 !== REVIEWED_DOWNLOAD_EVIDENCE_SHA256
+      || document.downloadEvidenceSha256 !== LEGACY_DOWNLOAD_EVIDENCE_SHA256
       || document.offlineBeforeCells !== true || !Number.isInteger(document.networkDownloadCount)
       || !document.phases || !Array.isArray(document.phases.sourceCensus)
       || !Array.isArray(document.phases.staging) || !Array.isArray(document.phases.finalOffline)) {
@@ -1688,7 +1744,7 @@ async function validateRecoveryCacheEvidence(evidenceRoot, currentProfile) {
     validateCachePreflightEvidence(document, {
       remainingArtifactIds: expectedArtifactIds,
       artifactExpectedFiles,
-      downloadEvidenceSha256: REVIEWED_DOWNLOAD_EVIDENCE_SHA256,
+      downloadEvidenceSha256: LEGACY_DOWNLOAD_EVIDENCE_SHA256,
       guard: { cacheRoot: document.sourceCacheRoot },
       stagingRoot: document.campaignStagingRoot,
       derivedSidecarRoot: document.derivedSidecarRoot,
@@ -2029,7 +2085,7 @@ async function validateSparseRecoveryCacheEvidence(evidenceRoot, legacyProfile, 
     (ordinal) => legacyProfile.cells[ordinal - 1].artifactIds,
   ))];
   const evidence = JSON.parse(await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8"));
-  const artifactExpectedFiles = expectedArtifactFilesFromEvidence(legacyProfile, evidence);
+  const artifactExpectedFiles = expectedLegacyArtifactFilesFromEvidence(legacyProfile, evidence);
   const documents = new Map();
   for (const filename of ["cache-preflight-initial.json", "cache-preflight.json"]) {
     const file = path.join(evidenceRoot, filename);
@@ -2037,7 +2093,7 @@ async function validateSparseRecoveryCacheEvidence(evidenceRoot, legacyProfile, 
     validateCachePreflightEvidence(document, {
       remainingArtifactIds: expectedArtifactIds,
       artifactExpectedFiles,
-      downloadEvidenceSha256: REVIEWED_DOWNLOAD_EVIDENCE_SHA256,
+      downloadEvidenceSha256: LEGACY_DOWNLOAD_EVIDENCE_SHA256,
       guard: { cacheRoot: document.sourceCacheRoot },
       stagingRoot: document.campaignStagingRoot,
       derivedSidecarRoot: document.derivedSidecarRoot,
@@ -3010,7 +3066,8 @@ export function validateCachePreflightEvidence(document, {
   if (JSON.stringify(document.frozenMissingFiles) !== JSON.stringify(frozen)) {
     fail("cache preflight frozen missing-file census drifted");
   }
-  if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256 && profile.cells.length === 19) {
+  if (new Set([CURRENT_DOWNLOAD_EVIDENCE_SHA256, LEGACY_DOWNLOAD_EVIDENCE_SHA256])
+    .has(downloadEvidenceSha256) && profile.cells.length === 19) {
     const exactScope = new Map([
       [16, 199],
       [RECOVERY_REMAINING_AUTHORITIES, RECOVERY_REMAINING_FILES],
@@ -3087,6 +3144,8 @@ export function validateCachePreflightEvidence(document, {
       document.diskPlan.freeBytes,
       document.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0),
       document.diskPlan.nonModelPaths,
+      downloadEvidenceSha256 === LEGACY_DOWNLOAD_EVIDENCE_SHA256
+        ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
     );
     if (JSON.stringify(document.diskPlan) !== JSON.stringify(expectedDiskPlan)) {
       fail("cache preflight disk plan drifted from exact target-byte census");
@@ -3109,7 +3168,8 @@ export function validateCachePreflightEvidence(document, {
       || document.diskPlan.freeBytes < document.diskPlan.peakRequiredAdditionalBytes) {
       fail("passed cache preflight did not prove sufficient JIT disk capacity");
     }
-    if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256) {
+    if (new Set([CURRENT_DOWNLOAD_EVIDENCE_SHA256, LEGACY_DOWNLOAD_EVIDENCE_SHA256])
+      .has(downloadEvidenceSha256)) {
       const expectedRemainingIds = [...new Set(plannedExecutionOrdinals.flatMap(
         (ordinal) => profile.cells[ordinal - 1].artifactIds,
       ))];
@@ -3129,9 +3189,15 @@ export function validateCachePreflightEvidence(document, {
           || expectedFileCount !== SPARSE_REMAINING_FILES))) {
         fail("passed cache preflight execution/census drifted from the reviewed profile");
       }
-      const expectedSourceBytes = sparse ? SPARSE_REMAINING_SOURCE_BYTES
-        : startTen ? RECOVERY_REMAINING_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
-      if (document.diskPlan.reviewedAllAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+      const legacyEvidence = downloadEvidenceSha256 === LEGACY_DOWNLOAD_EVIDENCE_SHA256;
+      const expectedSourceBytes = sparse
+        ? legacyEvidence ? LEGACY_SPARSE_REMAINING_SOURCE_BYTES : SPARSE_REMAINING_SOURCE_BYTES
+        : startTen
+          ? legacyEvidence ? LEGACY_RECOVERY_REMAINING_SOURCE_BYTES : RECOVERY_REMAINING_SOURCE_BYTES
+          : legacyEvidence ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
+      const expectedAllAtOnceSourceBytes = legacyEvidence
+        ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
+      if (document.diskPlan.reviewedAllAtOnceSourceBytes !== expectedAllAtOnceSourceBytes
         || document.diskPlan.reviewedJitSourcePeakBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
         || document.diskPlan.logicalSourceBytes !== expectedSourceBytes
         || document.diskPlan.allAtOnceSourceBytes !== expectedSourceBytes
@@ -3273,9 +3339,8 @@ export async function runCampaign(args, options = {}) {
     validateManifestAuthorities(profile, manifest);
     const downloadEvidencePath = path.join(sceneworks.root, DOWNLOAD_EVIDENCE_PATH);
     const downloadEvidenceBytes = await readFile(downloadEvidencePath, "utf8");
-    const artifactExpectedFiles = expectedArtifactFilesFromEvidence(
-      profile, JSON.parse(downloadEvidenceBytes),
-    );
+    const { artifactExpectedFiles, downloadEvidenceSha256 } =
+      expectedCurrentArtifactFilesFromEvidenceBytes(profile, downloadEvidenceBytes);
 
     const repositories = {
       sceneworks: { sha: sceneworks.sha, clean: true },
@@ -3313,7 +3378,7 @@ export async function runCampaign(args, options = {}) {
       prefixCandidates,
       python: args.python,
       artifactExpectedFiles,
-      downloadEvidenceSha256: createHash("sha256").update(downloadEvidenceBytes).digest("hex"),
+      downloadEvidenceSha256,
     };
   }
   const {
@@ -3382,7 +3447,7 @@ export async function runCampaign(args, options = {}) {
   const remainingFileCount = remainingArtifactIds.reduce(
     (sum, id) => sum + artifactExpectedFiles[id].length, 0,
   );
-  if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256
+  if (downloadEvidenceSha256 === CURRENT_DOWNLOAD_EVIDENCE_SHA256
     && JSON.stringify(executionOrdinals) === JSON.stringify(SPARSE_EXECUTION_ORDINALS)
     && (JSON.stringify(remainingArtifactIds) !== JSON.stringify(SPARSE_REMAINING_ARTIFACT_IDS)
       || remainingArtifactIds.length !== SPARSE_REMAINING_AUTHORITIES
@@ -4304,8 +4369,9 @@ async function main() {
     const profile = validateProfile(loadProfile(profilePath));
     const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
     validateManifestAuthorities(profile, manifest);
-    const downloadEvidence = JSON.parse(await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8"));
-    const expected = expectedArtifactFilesFromEvidence(profile, downloadEvidence);
+    const downloadEvidenceBytes = await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8");
+    const { artifactExpectedFiles: expected } =
+      expectedCurrentArtifactFilesFromEvidenceBytes(profile, downloadEvidenceBytes);
     if (Object.keys(expected).length !== 23) fail("terminal exact filename census is incomplete");
     process.stdout.write(`${PROFILE_NAME}: exactly 19 serialized cells and immutable authorities OK\n`);
     return;
