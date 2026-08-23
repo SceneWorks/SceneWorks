@@ -220,6 +220,45 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         "none",
         "bridge must retain its temporal receipt identity after cumulative Bernini integration"
     );
+
+    input.conditioning = vec![
+        Conditioning::ControlClip {
+            frames: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            mask: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            masking_strength: 0.75,
+            start_frame: 0,
+            mode: ReplacementMode::FaceOnly,
+        },
+        Conditioning::MultiReference {
+            images: vec![
+                gen_core::Image {
+                    width: 256,
+                    height: 512,
+                    pixels: Vec::new(),
+                },
+                gen_core::Image {
+                    width: 512,
+                    height: 256,
+                    pixels: Vec::new(),
+                },
+            ],
+        },
+    ];
+    input.width = 704;
+    input.height = 512;
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored+replace_person:control:frames:1:shapes:0:768x512@768x512:frame:0:mode:FaceOnly:strength:3f400000:references:ordered_grid:2x1:count:2:shapes:0:256x512,1:512x256:composite:704x512"),
+        "LTX replacement must seal the ordered control/reference carrier rather than borrowing I2V evidence"
+    );
 }
 
 #[cfg(any(
