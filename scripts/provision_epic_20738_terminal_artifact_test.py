@@ -433,6 +433,7 @@ class CacheOnlyProvisionTests(unittest.TestCase):
 
         for mode, expected_error in [
             ("normalized-alias", None),
+            ("extended-drive", None),
             ("different", "resolved to a different file"),
             ("missing-destination", "expected destination is missing"),
             ("missing-returned", "returned path is missing"),
@@ -466,6 +467,8 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                             destination.parent / ".." / destination.parent.name / destination.name
                         )
                         return alias.swapcase().replace("\\", "/") if os.name == "nt" else alias
+                    if mode == "extended-drive":
+                        return f"\\\\?\\{destination}"
                     if mode in {"different", "missing-destination"}:
                         different = destination.with_name("different.bin")
                         different.write_bytes(payload)
@@ -503,6 +506,25 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                     "lfsSha256": hashlib.sha256(payload).hexdigest(),
                     "commitSha": self.CURRENT_REVISION,
                 }])
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended path spellings are Windows-only")
+    def test_windows_extended_prefix_normalizes_only_drive_and_unc_paths(self) -> None:
+        self.assertEqual(
+            MODULE._without_windows_extended_prefix(
+                Path(r"\\?\D:\runner\snapshot\q4\model_index.json"), "fixture"
+            ),
+            Path(r"D:\runner\snapshot\q4\model_index.json"),
+        )
+        self.assertEqual(
+            MODULE._without_windows_extended_prefix(
+                Path(r"\\?\UNC\server\share\snapshot\q4\model_index.json"), "fixture"
+            ),
+            Path(r"\\server\share\snapshot\q4\model_index.json"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "unsupported Windows device namespace"):
+            MODULE._without_windows_extended_prefix(
+                Path(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\escape"), "fixture"
+            )
 
     def test_request_rejects_unreviewed_floating_or_escaping_fields(self) -> None:
         self.assertEqual(self.parse(self.request())["allowPatterns"], ["q4/*"])
