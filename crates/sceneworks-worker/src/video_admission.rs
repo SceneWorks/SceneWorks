@@ -90,7 +90,11 @@ fn bernini_vit_shape(width: u32, height: u32) -> (i64, i64) {
     (effective_width, effective_height)
 }
 
-fn bernini_mlx_vae_shape(width: u32, height: u32) -> (i64, i64) {
+/// Exact full-Bernini source preprocessing: both clip frames and reference images pass through
+/// the max-624, stride-16 VAE transform before conditioning. The renderer-only provider instead
+/// uses output geometry for both; SceneWorks resolves the full `bernini` provider, so mixing the
+/// two is an evidence mismatch rather than a conservative approximation.
+fn bernini_full_vae_shape(width: u32, height: u32) -> (i64, i64) {
     const MAX_SIZE: f64 = 624.0;
     const STRIDE: i64 = 16;
     let (width, height) = (f64::from(width), f64::from(height));
@@ -173,6 +177,7 @@ pub(crate) fn bernini_r2v_reference_receipt(
         VideoLane::Mlx => "mlx",
         VideoLane::Candle => "candle",
     };
+    const FULL_PREPROCESS_AXIS: &str = "source-preprocess-full-vae624-v1";
     let mut request_seal = sha2::Sha256::new();
     request_seal.update(BERNINI_R2V_SEAL_DOMAIN.as_bytes());
     let mut entries = Vec::with_capacity(images.len() + usize::from(clip.is_some()));
@@ -207,7 +212,9 @@ pub(crate) fn bernini_r2v_reference_receipt(
             request_seal.update(frame.height.to_le_bytes());
             request_seal.update(&frame.pixels);
         }
-        let tokens = bernini_packed_source_tokens(frames.len(), width, height)?;
+        let (vae_width, vae_height) = bernini_full_vae_shape(width, height);
+        let tokens =
+            bernini_packed_source_tokens(frames.len(), vae_width as u32, vae_height as u32)?;
         packed_tokens = packed_tokens
             .checked_add(tokens)
             .ok_or_else(|| "Bernini combined source-token count overflow".to_owned())?;
@@ -215,8 +222,8 @@ pub(crate) fn bernini_r2v_reference_receipt(
             "video-1:frames-{};native-{width}x{height};vae-{}x{}x{};tokens-{tokens}",
             frames.len(),
             (frames.len() - 1) / 4 + 1,
-            width / 8,
-            height / 8
+            vae_width / 8,
+            vae_height / 8
         ));
     }
     for (index, image) in images.iter().enumerate() {
@@ -232,10 +239,7 @@ pub(crate) fn bernini_r2v_reference_receipt(
             ));
         }
         let (vit_width, vit_height) = bernini_vit_shape(image.width, image.height);
-        let (vae_width, vae_height) = match lane {
-            VideoLane::Mlx => bernini_mlx_vae_shape(image.width, image.height),
-            VideoLane::Candle => (i64::from(width), i64::from(height)),
-        };
+        let (vae_width, vae_height) = bernini_full_vae_shape(image.width, image.height);
         request_seal.update(image.width.to_le_bytes());
         request_seal.update(image.height.to_le_bytes());
         request_seal.update(&image.pixels);
@@ -257,7 +261,7 @@ pub(crate) fn bernini_r2v_reference_receipt(
     }
     let packed_surface = has_video.then(|| format!("packed-source-tokens-{packed_tokens}:"));
     Ok(format!(
-        "{BERNINI_R2V_RECEIPT_DOMAIN}:backend-{backend}:count-{}:{}{}+{BERNINI_R2V_SEAL_DOMAIN}-{:x}",
+        "{BERNINI_R2V_RECEIPT_DOMAIN}:backend-{backend}:{FULL_PREPROCESS_AXIS}:count-{}:{}{}+{BERNINI_R2V_SEAL_DOMAIN}-{:x}",
         images.len(),
         packed_surface.as_deref().unwrap_or_default(),
         entries.join("|"),
@@ -1295,14 +1299,17 @@ fn bernini_rv2v_receipt_matches_surface(
     frames: u32,
     reference_count: u32,
 ) -> bool {
-    let Ok(video_tokens) = bernini_packed_source_tokens(frames as usize, width, height) else {
+    let (vae_width, vae_height) = bernini_full_vae_shape(width, height);
+    let Ok(video_tokens) =
+        bernini_packed_source_tokens(frames as usize, vae_width as u32, vae_height as u32)
+    else {
         return false;
     };
     let video_marker = format!(
         "video-1:frames-{frames};native-{width}x{height};vae-{}x{}x{};tokens-{video_tokens}",
         (frames - 1) / 4 + 1,
-        width / 8,
-        height / 8,
+        vae_width / 8,
+        vae_height / 8,
     );
     let Some((declared_total, token_surface)) = axis
         .split_once(":packed-source-tokens-")
@@ -1325,7 +1332,8 @@ fn bernini_rv2v_receipt_matches_surface(
                 .ok()
         })
         .collect();
-    axis.matches("video-1:").count() == 1
+    axis.contains("source-preprocess-full-vae624-v1")
+        && axis.matches("video-1:").count() == 1
         && axis.contains(&video_marker)
         && tokens.len() == reference_count as usize
         && tokens
@@ -1358,8 +1366,12 @@ fn bernini_surface_is_exact(
         _ => return false,
     };
     let reference_prefix = match request.lane {
-        VideoLane::Mlx => "bernini-r2v-references-v2:backend-mlx:count-",
-        VideoLane::Candle => "bernini-r2v-references-v2:backend-candle:count-",
+        VideoLane::Mlx => {
+            "bernini-r2v-references-v2:backend-mlx:source-preprocess-full-vae624-v1:count-"
+        }
+        VideoLane::Candle => {
+            "bernini-r2v-references-v2:backend-candle:source-preprocess-full-vae624-v1:count-"
+        }
     };
     let axes: Vec<_> = request
         .overlay

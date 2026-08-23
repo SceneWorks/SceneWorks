@@ -835,9 +835,9 @@ fn rv2v_conditioning() -> Vec<gen_core::Conditioning> {
 fn bernini_r2v_worker_receipts_bind_backend_specific_effective_shapes() {
     let conditioning = r2v_conditioning();
     let mlx = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &conditioning).unwrap();
-    assert_eq!(mlx, "bernini-r2v-references-v2:backend-mlx:count-2:0:native-640x360;vit-280x168;vae-624x352|1:native-360x640;vit-168x280;vae-352x624+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
+    assert_eq!(mlx, "bernini-r2v-references-v2:backend-mlx:source-preprocess-full-vae624-v1:count-2:0:native-640x360;vit-280x168;vae-624x352|1:native-360x640;vit-168x280;vae-352x624+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
     let candle = bernini_r2v_reference_receipt(VideoLane::Candle, 848, 480, &conditioning).unwrap();
-    assert_eq!(candle, "bernini-r2v-references-v2:backend-candle:count-2:0:native-640x360;vit-280x168;vae-848x480|1:native-360x640;vit-168x280;vae-848x480+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
+    assert_eq!(candle, "bernini-r2v-references-v2:backend-candle:source-preprocess-full-vae624-v1:count-2:0:native-640x360;vit-280x168;vae-624x352|1:native-360x640;vit-168x280;vae-352x624+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
 
     let mut duplicate = r2v_conditioning();
     let [gen_core::Conditioning::MultiReference { images }] = duplicate.as_mut_slice() else {
@@ -878,8 +878,8 @@ fn bernini_r2v_curve_identity_reuses_shapes_while_request_seal_binds_pixels() {
 }
 
 #[test]
-fn bernini_mlx_vae_shape_matches_providers_two_stage_bankers_rounding() {
-    assert_eq!(bernini_mlx_vae_shape(24, 625), (32, 624));
+fn bernini_full_vae_shape_matches_providers_two_stage_bankers_rounding() {
+    assert_eq!(bernini_full_vae_shape(24, 625), (32, 624));
 }
 
 #[test]
@@ -939,12 +939,13 @@ fn bernini_rv2v_seals_the_combined_source_tokens_and_distinguishes_clip_plus_ima
     };
     let conditioning = rv2v_conditioning();
     for (lane, packed_tokens, image_tokens) in [
-        (VideoLane::Mlx, 20_796_u64, 858_u64),
-        (VideoLane::Candle, 22_260_u64, 1_590_u64),
+        (VideoLane::Mlx, 12_012_u64, 858_u64),
+        (VideoLane::Candle, 12_012_u64, 858_u64),
     ] {
         let receipt = bernini_r2v_reference_receipt(lane, 848, 480, &conditioning).unwrap();
         assert!(receipt.contains(&format!("count-2:packed-source-tokens-{packed_tokens}:")));
-        assert!(receipt.contains("video-1:frames-45;native-848x480;vae-12x106x60;tokens-19080"));
+        assert!(receipt.contains("source-preprocess-full-vae624-v1"));
+        assert!(receipt.contains("video-1:frames-45;native-848x480;vae-12x78x44;tokens-10296"));
         assert!(receipt.contains(&format!(";tokens-{image_tokens}")));
 
         let overlay = format!("provider_video_mode:rv2v+{receipt}");
@@ -971,6 +972,16 @@ fn bernini_rv2v_seals_the_combined_source_tokens_and_distinguishes_clip_plus_ima
         crossed = exact();
         crossed.mode = "reference_to_video";
         assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        let crossed_overlay = crossed.overlay.unwrap().replace(
+            "source-preprocess-full-vae624-v1",
+            "source-preprocess-renderer-output-v1",
+        );
+        crossed.overlay = Some(&crossed_overlay);
+        assert!(
+            !bernini_surface_is_exact(&crossed, Some(&contract)),
+            "full Bernini must reject renderer preprocessing evidence"
+        );
     }
 
     let r2v_receipt =
