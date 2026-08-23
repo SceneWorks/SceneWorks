@@ -3257,13 +3257,13 @@ pub(super) fn candle_certified_load_spec(
     let WeightsSource::Dir(weights_dir) = &spec.weights else {
         return false;
     };
-    if !is_mage_engine(engine_id)
-        && !crate::memory_route_registry::candle_declaration_owns_load_shape(engine_id)
-        && !crate::memory_route_registry::candle_manifest_declares_request_strategy_provider(
-            manifest_entry,
-            engine_id,
-        )
-    {
+    let declaration_owned =
+        crate::memory_route_registry::candle_declaration_owns_load_shape(engine_id)
+            || crate::memory_route_registry::candle_manifest_declares_request_strategy_provider(
+                manifest_entry,
+                engine_id,
+            );
+    if !is_mage_engine(engine_id) && !declaration_owned {
         return candle_certified_artifact_path(engine_id, settings, weights_dir, tier);
     }
     let Some(downloads) = manifest_entry.get("downloads").and_then(Value::as_array) else {
@@ -3272,7 +3272,8 @@ pub(super) fn candle_certified_load_spec(
     let certify = |component_id: Option<&str>, actual: &Path| {
         let mut matches = downloads.iter().filter(|download| {
             download.get("provider").and_then(Value::as_str) == Some("huggingface")
-                && download.get("variant").and_then(Value::as_str) == Some(tier)
+                && (download.get("variant").and_then(Value::as_str) == Some(tier)
+                    || (component_id.is_some() && download.get("variant").is_none()))
                 && download.get("componentId").and_then(Value::as_str) == component_id
                 && download.get("coRequisite").and_then(Value::as_bool).unwrap_or(false)
                     == component_id.is_some()
@@ -3292,6 +3293,15 @@ pub(super) fn candle_certified_load_spec(
         let relative = download
             .get("subdir")
             .and_then(Value::as_str)
+            .or_else(|| {
+                component_id
+                    .and_then(|_| download.get("files"))
+                    .and_then(Value::as_array)
+                    .and_then(|files| match files.as_slice() {
+                        [Value::String(file)] if !file.contains('*') => Some(file.as_str()),
+                        _ => None,
+                    })
+            })
             .unwrap_or(tier);
         candle_certified_hf_artifact_path(
             settings,
@@ -3302,7 +3312,7 @@ pub(super) fn candle_certified_load_spec(
         )
     };
 
-    if !is_mage_engine(engine_id) {
+    if !is_mage_engine(engine_id) && !declaration_owned {
         return spec.components.is_empty()
             && (spec.text_encoder.is_none() || spec.validate_prepared_file_pins().is_ok())
             && certify(None, weights_dir);
@@ -3310,17 +3320,24 @@ pub(super) fn candle_certified_load_spec(
     let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
         return false;
     };
-    if spec.components.len() != descriptor.required_components.len() {
+    let expected_component_count = descriptor.required_components.len()
+        + usize::from(
+            engine_id == "sdxl"
+                && spec.ip_adapter.is_some()
+                && spec.components.contains_key("sdxl_ip_image_encoder"),
+        );
+    if spec.components.len() != expected_component_count {
         return false;
     }
 
     certify(None, weights_dir)
         && descriptor.required_components.iter().all(|component_id| {
-            matches!(
-                spec.components.get(*component_id),
-                Some(WeightsSource::Dir(path))
-                    if certify(Some(component_id), path)
-            )
+            spec.components.get(*component_id).is_some_and(|source| {
+                certify(
+                    Some(component_id),
+                    crate::conditioning_fit::weights_source_path(source),
+                )
+            })
         })
 }
 
@@ -4805,7 +4822,7 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
 /// function's test module is itself macOS-excluded, so admitting bare `test` would leave it unused
 /// in a macOS test build and dead-code-error again under `-D warnings`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn apply_declared_candle_image_load_shape(
+pub(super) fn apply_declared_candle_image_load_shape(
     engine_id: &str,
     resolved_tier: Option<&str>,
     request_mode: &str,
@@ -6691,6 +6708,12 @@ fn hires_first_pass_context(
     context.geometry.height = height;
     context.geometry.reference_count = reference_count;
     context.has_reference = reference_count > 0;
+    context.mode = if reference_count == 0 {
+        gen_core::MemoryMode::TextToImage
+    } else {
+        gen_core::MemoryMode::ImageToImage
+    };
+    context.has_phases = false;
     context
 }
 
@@ -9634,6 +9657,114 @@ pub(super) fn candle_resolved_tier_key(
     )
 }
 
+/// Run the shared selector for an uncached, bespoke SDXL provider after every physical component
+/// has been assembled. This is the only admission that can authorize the subsequent loader; the
+/// older scalar gate remains useful telemetry but cannot mint an optimized execution plan.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn admit_sdxl_bespoke_memory(
+    request: &ImageRequest,
+    settings: &Settings,
+    mut spec: LoadSpec,
+    request_mode: &str,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+    use_pid: bool,
+    additional_artifacts_certified: bool,
+) -> WorkerResult<(crate::candle_memory_strategy::CandleMemoryEvaluation, LoadSpec)> {
+    let WeightsSource::Dir(weights_dir) = &spec.weights else {
+        return Err(WorkerError::InvalidPayload(
+            "SDXL optimized admission requires a catalog snapshot directory".to_owned(),
+        ));
+    };
+    let tier = candle_resolved_tier_key(request, weights_dir, false);
+    spec = match tier {
+        "q4" => spec.with_quant(Quant::Q4),
+        "q8" => spec.with_quant(Quant::Q8),
+        "bf16" => spec,
+        other => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "SDXL Candle route resolved unsupported physical tier {other:?}"
+            )))
+        }
+    };
+    spec = apply_declared_candle_image_load_shape(
+        "sdxl",
+        Some(tier),
+        request_mode,
+        &request.model_manifest_entry,
+        spec,
+    );
+    spec.prepare_file_sources().map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "SDXL could not retain exact component/adapter receipts: {error}"
+        ))
+    })?;
+    let contract = runtime_cuda::providers::sdxl::provider_contract_for_spec(&spec)
+        .map_err(|error| WorkerError::InvalidPayload(format!("SDXL receipt refused: {error}")))?;
+    let runtime_overlay_bytes = contract.asset_facts.overlay_bytes;
+    let artifact_is_certified = additional_artifacts_certified
+        && candle_certified_load_spec(
+            "sdxl",
+            settings,
+            &spec,
+            &request.model_manifest_entry,
+            tier,
+        );
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        runtime_overlay_bytes,
+    );
+    let overlay = if spec.ip_adapter.is_some() {
+        Some("identity")
+    } else if spec.control.is_some() {
+        Some("control")
+    } else if !spec.adapters.is_empty() {
+        Some("lora")
+    } else {
+        None
+    };
+    let evaluation = crate::candle_memory_strategy::evaluate_shared_bespoke_image(
+        "sdxl",
+        &request.model,
+        &spec,
+        artifact_is_certified,
+        &request.model_manifest_entry,
+        tier,
+        request_mode,
+        overlay,
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count,
+        },
+        reference_count > 0,
+        use_pid,
+        false,
+        budget,
+        predicted_peak,
+        runtime_overlay_bytes,
+        gen_core::MemoryCacheState::Cold,
+        contract,
+        crate::candle_memory_strategy::SDXL_REQUEST_EVIDENCE_REVISION,
+    )?
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "SDXL {} {} at {tier} has no exact shared memory strategy before load",
+            request.model, request_mode
+        ))
+    })?;
+    Ok((evaluation, spec))
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_quant_for_resolved_tier(
     request: &ImageRequest,
@@ -10654,13 +10785,17 @@ async fn generate_candle_stream(
     shared_contract_spec =
         attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
-    // An Ideogram Hires refinement is a fresh one-reference TextToImage/img2img request even when
-    // the caller's first pass was Edit or Inpaint. Admit that final-pass identity independently;
-    // the original mode/reference/geometry is admitted below for the first pass.
+    // A supported Hires refinement is a fresh one-reference image-to-image request even when the
+    // caller's first pass was Edit or Inpaint. Admit that final-pass identity independently; the
+    // original mode/reference/geometry is admitted below for the first pass.
     let shared_admission_mode = if hires_fix.is_some()
         && matches!(
             engine_id,
-            "ideogram_4" | "ideogram_4_turbo" | "sana_1600m" | "sana_sprint_1600m"
+            "ideogram_4"
+                | "ideogram_4_turbo"
+                | "sana_1600m"
+                | "sana_sprint_1600m"
+                | "sdxl"
         )
     {
         "image_to_image"
@@ -10685,6 +10820,13 @@ async fn generate_candle_stream(
         edit_reference.is_some() || img2img_reference.is_some(),
         edit_mask.is_some(),
         hires_fix.is_some(),
+    )
+    .saturating_add(
+        u32::try_from(
+            usize::from(shared_contract_spec.control.is_some())
+                + shared_contract_spec.extra_controls.len(),
+        )
+        .unwrap_or(u32::MAX),
     );
     let artifact_is_certified = candle_certified_load_spec(
         engine_id,
@@ -10727,7 +10869,11 @@ async fn generate_candle_stream(
     let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
             engine_id,
-            "ideogram_4" | "ideogram_4_turbo" | "sana_1600m" | "sana_sprint_1600m"
+            "ideogram_4"
+                | "ideogram_4_turbo"
+                | "sana_1600m"
+                | "sana_sprint_1600m"
+                | "sdxl"
         )
     {
         crate::candle_memory_strategy::evaluate_shared_image(

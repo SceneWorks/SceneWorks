@@ -6527,7 +6527,7 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
     let model = InstantId::load(&paths).expect("InstantID load");
     let scrfd = Weights::from_file(&scrfd_path).expect("SCRFD weights");
     let arcface = Weights::from_file(&arcface_path).expect("ArcFace weights");
-    let model = model.with_face(&scrfd, &arcface).expect("face stack");
+    let mut model = model.with_face(&scrfd, &arcface).expect("face stack");
 
     // Reference identity embedding (frontal source).
     let ref_face = model
@@ -20413,4 +20413,43 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
         "the Step arm is the POST that carries the parked frame"
     );
+}
+
+#[test]
+fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
+    let edit = include_str!("sdxl_edit_candle.rs");
+    let ip = include_str!("sdxl_ipadapter.rs");
+    let detail = include_str!("detail.rs");
+    let base = include_str!("base.rs");
+    for (label, source) in [("edit", edit), ("ip", ip)] {
+        assert!(
+            source.contains("let adapters = resolve_adapters(request, settings)?;"),
+            "{label} must resolve the request's ordered adapter stack"
+        );
+        assert!(
+            source.contains("adapters,"),
+            "{label} must pass the resolved stack into the provider constructor"
+        );
+        assert!(
+            !source.contains("adapters: Vec::new()"),
+            "{label} must not drop adapters at the provider boundary"
+        );
+        assert!(source.contains("admit_sdxl_bespoke_memory("));
+        assert!(source.contains("load_admitted("));
+    }
+    assert!(detail.contains("admit_sdxl_bespoke_memory("));
+    assert!(detail.contains("SdxlDetail::load_admitted("));
+    assert!(detail.contains("TILE_CONTROLNET_REVISION"));
+    assert!(detail.contains("detail_memory_receipt.as_ref()"));
+    assert!(detail.contains("raw_adapter_settings[\"memoryStrategy\"]"));
+    assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));
+    assert!(!detail.contains("packed/request-quantized detail is not supported"));
+    assert!(base.contains("context.mode = if reference_count == 0"));
+    assert!(base.contains(
+        "let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode)"
+    ));
+    assert!(base.contains("let shared_admission_mode = if hires_fix.is_some()"));
+    assert!(base.contains("let first_pass_shared_memory = if hires_fix.is_some()"));
+    assert!(base.contains("| \"sdxl\""));
+    assert!(base.contains("provider_contract_for_spec(&spec)"));
 }

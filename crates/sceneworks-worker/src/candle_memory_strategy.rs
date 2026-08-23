@@ -41,6 +41,7 @@ const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
 pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
     "sc-15839-candle-pulid-flux-request-scope-v1";
 const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
+pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
 const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additive.sha256:";
@@ -1374,6 +1375,10 @@ pub(crate) fn evaluate_shared_image(
         .as_ref()
         .map(|overlay| overlay.as_deref())
         .unwrap_or(overlay);
+    let exact_sdxl_overlay = (engine_id == "sdxl")
+        .then(|| sdxl_provider_overlay(spec))
+        .flatten();
+    let provider_overlay = exact_sdxl_overlay.as_deref().or(provider_overlay);
     evaluate_shared_image_inner(
         engine_id,
         model_id,
@@ -1397,6 +1402,24 @@ pub(crate) fn evaluate_shared_image(
         contract_override,
         None,
     )
+}
+
+/// Exact ordered physical overlay identity shared by registered and bespoke SDXL admissions.
+pub(crate) fn sdxl_provider_overlay(spec: &LoadSpec) -> Option<String> {
+    let mut parts = Vec::new();
+    if spec.control.is_some() {
+        parts.push(format!("control:{}", 1 + spec.extra_controls.len()));
+    }
+    if spec.ip_adapter.is_some() {
+        parts.push("ip-adapter".to_owned());
+    }
+    if spec.pid.is_some() {
+        parts.push("pid".to_owned());
+    }
+    if let Some(adapters) = gen_core::adapter_stack_identity(&spec.adapters) {
+        parts.push(adapters);
+    }
+    (!parts.is_empty()).then(|| parts.join("+"))
 }
 
 /// Shared-selector entry point for a bespoke Candle provider whose exact contract is built from
@@ -1425,6 +1448,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
     let expected_revision = match engine_id {
         "pulid_flux" => PULID_FLUX_REQUEST_EVIDENCE_REVISION,
         "candle_kolors_ipadapter" | "candle_kolors_control" => KOLORS_REQUEST_EVIDENCE_REVISION,
+        "sdxl" => SDXL_REQUEST_EVIDENCE_REVISION,
         _ => {
             return Err(WorkerError::InvalidPayload(format!(
                 "{engine_id} has no registered bespoke memory evidence authority"
@@ -1457,6 +1481,11 @@ pub(crate) fn evaluate_shared_bespoke_image(
             return Ok(None);
         }
     }
+    let exact_provider_overlay = if engine_id == "sdxl" {
+        sdxl_provider_overlay(spec)
+    } else {
+        overlay.map(str::to_owned)
+    };
     evaluate_shared_image_inner(
         engine_id,
         model_id,
@@ -1466,7 +1495,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
         tier_key,
         request_mode_value,
         overlay,
-        overlay,
+        exact_provider_overlay.as_deref(),
         geometry,
         has_reference,
         use_pid,
@@ -1525,12 +1554,12 @@ fn evaluate_shared_image_inner(
         "kolors" => KOLORS_REQUEST_EVIDENCE_REVISION,
         "sana_1600m" | "sana_sprint_1600m" => SANA_REQUEST_EVIDENCE_REVISION,
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => SD35_REQUEST_EVIDENCE_REVISION,
+        "sdxl" => SDXL_REQUEST_EVIDENCE_REVISION,
         _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
-    // Hires-fix is two independently shaped denoise passes. The generic generation harness still
-    // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
-    // Keep that surface on its established path until it mints one scope per pass.
-    if worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id) {
+    // Hires-fix is two independently shaped denoise passes. Only families whose generation harness
+    // mints and carries one exact context per pass may use request-scoped optimized admission.
+    if worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id) && engine_id != "sdxl" {
         return Ok(None);
     }
     let mode =

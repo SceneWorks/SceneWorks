@@ -394,6 +394,18 @@ const PLAIN_LORA_PID: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::LoraPid,
     MemoryRouteLoadProfile::Pid,
 ];
+const SDXL_CANDLE_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::Plain,
+    MemoryRouteLoadProfile::Lora,
+    MemoryRouteLoadProfile::Pid,
+    MemoryRouteLoadProfile::LoraPid,
+    MemoryRouteLoadProfile::SingleControl,
+    MemoryRouteLoadProfile::LoraSingleControl,
+    MemoryRouteLoadProfile::IpAdapter,
+    MemoryRouteLoadProfile::LoraIpAdapter,
+    MemoryRouteLoadProfile::IpAdapterPid,
+    MemoryRouteLoadProfile::LoraIpAdapterPid,
+];
 const FLUX1_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::IpAdapter,
     MemoryRouteLoadProfile::LoraIpAdapter,
@@ -749,6 +761,15 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: true,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "sdxl",
+        tiers: BF16_Q4_Q8,
+        modes: ALL_MODES,
+        load_profiles: SDXL_CANDLE_PROFILES,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
@@ -6637,6 +6658,64 @@ mod tests {
             .load_shape,
             LoadShape::EagerMaterialization
         );
+    }
+
+    #[test]
+    fn candle_sdxl_rule_covers_exact_tiers_modes_and_load_profiles() {
+        for tier in [
+            MemoryRouteTier::Bf16,
+            MemoryRouteTier::Q4,
+            MemoryRouteTier::Q8,
+        ] {
+            for (mode, profile) in [
+                (MemoryRouteMode::TextToImage, MemoryRouteLoadProfile::Plain),
+                (MemoryRouteMode::TextToImage, MemoryRouteLoadProfile::Lora),
+                (MemoryRouteMode::EditImage, MemoryRouteLoadProfile::Plain),
+                (MemoryRouteMode::ImageInpaint, MemoryRouteLoadProfile::Lora),
+                (
+                    MemoryRouteMode::ImageDetail,
+                    MemoryRouteLoadProfile::SingleControl,
+                ),
+                (
+                    MemoryRouteMode::CharacterImage,
+                    MemoryRouteLoadProfile::IpAdapter,
+                ),
+                (
+                    MemoryRouteMode::CharacterImage,
+                    MemoryRouteLoadProfile::LoraIpAdapter,
+                ),
+            ] {
+                let selector = MemoryRouteSelector {
+                    backend: MemoryRouteBackend::Candle,
+                    provider: "sdxl",
+                    tier,
+                    mode,
+                    overlay: profile.overlay(),
+                    load_profile: profile,
+                };
+                assert!(rule_coordinates_match(selector), "missing {selector:?}");
+            }
+        }
+        for crossed in [
+            MemoryRouteSelector {
+                backend: MemoryRouteBackend::Candle,
+                provider: "sdxl",
+                tier: MemoryRouteTier::Nvfp4,
+                mode: MemoryRouteMode::TextToImage,
+                overlay: MemoryRouteOverlay::None,
+                load_profile: MemoryRouteLoadProfile::Plain,
+            },
+            MemoryRouteSelector {
+                backend: MemoryRouteBackend::Candle,
+                provider: "sdxl",
+                tier: MemoryRouteTier::Q4,
+                mode: MemoryRouteMode::ImageDetail,
+                overlay: MemoryRouteOverlay::Control,
+                load_profile: MemoryRouteLoadProfile::MultiControl,
+            },
+        ] {
+            assert!(!rule_coordinates_match(crossed), "accepted {crossed:?}");
+        }
     }
 
     #[test]
