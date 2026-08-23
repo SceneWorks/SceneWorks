@@ -20590,6 +20590,9 @@ fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
 ///
 /// ```text
 /// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
+/// #           KREA_HF_HUB=$HOME/.cache/huggingface/hub   (where the krea-2-turbo-mlx base tier lives)
+/// #           KREA_PLAN_DATA_DIR=<dir>  (persist the app data dir across runs so the 26 GB
+/// #                                      full-content compile runs once; defaults to a temp dir)
 /// # defaults: KREA_STEPS=2 KREA_W=512 KREA_H=512 KREA_SEED=42  KREA_OUT_DIR=/tmp/checkpoint_plan_parity
 /// cargo test -p sceneworks-worker --release checkpoint_plan_route_mlx_gpu_parity -- --ignored --nocapture
 /// ```
@@ -20617,14 +20620,26 @@ fn checkpoint_plan_route_mlx_gpu_parity() {
         .expect("utf-8 file name")
         .to_owned();
 
-    let data_dir = tempfile::Builder::new()
+    let temp_data_dir = tempfile::Builder::new()
         .prefix(&format!("checkpoint-plan-parity-{}-", std::process::id()))
         .tempdir()
         .expect("data dir");
-    let real_hub = PathBuf::from(format!("{home}/.cache/huggingface/hub"));
+    let data_dir = std::env::var_os("KREA_PLAN_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temp_data_dir.path().to_path_buf());
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let real_hub = PathBuf::from(env_or(
+        "KREA_HF_HUB",
+        &format!("{home}/.cache/huggingface/hub"),
+    ));
+    assert!(
+        real_hub.is_dir(),
+        "HF hub not found at {} — set KREA_HF_HUB to the hub holding SceneWorks/krea-2-turbo-mlx",
+        real_hub.display()
+    );
     let _hf = isolate_hf_hub_cache_to(&real_hub);
     let mut settings = Settings::from_env();
-    settings.data_dir = data_dir.path().to_path_buf();
+    settings.data_dir = data_dir.clone();
     settings.external_model_roots.push(library_dir.clone());
 
     let steps: u32 = env_or("KREA_STEPS", "2").parse().expect("KREA_STEPS");
@@ -20645,10 +20660,30 @@ fn checkpoint_plan_route_mlx_gpu_parity() {
     let root = store
         .approve_root(&library_dir)
         .expect("approve library root");
+    let checkpoint_id =
+        sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(&root.root_id, &file_name);
     let compile_started = std::time::Instant::now();
-    let compiled = store
-        .compile_linked(&root.root_id, &file_name)
-        .expect("compile the linked Krea 2 checkpoint");
+    // A persisted data dir (KREA_PLAN_DATA_DIR) keeps the one-time full-content compile of the
+    // 26 GB file across runs; `resolve` below still re-verifies the bytes on every run.
+    let compiled = match store.record(&checkpoint_id) {
+        Ok(record) => {
+            let plan = store
+                .plan(&checkpoint_id, &record.plan.plan_id)
+                .expect("persisted plan for the persisted record");
+            eprintln!(
+                "COMPILE reused persisted plan {} for {checkpoint_id}",
+                plan.plan_id
+            );
+            sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1 {
+                checkpoint_id: checkpoint_id.clone(),
+                record,
+                plan,
+            }
+        }
+        Err(_) => store
+            .compile_linked(&root.root_id, &file_name)
+            .expect("compile the linked Krea 2 checkpoint"),
+    };
     eprintln!(
         "COMPILE checkpoint_id={} plan_id={} family={} layers={} semantic_digest={} seconds={:.1}",
         compiled.checkpoint_id,
@@ -20671,27 +20706,32 @@ fn checkpoint_plan_route_mlx_gpu_parity() {
             "importPlan": { "checkpointId": compiled.checkpoint_id }
         }
     }));
+    // Prepare first so a refusal surfaces its typed diagnostic instead of an opaque route miss.
+    let prepared = prepare_checkpoint_plan_sources(&plan_request, &settings)
+        .unwrap_or_else(|error| panic!("plan route refused the compiled checkpoint: {error}"))
+        .expect("plan route prepares");
     assert_eq!(
         resolve_image_route(&plan_request, &settings),
         Some(ImageRoute::CheckpointPlan),
         "ROUTE EVIDENCE: a plan-backed krea_2 t2i job takes the plan-driven route"
     );
-    let prepared = prepare_checkpoint_plan_sources(&plan_request, &settings)
-        .expect("prepare ok")
-        .expect("plan route prepares");
     assert_eq!(prepared.descriptor.id, "krea_2_turbo");
     assert_eq!(
         prepared.primary.loader_path(),
         library_dir.join(&file_name).as_path()
     );
+    // Rendered as the route builds it (plain resident spec): the production handler additionally
+    // runs `apply_residency_policy`, which the existing KreaImported smoke proves numerically inert
+    // (streamed == resident, byte-identical), so the parity question here is purely the route.
     let plan_spec = checkpoint_plan_load_spec(&prepared, None).expect("plan load spec");
-    let plan_spec =
-        crate::mlx_fit_gate::apply_residency_policy(plan_spec, prepared.descriptor.id).unwrap();
 
     // ---- LEGACY: today's KreaImported lane over an app-managed install dir (the S0c shape) ----
-    let install_dir = data_dir.path().join("models/imports/kreamania_v5");
+    let install_dir = data_dir.join("models/imports/kreamania_v5");
     std::fs::create_dir_all(&install_dir).expect("install dir");
-    std::os::unix::fs::symlink(&dit_src, install_dir.join(&file_name)).expect("symlink DiT");
+    let install_link = install_dir.join(&file_name);
+    if !install_link.exists() {
+        std::os::unix::fs::symlink(&dit_src, &install_link).expect("symlink DiT");
+    }
     let legacy_request = request(json!({
         "projectId": "p",
         "model": "imported_kreamania_v5",
@@ -20780,6 +20820,10 @@ fn checkpoint_plan_route_mlx_gpu_parity() {
         "PARITY lhs=legacy_krea_imported rhs=plan_driven_route byte_delta={byte_delta} \
          legacy_sha256={legacy_sha} plan_sha256={plan_sha}"
     );
+    // Persist the legacy sha next to the PNGs so a render of the same file/base/request on another
+    // inference revision (e.g. the inference-side `variant5_native_file_render_fixed_seed_sha`)
+    // can be compared against today's path without re-running this lane.
+    std::fs::write(out_dir.join("legacy_pixel_sha256.txt"), &legacy_sha).expect("write sha");
     assert_eq!(
         legacy_image.pixels, plan_image.pixels,
         "plan-driven route must be byte-identical to today's Krea path at a fixed seed \
