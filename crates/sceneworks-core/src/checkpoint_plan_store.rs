@@ -7,6 +7,10 @@
 //!   lives. Plans and catalog records carry `rootId + relativePath`, never the path (E6).
 //! * `inventory.json` — the [`CheckpointInventoryV1`] of catalog records (plan reference + summary).
 //! * `plans/<planId>.json` — the immutable, complete [`ImportPlanV1`] each record references.
+//!
+//! and, outside that directory, `<data_dir>/models/imports/<installId>/` — the SceneWorks-owned
+//! bytes of a MANAGED install (sc-20636, [`MANAGED_INSTALLS_RELATIVE_DIR`]). The only tree this
+//! store ever deletes bytes from, and never a place a linked library lives.
 //! * `bindings/<planId>.json` — per-layer filesystem stamps captured when the plan compiled, so a
 //!   later resolve can skip re-hashing an unchanged multi-gigabyte source and must re-hash (and
 //!   refuse on mismatch) as soon as the entry looks different.
@@ -27,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 use crate::checkpoint_import::{
     CheckpointCatalogRecordV1, CheckpointImportContractError, CheckpointInventoryV1, ImportLayerV1,
-    ImportPlanV1, SourceLocatorV1, CHECKPOINT_IMPORT_CONTRACT_VERSION,
+    ImportPlanV1, ManagedProvenanceV1, SourceLocatorV1, CHECKPOINT_IMPORT_CONTRACT_VERSION,
 };
 use crate::checkpoint_inspector::{
     inspect_checkpoint, CheckpointDiagnosticSeverityV1, CheckpointDiagnosticV1,
@@ -42,6 +46,23 @@ pub const PLANS_DIR: &str = "plans";
 /// The prefix every inspector-emitted `plan_id` carries; see [`validate_plan_id`].
 pub const PLAN_ID_PREFIX: &str = "checkpoint-plan-";
 pub const BINDINGS_DIR: &str = "bindings";
+/// Every finalized managed install lives at `<data_dir>/models/imports/<installId>/` — the tree
+/// SceneWorks has always installed imported models into, now addressed by install id.
+///
+/// It is deliberately NOT under `<data_dir>/checkpoints/`: the plan documents are metadata the
+/// store rewrites freely, while these are the model bytes every existing consumer (`paths.model`,
+/// the catalog's install-state sweep, the external-library runtime's anchor, the delete route)
+/// already resolves. Keeping them in place is what lets managed ownership become transactional
+/// without relocating anyone's models.
+///
+/// The whole subtree is SceneWorks-owned: it is the only tree
+/// [`CheckpointPlanStore::remove_managed`] deletes bytes from, its location is derived from the
+/// data dir rather than supplied by a caller, and a linked library is never under it (E6).
+pub const MANAGED_INSTALLS_RELATIVE_DIR: &str = "models/imports";
+/// Staging area for in-flight ingests. A sibling of the install root rather than a child, so a
+/// half-written tree is never inside the directory consumers enumerate, and the commit is still a
+/// rename within one filesystem.
+pub const MANAGED_STAGING_RELATIVE_DIR: &str = "models/.import-staging";
 
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 
@@ -173,6 +194,11 @@ pub struct CompiledCheckpointV1 {
     pub checkpoint_id: String,
     pub record: CheckpointCatalogRecordV1,
     pub plan: ImportPlanV1,
+    /// Every OTHER persisted checkpoint whose plan carries this plan's semantic digest — the same
+    /// bytes already known to the store under a different ownership or location (E1/AC2). Reported,
+    /// never acted on: neither copy is deleted, neither compile is refused, because a user may
+    /// legitimately keep a linked library copy and a managed one.
+    pub duplicate_checkpoint_ids: Vec<String>,
 }
 
 /// One plan layer resolved to the verified bytes on disk.
@@ -267,12 +293,41 @@ pub enum CheckpointPlanError {
         expected_sha256: String,
         actual_sha256: String,
     },
-    /// The plan uses a locator kind this store does not resolve (managed installs arrive with
-    /// sc-20636).
+    /// The plan uses a locator kind this store does not resolve.
     UnsupportedLocator {
         checkpoint_id: String,
         layer_id: String,
         kind: &'static str,
+    },
+    /// A persisted or caller-supplied `install_id` is not the shape [`validate_install_id`]
+    /// accepts, so it may not be used as a directory name. Same choke-point reasoning as
+    /// [`Self::InvalidPlanId`]: install ids are read back from a user-writable `inventory.json`
+    /// and then address a path.
+    InvalidInstallId {
+        install_id: String,
+        reason: &'static str,
+    },
+    /// The managed install directory this plan was compiled into is gone (deleted out from under
+    /// the store, or the data dir was moved).
+    InstallUnavailable {
+        install_id: String,
+        path: PathBuf,
+    },
+    /// A managed install id is already taken by a different persisted checkpoint. Finalizing over
+    /// it would replace one install's bytes with another's while the first's plan still pointed at
+    /// them, so the ingest refuses instead.
+    InstallIdTaken {
+        install_id: String,
+        checkpoint_id: String,
+        path: PathBuf,
+    },
+    /// A layer whose locator kind disagrees with the ownership the operation is compiling. A
+    /// managed compile that produced a linked layer (or the reverse) would persist a plan the
+    /// resolve path reads against the wrong root.
+    LocatorOwnershipMismatch {
+        checkpoint_id: String,
+        layer_id: String,
+        expected: &'static str,
     },
     /// A layer's path is confined-relative but its resolved target lands outside the approved root
     /// (a symlink inside the library pointing elsewhere). The inspector refuses the same shape
@@ -326,6 +381,10 @@ impl CheckpointPlanError {
             Self::SourceMissing { .. } => "source-missing",
             Self::SourceDrifted { .. } => "source-drifted",
             Self::UnsupportedLocator { .. } => "unsupported-locator",
+            Self::InvalidInstallId { .. } => "invalid-install-id",
+            Self::InstallUnavailable { .. } => "install-unavailable",
+            Self::InstallIdTaken { .. } => "install-id-taken",
+            Self::LocatorOwnershipMismatch { .. } => "locator-ownership-mismatch",
             Self::PathEscapesRoot { .. } => "path-escapes-root",
             Self::InvalidPlanId { .. } => "invalid-plan-id",
             Self::RootIdCollision { .. } => "root-id-collision",
@@ -420,6 +479,32 @@ impl fmt::Display for CheckpointPlanError {
                 f,
                 "checkpoint {checkpoint_id:?} layer {layer_id:?} uses a {kind} locator this store does not resolve"
             ),
+            Self::InvalidInstallId { install_id, reason } => write!(
+                f,
+                "managed install id {install_id:?} is not a usable directory name: {reason}"
+            ),
+            Self::InstallUnavailable { install_id, path } => write!(
+                f,
+                "managed install {install_id:?} is not present at {}; its SceneWorks-owned copy was removed outside the app",
+                path.display()
+            ),
+            Self::InstallIdTaken {
+                install_id,
+                checkpoint_id,
+                path,
+            } => write!(
+                f,
+                "managed install id {install_id:?} is already in use: {} exists (checkpoint {checkpoint_id:?}). Remove that install, or import under a different id.",
+                path.display()
+            ),
+            Self::LocatorOwnershipMismatch {
+                checkpoint_id,
+                layer_id,
+                expected,
+            } => write!(
+                f,
+                "checkpoint {checkpoint_id:?} layer {layer_id:?} compiled to a locator that is not {expected}"
+            ),
             Self::PathEscapesRoot {
                 checkpoint_id,
                 relative_path,
@@ -470,6 +555,54 @@ fn io_error(path: &Path, error: std::io::Error) -> CheckpointPlanError {
 /// Checkpoint identity for a linked source: root id + relative path, nothing physical.
 pub fn linked_checkpoint_id(root_id: &str, relative_path: &str) -> String {
     format!("linked/{root_id}/{relative_path}")
+}
+
+/// Checkpoint identity for a managed source: the install id, nothing physical. A managed install
+/// holds exactly one checkpoint, so unlike [`linked_checkpoint_id`] the relative path is not part
+/// of the identity — the install id already names it.
+pub fn managed_checkpoint_id(install_id: &str) -> String {
+    format!("managed/{install_id}")
+}
+
+/// The install id inside a `managed/<installId>` checkpoint id, if it is one.
+pub fn managed_install_id(checkpoint_id: &str) -> Option<&str> {
+    checkpoint_id
+        .strip_prefix("managed/")
+        .filter(|install_id| validate_install_id(install_id).is_ok())
+}
+
+/// The shape every managed install id must have before it can address a directory.
+///
+/// An install id is chosen by whoever opens the ingest — for a model import, the sanitized model id
+/// that already names the install directory — and is read back out of a user-writable
+/// `inventory.json` before being joined onto the install root. So this is the choke point: every
+/// read, write, and delete of an install directory goes through
+/// [`CheckpointPlanStore::install_dir`], which validates first.
+pub fn validate_install_id(install_id: &str) -> Result<(), CheckpointPlanError> {
+    let invalid = |reason: &'static str| CheckpointPlanError::InvalidInstallId {
+        install_id: install_id.to_owned(),
+        reason,
+    };
+    if install_id.is_empty() || install_id.len() > 128 {
+        return Err(invalid("must be 1..=128 characters"));
+    }
+    // The accepted set is exactly what `model_artifacts::safe_download_dir` emits, so a model id
+    // that already names an install directory today keeps naming it.
+    if !install_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(invalid("must be ASCII alphanumeric, '_', '-', or '.'"));
+    }
+    // `.` is allowed inside a name (`model.v2`) but never as the leading character and never
+    // doubled: that is what keeps `.`, `..`, and hidden directories unreachable.
+    if install_id.starts_with('.') || install_id.starts_with('-') {
+        return Err(invalid("must not start with '.' or '-'"));
+    }
+    if install_id.contains("..") {
+        return Err(invalid("must not contain '..'"));
+    }
+    Ok(())
 }
 
 /// Deterministic opaque id for an approved root. Derived from the canonical path's digest so
@@ -566,6 +699,14 @@ fn confined_root_join(
     Ok(canonical_target)
 }
 
+/// The locator kind as the store names it in refusals: the discriminator, never the payload.
+fn locator_kind(locator: &SourceLocatorV1) -> &'static str {
+    match locator {
+        SourceLocatorV1::Linked { .. } => "linked",
+        SourceLocatorV1::Managed { .. } => "managed",
+    }
+}
+
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -584,17 +725,34 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 #[derive(Clone, Debug)]
 pub struct CheckpointPlanStore {
     root: PathBuf,
+    /// Both derived from the data dir in [`Self::open`], never supplied by a caller: the tree
+    /// `remove_managed` may delete from cannot be steered by any argument.
+    installs_root: PathBuf,
+    staging_root: PathBuf,
 }
 
 impl CheckpointPlanStore {
     pub fn open(data_dir: &Path) -> Self {
         Self {
             root: data_dir.join(CHECKPOINTS_DIR),
+            installs_root: data_dir.join(MANAGED_INSTALLS_RELATIVE_DIR),
+            staging_root: data_dir.join(MANAGED_STAGING_RELATIVE_DIR),
         }
     }
 
+    /// The document root: `<data_dir>/checkpoints`.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The managed-install byte root: `<data_dir>/models/imports`.
+    pub fn installs_root(&self) -> &Path {
+        &self.installs_root
+    }
+
+    /// The staging root in-flight ingests write into: `<data_dir>/models/.import-staging`.
+    pub fn staging_root(&self) -> &Path {
+        &self.staging_root
     }
 
     fn approved_roots_path(&self) -> PathBuf {
@@ -709,6 +867,49 @@ impl CheckpointPlanStore {
         Ok(root)
     }
 
+    // ---- managed installs -----------------------------------------------------------------
+
+    /// The SceneWorks-owned directory a managed install occupies. Validates the id before it can
+    /// address a path, so this is the only way any caller — including the ingest and
+    /// [`Self::remove_managed`] — names an install directory.
+    pub fn install_dir(&self, install_id: &str) -> Result<PathBuf, CheckpointPlanError> {
+        validate_install_id(install_id)?;
+        Ok(self.installs_root.join(install_id))
+    }
+
+    /// The install directory, required to exist. `InstallUnavailable` rather than a bare io error
+    /// so a caller can tell "the user deleted our copy" apart from a broken data dir.
+    pub fn resolve_install(&self, install_id: &str) -> Result<PathBuf, CheckpointPlanError> {
+        let path = self.install_dir(install_id)?;
+        if !path.is_dir() {
+            return Err(CheckpointPlanError::InstallUnavailable {
+                install_id: install_id.to_owned(),
+                path,
+            });
+        }
+        Ok(path)
+    }
+
+    /// Remove a managed install completely: its catalog record, plan and bindings documents, and
+    /// the SceneWorks-owned bytes under `<data_dir>/models/imports/<installId>`.
+    ///
+    /// This is the ONLY method in this store that deletes checkpoint bytes, and it can only ever
+    /// address a path under [`Self::installs_root`] (E6), which is derived from the data dir rather
+    /// than supplied by anyone. A linked library is never under that tree, so no argument —
+    /// including a crafted `inventory.json` — can steer it at a user's files;
+    /// [`validate_install_id`] additionally refuses anything that is not a single non-traversing
+    /// path component. Returns `false` when there was nothing to remove.
+    pub fn remove_managed(&self, install_id: &str) -> Result<bool, CheckpointPlanError> {
+        let install_path = self.install_dir(install_id)?;
+        let removed_record = self.invalidate(&managed_checkpoint_id(install_id))?;
+        let removed_bytes = match fs::remove_dir_all(&install_path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(io_error(&install_path, error)),
+        };
+        Ok(removed_record || removed_bytes)
+    }
+
     /// The live directory for an approved root id.
     pub fn resolve_root(&self, root_id: &str) -> Result<PathBuf, CheckpointPlanError> {
         let roots = self.approved_roots()?;
@@ -749,7 +950,60 @@ impl CheckpointPlanStore {
             relative_path: relative_path.to_owned(),
             reason,
         })?;
-        let inspection = inspect_checkpoint(&request);
+        self.compile(&request, &root_path, "linked")
+    }
+
+    /// Inspect `<installs>/<install_id>/<relative_path>` as an application-owned checkpoint and
+    /// persist its plan, catalog record, and source bindings — the managed counterpart of
+    /// [`Self::compile_linked`], into the same store, using the same inspector and the same
+    /// documents (sc-20636).
+    ///
+    /// Identity is the install id alone, and the compiled layers carry
+    /// `SourceLocatorV1::Managed { install_id, relative_path, sha256, provenance }`, so the
+    /// resulting plan's SEMANTIC digest is byte-for-byte the digest the same checkpoint compiles to
+    /// under a linked root (E1) while its source-binding identity is not.
+    ///
+    /// This does not copy, download, or validate transactionally — it compiles what is already
+    /// finalized under the install directory. [`crate::checkpoint_ingest`] is what gets bytes there
+    /// atomically; calling this directly on a half-written directory is exactly the partial install
+    /// the ingest exists to prevent.
+    pub fn compile_managed(
+        &self,
+        install_id: &str,
+        relative_path: &str,
+        provenance: ManagedProvenanceV1,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        let install_path = self.resolve_install(install_id)?;
+        let relative = validate_portable_relative_path(relative_path)?;
+        let checkpoint_id = managed_checkpoint_id(install_id);
+        let request = CheckpointInspectionRequestV1::managed(
+            checkpoint_id.clone(),
+            install_path.clone(),
+            relative.clone(),
+            install_id,
+            provenance,
+        )
+        .map_err(|reason| CheckpointPlanError::InvalidRelativePath {
+            relative_path: relative_path.to_owned(),
+            reason,
+        })?;
+        self.compile(&request, &install_path, "managed")
+    }
+
+    /// The ownership-independent half of a compile: inspect, take the runnable record and plan,
+    /// stamp every layer, and publish. `root_path` is the directory the plan's relative paths are
+    /// joined onto — an approved library root for linked, the install directory for managed — and
+    /// `expected_kind` is the locator kind every compiled layer must carry, so a request that
+    /// produced the wrong ownership refuses instead of persisting a plan the resolve path would
+    /// read against the wrong root.
+    fn compile(
+        &self,
+        request: &CheckpointInspectionRequestV1,
+        root_path: &Path,
+        expected_kind: &'static str,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        let checkpoint_id = request.checkpoint_id.clone();
+        let inspection = inspect_checkpoint(request);
         let errors: Vec<CheckpointDiagnosticV1> = inspection
             .diagnostics
             .iter()
@@ -793,7 +1047,14 @@ impl CheckpointPlanStore {
         // Stamps first: they describe the bytes the inspector just hashed.
         let mut stamps = BTreeMap::new();
         for layer in &plan.layers {
-            let path = self.layer_path(&checkpoint_id, &root_path, layer)?;
+            if locator_kind(&layer.source) != expected_kind {
+                return Err(CheckpointPlanError::LocatorOwnershipMismatch {
+                    checkpoint_id,
+                    layer_id: layer.layer_id.clone(),
+                    expected: expected_kind,
+                });
+            }
+            let path = self.layer_path(&checkpoint_id, root_path, layer)?;
             let stamp = SourceStampV1::of(&path).map_err(|error| io_error(&path, error))?;
             stamps.insert(layer.layer_id.clone(), stamp);
         }
@@ -802,6 +1063,10 @@ impl CheckpointPlanStore {
             plan_id: plan.plan_id.clone(),
             stamps,
         };
+        // Reported against the inventory as it stands BEFORE this record is published, so a
+        // recompile of the same checkpoint never reports itself as its own duplicate.
+        let duplicate_checkpoint_ids =
+            self.duplicates_of(&record.summary.semantic_digest, &checkpoint_id)?;
 
         self.persist_plan(&plan)?;
         self.persist_bindings(&bindings)?;
@@ -810,7 +1075,28 @@ impl CheckpointPlanStore {
             checkpoint_id,
             record,
             plan,
+            duplicate_checkpoint_ids,
         })
+    }
+
+    /// Every persisted checkpoint other than `exclude_checkpoint_id` whose plan carries
+    /// `semantic_digest`: the same bytes already known to the store under different ownership or in
+    /// a different place. In checkpoint-id order, so the report is stable.
+    pub fn duplicates_of(
+        &self,
+        semantic_digest: &str,
+        exclude_checkpoint_id: &str,
+    ) -> Result<Vec<String>, CheckpointPlanError> {
+        Ok(self
+            .inventory()?
+            .records
+            .into_iter()
+            .filter(|record| {
+                record.checkpoint_id != exclude_checkpoint_id
+                    && record.summary.semantic_digest == semantic_digest
+            })
+            .map(|record| record.checkpoint_id)
+            .collect())
     }
 
     fn layer_path(
@@ -820,14 +1106,8 @@ impl CheckpointPlanStore {
         layer: &ImportLayerV1,
     ) -> Result<PathBuf, CheckpointPlanError> {
         let relative = match &layer.source {
-            SourceLocatorV1::Linked { relative_path, .. } => relative_path,
-            SourceLocatorV1::Managed { .. } => {
-                return Err(CheckpointPlanError::UnsupportedLocator {
-                    checkpoint_id: checkpoint_id.to_owned(),
-                    layer_id: layer.layer_id.clone(),
-                    kind: "managed",
-                })
-            }
+            SourceLocatorV1::Linked { relative_path, .. }
+            | SourceLocatorV1::Managed { relative_path, .. } => relative_path,
         };
         confined_root_join(checkpoint_id, root_path, relative)
     }
@@ -977,22 +1257,34 @@ impl CheckpointPlanStore {
         let mut layers = Vec::with_capacity(plan.layers.len());
         let mut refreshed = false;
         for layer in &plan.layers {
-            let (root_id, relative_path, fingerprint) = match &layer.source {
+            // The root a layer's relative path is joined onto is chosen by the LOCATOR, never by
+            // the caller: a linked layer resolves under its approved library root, a managed layer
+            // under its own SceneWorks-owned install directory. A managed layer naming an install
+            // other than the checkpoint's own would resolve one install's plan against another
+            // install's bytes, so it refuses rather than reading them.
+            let (root_path, relative_path, fingerprint) = match &layer.source {
                 SourceLocatorV1::Linked {
                     root_id,
                     relative_path,
                     fingerprint,
                     ..
-                } => (root_id, relative_path, fingerprint),
-                SourceLocatorV1::Managed { .. } => {
-                    return Err(CheckpointPlanError::UnsupportedLocator {
-                        checkpoint_id: checkpoint_id.to_owned(),
-                        layer_id: layer.layer_id.clone(),
-                        kind: "managed",
-                    })
+                } => (self.resolve_root(root_id)?, relative_path, fingerprint),
+                SourceLocatorV1::Managed {
+                    install_id,
+                    relative_path,
+                    sha256,
+                    ..
+                } => {
+                    if managed_install_id(checkpoint_id) != Some(install_id.as_str()) {
+                        return Err(CheckpointPlanError::UnsupportedLocator {
+                            checkpoint_id: checkpoint_id.to_owned(),
+                            layer_id: layer.layer_id.clone(),
+                            kind: "foreign-install managed",
+                        });
+                    }
+                    (self.resolve_install(install_id)?, relative_path, sha256)
                 }
             };
-            let root_path = self.resolve_root(root_id)?;
             let path = confined_root_join(checkpoint_id, &root_path, relative_path)?;
             let current = match SourceStampV1::of(&path) {
                 Ok(stamp) => stamp,

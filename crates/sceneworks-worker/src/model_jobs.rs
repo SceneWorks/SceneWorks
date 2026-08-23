@@ -4,6 +4,9 @@ use sceneworks_core::base_weights::{
     detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
     BaseWeightDetection, ComponentRole,
 };
+use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
+use sceneworks_core::checkpoint_ingest::ManagedIngest;
+use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
 
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
 /// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
@@ -4632,6 +4635,114 @@ async fn stable_model_file_sha256(
     Ok((hash, after))
 }
 
+/// The managed install id for a resolved model-import target directory (sc-20636).
+///
+/// The install id is the target directory's own name, so a managed install occupies exactly the
+/// path imported models have always occupied (`<data>/models/imports/<name>`) and every existing
+/// consumer of `paths.model` keeps working. The store's own [`CheckpointPlanStore::install_dir`] is
+/// then required to reproduce that same path, which is what proves the id addresses the intended
+/// directory rather than merely looking plausible.
+fn managed_install_id_for_target(
+    store: &CheckpointPlanStore,
+    target_dir: &Path,
+) -> WorkerResult<String> {
+    let install_id = target_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Model import target {} does not name an install directory",
+                target_dir.display()
+            ))
+        })?
+        .to_owned();
+    // Normalized the same way `resolve_model_import_target` normalized `target_dir`: on macOS a
+    // data dir under `/var` canonicalizes to `/private/var`, so a lexical comparison would reject
+    // the very directory the store derived.
+    let derived = store
+        .install_dir(&install_id)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let derived = crate::paths::normalize_existing_or_absolute(&derived)?;
+    if derived != target_dir {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Model import target {} is not the managed install directory for {install_id:?} ({})",
+            target_dir.display(),
+            derived.display()
+        )));
+    }
+    Ok(install_id)
+}
+
+/// The provenance a managed install records, taken from the `importProvenance` the API normalised
+/// from either the discriminated source or the legacy flat fields.
+///
+/// A payload with no provenance is a job queued by an older API build; it records the ingest source
+/// as `legacy-import` rather than guessing, so the field is never silently wrong.
+fn managed_provenance_from_payload(payload: &JsonObject) -> WorkerResult<ManagedProvenanceV1> {
+    let Some(object) = payload.get("importProvenance").and_then(Value::as_object) else {
+        return Ok(ManagedProvenanceV1::of_source("legacy-import"));
+    };
+    let field = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let provenance = ManagedProvenanceV1 {
+        source: field("source").unwrap_or_else(|| "legacy-import".to_owned()),
+        reference: field("reference"),
+        url: field("url"),
+        version_id: field("versionId"),
+        file_id: field("fileId"),
+        credential_host: field("credentialHost"),
+    };
+    provenance
+        .validate()
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    Ok(provenance)
+}
+
+/// A staged artifact's path relative to the staging root, in the portable `/`-separated spelling
+/// the plan contract uses.
+fn managed_staged_relative_path(staging_dir: &Path, file: &Path) -> WorkerResult<String> {
+    let relative = file.strip_prefix(staging_dir).map_err(|_| {
+        WorkerError::InvalidPayload(format!(
+            "Imported checkpoint {} is not inside the import staging directory {}",
+            file.display(),
+            staging_dir.display()
+        ))
+    })?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(
+                part.to_str()
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "Imported checkpoint path {} is not valid UTF-8",
+                            relative.display()
+                        ))
+                    })?
+                    .to_owned(),
+            ),
+            _ => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Imported checkpoint path {} is not a confined relative path",
+                    relative.display()
+                )))
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Imported checkpoint path is empty".to_owned(),
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
 pub(crate) async fn run_model_import_job(
     api: &ApiClient,
     settings: &Settings,
@@ -4651,8 +4762,31 @@ pub(crate) async fn run_model_import_job(
             .data_dir
             .join("models")
             .join("imports")
-            .join(target_name),
+            .join(&target_name),
     )?;
+
+    // sc-20636 (epic 20398): every managed source — HF repo, source URL, Civitai, upload, local
+    // copy — transfers into a STAGING directory and reaches `target_dir` only through one atomic
+    // rename in `ManagedIngest::finalize`, after its bytes have been hashed and fully validated. A
+    // cancel, a crash, a full disk, or a hash mismatch therefore all end with no directory at
+    // `target_dir` at all, so no partially-transferred model is ever addressable, selectable, or
+    // written to the manifest. The transfer code below is unchanged and simply points at staging.
+    let plan_store = CheckpointPlanStore::open(&settings.data_dir);
+    let install_id = managed_install_id_for_target(&plan_store, &target_dir)?;
+    let provenance = managed_provenance_from_payload(&job.payload)?;
+    let ingest = match ManagedIngest::begin(&plan_store, &install_id, provenance) {
+        Ok(ingest) => ingest,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await
+        }
+    };
+    let staging_dir = ingest.staging_dir().to_path_buf();
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -4687,7 +4821,7 @@ pub(crate) async fn run_model_import_job(
             HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
         let mut progress = DownloadProgress::new(
             repo,
-            directory_size(&target_dir).await,
+            directory_size(&staging_dir).await,
             snapshot.total_bytes(),
             progress_report_interval(settings),
         );
@@ -4700,7 +4834,7 @@ pub(crate) async fn run_model_import_job(
                 cancel_message: "Model import canceled by user.",
                 fresh_download: false,
             },
-            &target_dir,
+            &staging_dir,
             &snapshot,
             &mut progress,
         )
@@ -4718,7 +4852,7 @@ pub(crate) async fn run_model_import_job(
         )?;
         import_lora_source_path(
             &source_path,
-            &target_dir,
+            &staging_dir,
             payload_bool(&job.payload, "uploadedSourcePath"),
         )
         .await?;
@@ -4733,7 +4867,7 @@ pub(crate) async fn run_model_import_job(
                 fresh_download: false,
             },
             source_url,
-            &target_dir,
+            &staging_dir,
         )
         .await?;
     } else {
@@ -4746,7 +4880,7 @@ pub(crate) async fn run_model_import_job(
         .await;
     }
 
-    let imported_model_file = imported_model_primary_weight_file(&target_dir);
+    let imported_model_file = imported_model_primary_weight_file(&staging_dir);
     let mut model_file_sha256 = None;
     let mut verified_model_file_identity = None;
 
@@ -4812,7 +4946,7 @@ pub(crate) async fn run_model_import_job(
                     &detection,
                     BaseWeightDetection::Recognized(verdict)
                         if verdict.family.as_deref() == Some("mage-flow")
-                ) && !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&target_dir)
+                ) && !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&staging_dir)
                 {
                     return fail_job(
                         api,
@@ -4841,7 +4975,7 @@ pub(crate) async fn run_model_import_job(
                             ComponentRole::Transformer
                                 if verdict.family.as_deref() == Some("mage-flow")
                                     && sceneworks_core::base_weights::is_mage_flow_transformer_dir(
-                                        &target_dir,
+                                        &staging_dir,
                                     ) =>
                             {
                                 "transformer_directory"
@@ -4891,7 +5025,7 @@ pub(crate) async fn run_model_import_job(
         }
     };
 
-    let detected_family = match detect_model_family(&target_dir) {
+    let detected_family = match detect_model_family(&staging_dir) {
         // A diffusers dir / LoRA is classified here; a bare base DiT is not, so fall back to the
         // base-weight verdict's family (sc-14108).
         Ok(detected) => detected.or(base_weight_family),
@@ -4932,8 +5066,10 @@ pub(crate) async fn run_model_import_job(
             verified_model_file_identity = Some(identity);
         }
     }
+    // Written into STAGING, so the tree that commits is already complete. The marker is a hidden
+    // dot-file, which the inspector skips, so it is not part of the compiled plan.
     write_model_install_marker(
-        &target_dir,
+        &staging_dir,
         &job.payload,
         repo.unwrap_or(""),
         &job.id,
@@ -4941,6 +5077,58 @@ pub(crate) async fn run_model_import_job(
         model_file_sha256.as_deref(),
     )
     .await?;
+
+    // ---- commit ---------------------------------------------------------------------------
+    // Everything above ran against staged bytes. This is the point of no return: one rename, then
+    // the plan/record/bindings publication. A refusal here still leaves nothing at `target_dir`.
+    let primary_relative = match imported_model_file.as_ref() {
+        Some(file) => managed_staged_relative_path(&staging_dir, file)?,
+        None => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import is not supported for this file.",
+                Some("No safetensors base-weight file was found in the imported model.".to_owned()),
+            )
+            .await
+        }
+    };
+    // The DECLARED digest, not the one just computed from these bytes. Handing `finalize` the
+    // file's own hash would make its integrity check compare the bytes to themselves and pass
+    // unconditionally — a disabled guard that still looks like a guard. The block above verifies
+    // and fails first with a more actionable message; this is the transactional line of defence
+    // behind it, so a caller that reaches `finalize` by any other route is still checked.
+    let declared_sha256 =
+        optional_payload_string(&job.payload, "expectedSha256").and_then(normalize_sha256);
+    let install = match ingest.finalize(&primary_relative, declared_sha256.as_deref()) {
+        Ok(install) => install,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await
+        }
+    };
+    // The commit landed where the job was told to install. `managed_install_id_for_target` already
+    // proved the two agree; re-checked here against the normalized form because everything below
+    // records `target_dir` as the entry's installed path.
+    debug_assert_eq!(
+        crate::paths::normalize_existing_or_absolute(&install.install_path).ok(),
+        Some(target_dir.clone())
+    );
+    if !install.duplicate_checkpoint_ids().is_empty() {
+        // Reported, never acted on: a user may legitimately keep both a linked library copy and a
+        // managed one, so neither is deleted and the import still succeeds (AC2).
+        tracing::info!(
+            checkpoint_id = %install.checkpoint_id,
+            duplicates = %install.duplicate_checkpoint_ids().join(", "),
+            "imported checkpoint duplicates checkpoints already known to this install"
+        );
+    }
+
     if let Some(manifest_entry) = job
         .payload
         .get("manifestEntry")
@@ -4957,6 +5145,17 @@ pub(crate) async fn run_model_import_job(
             manifest_entry.insert(
                 "importSourceShape".to_owned(),
                 Value::String(source.to_owned()),
+            );
+            // The plan binding (epic 20398): a managed install is selectable through the
+            // plan-driven route by the checkpoint identity its published plan carries. Stamped
+            // beside `importSourceShape` because the scheduler's imported claim requires BOTH — a
+            // source shape and a source hint — and only an entry the base-weight gate classified
+            // has a shape. `paths.model` is written too: the plan-driven route serves plain
+            // text-to-image only, and the family's bespoke lane keeps every shape it does not
+            // serve, so importing through the plan never removes a capability the entry had.
+            manifest_entry.insert(
+                "importPlan".to_owned(),
+                json!({ "checkpointId": install.checkpoint_id }),
             );
         }
         if let Some(quant) = import_quant_format {
@@ -5018,6 +5217,14 @@ pub(crate) async fn run_model_import_job(
         import_quant_format
             .map(|quant| Value::String(quant.to_owned()))
             .unwrap_or(Value::Null),
+    );
+    // sc-20636: the duplicates the compile found, on the JOB RESULT and not only in a log line.
+    // "This is the same checkpoint you already have as X" is the user's decision to make — nothing
+    // deletes either copy — and a `tracing::info!` never reaches them. Always present (an empty
+    // array when there are none) so a client can render it without probing for the key.
+    result.insert(
+        "duplicateCheckpointIds".to_owned(),
+        json!(install.duplicate_checkpoint_ids()),
     );
     result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
     update_job(

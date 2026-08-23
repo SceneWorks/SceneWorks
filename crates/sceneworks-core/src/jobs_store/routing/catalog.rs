@@ -1387,6 +1387,50 @@ pub fn checkpoint_plan_checkpoint_id(entry: &Map<String, Value>) -> Option<&str>
         .filter(|id| !id.is_empty())
 }
 
+/// The path a bespoke imported lane actually LOADS from, in the order the entry may spell it.
+/// `None` when every spelling is absent or blank.
+///
+/// Deliberately excludes the provenance-only `source.path`, which [`imported_entry_installed_path`]
+/// accepts as a last resort: an import writes `source.path` as a data-dir-RELATIVE breadcrumb
+/// (`models/imports/<name>`), and a LINKED entry may carry one describing where its bytes came from
+/// while owning no installed bytes at all. Treating that as a loadable path made a linked entry
+/// claim a bespoke family lane it does not have — and pointed that lane at a path it must not read
+/// (sc-20636 review).
+pub fn imported_entry_loadable_path(entry: &Map<String, Value>) -> Option<&str> {
+    entry
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            entry
+                .get("paths")
+                .and_then(Value::as_object)
+                .and_then(|paths| paths.get("model"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| entry.get("installedPath").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
+/// Every spelling of an installed/linked path an entry may carry, including the provenance-only
+/// `source.path` fallback. `None` when all of them are absent or blank.
+///
+/// The ADMISSION view: "does this entry describe bytes anywhere", used to decide whether an
+/// imported entry is worth pricing. A caller deciding whether a lane can LOAD the entry wants
+/// [`imported_entry_loadable_path`] instead — see its note on why the `source.path` fallback must
+/// not answer that question.
+pub fn imported_entry_installed_path(entry: &Map<String, Value>) -> Option<&str> {
+    imported_entry_loadable_path(entry).or_else(|| {
+        entry
+            .get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("path"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+    })
+}
+
 fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
     match entry.get("importSourceShape").and_then(Value::as_str) {
         Some(
@@ -1508,26 +1552,7 @@ pub fn imported_image_request_provider_eligible(
     // plan-backed entry (epic 20398, sc-20634) — the persisted checkpoint identity the worker's
     // plan-driven route resolves through the checkpoint plan store. Either is a claim that the
     // worker then verifies fail-closed; neither is consumed for loading here.
-    let has_nonempty_path = entry
-        .get("modelPath")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            entry
-                .get("paths")
-                .and_then(Value::as_object)
-                .and_then(|paths| paths.get("model"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| entry.get("installedPath").and_then(Value::as_str))
-        .or_else(|| {
-            entry
-                .get("source")
-                .and_then(Value::as_object)
-                .and_then(|source| source.get("path"))
-                .and_then(Value::as_str)
-        })
-        .map(str::trim)
-        .is_some_and(|path| !path.is_empty());
+    let has_nonempty_path = imported_entry_installed_path(entry).is_some();
     if !has_nonempty_path && checkpoint_plan_checkpoint_id(entry).is_none() {
         return false;
     }

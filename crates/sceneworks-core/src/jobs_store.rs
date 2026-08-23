@@ -45,6 +45,7 @@ pub(crate) use routing::mlx::*;
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
     candle_routed_image_models, checkpoint_plan_checkpoint_id, imported_control_intent_is_material,
+    imported_entry_installed_path, imported_entry_loadable_path,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
     imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
     mac_capabilities, model_candle_support, model_mac_support, video_job_type_for_mode,

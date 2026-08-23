@@ -323,6 +323,7 @@ fn managed(install_id: &str, path: &str) -> SourceLocatorV1 {
         ManagedProvenanceV1 {
             source: "huggingface".to_owned(),
             reference: Some("org/model@rev".to_owned()),
+            ..ManagedProvenanceV1::default()
         },
     )
     .expect("valid managed locator")
@@ -371,9 +372,29 @@ fn linked_and_managed_copies_have_the_same_semantic_plan_but_different_bindings(
         linked_reference.source_binding_identity,
         managed_reference.source_binding_identity
     );
+    // sc-20636: the semantic digest excludes `planId`. The inspector derives a plan id from the
+    // checkpoint id, which encodes ownership, so a plan id in the semantic form made two copies of
+    // identical bytes — one linked, one managed — carry DIFFERENT "locator-independent" digests.
+    // Pinned as a differently-named plan over the same layers so a reintroduction reds here.
+    let renamed_plan = ImportPlanV1::new(
+        "checkpoint-plan-deadbeef",
+        &linked_plan.family,
+        linked_plan.layers.clone(),
+    )
+    .expect("valid import plan");
+    assert_eq!(
+        renamed_plan.semantic_digest().unwrap(),
+        linked_plan.semantic_digest().unwrap(),
+        "the plan id is a document name, not content, and must not reach the semantic digest"
+    );
+    assert_ne!(
+        renamed_plan.source_binding_identity().unwrap(),
+        linked_plan.source_binding_identity().unwrap(),
+        "the source binding still binds the exact document"
+    );
     assert_eq!(
         linked_plan.semantic_digest().unwrap(),
-        "sha256:d224a8484eaa43937759d190ff91a6de912585505b459602a61e2150d914bef5"
+        "sha256:11406d061fa8c81e6bac300bd946a3990b89556878d8fd5d66a15cc2e96c2f52"
     );
     assert_eq!(
         linked_plan.source_binding_identity().unwrap(),
@@ -2028,6 +2049,19 @@ fn schema_expressible_rules_are_bidirectionally_aligned_and_semantic_gaps_are_ex
         json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":" "}}),
         json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","reference":" "}}),
         json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","extra":true}}),
+        // sc-20636: every field `ManagedProvenanceV1` serializes must be expressible under the
+        // schema's `additionalProperties:false` provenance, set and blank alike. Without these the
+        // alignment loop never carries a post-`reference` field and cannot see the schema drift.
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"url","url":"https://example.test/model.safetensors"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"url","url":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","versionId":"refs/pr/3"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","versionId":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","fileId":"884422"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","fileId":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","credentialHost":"civitai.com"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","credentialHost":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","url":null,"versionId":null,"fileId":null,"credentialHost":null}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","reference":"flux/v1","url":"https://civitai.test/api/download/884422","versionId":"12345","fileId":"884422","credentialHost":"civitai.test"}}),
     ];
     for value in aligned_locator_mutations {
         assert_eq!(
@@ -2151,6 +2185,21 @@ fn schema_expressible_rules_are_bidirectionally_aligned_and_semantic_gaps_are_ex
     assert!(validator.is_valid(&keyed_duplicate_layers));
     assert!(serde_json::from_value::<ImportPlanV1>(keyed_duplicate_layers).is_err());
 
+    // sc-20636: now that the schema admits `provenance.url`, the userinfo refusal becomes a
+    // semantic-only gap — JSON Schema can require a non-blank string but not the absence of a
+    // `user:token@` authority, so serde must stay the gate that keeps a credential out of a plan.
+    let userinfo_url = json!({"kind":"managed","schemaVersion":1,"installId":"install",
+        "relativePath":"model.safetensors","sha256":DIGEST,
+        "provenance":{"source":"url","url":"https://user:token@example.test/model.safetensors"}});
+    assert!(
+        validator.is_valid(&userinfo_url),
+        "schema is expected to admit a userinfo url; it is a semantic-only rule"
+    );
+    assert!(
+        serde_json::from_value::<SourceLocatorV1>(userinfo_url).is_err(),
+        "serde must refuse a provenance url embedding credentials"
+    );
+
     let mut count_mismatch = serde_json::to_value(import_plan.summary().unwrap()).unwrap();
     count_mismatch["layerCount"] = json!(1);
     assert!(validator.is_valid(&count_mismatch));
@@ -2175,6 +2224,7 @@ fn schema_expressible_rules_are_bidirectionally_aligned_and_semantic_gaps_are_ex
         "sorted layers",
         "summary counts",
         "reference/summary digest agreement",
+        "credential-free provenance urls",
     ] {
         assert!(
             readme.contains(documented),
@@ -2292,6 +2342,7 @@ fn constructors_and_every_publication_surface_reject_manual_invalid_state() {
     let invalid_provenance = ManagedProvenanceV1 {
         source: " ".to_owned(),
         reference: None,
+        ..ManagedProvenanceV1::default()
     };
     assert!(invalid_provenance.validate().is_err());
     assert!(!serialization_error(&invalid_provenance).is_empty());

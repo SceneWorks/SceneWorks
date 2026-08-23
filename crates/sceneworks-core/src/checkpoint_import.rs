@@ -465,22 +465,51 @@ fn canonical_json<T: Serialize>(value: &T) -> Result<String, CheckpointImportCon
 }
 
 /// Provenance retained for an application-owned installed checkpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Every field beyond `source` is optional and omitted from the canonical bytes when absent, so a
+/// document written before a field existed and one written after with the field unset are the same
+/// bytes and the same [`SourceLocatorV1::source_binding_identity`].
+///
+/// This records WHERE the bytes came from, never HOW they were authorized: `credential_host` names
+/// the host whose stored credential was applied, and [`Self::validate`] refuses a `url` that
+/// carries userinfo, so no token, key, or password can reach a persisted plan through here
+/// (sc-20636).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ManagedProvenanceV1 {
+    /// The ingest source kind: `upload`, `local-copy`, `url`, `huggingface`, `civitai`.
     pub source: String,
+    /// The source-scoped human reference: an HF `repo@revision`, a Civitai model/version name, the
+    /// uploaded filename.
     pub reference: Option<String>,
+    /// The fetch URL, with userinfo and secret-bearing query parameters already stripped by the
+    /// caller (`checkpoint_ingest::sanitize_provenance_url`). Validated here as a second line.
+    pub url: Option<String>,
+    /// The source-scoped version identity: a Civitai `modelVersionId`, an HF revision.
+    pub version_id: Option<String>,
+    /// The source-scoped file identity: a Civitai file id, an HF filename.
+    pub file_id: Option<String>,
+    /// The host whose stored credential authorized the fetch. The credential itself is never
+    /// recorded; this is only the fact that one was used, and against which host.
+    pub credential_host: Option<String>,
 }
 
 impl Serialize for ManagedProvenanceV1 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct(
-            "ManagedProvenanceV1",
-            if self.reference.is_some() { 2 } else { 1 },
-        )?;
+        let optional = [
+            ("reference", &self.reference),
+            ("url", &self.url),
+            ("versionId", &self.version_id),
+            ("fileId", &self.file_id),
+            ("credentialHost", &self.credential_host),
+        ];
+        let present = optional.iter().filter(|(_, value)| value.is_some()).count();
+        let mut state = serializer.serialize_struct("ManagedProvenanceV1", 1 + present)?;
         state.serialize_field("source", &self.source)?;
-        if let Some(reference) = &self.reference {
-            state.serialize_field("reference", reference)?;
+        for (key, value) in optional {
+            if let Some(value) = value {
+                state.serialize_field(key, value)?;
+            }
         }
         state.end()
     }
@@ -494,11 +523,23 @@ impl<'de> Deserialize<'de> for ManagedProvenanceV1 {
             source: String,
             #[serde(default)]
             reference: Option<String>,
+            #[serde(default)]
+            url: Option<String>,
+            #[serde(default)]
+            version_id: Option<String>,
+            #[serde(default)]
+            file_id: Option<String>,
+            #[serde(default)]
+            credential_host: Option<String>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let provenance = Self {
             source: wire.source,
             reference: wire.reference,
+            url: wire.url,
+            version_id: wire.version_id,
+            file_id: wire.file_id,
+            credential_host: wire.credential_host,
         };
         provenance.validate().map_err(D::Error::custom)?;
         Ok(provenance)
@@ -506,13 +547,52 @@ impl<'de> Deserialize<'de> for ManagedProvenanceV1 {
 }
 
 impl ManagedProvenanceV1 {
+    /// Provenance carrying only its source kind. Every other field is set by the ingest that knows
+    /// it, so a caller can never leave one silently defaulted to a wrong value.
+    pub fn of_source(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            ..Self::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), CheckpointImportContractError> {
         validate_nonempty(&self.source, "managed provenance source")?;
-        if let Some(reference) = &self.reference {
-            validate_nonempty(reference, "managed provenance reference")?;
+        for (value, label) in [
+            (&self.reference, "managed provenance reference"),
+            (&self.url, "managed provenance url"),
+            (&self.version_id, "managed provenance version id"),
+            (&self.file_id, "managed provenance file id"),
+            (&self.credential_host, "managed provenance credential host"),
+        ] {
+            if let Some(value) = value {
+                validate_nonempty(value, label)?;
+            }
+        }
+        if let Some(url) = &self.url {
+            validate_secret_free_url(url)?;
         }
         Ok(())
     }
+}
+
+/// Refuses a provenance URL that embeds a credential. A persisted plan is world-readable app state
+/// and is shown back to the user, so `https://user:token@host/file` must never reach it — the
+/// authority component is checked directly rather than trusting the caller to have stripped it.
+fn validate_secret_free_url(url: &str) -> Result<(), CheckpointImportContractError> {
+    let authority = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if authority.contains('@') {
+        return Err(invalid(
+            "managed provenance url must not embed credentials (userinfo)",
+        ));
+    }
+    Ok(())
 }
 
 /// The physical location of one source file.
@@ -881,11 +961,18 @@ impl<'de> Deserialize<'de> for ImportPlanV1 {
     }
 }
 
+/// The semantic form deliberately carries NO `plan_id` (sc-20636).
+///
+/// A plan id is an assigned document name, not content: the inspector derives it from the
+/// checkpoint id, which encodes ownership (`linked/<rootId>/<path>` vs `managed/<installId>`).
+/// Including it made the "locator-independent" semantic digest differ between a linked checkpoint
+/// and a managed copy of the identical bytes — the exact equality E1 requires and duplicate
+/// detection is built on. Document identity is still bound by
+/// [`ImportPlanV1::source_binding_identity`], which hashes the whole canonical plan.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SemanticPlanV1<'a> {
     schema_version: u32,
-    plan_id: &'a str,
     family: &'a str,
     layers: Vec<SemanticLayerV1<'a>>,
 }
@@ -986,7 +1073,6 @@ impl ImportPlanV1 {
         layers.sort_by(|left, right| left.layer_id.cmp(right.layer_id));
         Ok(SemanticPlanV1 {
             schema_version: self.schema_version,
-            plan_id: &self.plan_id,
             family: &self.family,
             layers,
         })

@@ -649,6 +649,7 @@ fn managed_sources_compile_managed_locators_for_every_artifact() {
         ManagedProvenanceV1 {
             source: "civitai".to_owned(),
             reference: Some("model-version-7".to_owned()),
+            ..ManagedProvenanceV1::default()
         },
     )
     .unwrap();
