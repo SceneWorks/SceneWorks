@@ -45,8 +45,8 @@ use sha2::Digest;
 
 use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Selection};
 
-pub(crate) const BERNINI_R2V_MLX_RECEIPT_DOMAIN: &str = "bernini-r2v-references-mlx-v1";
-pub(crate) const BERNINI_R2V_CANDLE_RECEIPT_DOMAIN: &str = "bernini-r2v-references-candle-v1";
+pub(crate) const BERNINI_R2V_RECEIPT_DOMAIN: &str = "bernini-r2v-references-v2";
+pub(crate) const BERNINI_R2V_SEAL_DOMAIN: &str = "bernini-r2v-request-seal-v1";
 pub(crate) const BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN: &str = "bernini-adapter-receipt-v1";
 
 pub(crate) fn bernini_adapter_receipt_axis(component_id: &str) -> String {
@@ -96,7 +96,10 @@ fn bernini_mlx_vae_shape(width: u32, height: u32) -> (i64, i64) {
     let (width, height) = (f64::from(width), f64::from(height));
     let mut scale = (MAX_SIZE / width.max(height)).min(1.0);
     scale = scale.max(1.0 / width.min(height));
-    let make_divisible = |value: f64| STRIDE.max(round_half_even(value / STRIDE as f64) * STRIDE);
+    let make_divisible = |value: f64| {
+        let scaled = round_half_even(value);
+        STRIDE.max(round_half_even(scaled as f64 / STRIDE as f64) * STRIDE)
+    };
     let mut effective = (
         make_divisible(width * scale),
         make_divisible(height * scale),
@@ -111,8 +114,10 @@ fn bernini_mlx_vae_shape(width: u32, height: u32) -> (i64, i64) {
     effective
 }
 
-/// Worker-side independent twin of the provider's ordered reference receipt. It binds the flattened
-/// image count, order, native bytes, and backend-specific ViT/VAE effective shapes.
+/// Worker-side independent twin of the provider's ordered reference receipt. The first axis is the
+/// content-independent memory evidence identity (count/order/native and effective shapes); the
+/// second is a request-only byte seal. Curve lookup strips only the seal, so same-shape references
+/// share memory evidence while post-admission content mutation still fails provider configure.
 pub(crate) fn bernini_r2v_reference_receipt(
     lane: VideoLane,
     width: u32,
@@ -128,11 +133,12 @@ pub(crate) fn bernini_r2v_reference_receipt(
             images.len()
         ));
     }
-    let domain = match lane {
-        VideoLane::Mlx => BERNINI_R2V_MLX_RECEIPT_DOMAIN,
-        VideoLane::Candle => BERNINI_R2V_CANDLE_RECEIPT_DOMAIN,
+    let backend = match lane {
+        VideoLane::Mlx => "mlx",
+        VideoLane::Candle => "candle",
     };
-    let mut seen = std::collections::BTreeSet::new();
+    let mut request_seal = sha2::Sha256::new();
+    request_seal.update(BERNINI_R2V_SEAL_DOMAIN.as_bytes());
     let mut entries = Vec::with_capacity(images.len());
     for (index, image) in images.iter().enumerate() {
         let expected = u64::from(image.width)
@@ -146,30 +152,35 @@ pub(crate) fn bernini_r2v_reference_receipt(
                 image.pixels.len()
             ));
         }
-        let mut digest = sha2::Sha256::new();
-        digest.update(domain.as_bytes());
-        digest.update(image.width.to_le_bytes());
-        digest.update(image.height.to_le_bytes());
-        digest.update(&image.pixels);
-        let digest = format!("{:x}", digest.finalize());
-        if !seen.insert(digest.clone()) {
-            return Err("Bernini R2V references must be distinct".to_owned());
-        }
         let (vit_width, vit_height) = bernini_vit_shape(image.width, image.height);
         let (vae_width, vae_height) = match lane {
             VideoLane::Mlx => bernini_mlx_vae_shape(image.width, image.height),
             VideoLane::Candle => (i64::from(width), i64::from(height)),
         };
+        request_seal.update(image.width.to_le_bytes());
+        request_seal.update(image.height.to_le_bytes());
+        request_seal.update(&image.pixels);
         entries.push(format!(
-            "{index}:native-{}x{};vit-{vit_width}x{vit_height};vae-{vae_width}x{vae_height};sha256-{digest}",
+            "{index}:native-{}x{};vit-{vit_width}x{vit_height};vae-{vae_width}x{vae_height}",
             image.width, image.height
         ));
     }
     Ok(format!(
-        "{domain}:count-{}:{}",
+        "{BERNINI_R2V_RECEIPT_DOMAIN}:backend-{backend}:count-{}:{}+{BERNINI_R2V_SEAL_DOMAIN}-{:x}",
         images.len(),
-        entries.join("|")
+        entries.join("|"),
+        request_seal.finalize()
     ))
+}
+
+/// Content-independent overlay identity used for fitted video-curve lookup. Request byte seals are
+/// deliberately excluded; all other axes remain exact.
+fn video_curve_overlay(overlay: Option<&str>) -> Option<String> {
+    let axes = overlay?
+        .split('+')
+        .filter(|axis| !axis.starts_with(BERNINI_R2V_SEAL_DOMAIN))
+        .collect::<Vec<_>>();
+    (!axes.is_empty()).then(|| axes.join("+"))
 }
 
 type VideoDecodeProfileResolver = fn(
@@ -615,6 +626,7 @@ fn fitted_or_floor_phase_peaks<'a>(
             if calibration.abi != selector.identity.calibration_abi {
                 return None;
             }
+            let curve_overlay = video_curve_overlay(selector.identity.overlay);
             bundle.evaluate(VideoCurveQuery {
                 model_id: selector.identity.model_id,
                 model_family: selector.identity.model_family,
@@ -626,7 +638,7 @@ fn fitted_or_floor_phase_peaks<'a>(
                 reference_shape: selector.identity.reference_shape,
                 reference_count: selector.identity.reference_count,
                 frames_per_second: selector.identity.fps,
-                overlay: selector.identity.overlay,
+                overlay: curve_overlay.as_deref(),
                 rung: rung_of(strategy),
                 load_shape: curve_load_shape(selector.contract.load_shape),
                 closure_digest: selector.identity.expected_closure_digest,
@@ -1199,9 +1211,9 @@ fn bernini_surface_is_exact(
         "reference_to_video" => "provider_video_mode:r2v",
         _ => return false,
     };
-    let reference_domain = match request.lane {
-        VideoLane::Mlx => BERNINI_R2V_MLX_RECEIPT_DOMAIN,
-        VideoLane::Candle => BERNINI_R2V_CANDLE_RECEIPT_DOMAIN,
+    let reference_prefix = match request.lane {
+        VideoLane::Mlx => "bernini-r2v-references-v2:backend-mlx:count-",
+        VideoLane::Candle => "bernini-r2v-references-v2:backend-candle:count-",
     };
     let axes: Vec<_> = request
         .overlay
@@ -1212,10 +1224,21 @@ fn bernini_surface_is_exact(
     let reference_axis = axes
         .iter()
         .copied()
-        .find(|axis| axis.starts_with(reference_domain));
+        .find(|axis| axis.starts_with(reference_prefix));
+    let seal_axis = axes
+        .iter()
+        .copied()
+        .find(|axis| axis.starts_with(BERNINI_R2V_SEAL_DOMAIN));
+    let reference_axis_count = axes
+        .iter()
+        .filter(|axis| axis.starts_with(reference_prefix))
+        .count();
+    let seal_axis_count = axes
+        .iter()
+        .filter(|axis| axis.starts_with(BERNINI_R2V_SEAL_DOMAIN))
+        .count();
     let reference_count = reference_axis.and_then(|axis| {
-        axis.strip_prefix(reference_domain)?
-            .strip_prefix(":count-")?
+        axis.strip_prefix(reference_prefix)?
             .split_once(':')?
             .0
             .parse::<u32>()
@@ -1226,18 +1249,23 @@ fn bernini_surface_is_exact(
         && axes.iter().all(|axis| {
             *axis == expected_provider_mode
                 || Some(*axis) == expected_adapter.as_deref()
-                || axis.starts_with(reference_domain)
+                || axis.starts_with(reference_prefix)
+                || axis.starts_with(BERNINI_R2V_SEAL_DOMAIN)
         });
     let carrier_is_exact = match request.mode {
         "video_to_video" => {
             request.reference_count == 1
                 && request.reference_shape == "video"
-                && reference_axis.is_none()
+                && reference_axis_count == 0
+                && seal_axis_count == 0
         }
         "reference_to_video" => {
             (1..=8).contains(&request.reference_count)
                 && request.reference_shape == "multi_image"
                 && reference_count == Some(request.reference_count)
+                && reference_axis_count == 1
+                && seal_axis.is_some()
+                && seal_axis_count == 1
         }
         _ => false,
     };
@@ -1298,6 +1326,7 @@ fn curve_evidence_covers_request(
         request.frames,
         request.decode_chunk_size,
     );
+    let curve_overlay = video_curve_overlay(request.overlay);
     curves.curves.iter().any(|curve| {
         curve.model_id == request.model_id
             && curve.model_family == request.model_family
@@ -1309,7 +1338,7 @@ fn curve_evidence_covers_request(
             && curve.reference_shape == request.reference_shape
             && curve.reference_count == request.reference_count
             && curve.frames_per_second.contains(&request.fps)
-            && curve.overlay.as_deref() == request.overlay
+            && curve.overlay.as_deref() == curve_overlay.as_deref()
             && curve.calibration_abi == gen_core::MEMORY_CALIBRATION_ABI
             && curve.calibration_fingerprint == calibration.fingerprint
             && geometries.iter().all(|geometry| {
@@ -1325,7 +1354,7 @@ fn curve_evidence_covers_request(
                         reference_shape: request.reference_shape,
                         reference_count: request.reference_count,
                         frames_per_second: request.fps,
-                        overlay: request.overlay,
+                        overlay: curve_overlay.as_deref(),
                         rung: curve.rung,
                         load_shape: curve_load_shape(contract.load_shape),
                         closure_digest: request.expected_closure_digest,

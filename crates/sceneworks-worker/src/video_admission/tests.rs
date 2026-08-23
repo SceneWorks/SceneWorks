@@ -814,16 +814,51 @@ fn r2v_conditioning() -> Vec<gen_core::Conditioning> {
 fn bernini_r2v_worker_receipts_bind_backend_specific_effective_shapes() {
     let conditioning = r2v_conditioning();
     let mlx = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &conditioning).unwrap();
-    assert_eq!(mlx, "bernini-r2v-references-mlx-v1:count-2:0:native-640x360;vit-280x168;vae-624x352;sha256-08f7799b7050c59262c63194761800f52bfab061e84d947119e73447cf3ee4c4|1:native-360x640;vit-168x280;vae-352x624;sha256-ddfffcf24ec18d8c764ce45021fc37c3e248f7ae9bf183d57b5fe50ec26c19de");
+    assert_eq!(mlx, "bernini-r2v-references-v2:backend-mlx:count-2:0:native-640x360;vit-280x168;vae-624x352|1:native-360x640;vit-168x280;vae-352x624+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
     let candle = bernini_r2v_reference_receipt(VideoLane::Candle, 848, 480, &conditioning).unwrap();
-    assert_eq!(candle, "bernini-r2v-references-candle-v1:count-2:0:native-640x360;vit-280x168;vae-848x480;sha256-5bdf7fc62714f39b6b79861f79f4e50a948114e4d683d4c75476fbac783c2120|1:native-360x640;vit-168x280;vae-848x480;sha256-f9496ae0e80c29da2d8f78c49465125d8caa9f3f89756c8432e53a5f0cd300c5");
+    assert_eq!(candle, "bernini-r2v-references-v2:backend-candle:count-2:0:native-640x360;vit-280x168;vae-848x480|1:native-360x640;vit-168x280;vae-848x480+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
 
     let mut duplicate = r2v_conditioning();
     let [gen_core::Conditioning::MultiReference { images }] = duplicate.as_mut_slice() else {
         unreachable!()
     };
     images[1] = images[0].clone();
-    assert!(bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &duplicate).is_err());
+    assert!(
+        bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &duplicate).is_ok(),
+        "distinct public asset ids may legitimately resolve to identical pixels"
+    );
+}
+
+#[test]
+fn bernini_r2v_curve_identity_reuses_shapes_while_request_seal_binds_pixels() {
+    let first = r2v_conditioning();
+    let mut second = first.clone();
+    let [gen_core::Conditioning::MultiReference { images }] = second.as_mut_slice() else {
+        unreachable!()
+    };
+    images[0].pixels[0] ^= 1;
+
+    let first_receipt = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &first).unwrap();
+    let second_receipt = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &second).unwrap();
+    assert_ne!(
+        first_receipt, second_receipt,
+        "the post-admission byte seal changes"
+    );
+
+    let first_overlay = format!("provider_video_mode:r2v+{first_receipt}");
+    let second_overlay = format!("provider_video_mode:r2v+{second_receipt}");
+    let first_curve = video_curve_overlay(Some(&first_overlay)).unwrap();
+    let second_curve = video_curve_overlay(Some(&second_overlay)).unwrap();
+    assert_eq!(
+        first_curve, second_curve,
+        "same ordered native/effective shapes must reuse one fitted curve"
+    );
+    assert!(!first_curve.contains("request-seal"));
+}
+
+#[test]
+fn bernini_mlx_vae_shape_matches_providers_two_stage_bankers_rounding() {
+    assert_eq!(bernini_mlx_vae_shape(24, 625), (32, 624));
 }
 
 #[test]
