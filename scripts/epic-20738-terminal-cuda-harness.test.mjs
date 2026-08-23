@@ -1033,6 +1033,102 @@ test("recovery continuation imports only audited PASS cells and rejects ambiguit
   }
 });
 
+test("start-10 cache preflight binds the reviewed remaining census without weakening global references", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-21280-start10-census-"));
+  try {
+    const fixture = await writeRecoveryCandidate(temporary);
+    const initial = JSON.parse(await readFile(path.join(fixture.evidence, "cache-preflight-initial.json"), "utf8"));
+    const checked = profile();
+    const ids = [...new Set(checked.cells.slice(9).flatMap((cell) => cell.artifactIds))];
+    const sourceCensus = initial.phases.sourceCensus.filter((row) => ids.includes(row.id));
+    const plannedAudits = new Map(sourceCensus.map((row) => [row.id, {
+      ...row,
+      downloadedFiles: initial.downloadedFiles.filter((file) => file.artifactId === row.id).map(
+        ({ artifactId, ...file }) => file,
+      ),
+    }]));
+    const lifetimePlan = authorityLifetimePlan(checked, 9, plannedAudits);
+    const diskPlan = estimateJitDiskPlan(
+      lifetimePlan, initial.diskPlan.freeBytes,
+      initial.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0),
+      initial.diskPlan.nonModelPaths,
+    );
+    const startTen = {
+      ...initial,
+      expectedArtifactIds: ids,
+      phases: { ...initial.phases, sourceCensus },
+      reusedFiles: sourceCensus.flatMap((row) => row.reusedFiles.map(
+        (file) => ({ artifactId: row.id, ...file }),
+      )),
+      frozenMissingFiles: sourceCensus.flatMap((row) => row.missingFiles.map((file) => ({
+        artifactId: row.id, repository: row.repository, revision: row.revision, file,
+      }))),
+      lifetimePlan,
+      diskPlan,
+    };
+    const validation = {
+      remainingArtifactIds: ids,
+      artifactExpectedFiles: Object.fromEntries(sourceCensus.map((row) => [row.id, row.expectedFiles])),
+      downloadEvidenceSha256: startTen.downloadEvidenceSha256,
+      guard: { cacheRoot: startTen.sourceCacheRoot },
+      stagingRoot: startTen.campaignStagingRoot,
+      derivedSidecarRoot: startTen.derivedSidecarRoot,
+      missingStore: startTen.missingFileStore,
+      expectedNonModelPaths: startTen.diskPlan.nonModelPaths,
+      profile: checked,
+    };
+    assert.equal(startTen.diskPlan.cells.length, 10);
+    assert.equal(startTen.diskPlan.logicalSourceBytes, 151_407_075_690);
+    assert.equal(startTen.diskPlan.allAtOnceSourceBytes, 151_407_075_690);
+    assert.equal(startTen.diskPlan.reviewedAllAtOnceSourceBytes, 179_028_698_264);
+    assert.equal(startTen.diskPlan.peakModelAndSidecarBytes, 56_156_615_634);
+    assert.equal(startTen.diskPlan.peakRequiredAdditionalBytes, 99_106_288_594);
+    assert.doesNotThrow(() => validateCachePreflightEvidence(startTen, validation));
+
+    const shiftedIds = [...new Set(checked.cells.slice(10).flatMap((cell) => cell.artifactIds))];
+    const shiftedCensus = sourceCensus.filter((row) => shiftedIds.includes(row.id));
+    const shiftedAudits = new Map(shiftedCensus.map((row) => [row.id, {
+      ...row, downloadedFiles: [],
+    }]));
+    const shifted = structuredClone(startTen);
+    shifted.expectedArtifactIds = shiftedIds;
+    shifted.phases.sourceCensus = shiftedCensus;
+    shifted.reusedFiles = shiftedCensus.flatMap((row) => row.reusedFiles.map(
+      (file) => ({ artifactId: row.id, ...file }),
+    ));
+    shifted.frozenMissingFiles = [];
+    shifted.downloadedFiles = [];
+    shifted.networkDownloadCount = 0;
+    shifted.lifetimePlan = authorityLifetimePlan(checked, 10, shiftedAudits);
+    shifted.diskPlan = estimateJitDiskPlan(
+      shifted.lifetimePlan, initial.diskPlan.freeBytes, 0, initial.diskPlan.nonModelPaths,
+    );
+    const shiftedValidation = {
+      ...validation,
+      remainingArtifactIds: shiftedIds,
+      artifactExpectedFiles: Object.fromEntries(shiftedCensus.map((row) => [row.id, row.expectedFiles])),
+    };
+    assert.throws(
+      () => validateCachePreflightEvidence(shifted, shiftedValidation),
+      /target-byte totals/,
+      "a forged later start cannot repurpose the reviewed start-10 total",
+    );
+
+    for (const [label, mutate, pattern] of [
+      ["census", (value) => { value.phases.sourceCensus.reverse(); }, /top-level hit\/download partition|omitted sourceCensus|start\/census/],
+      ["total", (value) => { value.diskPlan.logicalSourceBytes += 1; }, /disk plan|target-byte totals/],
+      ["peak", (value) => { value.diskPlan.peakModelAndSidecarBytes -= 1; }, /disk plan|target-byte totals/],
+      ["floor", (value) => { value.diskPlan.peakRequiredAdditionalBytes -= 1; }, /disk plan|target-byte totals/],
+    ]) {
+      const drifted = structuredClone(startTen);
+      mutate(drifted);
+      assert.throws(() => validateCachePreflightEvidence(drifted, validation), pattern, label);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("prefix discovery accepts exactly one rehashed contiguous old-profile PASS prefix", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-prefix-"));
   try {
