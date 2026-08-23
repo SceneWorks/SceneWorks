@@ -30,7 +30,7 @@
 
 use gen_core::tiling::VideoDecodeMemoryProfile;
 use gen_core::{
-    MemoryBackend, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryNumericTier,
+    Conditioning, MemoryBackend, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryNumericTier,
     MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
 };
 use sceneworks_core::memory_calibration::StrategyRung;
@@ -41,8 +41,136 @@ use sceneworks_core::video_memory_curves::{
 use sceneworks_core::video_request::{
     VideoAdmissionGeometry, VideoDecodePass, VideoLane, VideoRungSelection, VideoStrategySelector,
 };
+use sha2::Digest;
 
 use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Selection};
+
+pub(crate) const BERNINI_R2V_MLX_RECEIPT_DOMAIN: &str = "bernini-r2v-references-mlx-v1";
+pub(crate) const BERNINI_R2V_CANDLE_RECEIPT_DOMAIN: &str = "bernini-r2v-references-candle-v1";
+pub(crate) const BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN: &str = "bernini-adapter-receipt-v1";
+
+pub(crate) fn bernini_adapter_receipt_axis(component_id: &str) -> String {
+    let mut digest = sha2::Sha256::new();
+    digest.update(BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN.as_bytes());
+    digest.update(component_id.as_bytes());
+    format!(
+        "{BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN}-{:x}",
+        digest.finalize()
+    )
+}
+
+fn round_half_even(value: f64) -> i64 {
+    let floor = value.floor();
+    let fraction = value - floor;
+    if fraction < 0.5 {
+        floor as i64
+    } else if fraction > 0.5 || (floor as i64) % 2 != 0 {
+        floor as i64 + 1
+    } else {
+        floor as i64
+    }
+}
+
+fn bernini_vit_shape(width: u32, height: u32) -> (i64, i64) {
+    const FACTOR: i64 = 28;
+    const MIN_PIXELS: i64 = 3136;
+    const MAX_PIXELS: i64 = 50176;
+    let (width, height) = (f64::from(width), f64::from(height));
+    let mut effective_height = round_half_even(height / FACTOR as f64) * FACTOR;
+    let mut effective_width = round_half_even(width / FACTOR as f64) * FACTOR;
+    if effective_height * effective_width > MAX_PIXELS {
+        let scale = ((height * width) / MAX_PIXELS as f64).sqrt();
+        effective_height = FACTOR.max((height / scale / FACTOR as f64).floor() as i64 * FACTOR);
+        effective_width = FACTOR.max((width / scale / FACTOR as f64).floor() as i64 * FACTOR);
+    } else if effective_height * effective_width < MIN_PIXELS {
+        let scale = (MIN_PIXELS as f64 / (height * width)).sqrt();
+        effective_height = (height * scale / FACTOR as f64).ceil() as i64 * FACTOR;
+        effective_width = (width * scale / FACTOR as f64).ceil() as i64 * FACTOR;
+    }
+    (effective_width, effective_height)
+}
+
+fn bernini_mlx_vae_shape(width: u32, height: u32) -> (i64, i64) {
+    const MAX_SIZE: f64 = 624.0;
+    const STRIDE: i64 = 16;
+    let (width, height) = (f64::from(width), f64::from(height));
+    let mut scale = (MAX_SIZE / width.max(height)).min(1.0);
+    scale = scale.max(1.0 / width.min(height));
+    let make_divisible = |value: f64| STRIDE.max(round_half_even(value / STRIDE as f64) * STRIDE);
+    let mut effective = (
+        make_divisible(width * scale),
+        make_divisible(height * scale),
+    );
+    if effective.0.max(effective.1) > MAX_SIZE as i64 {
+        scale = MAX_SIZE / effective.0.max(effective.1) as f64;
+        effective = (
+            make_divisible(effective.0 as f64 * scale),
+            make_divisible(effective.1 as f64 * scale),
+        );
+    }
+    effective
+}
+
+/// Worker-side independent twin of the provider's ordered reference receipt. It binds the flattened
+/// image count, order, native bytes, and backend-specific ViT/VAE effective shapes.
+pub(crate) fn bernini_r2v_reference_receipt(
+    lane: VideoLane,
+    width: u32,
+    height: u32,
+    conditioning: &[Conditioning],
+) -> Result<String, String> {
+    let [Conditioning::MultiReference { images }] = conditioning else {
+        return Err("Bernini R2V admission requires exactly one MultiReference carrier".to_owned());
+    };
+    if !(1..=8).contains(&images.len()) {
+        return Err(format!(
+            "Bernini R2V admission requires 1-8 flattened images, got {}",
+            images.len()
+        ));
+    }
+    let domain = match lane {
+        VideoLane::Mlx => BERNINI_R2V_MLX_RECEIPT_DOMAIN,
+        VideoLane::Candle => BERNINI_R2V_CANDLE_RECEIPT_DOMAIN,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut entries = Vec::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        let expected = u64::from(image.width)
+            .checked_mul(u64::from(image.height))
+            .and_then(|pixels| pixels.checked_mul(3))
+            .and_then(|pixels| usize::try_from(pixels).ok())
+            .ok_or_else(|| "Bernini R2V reference geometry overflow".to_owned())?;
+        if image.pixels.len() != expected {
+            return Err(format!(
+                "Bernini R2V reference {index} has {} RGB bytes, expected {expected}",
+                image.pixels.len()
+            ));
+        }
+        let mut digest = sha2::Sha256::new();
+        digest.update(domain.as_bytes());
+        digest.update(image.width.to_le_bytes());
+        digest.update(image.height.to_le_bytes());
+        digest.update(&image.pixels);
+        let digest = format!("{:x}", digest.finalize());
+        if !seen.insert(digest.clone()) {
+            return Err("Bernini R2V references must be distinct".to_owned());
+        }
+        let (vit_width, vit_height) = bernini_vit_shape(image.width, image.height);
+        let (vae_width, vae_height) = match lane {
+            VideoLane::Mlx => bernini_mlx_vae_shape(image.width, image.height),
+            VideoLane::Candle => (i64::from(width), i64::from(height)),
+        };
+        entries.push(format!(
+            "{index}:native-{}x{};vit-{vit_width}x{vit_height};vae-{vae_width}x{vae_height};sha256-{digest}",
+            image.width, image.height
+        ));
+    }
+    Ok(format!(
+        "{domain}:count-{}:{}",
+        images.len(),
+        entries.join("|")
+    ))
+}
 
 type VideoDecodeProfileResolver = fn(
     VideoLane,
@@ -842,9 +970,9 @@ fn admit_video_generation_with_curves_and_profiles(
     }
     let contract = generator.memory_strategy_contract();
     if require_request_evidence && !packaged_video_evidence_covers_request(generator, &request) {
-        if bernini_v2v_attempt(&request) {
+        if bernini_memory_attempt(&request) {
             return VideoAdmissionOutcome {
-                refusal: Some(bernini_v2v_evidence_refusal(&request, contract)),
+                refusal: Some(bernini_evidence_refusal(&request, contract)),
                 ..VideoAdmissionOutcome::default()
             };
         }
@@ -1043,12 +1171,13 @@ fn admit_video_generation_with_curves_and_profiles(
     }
 }
 
-fn bernini_v2v_attempt(request: &VideoAdmissionInputs<'_>) -> bool {
+fn bernini_memory_attempt(request: &VideoAdmissionInputs<'_>) -> bool {
     request.model_id == "bernini"
-        && (request.mode == "video_to_video" || request.reference_count > 0)
+        && (matches!(request.mode, "video_to_video" | "reference_to_video")
+            || request.reference_count > 0)
 }
 
-fn bernini_v2v_surface_is_exact(
+fn bernini_surface_is_exact(
     request: &VideoAdmissionInputs<'_>,
     contract: Option<&MemoryProviderContract>,
 ) -> bool {
@@ -1059,23 +1188,61 @@ fn bernini_v2v_surface_is_exact(
         .resident_components()
         .iter()
         .find(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack)
-        .map(|component| component.id.as_str());
+        .map(|component| bernini_adapter_receipt_axis(&component.id));
     let adapter_axis = request.overlay.and_then(|overlay| {
         overlay
             .split('+')
-            .find(|axis| axis.starts_with("adapters:["))
+            .find(|axis| axis.starts_with(BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN))
     });
-    let overlay_is_exact = adapter_axis == expected_adapter
-        && request.overlay.map_or(true, |overlay| {
-            !overlay.is_empty()
-                && overlay
-                    .split('+')
-                    .all(|axis| axis == "provider_video_mode:v2v" || Some(axis) == expected_adapter)
+    let expected_provider_mode = match request.mode {
+        "video_to_video" => "provider_video_mode:v2v",
+        "reference_to_video" => "provider_video_mode:r2v",
+        _ => return false,
+    };
+    let reference_domain = match request.lane {
+        VideoLane::Mlx => BERNINI_R2V_MLX_RECEIPT_DOMAIN,
+        VideoLane::Candle => BERNINI_R2V_CANDLE_RECEIPT_DOMAIN,
+    };
+    let axes: Vec<_> = request
+        .overlay
+        .unwrap_or_default()
+        .split('+')
+        .filter(|axis| !axis.is_empty())
+        .collect();
+    let reference_axis = axes
+        .iter()
+        .copied()
+        .find(|axis| axis.starts_with(reference_domain));
+    let reference_count = reference_axis.and_then(|axis| {
+        axis.strip_prefix(reference_domain)?
+            .strip_prefix(":count-")?
+            .split_once(':')?
+            .0
+            .parse::<u32>()
+            .ok()
+    });
+    let overlay_is_exact = adapter_axis == expected_adapter.as_deref()
+        && axes.contains(&expected_provider_mode)
+        && axes.iter().all(|axis| {
+            *axis == expected_provider_mode
+                || Some(*axis) == expected_adapter.as_deref()
+                || axis.starts_with(reference_domain)
         });
+    let carrier_is_exact = match request.mode {
+        "video_to_video" => {
+            request.reference_count == 1
+                && request.reference_shape == "video"
+                && reference_axis.is_none()
+        }
+        "reference_to_video" => {
+            (1..=8).contains(&request.reference_count)
+                && request.reference_shape == "multi_image"
+                && reference_count == Some(request.reference_count)
+        }
+        _ => false,
+    };
     request.model_id == "bernini"
-        && request.mode == "video_to_video"
-        && request.reference_count == 1
-        && request.reference_shape == "video"
+        && carrier_is_exact
         && request.fps == 16
         && matches!(
             (request.width, request.height),
@@ -1090,21 +1257,24 @@ fn bernini_v2v_surface_is_exact(
         && overlay_is_exact
 }
 
-fn bernini_v2v_evidence_refusal(
+fn bernini_evidence_refusal(
     request: &VideoAdmissionInputs<'_>,
     contract: Option<&MemoryProviderContract>,
 ) -> String {
-    if !bernini_v2v_surface_is_exact(request, contract) {
-        return "Bernini V2V memory admission refused: exact surface requires one VideoClip, FPS16, frames 45/61/77, geometries 848x480/480x848/1280x720/720x1280, supported tier, and the exact loaded adapter receipt".to_owned();
+    if !bernini_surface_is_exact(request, contract) {
+        return "Bernini memory admission refused: exact surface requires either one VideoClip/V2V or one ordered MultiReference with 1-8 distinct images/R2V, FPS16, frames 45/61/77, one public geometry, supported tier, backend-specific reference receipt, and the exact loaded adapter receipt".to_owned();
     }
     format!(
-        "Bernini V2V memory admission refused: no current calibrated evidence matches route={}, lane={}, tier={:?}, geometry={}x{} frames={} overlay={:?}",
+        "Bernini {} memory admission refused: no current calibrated evidence matches route={}, lane={}, tier={:?}, geometry={}x{} frames={} references={} shape={} overlay={:?}",
+        request.mode,
         request.route,
         request.lane.as_key(),
         request.tier.quant,
         request.width,
         request.height,
         request.frames,
+        request.reference_count,
+        request.reference_shape,
         request.overlay
     )
 }

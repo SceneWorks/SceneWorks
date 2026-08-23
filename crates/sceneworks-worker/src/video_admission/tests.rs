@@ -2,8 +2,8 @@
 //! `sceneworks-core` transcribed from gen-core still match the pinned bundle.
 
 use gen_core::{
-    LoadShape, LoadSpec, MemoryBackendRealization, MemoryCalibrationIdentity, MemoryComponentKind,
-    MemoryComponentResidency, MemoryFormulaKind, MemoryFormulaVariable,
+    Generator, LoadShape, LoadSpec, MemoryBackendRealization, MemoryCalibrationIdentity,
+    MemoryComponentKind, MemoryComponentResidency, MemoryFormulaKind, MemoryFormulaVariable,
     MemoryLifecycleCapabilities, MemoryParameterRanges, MemoryPhase, MemoryResidentComponent,
     MemoryStrategyCapability, MemoryStrategySupport, MemoryWindowMaterialization, Precision, Quant,
     VaeTiling, WeightsSource,
@@ -716,6 +716,7 @@ fn bernini_v2v_is_refused_for_missing_or_crossed_evidence() {
     exact.width = 848;
     exact.height = 480;
     exact.fps = 16;
+    exact.overlay = Some("provider_video_mode:v2v");
     let outcome = admit_video_generation(&generator, exact);
     assert!(outcome
         .refusal
@@ -758,12 +759,14 @@ fn bernini_v2v_consumes_the_loaded_adapter_receipt_without_reconstructing_it() {
         };
         contract
     };
-    let exact = bernini_inputs(Some(RECEIPT));
+    let exact_axis = bernini_adapter_receipt_axis(RECEIPT);
+    let exact_overlay = format!("{exact_axis}+provider_video_mode:v2v");
+    let exact = bernini_inputs(Some(&exact_overlay));
 
     for resident_bytes in [0, 12_345] {
         let contract = contract_with_receipt(resident_bytes);
         assert!(
-            bernini_v2v_surface_is_exact(&exact, Some(&contract)),
+            bernini_surface_is_exact(&exact, Some(&contract)),
             "dense-folded zero-byte and packed-additive receipts are both identity-bearing"
         );
     }
@@ -779,13 +782,96 @@ fn bernini_v2v_consumes_the_loaded_adapter_receipt_without_reconstructing_it() {
         RECEIPT.replace("digest=sha256:aa", "digest=sha256:ba"),
     ] {
         let contract = contract_with_receipt(12_345);
-        let crossed_request = bernini_inputs(Some(&crossed));
+        let crossed_axis = bernini_adapter_receipt_axis(&crossed);
+        let crossed_overlay = format!("{crossed_axis}+provider_video_mode:v2v");
+        let crossed_request = bernini_inputs(Some(&crossed_overlay));
         assert!(
-            !bernini_v2v_surface_is_exact(&crossed_request, Some(&contract)),
+            !bernini_surface_is_exact(&crossed_request, Some(&contract)),
             "crossed receipt was accepted: {crossed}"
         );
     }
-    assert!(!bernini_v2v_surface_is_exact(&exact, None));
+    assert!(!bernini_surface_is_exact(&exact, None));
+}
+
+fn r2v_conditioning() -> Vec<gen_core::Conditioning> {
+    vec![gen_core::Conditioning::MultiReference {
+        images: vec![
+            gen_core::Image {
+                width: 640,
+                height: 360,
+                pixels: vec![11; 640 * 360 * 3],
+            },
+            gen_core::Image {
+                width: 360,
+                height: 640,
+                pixels: vec![29; 360 * 640 * 3],
+            },
+        ],
+    }]
+}
+
+#[test]
+fn bernini_r2v_worker_receipts_bind_backend_specific_effective_shapes() {
+    let conditioning = r2v_conditioning();
+    let mlx = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &conditioning).unwrap();
+    assert_eq!(mlx, "bernini-r2v-references-mlx-v1:count-2:0:native-640x360;vit-280x168;vae-624x352;sha256-08f7799b7050c59262c63194761800f52bfab061e84d947119e73447cf3ee4c4|1:native-360x640;vit-168x280;vae-352x624;sha256-ddfffcf24ec18d8c764ce45021fc37c3e248f7ae9bf183d57b5fe50ec26c19de");
+    let candle = bernini_r2v_reference_receipt(VideoLane::Candle, 848, 480, &conditioning).unwrap();
+    assert_eq!(candle, "bernini-r2v-references-candle-v1:count-2:0:native-640x360;vit-280x168;vae-848x480;sha256-5bdf7fc62714f39b6b79861f79f4e50a948114e4d683d4c75476fbac783c2120|1:native-360x640;vit-168x280;vae-848x480;sha256-f9496ae0e80c29da2d8f78c49465125d8caa9f3f89756c8432e53a5f0cd300c5");
+
+    let mut duplicate = r2v_conditioning();
+    let [gen_core::Conditioning::MultiReference { images }] = duplicate.as_mut_slice() else {
+        unreachable!()
+    };
+    images[1] = images[0].clone();
+    assert!(bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &duplicate).is_err());
+}
+
+#[test]
+fn bernini_r2v_exact_surface_reaches_the_shared_selector_with_flattened_count() {
+    let mut contract = fixture_contract(20, 4, &[MemoryStrategy::BoundedDecode]);
+    contract.provider_id = "bernini".to_owned();
+    let receipt =
+        bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &r2v_conditioning()).unwrap();
+    let overlay = format!("provider_video_mode:r2v+{receipt}");
+    let generator = fixture_generator(Some(contract));
+    for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+        let mut request = bernini_inputs(Some(&overlay));
+        request.mode = "reference_to_video";
+        request.reference_count = 2;
+        request.reference_shape = "multi_image";
+        request.runtime.as_mut().unwrap().cache_state = cache_state;
+        assert!(bernini_surface_is_exact(
+            &request,
+            generator.memory_strategy_contract()
+        ));
+
+        let outcome = admit_video_generation_with_curves(&generator, request, None);
+        assert!(
+            outcome.context.is_some(),
+            "shared selector context: {outcome:?}"
+        );
+        let context = outcome.context.unwrap();
+        assert_eq!(context.mode.as_key(), "reference_to_video");
+        assert_eq!(context.geometry.reference_count, 2);
+        assert_eq!(context.overlay.as_deref(), Some(overlay.as_str()));
+        assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+        assert_eq!(context.cache_state, cache_state);
+    }
+
+    for (count, shape, mode) in [
+        (1, "multi_image", "reference_to_video"),
+        (2, "video", "reference_to_video"),
+        (2, "multi_image", "video_to_video"),
+    ] {
+        let mut crossed = bernini_inputs(Some(&overlay));
+        crossed.mode = mode;
+        crossed.reference_count = count;
+        crossed.reference_shape = shape;
+        assert!(!bernini_surface_is_exact(
+            &crossed,
+            generator.memory_strategy_contract()
+        ));
+    }
 }
 
 #[test]

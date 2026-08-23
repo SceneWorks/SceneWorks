@@ -60,11 +60,11 @@ fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
 #[test]
 fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     let mut input = VideoGenInput::default();
-    assert_eq!(video_admission_overlay(&input, None), None);
+    assert_eq!(video_admission_overlay(&input, None).unwrap(), None);
 
     input.video_mode = Some("no_audio".to_owned());
     assert_eq!(
-        video_admission_overlay(&input, None).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some("provider_video_mode:no_audio"),
         "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
     );
@@ -79,13 +79,15 @@ fn bernini_adapter_overlay_records_exact_artifact_identity() {
     let root = tempfile::tempdir().unwrap();
     let adapter_path = root.path().join("style.safetensors");
     std::fs::write(&adapter_path, b"weights-free-adapter").unwrap();
-    let mut input = VideoGenInput::default();
-    input.engine_id = "bernini";
-    input.adapters = vec![AdapterSpec::new(
-        adapter_path.clone(),
-        0.75,
-        gen_core::AdapterKind::Lora,
-    )];
+    let input = VideoGenInput {
+        engine_id: "bernini",
+        adapters: vec![AdapterSpec::new(
+            adapter_path.clone(),
+            0.75,
+            gen_core::AdapterKind::Lora,
+        )],
+        ..Default::default()
+    };
 
     const RECEIPT: &str = "adapters:[artifact=safetensors;path_hex=2f746d702f7374796c652e7361666574656e736f7273;digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;kind=Lora;scale_bits=3f400000;pass_scale_bits=none;expert=None;verified_bytes=20;stable=true]";
     let mut contract = gen_core::MemoryProviderContract::compatibility_default(
@@ -110,13 +112,15 @@ fn bernini_adapter_overlay_records_exact_artifact_identity() {
     };
 
     assert_eq!(
-        video_admission_overlay(&input, Some(&contract)).as_deref(),
-        Some(RECEIPT),
-        "the worker must consume the provider's one load-exact receipt byte-for-byte"
+        video_admission_overlay(&input, Some(&contract))
+            .unwrap()
+            .as_deref(),
+        Some(crate::video_admission::bernini_adapter_receipt_axis(RECEIPT).as_str()),
+        "the worker must bind the opaque request axis to the provider's load-exact receipt"
     );
     assert_eq!(
-        video_admission_overlay(&input, None).as_deref(),
-        Some("adapters:unverified"),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("bernini-adapter-unverified"),
         "missing provider receipt must fail closed, never trigger a second filesystem reconstruction"
     );
 }
@@ -159,6 +163,66 @@ fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
         ),
         "other"
     );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_admission_flattens_the_single_multi_reference_carrier() {
+    let images = vec![
+        Image {
+            width: 640,
+            height: 360,
+            pixels: vec![11; 640 * 360 * 3],
+        },
+        Image {
+            width: 360,
+            height: 640,
+            pixels: vec![29; 360 * 640 * 3],
+        },
+    ];
+    let conditioning = vec![Conditioning::MultiReference { images }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &conditioning),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &conditioning),
+        2
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
+    for reference_asset_ids in [
+        Vec::<&str>::new(),
+        vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        vec!["same", "same"],
+    ] {
+        let request = request(serde_json::json!({
+            "projectId": "p",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "ordered subjects",
+            "referenceAssetIds": reference_asset_ids,
+        }));
+        assert!(validate_r2v_reference_ids(&request).is_err());
+    }
+
+    let exact = request(serde_json::json!({
+        "projectId": "p",
+        "model": "bernini",
+        "mode": "reference_to_video",
+        "prompt": "ordered subjects",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"],
+    }));
+    validate_r2v_reference_ids(&exact).expect("one ordered wrapper may contain eight distinct ids");
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
