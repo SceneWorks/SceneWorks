@@ -16727,6 +16727,61 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
     );
 }
 
+/// SC-20790's Candle modules are cfg-gated off on macOS, so keep a native source-contract guard for
+/// the production ordering that the Linux/CUDA build also type-checks. The authoritative selector
+/// must run before either provider dispatches to a loader, and the selected context must reach both
+/// load and generation rather than remaining telemetry-only metadata.
+#[test]
+fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
+    let ip = include_str!("kolors_ipadapter.rs");
+    let control = include_str!("kolors_control.rs");
+
+    for (route, source, dispatch_marker) in [
+        (
+            "IP-Adapter",
+            ip,
+            "IpAdapterKolors::load_with_memory_context",
+        ),
+        ("ControlNet", control, "run_candle_strict_control("),
+    ] {
+        let selector = source
+            .find("evaluate_shared_bespoke_image(")
+            .unwrap_or_else(|| panic!("{route} omitted the shared bespoke selector"));
+        let dispatch = source[selector..]
+            .find(dispatch_marker)
+            .map(|offset| selector + offset)
+            .unwrap_or_else(|| panic!("{route} omitted request-bound dispatch"));
+        assert!(
+            selector < dispatch,
+            "{route} must refuse an unselected request before load"
+        );
+        for marker in [
+            "provider_contract_for_",
+            "KOLORS_BASE_REVISION",
+            "KOLORS_REQUEST_EVIDENCE_REVISION",
+            "image_memory_strategy_selected",
+            "generate_with_memory_context",
+        ] {
+            assert!(source.contains(marker), "{route} omitted {marker}");
+        }
+    }
+
+    assert!(ip.contains("KOLORS_IPADAPTER_REVISION"));
+    assert!(ip.contains("ipadapter-kolors"));
+    assert!(control.contains("KOLORS_CONTROL_REVISION"));
+    assert!(control.contains("controlnet-kolors"));
+    for mutable_source in [
+        "SCENEWORKS_KOLORS_IPADAPTER_DIR",
+        "SCENEWORKS_CONTROLNET_KOLORS",
+        "\"refs/pr/4\"",
+    ] {
+        assert!(
+            !ip.contains(mutable_source) && !control.contains(mutable_source),
+            "mutable Kolors source {mutable_source} re-entered production resolution"
+        );
+    }
+}
+
 /// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed
 /// `SceneWorks/krea-2-turbo-mlx` turnkey const on-demand; the repo is non-overridable here, so it must
 /// pin an exact commit rather than the mutable `main` branch (sc-9879, F-077 follow-up).
@@ -19681,9 +19736,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "Flux2Comfyui",
         // Bernini still-image companion: a plain base load.
         "Bernini",
-        // The two reject arms error before any generation, so they never allocate.
+        // These reject arms error before any generation, so they never allocate.
         "PoseReject",
         "PoseControlBaseMissing",
+        "KolorsCompositeReject",
         // Generic provider arms — both reach the shared `generate_candle_stream` gate.
         "CandleTxt2Img",
     ];

@@ -38,7 +38,8 @@ const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-req
 const CHROMA_REQUEST_EVIDENCE_REVISION: &str = "sc-20788-candle-chroma-staged-residency-v2";
 const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
     "sc-20789-candle-ideogram-request-scoped-staged-residency-v1";
-const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
+pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
+    "sc-15839-candle-pulid-flux-request-scope-v1";
 const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
@@ -46,6 +47,12 @@ const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additiv
 const IDEOGRAM_TURBO_ADAPTER_PREFIX: &str = "ideogram.turbo-time.sha256:";
 const IDEOGRAM_PID_PREFIX: &str = "ideogram.pid.flux2.sha256:";
 const IDEOGRAM_PHYSICAL_RECEIPT_PREFIX: &str = "ideogram.physical.sha256:";
+pub(crate) const KOLORS_REQUEST_EVIDENCE_REVISION: &str = "kolors-candle-request-contract-v1";
+const KOLORS_PHYSICAL_RECEIPT_PREFIX: &str = "kolors.physical.sha256:";
+const KOLORS_ADAPTER_RECEIPT_PREFIX: &str = "kolors.adapters.ordered.sha256:";
+const KOLORS_IP_RECEIPT_PREFIX: &str = "kolors.ip.sha256:";
+const KOLORS_CONTROL_RECEIPT_PREFIX: &str = "kolors.control.sha256:";
+const KOLORS_PID_RECEIPT_PREFIX: &str = "kolors.pid.sdxl.sha256:";
 
 fn is_chroma(engine_id: &str) -> bool {
     matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
@@ -55,8 +62,15 @@ fn is_ideogram(engine_id: &str) -> bool {
     matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
 }
 
+fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "candle_kolors_ipadapter" | "candle_kolors_control"
+    )
+}
+
 fn is_receipt_priced(engine_id: &str) -> bool {
-    is_chroma(engine_id) || is_ideogram(engine_id)
+    is_chroma(engine_id) || is_ideogram(engine_id) || is_sealed_kolors_bespoke(engine_id)
 }
 
 /// Resolve the public `lora` cell to the exact ordered adapter load identity sealed by the
@@ -228,6 +242,119 @@ fn validate_ideogram_asset_facts(
         ));
     }
     Ok(())
+}
+
+fn validate_kolors_asset_facts(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+    use_pid: bool,
+) -> WorkerResult<String> {
+    let facts = contract.asset_facts;
+    let components = contract.resident_components();
+    let receipt = components
+        .iter()
+        .filter(|component| component.id.starts_with(KOLORS_PHYSICAL_RECEIPT_PREFIX))
+        .collect::<Vec<_>>();
+    let prefixed = |prefix: &str| {
+        components
+            .iter()
+            .filter(|component| component.id.starts_with(prefix))
+            .collect::<Vec<_>>()
+    };
+    let adapters = prefixed(KOLORS_ADAPTER_RECEIPT_PREFIX);
+    let ip = prefixed(KOLORS_IP_RECEIPT_PREFIX);
+    let control = prefixed(KOLORS_CONTROL_RECEIPT_PREFIX);
+    let pid = prefixed(KOLORS_PID_RECEIPT_PREFIX);
+    let valid_id = |id: &str, prefix: &str| {
+        id.len() == prefix.len() + 64
+            && id[prefix.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    };
+    let exact_route = match engine_id {
+        "kolors" => ip.is_empty() && control.is_empty(),
+        "candle_kolors_ipadapter" => ip.len() == 1 && control.is_empty() && pid.is_empty(),
+        "candle_kolors_control" => {
+            control.len() == 1 && ip.is_empty() && pid.len() == usize::from(use_pid)
+        }
+        _ => false,
+    };
+    let overlay_sum = adapters
+        .iter()
+        .chain(ip.iter())
+        .chain(control.iter())
+        .chain(pid.iter())
+        .map(|component| component.resident_bytes)
+        .sum::<u64>();
+    let valid = facts.conditioning_bytes > 0
+        && facts.transformer_bytes > 0
+        && facts.decoder_bytes > 0
+        && facts.base_bytes
+            == facts
+                .conditioning_bytes
+                .saturating_add(facts.transformer_bytes)
+                .saturating_add(facts.decoder_bytes)
+        && facts.overlay_bytes == overlay_sum
+        && exact_route
+        && matches!(receipt.as_slice(), [component]
+            if valid_id(&component.id, KOLORS_PHYSICAL_RECEIPT_PREFIX)
+                && component.kind == gen_core::MemoryComponentKind::TransformerSubStack(
+                    gen_core::TransformerComponent::Dit
+                )
+                && component.resident_bytes == facts.transformer_bytes)
+        && adapters
+            .iter()
+            .all(|component| valid_id(&component.id, KOLORS_ADAPTER_RECEIPT_PREFIX))
+        && ip
+            .iter()
+            .all(|component| valid_id(&component.id, KOLORS_IP_RECEIPT_PREFIX))
+        && control
+            .iter()
+            .all(|component| valid_id(&component.id, KOLORS_CONTROL_RECEIPT_PREFIX))
+        && pid
+            .iter()
+            .all(|component| valid_id(&component.id, KOLORS_PID_RECEIPT_PREFIX));
+    if !valid {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} provider returned incomplete or crossed Kolors physical receipts"
+        )));
+    }
+    Ok(receipt[0].id.clone())
+}
+
+pub(crate) fn kolors_overlay_receipt_identity(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+    use_pid: bool,
+) -> WorkerResult<Option<String>> {
+    validate_kolors_asset_facts(engine_id, contract, use_pid)?;
+    let accepted: Vec<&str> = match engine_id {
+        "kolors" => vec![KOLORS_ADAPTER_RECEIPT_PREFIX, KOLORS_PID_RECEIPT_PREFIX],
+        "candle_kolors_ipadapter" => {
+            vec![KOLORS_IP_RECEIPT_PREFIX, KOLORS_ADAPTER_RECEIPT_PREFIX]
+        }
+        "candle_kolors_control" => vec![
+            KOLORS_CONTROL_RECEIPT_PREFIX,
+            KOLORS_ADAPTER_RECEIPT_PREFIX,
+            KOLORS_PID_RECEIPT_PREFIX,
+        ],
+        _ => vec![],
+    };
+    let identities = contract
+        .resident_components()
+        .iter()
+        .filter(|component| {
+            accepted
+                .iter()
+                .any(|prefix| component.id.starts_with(prefix))
+        })
+        .map(|component| component.id.as_str())
+        .collect::<Vec<_>>();
+    if identities.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(identities.join("+")))
+    }
 }
 
 pub(crate) fn ideogram_physical_receipt_identity(
@@ -1079,7 +1206,43 @@ pub(crate) fn evaluate_shared_bespoke_image(
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
     contract: gen_core::MemoryProviderContract,
+    request_evidence_revision: &'static str,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    let expected_revision = match engine_id {
+        "pulid_flux" => PULID_FLUX_REQUEST_EVIDENCE_REVISION,
+        "candle_kolors_ipadapter" | "candle_kolors_control" => KOLORS_REQUEST_EVIDENCE_REVISION,
+        _ => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{engine_id} has no registered bespoke memory evidence authority"
+            )))
+        }
+    };
+    if request_evidence_revision != expected_revision {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} crossed bespoke memory evidence revision {request_evidence_revision}"
+        )));
+    }
+    if is_sealed_kolors_bespoke(engine_id) {
+        let Some(mode) =
+            crate::memory_route_registry::MemoryRouteMode::from_request(request_mode_value)
+        else {
+            return Ok(None);
+        };
+        if !crate::memory_route_registry::declared_candle_bespoke_request(
+            engine_id,
+            Some(tier_key),
+            request_mode_value,
+            spec,
+            crate::memory_route_registry::MemoryRouteRequestContext {
+                mode,
+                reference_count: geometry.reference_count,
+                use_pid,
+                has_phases,
+            },
+        ) {
+            return Ok(None);
+        }
+    }
     evaluate_shared_image_inner(
         engine_id,
         model_id,
@@ -1101,7 +1264,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
         cache_state,
         None,
         Some(contract),
-        Some(PULID_FLUX_REQUEST_EVIDENCE_REVISION),
+        Some(request_evidence_revision),
     )
 }
 
@@ -1195,6 +1358,17 @@ fn evaluate_shared_image_inner(
     } else if is_ideogram(engine_id) {
         validate_ideogram_asset_facts(engine_id, &contract, use_pid, &mode.mode)?;
         ideogram_provider_overlay_identity(engine_id, &contract, provider_overlay)?
+    } else if is_sealed_kolors_bespoke(engine_id) {
+        let exact = kolors_overlay_receipt_identity(engine_id, &contract, use_pid)?;
+        match (provider_overlay, exact) {
+            (None, None) => None,
+            (Some(_), Some(exact)) => Some(exact),
+            _ => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{engine_id} public overlay crossed its exact provider receipt"
+                )))
+            }
+        }
     } else {
         provider_overlay.map(str::to_owned)
     };
@@ -1801,6 +1975,308 @@ mod tests {
         .as_object()
         .expect("Chroma structural manifest")
         .clone()
+    }
+
+    fn kolors_bespoke_probe_contract(
+        provider: &str,
+        use_pid: bool,
+    ) -> gen_core::MemoryProviderContract {
+        let mut contract = chroma_probe_contract(None, 0, 0);
+        contract.provider_id = provider.to_owned();
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "kolors-candle-staged-chatglm-unet-f32-vae-v1",
+            gen_core::LoadShape::EagerMaterialization,
+        ));
+        let overlay_prefix = if provider == "candle_kolors_ipadapter" {
+            KOLORS_IP_RECEIPT_PREFIX
+        } else {
+            KOLORS_CONTROL_RECEIPT_PREFIX
+        };
+        let overlay_kind = if provider == "candle_kolors_ipadapter" {
+            gen_core::MemoryComponentKind::IpAdapter
+        } else {
+            gen_core::MemoryComponentKind::ControlBranch
+        };
+        let mut components = vec![
+            gen_core::MemoryResidentComponent {
+                id: format!("{KOLORS_PHYSICAL_RECEIPT_PREFIX}{}", "a".repeat(64)),
+                kind: gen_core::MemoryComponentKind::TransformerSubStack(
+                    gen_core::TransformerComponent::Dit,
+                ),
+                resident_bytes: gib(10),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            },
+            gen_core::MemoryResidentComponent {
+                id: format!("{overlay_prefix}{}", "b".repeat(64)),
+                kind: overlay_kind,
+                resident_bytes: gib(2),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            },
+        ];
+        if use_pid {
+            components.push(gen_core::MemoryResidentComponent {
+                id: format!("{KOLORS_PID_RECEIPT_PREFIX}{}", "c".repeat(64)),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: gib(3),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![
+                gen_core::MemoryFormulaVariable::AssetBytes,
+                gen_core::MemoryFormulaVariable::PixelCount,
+                gen_core::MemoryFormulaVariable::BatchCount,
+                gen_core::MemoryFormulaVariable::ConditioningTokenCount,
+                gen_core::MemoryFormulaVariable::OverlayBytes,
+            ],
+            resident_components: components,
+        };
+        contract.asset_facts = gen_core::MemoryAssetFacts {
+            conditioning_bytes: gib(6),
+            transformer_bytes: gib(10),
+            decoder_bytes: gib(2),
+            base_bytes: gib(18),
+            overlay_bytes: gib(if use_pid { 5 } else { 2 }),
+        };
+        contract
+    }
+
+    #[test]
+    fn kolors_bespoke_selector_is_request_authoritative_and_route_exact() {
+        let manifest = json!({
+            "candle": { "vramGbByTier": { "q4": 30.0 }, "measured": true }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let ip_spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")))
+            .with_ip_adapter(WeightsSource::Dir(PathBuf::from("kolors-ip")));
+        let budget = Some(VramBudget {
+            free_gb: 22.0,
+            total_gb: 48.0,
+        });
+        let evaluation = evaluate_shared_bespoke_image(
+            "candle_kolors_ipadapter",
+            "kolors",
+            &ip_spec,
+            true,
+            &manifest,
+            "q4",
+            "character_image",
+            Some("identity"),
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            budget,
+            Some(30.0),
+            0,
+            MemoryCacheState::Cold,
+            kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+            KOLORS_REQUEST_EVIDENCE_REVISION,
+        )
+        .unwrap()
+        .expect("exact staged candidate");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert_eq!(
+            evaluation.context.evidence_revision,
+            KOLORS_REQUEST_EVIDENCE_REVISION
+        );
+        assert!(evaluation
+            .context
+            .overlay
+            .as_deref()
+            .unwrap()
+            .starts_with(KOLORS_IP_RECEIPT_PREFIX));
+
+        let control_spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")))
+            .with_control(WeightsSource::File(PathBuf::from(
+                "kolors-control.safetensors",
+            )));
+        let crossed = evaluate_shared_bespoke_image(
+            "candle_kolors_control",
+            "kolors",
+            &control_spec,
+            true,
+            &manifest,
+            "q4",
+            "text_to_image",
+            Some("control"),
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            false,
+            false,
+            budget,
+            Some(30.0),
+            0,
+            MemoryCacheState::Cold,
+            kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+            KOLORS_REQUEST_EVIDENCE_REVISION,
+        );
+        assert!(
+            crossed.is_err(),
+            "IP evidence must not authorize ControlNet"
+        );
+        assert!(evaluate_shared_bespoke_image(
+            "candle_kolors_ipadapter",
+            "kolors",
+            &ip_spec,
+            true,
+            &manifest,
+            "q4",
+            "character_image",
+            Some("identity"),
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            budget,
+            Some(30.0),
+            0,
+            MemoryCacheState::Cold,
+            kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+            "crossed-kolors-revision",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn kolors_bespoke_staged_surface_covers_tiers_geometries_modes_pid_and_cache_states() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 63.7, "q8": 63.7, "bf16": 63.7 },
+                "measured": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let budget = Some(VramBudget {
+            free_gb: 40.0,
+            total_gb: 48.0,
+        });
+        let geometries = [(768, 768), (1024, 1024), (1280, 768), (768, 1280)];
+        for tier in ["q4", "q8", "bf16"] {
+            let base_spec =
+                LoadSpec::new(WeightsSource::Dir(PathBuf::from(format!("kolors-{tier}"))));
+            let ip_spec = base_spec
+                .clone()
+                .with_ip_adapter(WeightsSource::Dir(PathBuf::from("kolors-ip")));
+            let control_spec = base_spec
+                .clone()
+                .with_control(WeightsSource::File(PathBuf::from(
+                    "kolors-control.safetensors",
+                )));
+            let control_pid_spec = control_spec.clone().with_pid(
+                WeightsSource::File(PathBuf::from("pid.safetensors")),
+                WeightsSource::Dir(PathBuf::from("gemma")),
+            );
+            for (width, height) in geometries {
+                for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+                    let ip = evaluate_shared_bespoke_image(
+                        "candle_kolors_ipadapter",
+                        "kolors",
+                        &ip_spec,
+                        true,
+                        &manifest,
+                        tier,
+                        "character_image",
+                        Some("identity"),
+                        MemoryGeometry {
+                            width,
+                            height,
+                            batch: 1,
+                            frames: 1,
+                            reference_count: 1,
+                        },
+                        true,
+                        false,
+                        false,
+                        budget,
+                        Some(63.7),
+                        0,
+                        cache_state,
+                        kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+                        KOLORS_REQUEST_EVIDENCE_REVISION,
+                    )
+                    .unwrap()
+                    .expect("IP staged candidate");
+                    assert_eq!(
+                        ip.context.selection.strategy,
+                        MemoryStrategy::StagedResidency
+                    );
+
+                    for (mode, use_pid) in [
+                        ("text_to_image", false),
+                        ("style_variations", false),
+                        ("character_image", false),
+                        ("text_to_image", true),
+                    ] {
+                        let control = evaluate_shared_bespoke_image(
+                            "candle_kolors_control",
+                            "kolors",
+                            if use_pid {
+                                &control_pid_spec
+                            } else {
+                                &control_spec
+                            },
+                            true,
+                            &manifest,
+                            tier,
+                            mode,
+                            Some("control"),
+                            MemoryGeometry {
+                                width,
+                                height,
+                                batch: 1,
+                                frames: 1,
+                                reference_count: 0,
+                            },
+                            false,
+                            use_pid,
+                            false,
+                            budget,
+                            Some(63.7),
+                            0,
+                            cache_state,
+                            kolors_bespoke_probe_contract("candle_kolors_control", use_pid),
+                            KOLORS_REQUEST_EVIDENCE_REVISION,
+                        )
+                        .unwrap()
+                        .expect("Control staged candidate");
+                        assert_eq!(
+                            control.context.selection.strategy,
+                            MemoryStrategy::StagedResidency
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn ideogram_probe_contract(
@@ -3359,6 +3835,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             composition_probe_contract(false, false),
+            DECLARATION_REQUEST_EVIDENCE_REVISION,
         )
         .expect("staging-free bespoke evaluation");
         assert!(

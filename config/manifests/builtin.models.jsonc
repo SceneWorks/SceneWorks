@@ -11714,10 +11714,12 @@
       },
       // candle/CUDA VRAM gate (sc-16095): measured on an RTX PRO 6000 Blackwell at 1024².
       // Base peaks were q4 26.681, q8 30.372, and bf16 55.102 GB. The shipping bf16
-      // providers raised the family high-water to 63.658 GB for strict control and
-      // 61.343 GB for IP-Adapter. These resident providers do not stage phases, so no
-      // sequentialPeakGb row is declared. Packed q4/q8 conditioned loading is owned by
-      // sc-16171; its matrix cells remain unverified rather than borrowing base evidence.
+      // providers raised the family resident high-water to 63.658 GB for strict control and
+      // 61.343 GB for IP-Adapter. SC-20790 gives the two bespoke providers request-authoritative
+      // structural staged phase contracts (IP: ChatGLM+CLIP/IP -> IP UNet -> F32 VAE; control:
+      // ChatGLM -> co-resident UNet+ControlNet -> F32 VAE/PiD). Their exact content receipts are
+      // selected pre-load; the legacy resident numbers remain catalog sizing hints and cannot grant
+      // an optimized candidate. No generated matrix row or borrowed sequentialPeakGb is declared.
       "candle": {
         "minMemoryGb": 29,
         "vramGbByTier": { "q4": 26.7, "q8": 30.4, "bf16": 63.7 },

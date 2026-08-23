@@ -180,10 +180,12 @@ pub enum MemoryRouteLoadProfile {
     Lora,
     LoraPid,
     LoraSingleControl,
+    LoraSingleControlPid,
     LoraIpAdapter,
     IpAdapterPid,
     LoraIpAdapterPid,
     SingleControl,
+    SingleControlPid,
     MultiControl,
     IpAdapter,
     Pid,
@@ -191,15 +193,17 @@ pub enum MemoryRouteLoadProfile {
 }
 
 impl MemoryRouteLoadProfile {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::Plain,
         Self::Lora,
         Self::LoraPid,
         Self::LoraSingleControl,
+        Self::LoraSingleControlPid,
         Self::LoraIpAdapter,
         Self::IpAdapterPid,
         Self::LoraIpAdapterPid,
         Self::SingleControl,
+        Self::SingleControlPid,
         Self::MultiControl,
         Self::IpAdapter,
         Self::Pid,
@@ -212,10 +216,12 @@ impl MemoryRouteLoadProfile {
             Self::Lora => "lora",
             Self::LoraPid => "lora_pid",
             Self::LoraSingleControl => "lora_single_control",
+            Self::LoraSingleControlPid => "lora_single_control_pid",
             Self::LoraIpAdapter => "lora_ip_adapter",
             Self::IpAdapterPid => "ip_adapter_pid",
             Self::LoraIpAdapterPid => "lora_ip_adapter_pid",
             Self::SingleControl => "single_control",
+            Self::SingleControlPid => "single_control_pid",
             Self::MultiControl => "multi_control",
             Self::IpAdapter => "ip_adapter",
             Self::Pid => "pid",
@@ -227,9 +233,11 @@ impl MemoryRouteLoadProfile {
         match self {
             Self::Plain | Self::Pid => MemoryRouteOverlay::None,
             Self::Lora | Self::LoraPid => MemoryRouteOverlay::Lora,
-            Self::SingleControl | Self::LoraSingleControl | Self::MultiControl => {
-                MemoryRouteOverlay::Control
-            }
+            Self::SingleControl
+            | Self::SingleControlPid
+            | Self::LoraSingleControl
+            | Self::LoraSingleControlPid
+            | Self::MultiControl => MemoryRouteOverlay::Control,
             Self::IpAdapter
             | Self::LoraIpAdapter
             | Self::IpAdapterPid
@@ -244,10 +252,12 @@ impl MemoryRouteLoadProfile {
             "lora" => Some(Self::Lora),
             "lora_pid" => Some(Self::LoraPid),
             "lora_single_control" => Some(Self::LoraSingleControl),
+            "lora_single_control_pid" => Some(Self::LoraSingleControlPid),
             "lora_ip_adapter" => Some(Self::LoraIpAdapter),
             "ip_adapter_pid" => Some(Self::IpAdapterPid),
             "lora_ip_adapter_pid" => Some(Self::LoraIpAdapterPid),
             "single_control" => Some(Self::SingleControl),
+            "single_control_pid" => Some(Self::SingleControlPid),
             "multi_control" => Some(Self::MultiControl),
             "ip_adapter" => Some(Self::IpAdapter),
             "pid" => Some(Self::Pid),
@@ -274,6 +284,8 @@ impl MemoryRouteLoadProfile {
             return match (has_lora, has_pid, has_ip_adapter) {
                 (false, false, false) => Some(Self::SingleControl),
                 (true, false, false) => Some(Self::LoraSingleControl),
+                (false, true, false) => Some(Self::SingleControlPid),
+                (true, true, false) => Some(Self::LoraSingleControlPid),
                 _ => None,
             };
         }
@@ -476,7 +488,9 @@ const KOLORS_CANDLE_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
 ];
 const KOLORS_CANDLE_CONTROL_PROFILES: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::SingleControl,
+    MemoryRouteLoadProfile::SingleControlPid,
     MemoryRouteLoadProfile::LoraSingleControl,
+    MemoryRouteLoadProfile::LoraSingleControlPid,
 ];
 const Q4_Q8: &[MemoryRouteTier] = &[MemoryRouteTier::Q4, MemoryRouteTier::Q8];
 const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
@@ -1105,6 +1119,50 @@ fn rule_coordinates_match(selector: MemoryRouteSelector) -> bool {
 
 fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> bool {
     matching_rules(selector).any(|rule| !rule.requires_sequential_selection || sequential_selected)
+}
+
+/// Exact typed authority for bespoke Candle providers whose physical contract is assembled from
+/// request-local component paths instead of the registered catalog loader. This is intentionally
+/// independent of legacy load shaping: absence or a crossed coordinate is a terminal pre-load
+/// refusal, never permission to fall through to an older estimate.
+#[cfg_attr(
+    not(any(test, all(not(target_os = "macos"), feature = "backend-candle"))),
+    allow(dead_code)
+)]
+pub(crate) fn declared_candle_bespoke_request(
+    runtime_provider: &'static str,
+    resolved_tier: Option<&str>,
+    request_mode: &str,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> bool {
+    let (Some(tier), Some(mode), Some(load_profile)) = (
+        resolved_tier.and_then(MemoryRouteTier::from_resolved_tier),
+        MemoryRouteMode::from_request(request_mode),
+        MemoryRouteLoadProfile::from_spec(spec),
+    ) else {
+        return false;
+    };
+    if context.mode != mode || context.use_pid != spec.pid.is_some() || context.has_phases {
+        return false;
+    }
+    let reference_shape_matches = match runtime_provider {
+        "candle_kolors_ipadapter" => context.reference_count == 1 && !context.use_pid,
+        "candle_kolors_control" => context.reference_count == 0,
+        _ => false,
+    };
+    reference_shape_matches
+        && rule_matches(
+            MemoryRouteSelector {
+                backend: MemoryRouteBackend::Candle,
+                provider: runtime_provider,
+                tier,
+                mode,
+                overlay: load_profile.overlay(),
+                load_profile,
+            },
+            false,
+        )
 }
 
 fn closed_array_contains<T: Copy + PartialEq>(
@@ -2929,6 +2987,17 @@ mod tests {
                     gen_core::AdapterKind::Lora,
                 )])
                 .with_control(WeightsSource::File("control.safetensors".into())),
+            MemoryRouteLoadProfile::LoraSingleControlPid => base
+                .with_adapters(vec![gen_core::AdapterSpec::new(
+                    "adapter.safetensors".into(),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )])
+                .with_control(WeightsSource::File("control.safetensors".into()))
+                .with_pid(
+                    WeightsSource::File("pid.safetensors".into()),
+                    WeightsSource::Dir("gemma".into()),
+                ),
             MemoryRouteLoadProfile::LoraIpAdapter => base
                 .with_adapters(vec![gen_core::AdapterSpec::new(
                     "adapter.safetensors".into(),
@@ -2956,6 +3025,12 @@ mod tests {
             MemoryRouteLoadProfile::SingleControl => {
                 base.with_control(WeightsSource::File("control.safetensors".into()))
             }
+            MemoryRouteLoadProfile::SingleControlPid => base
+                .with_control(WeightsSource::File("control.safetensors".into()))
+                .with_pid(
+                    WeightsSource::File("pid.safetensors".into()),
+                    WeightsSource::Dir("gemma".into()),
+                ),
             MemoryRouteLoadProfile::MultiControl => base
                 .with_control(WeightsSource::File("control.safetensors".into()))
                 .with_extra_control(WeightsSource::File("control-2.safetensors".into())),
@@ -7703,5 +7778,123 @@ mod tests {
             LoadShapeDeclarationResult::Refused
         );
         assert_eq!(provider_refused.load_shape, LoadShape::EagerMaterialization);
+    }
+
+    #[test]
+    fn kolors_bespoke_authority_binds_exact_provider_tier_mode_profile_and_reference_shape() {
+        for tier in [
+            MemoryRouteTier::Bf16,
+            MemoryRouteTier::Q4,
+            MemoryRouteTier::Q8,
+        ] {
+            for profile in [
+                MemoryRouteLoadProfile::IpAdapter,
+                MemoryRouteLoadProfile::LoraIpAdapter,
+            ] {
+                let load = spec(tier, profile);
+                assert!(declared_candle_bespoke_request(
+                    "candle_kolors_ipadapter",
+                    Some(tier.as_str()),
+                    "character_image",
+                    &load,
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::CharacterImage,
+                        reference_count: 1,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                ));
+            }
+
+            for mode in KOLORS_CANDLE_CONTROL_MODES {
+                for profile in KOLORS_CANDLE_CONTROL_PROFILES {
+                    let load = spec(tier, *profile);
+                    let use_pid = matches!(
+                        profile,
+                        MemoryRouteLoadProfile::SingleControlPid
+                            | MemoryRouteLoadProfile::LoraSingleControlPid
+                    );
+                    assert!(declared_candle_bespoke_request(
+                        "candle_kolors_control",
+                        Some(tier.as_str()),
+                        mode.as_str(),
+                        &load,
+                        MemoryRouteRequestContext {
+                            mode: *mode,
+                            reference_count: 0,
+                            use_pid,
+                            has_phases: false,
+                        },
+                    ));
+                }
+            }
+        }
+
+        let ip = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::IpAdapter);
+        let control = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl);
+        let exact_ip = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::CharacterImage,
+            reference_count: 1,
+            use_pid: false,
+            has_phases: false,
+        };
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("nvfp4"),
+            "character_image",
+            &ip,
+            exact_ip,
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("q4"),
+            "text_to_image",
+            &ip,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                ..exact_ip
+            },
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("q4"),
+            "character_image",
+            &ip,
+            MemoryRouteRequestContext {
+                reference_count: 0,
+                ..exact_ip
+            },
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("q4"),
+            "character_image",
+            &control,
+            exact_ip,
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_control",
+            Some("q4"),
+            "text_to_image",
+            &control,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 1,
+                use_pid: false,
+                has_phases: false,
+            },
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_control",
+            Some("q4"),
+            "text_to_image",
+            &control,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: true,
+            },
+        ));
     }
 }
