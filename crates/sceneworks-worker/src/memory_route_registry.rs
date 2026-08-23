@@ -7476,10 +7476,13 @@ mod tests {
                 "qwen_image_edit",
                 "sana_1600m",
                 "sana_sprint_1600m",
+                "sd3_5_large",
+                "sd3_5_large_turbo",
+                "sd3_5_medium",
             ]
             .into()
         );
-        assert_eq!(witnesses.len(), 172);
+        assert_eq!(witnesses.len(), 208);
         assert!(witnesses.iter().all(|witness| {
             matches!(
                 witness.tier,
@@ -7559,7 +7562,10 @@ mod tests {
                 .unwrap();
             assert_eq!(off_mac["revision"], revision);
             assert_eq!(off_mac["variant"], "bf16");
-            assert_eq!(off_mac["subdir"], "");
+            assert!(
+                off_mac.get("subdir").is_none(),
+                "a root-level download must omit subdir rather than serialize an invalid empty path"
+            );
 
             let plain = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
                 "immutable-dense",

@@ -3553,7 +3553,6 @@ mod tests {
             ("illustrious_xl_v2", "control"),
             ("realvisxl", "control"),
             ("realvisxl_lightning", "control"),
-            ("scail2_14b", "multiReference"),
             ("sdxl", "control"),
         ];
         for (model, shape) in resolved {
@@ -3630,25 +3629,10 @@ mod tests {
             "removing Candle SDXL control must break the checked-in matrix/residual relationship"
         );
 
-        let mut missing_scail_multi_reference: Value =
-            serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
-        let scail = missing_scail_multi_reference["snapshot"]["generator_capabilities"]
-            .as_array_mut()
-            .expect("Candle snapshot has generator capabilities")
-            .iter_mut()
-            .find(|entry| entry["id"] == "scail2_14b")
-            .expect("Candle snapshot has the SCAIL-2 provider");
-        scail["conditioning"] = Value::Array(vec![
-            Value::String("reference".to_owned()),
-            Value::String("mask".to_owned()),
-            Value::String("controlClip".to_owned()),
-        ]);
-        let mutated_scail = backend_capability_matrix_from_runtime_sources(
-            MLX_RUNTIME_FACTS,
-            &serde_json::to_string(&missing_scail_multi_reference).unwrap(),
-        )
-        .expect("mutated SCAIL-2 facts still derive a matrix");
-        let scail_cell = mutated_scail
+        // The current native SCAIL-2 providers both reject a bare MultiReference payload. It is a
+        // private paired carrier shape rather than an advertised capability, so the production
+        // matrix must omit it instead of resurrecting an MLX-only parity obligation.
+        let scail_cell = baseline
             .models
             .iter()
             .find(|row| row.id == "scail2_14b")
@@ -3656,19 +3640,8 @@ mod tests {
                 row.conditioning_shape
                     .iter()
                     .find(|cell| cell.capability == "multiReference")
-            })
-            .expect("mutated derivation emits scail2_14b/multiReference");
-        assert_eq!(
-            (scail_cell.mlx, scail_cell.candle),
-            (Some(true), Some(false))
-        );
-        assert_eq!(
-            scail_cell
-                .parity_obligation
-                .as_ref()
-                .map(|obligation| obligation.work_item.as_str()),
-            Some("epic-8588")
-        );
+            });
+        assert!(scail_cell.is_none());
     }
 
     #[test]
@@ -5049,7 +5022,7 @@ mod tests {
             ),
             (
                 "epic-18803-eros-candle-conditioning-withdrawal",
-                ("epic-18803", "conditioning", 4usize),
+                ("epic-18803", "conditioning", 5usize),
             ),
             (
                 "epic-18803-eros-candle-adapter-withdrawal",
@@ -5270,20 +5243,20 @@ mod tests {
             .find(|model| model.id == "sana_1600m")
             .unwrap();
         assert!(manifest_artifact_tier_support(sana, "bf16", "mlx"));
-        assert!(!manifest_artifact_tier_support(sana, "bf16", "candle"));
+        assert!(manifest_artifact_tier_support(sana, "bf16", "candle"));
         let dense = precision_cell(sana, "bf16", &original, &candle).unwrap();
         assert_eq!((dense.mlx, dense.candle), (Some(true), Some(true)));
 
-        // Removing the Candle descriptor loses Candle dense support even though the manifest still
-        // contains a macOS bf16 artifact. Conversely, removing the MLX descriptor does not erase the
-        // exact macOS artifact. These mutations guard both independent sides of the union.
+        // The exact platform artifact independently preserves each lane's dense support when its
+        // runtime descriptor is removed. Production dispatch remains an additional requirement,
+        // exercised by the mutation below.
         let mut no_candle_descriptor = candle.clone();
         no_candle_descriptor.model_mappings.remove("sana_1600m");
         no_candle_descriptor
             .video_model_mappings
             .retain(|mapping| mapping.model_id != "sana_1600m");
         let dense = precision_cell(sana, "bf16", &original, &no_candle_descriptor).unwrap();
-        assert_eq!(dense.candle, Some(false));
+        assert_eq!(dense.candle, Some(true));
 
         let mut no_mlx_descriptor = original.clone();
         no_mlx_descriptor.model_mappings.remove("sana_1600m");

@@ -1227,14 +1227,17 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         });
         MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "krea_2_turbo".to_owned(),
                 resolved_route: "krea_2_turbo".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
                 load_shape: provider_contract.load_shape,
                 mode: gen_core::MemoryMode::TextToImage,
+                reference_shape: gen_core::MemoryReferenceShape::None,
                 // The existing measurements cover ordinary T2I only.
                 overlay: None,
                 geometry: at_geometry,
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition,
                 parameters: selection.parameters,
@@ -1446,13 +1449,16 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             *selection,
             MemoryEvidence {
                 key: MemoryEvidenceKey {
+                    model_family: "krea_2_turbo".to_owned(),
                     resolved_route: "krea_2_turbo".to_owned(),
                     backend: gen_core::MemoryBackend::Candle,
                     tier: numeric_tier,
                     load_shape: provider_contract.load_shape,
                     mode: gen_core::MemoryMode::TextToImage,
+                    reference_shape: gen_core::MemoryReferenceShape::None,
                     overlay: None,
                     geometry,
+                    frames_per_second: None,
                     strategy: selection.strategy,
                     engaged_composition: provider_contract.engaged_composition(selection.strategy),
                     parameters: selection.parameters,

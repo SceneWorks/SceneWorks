@@ -516,7 +516,10 @@ pub(crate) async fn run_image_detail_job(
     // Resolved AFTER `weights_dir` (sc-11042): the tier dir is an input to the quant resolution, so the
     // NVFP4 tier can only be picked when it is the tier that actually resolved. Pure reorder — the
     // q4/q8/bf16 mapping reads only the request and is unaffected.
+    #[cfg(target_os = "macos")]
     let (quant, _) = resolve_quant(&request, Some(&weights_dir));
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (_quant, _) = resolve_quant(&request, Some(&weights_dir));
     let adapters = resolve_adapters(&request, settings)?;
     let control_repo = advanced::str(
         &request.advanced,

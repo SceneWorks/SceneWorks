@@ -258,6 +258,42 @@ pub(super) fn kolors_strict_control_test_fixture(path: PathBuf) -> KolorsStrictC
         scheduler: None,
         pid: None,
         adapters: Vec::new(),
+        memory_context: gen_core::MemoryRunContext {
+            selection: gen_core::MemorySelection {
+                strategy: gen_core::MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: gen_core::MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: None,
+                    component_precision_floors: &[],
+                },
+            },
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: String::new(),
+            load_shape: gen_core::LoadShape::EagerMaterialization,
+            mode: gen_core::MemoryMode::TextToImage,
+            has_reference: false,
+            use_pid: false,
+            has_phases: false,
+            geometry: gen_core::MemoryGeometry {
+                width: 512,
+                height: 512,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            overlay: None,
+            budget: gen_core::MemoryBudget {
+                total_bytes: 1,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            predicted_peak_bytes: 1,
+            cache_state: gen_core::MemoryCacheState::Cold,
+            evidence_revision: "test-fixture".to_owned(),
+        },
     }
 }
 

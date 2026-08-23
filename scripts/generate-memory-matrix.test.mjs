@@ -3272,7 +3272,7 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // bump re-stamped it again to the #726 inference-main merge (4013049764). The literal is
   // re-stamped rather than relaxed to a shape check: the assertion below only means something
   // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "4013049764172ee7dc707101c7da8c83c1483f2d");
+  assert.equal(pin, "42cab15ba4d84b6356a475c9957bea12f4ecf6c7");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the

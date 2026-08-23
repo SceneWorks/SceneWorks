@@ -4671,8 +4671,9 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         },
     );
 
-    // Weights absent (empty env override, empty data dir) ⇒ the route falls to Stub, BUT the Stub
-    // arm's fail-loud gate must refuse rather than hand back a procedural fake video.
+    // Weights absent ⇒ the route falls to Stub, BUT the Stub arm's fail-loud gate must refuse
+    // rather than hand back a procedural fake video. Isolate every HF cache variable so a developer's
+    // real downloaded Krea tier cannot turn this absence fixture into an available route.
     let empty_guard = tempfile::Builder::new()
         .prefix("krea_empty_")
         .tempdir()
@@ -4682,18 +4683,26 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         data_dir: empty.to_path_buf(),
         ..Settings::from_env()
     };
-    temp_env_var("SCENEWORKS_MLX_KREA_REALTIME_DIR", "", || {
-        assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
-        let err = ensure_video_engine_weights(&req, &bare)
-            .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
-        let WorkerError::InvalidPayload(message) = err else {
-            panic!("expected an actionable InvalidPayload");
-        };
-        assert!(
-            message.contains("krea_realtime_14b") && message.contains("Model Manager"),
-            "the error must name the model and tell the user what to do: {message}"
-        );
-    });
+    temp_env_vars(
+        &[
+            ("SCENEWORKS_MLX_KREA_REALTIME_DIR", ""),
+            ("HF_HUB_CACHE", empty.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ],
+        || {
+            assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
+            let err = ensure_video_engine_weights(&req, &bare)
+                .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
+            let WorkerError::InvalidPayload(message) = err else {
+                panic!("expected an actionable InvalidPayload");
+            };
+            assert!(
+                message.contains("krea_realtime_14b") && message.contains("Model Manager"),
+                "the error must name the model and tell the user what to do: {message}"
+            );
+        },
+    );
 }
 
 /// The caller-side mapping pin: drives `generate_krea_realtime_using` end to end (through the
@@ -5190,7 +5199,17 @@ fn write_complete_krea_tier(root: &Path, tier: &str) {
     for file in files {
         let path = root.join(tier).join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"x").unwrap();
+        let contents: &[u8] = if file == &"config.json" {
+            match tier {
+                "q4" => br#"{"quantization":{"bits":4,"group_size":64}}"#,
+                "q8" => br#"{"quantization":{"bits":8,"group_size":64}}"#,
+                "bf16" => b"{}",
+                _ => unreachable!("the tier file table only exposes published tiers"),
+            }
+        } else {
+            b"x"
+        };
+        std::fs::write(path, contents).unwrap();
     }
 }
 

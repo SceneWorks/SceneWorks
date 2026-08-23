@@ -1737,6 +1737,10 @@ pub(super) fn video_admission_overlay(
 /// Bernini v2v carries one normalized [`Conditioning::VideoClip`]. A count-only identity would
 /// let another temporal carrier borrow the same evidence, so admission records the resolved
 /// carrier shape explicitly.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn video_admission_reference_shape(
     model_id: &str,
     mode: &str,
@@ -1807,6 +1811,10 @@ pub(super) fn video_admission_reference_shape(
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn video_admission_reference_count(
     model_id: &str,
     mode: &str,

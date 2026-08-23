@@ -1018,13 +1018,20 @@ fn verified_candidates(
             LoadShapeKey::DeferredMaterialization => gen_core::LoadShape::DeferredMaterialization,
         };
         let evidence_key = MemoryEvidenceKey {
+            model_family: model_id.to_owned(),
             resolved_route: runtime_provider.to_owned(),
             backend: MemoryBackend::Candle,
             tier: numeric_tier(runtime_provider, tier).expect("validated numeric tier"),
             mode: mode.mode.clone(),
+            reference_shape: if geometry.reference_count == 0 {
+                gen_core::MemoryReferenceShape::None
+            } else {
+                gen_core::MemoryReferenceShape::Image
+            },
             load_shape,
             overlay: (overlay != "none").then(|| overlay.to_owned()),
             geometry,
+            frames_per_second: None,
             strategy: selected_strategy,
             engaged_composition: record
                 .strategy
@@ -1238,13 +1245,20 @@ fn synthesize_estimate_floors(
             selection,
             MemoryEvidence {
                 key: MemoryEvidenceKey {
+                    model_family: engine_id.to_owned(),
                     resolved_route: engine_id.to_owned(),
                     backend: MemoryBackend::Candle,
                     tier,
                     mode: mode.mode.clone(),
+                    reference_shape: if geometry.reference_count == 0 {
+                        gen_core::MemoryReferenceShape::None
+                    } else {
+                        gen_core::MemoryReferenceShape::Image
+                    },
                     load_shape: contract.load_shape,
                     overlay: overlay.map(str::to_owned),
                     geometry,
+                    frames_per_second: None,
                     strategy,
                     engaged_composition: engaged,
                     parameters,
@@ -1658,13 +1672,20 @@ fn evaluate_shared_image_inner(
     };
     let mut resident = MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: engine_id.to_owned(),
             resolved_route: engine_id.to_owned(),
             backend: MemoryBackend::Candle,
             tier,
             mode: mode.mode.clone(),
+            reference_shape: if geometry.reference_count == 0 {
+                gen_core::MemoryReferenceShape::None
+            } else {
+                gen_core::MemoryReferenceShape::Image
+            },
             load_shape: contract.load_shape,
             overlay: provider_overlay.map(str::to_owned),
             geometry,
+            frames_per_second: None,
             strategy: MemoryStrategy::Resident,
             engaged_composition: contract.engaged_composition(MemoryStrategy::Resident),
             parameters: resident_selection.parameters,
@@ -5076,11 +5097,13 @@ mod tests {
     fn optimized_candidates_reserve_the_actual_runtime_adapter_bytes() {
         let mut evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "z_image".to_owned(),
                 resolved_route: "z_image".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier("z_image", "q4").expect("q4 is a supported numeric tier"),
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: gen_core::MemoryMode::TextToImage,
+                reference_shape: gen_core::MemoryReferenceShape::None,
                 overlay: Some("lora".to_owned()),
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -5090,6 +5113,7 @@ mod tests {
                     // Text-to-image fixture: no reference images (sc-17054).
                     reference_count: 0,
                 },
+                frames_per_second: None,
                 strategy: MemoryStrategy::BoundedTransformerResidency,
                 engaged_composition: vec![MemoryStrategy::BoundedTransformerResidency],
                 parameters: Default::default(),

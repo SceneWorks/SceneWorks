@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b473de0b0bc947d3af8589e3555aa8014c99fe29f7ae42896ad79e0cd7646cd0",
+    "sceneWorksRevision": "source-tree:95cbcb37c5fe9950f95221f63a2d48899c007599ad937374b0e1663a666e1121",
     "inferenceRevision": "42cab15ba4d84b6356a475c9957bea12f4ecf6c7",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "4ee068d736ea4d19a8cc7a8ba79daec5b692124bf91d9d26a32bcb08bb236618"
+        "sha256": "9a639a4c5654c7b7fc09c8836256e91c1de6ff927ddb1f58fd154b6117a1d429"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -26,11 +26,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "67d812557a803ba04983c0f39a43d3160665cc772ea84476132eaaadd9df38a0"
+        "sha256": "a086ca12d34631352474e0b77674eb8d5da43d4130279d0fe3b2edbdb4992314"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "fdd6d35be1b78042088344176f2ff6bf5d92b7e4aaeedff93115a3d656ebfa39"
+        "sha256": "ba831356b7f2815ece78c301d5808b99d2aea47f759b0441c182507ae270e797"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "2d4fe1efd4113a782667886144276ab0a9d1dc3612842d3028927031f36c468b"
+        "sha256": "1487fa731e7ed59bd94a906da16e09cb54adfffb6fe5b1960d479441e976fc38"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -94,7 +94,7 @@
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "598863ca561ff67147a2635f1b0b1155cbe28dae2c5f574cd8173b0d358fcce1"
+        "sha256": "2b70552e0dc0107ed635a8eeb51d1d51dadd1e283c408ffdcb764f32b686283c"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
@@ -193,7 +193,7 @@
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 73,
+      "providers": 74,
       "bespokeWaivers": 1,
       "mismatches": 440,
       "byLeg": {

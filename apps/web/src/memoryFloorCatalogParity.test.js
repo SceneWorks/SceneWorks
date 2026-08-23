@@ -891,7 +891,7 @@ describe("catalog memory floors: the two backend lanes are independent", () => {
 
   it("never answers the candle lane from MLX evidence when candle declares none", () => {
     // The pre-fix failure shape: a windows/linux-served tier with an MLX footprint and NO candle
-    // evidence. z_image and sdxl are the shipped examples. Silence is required — NOT the MLX number.
+    // evidence. z_image_edit is the remaining shipped example. Silence is required — NOT the MLX number.
     let checked = 0;
     for (const model of manifestModels) {
       const tiers = tiersOn(model, "windows");
@@ -907,7 +907,7 @@ describe("catalog memory floors: the two backend lanes are independent", () => {
       expect(cheapestDeclaredTierPeakGb(entry, { backend: "candle" }), `${model.id}`).toBeNull();
       expect(blanketFloorGb(entry, "candle"), `${model.id}`).toBeNull();
     }
-    expect(checked, "z_image / sdxl / illustrious_xl_* have this shape").toBeGreaterThanOrEqual(3);
+    expect(checked, "z_image_edit keeps this cross-lane guard non-vacuous").toBeGreaterThanOrEqual(1);
   });
 
   // The reason the MLX blanket may NOT be reused as a "conservative" candle default. This is a manifest
@@ -1295,8 +1295,8 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
   });
 
   it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
-    // MINOR 4. `candle.measured === false` is the uncalibrated inventory. It is false on 22 entries;
-    // twelve of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers are
+    // MINOR 4. `candle.measured === false` is the uncalibrated inventory. It is false on 30 entries;
+    // twenty of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers are
     // pinned so the prose cannot drift from the catalog again. sc-16025 adds the six Mage profiles to
     // this set because their q4/q8 numeric identity changed and the historical samples are no longer
     // valid current measurements. sc-18478 adds the uncalibrated VACE-Fun blanket-only lane.
@@ -1313,12 +1313,15 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     // number at all, `predicted_peak_gb` returns null and the fit gate stays best-effort instead of
     // admitting a card against a guess.
     const uncalibratedLane = manifestModels.filter((model) => model.candle?.measured === false);
-    expect(uncalibratedLane.length).toBe(22);
+    expect(uncalibratedLane.length).toBe(30);
     const withPerTier = uncalibratedLane.filter(
       (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length > 0,
     );
     expect(withPerTier.map((model) => model.id).sort()).toEqual(
       [
+        "chroma1_base",
+        "chroma1_flash",
+        "chroma1_hd",
         "flux_schnell",
         "flux2_dev",
         "krea_2_raw",
@@ -1329,6 +1332,11 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "mage_flow_edit_base",
         "mage_flow_edit_turbo",
         "mage_flow_turbo",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+        "realvisxl",
+        "realvisxl_lightning",
+        "sdxl",
         "sd3_5_large_turbo",
         "sd3_5_medium",
       ].sort(),

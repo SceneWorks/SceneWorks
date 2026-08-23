@@ -9695,6 +9695,7 @@ pub(super) async fn admit_sdxl_bespoke_memory(
         request_mode,
         &request.model_manifest_entry,
         spec,
+        false,
     );
     spec.prepare_file_sources().map_err(|error| {
         WorkerError::InvalidPayload(format!(

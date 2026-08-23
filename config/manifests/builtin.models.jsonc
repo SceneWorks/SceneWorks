@@ -9930,7 +9930,9 @@
         // T5 + transformer + VAE together, while staged holds only the largest phase. Admission
         // maxes each row against the sealed provider tensor-header projection and adds exact
         // materialized adapter/PiD bytes, so a changed inventory can only raise or refuse the gate.
+        "minMemoryGb": 18,
         "vramGbByTier": { "q4": 18.0, "q8": 22.0, "bf16": 46.0 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 13.0, "q8": 14.0, "bf16": 38.0 },
         "measured": false,
         "memoryStrategyContract": {
@@ -10458,7 +10460,9 @@
         "supportsSequentialOffload": true,
         // Structural, estimate-backed rows. Runtime admission maxes these against the exact
         // provider receipt and charges materialized adapter/PiD networks separately.
+        "minMemoryGb": 18,
         "vramGbByTier": { "q4": 18.0, "q8": 22.0, "bf16": 46.0 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 13.0, "q8": 14.0, "bf16": 38.0 },
         "measured": false,
         "memoryStrategyContract": {
@@ -10932,7 +10936,9 @@
         "supportsSequentialOffload": true,
         // Structural, estimate-backed rows. Runtime admission maxes these against the exact
         // provider receipt and charges materialized adapter/PiD networks separately.
+        "minMemoryGb": 18,
         "vramGbByTier": { "q4": 18.0, "q8": 22.0, "bf16": 46.0 },
+        "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 13.0, "q8": 14.0, "bf16": 38.0 },
         "measured": false,
         "memoryStrategyContract": {
@@ -12248,7 +12254,6 @@
           "repo": "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
           "revision": "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
           "variant": "bf16",
-          "subdir": "",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 25830116527,
@@ -12438,7 +12443,6 @@
           "repo": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
           "revision": "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
           "variant": "bf16",
-          "subdir": "",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 9736976627,

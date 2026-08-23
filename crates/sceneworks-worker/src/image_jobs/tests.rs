@@ -450,7 +450,7 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
     );
 
     let (clip_l, clip_bigg, vae) =
-        resolve_candle_detail_components(&request, &settings, &weights_dir, false)
+        resolve_candle_detail_components(&request, &settings, &weights_dir)
             .expect("dense base and all authoritative co-requisites resolve");
     assert!(matches!(clip_l, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
     assert!(matches!(clip_bigg, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
@@ -463,7 +463,7 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
         .expect("fallback tier resolves")
         .expect("q4 sibling remains installed");
     assert_eq!(tier_key_from_resolved_dir(&packed_fallback), Some("q4"));
-    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback, false)
+    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback)
         .expect_err("a packed sibling must not masquerade as the requested dense detail base");
     assert!(
         error
@@ -16796,7 +16796,6 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         "\"sana_1600m\" | \"sana_sprint_1600m\"",
         "hires_first_pass_generation_memory",
         "hires_first_pass_memory_context",
-        "sana_selector_authoritative",
         "requires an exact receipt-priced pre-load memory selection for every render pass",
         "if is_ideogram || is_sana",
         "sana_physical_receipt_identity",
@@ -19723,7 +19722,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "SdxlIpAdapter",
             "sdxl_ipadapter.rs",
             include_str!("sdxl_ipadapter.rs"),
-            "admit_conditioning_paths(",
+            "admit_sdxl_bespoke_memory(",
         ),
         (
             "KolorsIpAdapter",
@@ -19845,7 +19844,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "SdxlEdit",
             "sdxl_edit_candle.rs",
             include_str!("sdxl_edit_candle.rs"),
-            "admit_candle_base(",
+            "admit_sdxl_bespoke_memory(",
         ),
         (
             "Flux2Edit",
