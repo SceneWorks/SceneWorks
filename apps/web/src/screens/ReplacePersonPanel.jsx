@@ -3,6 +3,10 @@ import { API_BASE_URL, withMediaTicket } from "../api.js";
 import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
+// sc-20262: whether the selected replacement engine actually consumes `replacementMode`. Defined
+// in the validation module rather than here so this panel and `VideoStudio.jsx` (which stops SENDING
+// the value) read one predicate, and so it sits inside the capability-matrix fingerprint.
+import { replacementModeApplies } from "../videoStudioValidation.js";
 
 const MASK_STATE_COPY = {
   active: "Per-frame segmentation masks generated for tracked frames.",
@@ -612,24 +616,31 @@ export function ReplacePersonPanel({
       {replacementModels.length === 1 ? <StudioUpdateBadge item={selectedReplacementModel} /> : null}
       <StudioUpdateNotice item={selectedReplacementModel} onUpdate={createModelDownloadJob} />
 
-      {model === "scail2_14b" ? (
+      {replacementModeApplies(model) ? null : (
         <div className="guidance-strip">
           <strong>SCAIL-2 full-character replacement</strong>
           <span>
-            SCAIL-2 re-renders the whole tracked person from the character reference, so the
-            Replacement mode below (face-only / keep-outfit) does not apply.
+            SCAIL-2 re-renders the whole tracked person from the character reference, so there is no
+            Replacement mode to choose — face-only and keep-outfit have nothing to select.
           </span>
         </div>
-      ) : null}
+      )}
 
-      <label>
-        Replacement mode
-        <select onChange={(event) => setReplacementMode(event.target.value)} value={replacementMode}>
-          <option value="face_only">Face Only</option>
-          <option value="full_person_keep_outfit">Full Person, Keep Outfit</option>
-          <option value="full_person_replace_outfit">Full Person, Replace Outfit</option>
-        </select>
-      </label>
+      {/* Hidden rather than rendered-and-ignored for SCAIL-2 (sc-20262): the worker's scail2
+          conditioning sites emit `ReplacementMode::default()` literally, so a value set here never
+          reached the engine, and the engine now refuses a non-default one. The guidance strip above
+          said so in prose while the control stayed settable — prose is not a gate. Unchanged for the
+          Wan-VACE inpainting engines, which honor it. */}
+      {replacementModeApplies(model) ? (
+        <label>
+          Replacement mode
+          <select onChange={(event) => setReplacementMode(event.target.value)} value={replacementMode}>
+            <option value="face_only">Face Only</option>
+            <option value="full_person_keep_outfit">Full Person, Keep Outfit</option>
+            <option value="full_person_replace_outfit">Full Person, Replace Outfit</option>
+          </select>
+        </label>
+      ) : null}
     </div>
   );
 }

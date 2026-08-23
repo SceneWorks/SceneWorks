@@ -64,15 +64,156 @@ const MAX_CATALOG_GENERATED_TAGS: usize = 32;
 const MAX_CATALOG_GENERATED_TAG_BYTES: usize = 128;
 const MAX_MATERIALIZED_CAPTION_BYTES: usize = 8_192;
 
+/// Bound on every cache-stage hook wait, on both sides.
+///
+/// The hook parks real OS threads. An UNBOUNDED wait whose partner never comes
+/// wedges the test binary *silently* — libtest prints no line at all for a test
+/// that never returns, so the run just goes quiet and rides the 30-minute
+/// `parity-rust` cap out as a CANCELLED job naming no failing test (sc-19764).
+/// Bounding every wait turns that into a named panic in seconds. This can only
+/// fire on a mispairing; the healthy choreography meets in milliseconds.
+#[cfg(test)]
+const CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
+/// Candidate budget handed to the ONE candidate this hook parks, so that
+/// candidate times out while it sits at `before_stage`.
+#[cfg(test)]
+const CATALOG_CACHE_STAGE_TEST_CANDIDATE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+/// Two-party meeting point with a deadline.
+///
+/// Every use below meets two *blocking* threads — the staging verifier and the
+/// project-copy closure both run inside `spawn_blocking`, and the control side
+/// spawns its own blocking task — so parking here never stalls a test's
+/// runtime. The deadline exists purely so a mispairing fails by name instead of
+/// hanging the binary.
+#[cfg(test)]
+struct CatalogCacheStageTestRendezvous {
+    name: &'static str,
+    state: std::sync::Mutex<(usize, u64)>,
+    partner_arrived: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl CatalogCacheStageTestRendezvous {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            state: std::sync::Mutex::new((0, 0)),
+            partner_arrived: std::sync::Condvar::new(),
+        }
+    }
+
+    fn wait(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = state.1;
+        state.0 += 1;
+        if state.0 == 2 {
+            *state = (0, generation + 1);
+            drop(state);
+            self.partner_arrived.notify_all();
+            return;
+        }
+        let (mut state, wait) = self
+            .partner_arrived
+            .wait_timeout_while(state, CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT, |state| {
+                state.1 == generation
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if wait.timed_out() {
+            // Leave the meeting point empty so a later arrival cannot pair with
+            // this abandoned one.
+            state.0 -= 1;
+            drop(state);
+            panic!(
+                "catalog cache stage test rendezvous `{}` had no partner within {:?} — the hook \
+                 choreography is mispaired",
+                self.name, CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT
+            );
+        }
+    }
+}
+
+/// One-way, NEVER-BLOCKING signal from the materialization future to the test.
+///
+/// This one cannot be a rendezvous. `signal_catalog_cache_timeout_test_hook` is
+/// called from the materialization future itself, i.e. on the test's
+/// current-thread runtime — the same runtime that has to poll the test task
+/// that would supply the partner. Parking there deadlocks outright whenever the
+/// candidate budget expires BEFORE the control side has parked, which is
+/// exactly what a loaded CI runner produces: the test wedges forever, still
+/// holding `catalog_scan_hook_test_lock`, and takes every later user of that
+/// lock with it (sc-19764, PR #2346 — 594 of 597 tests printed, then 21 silent
+/// minutes). So the producer only records the observation and the consumer,
+/// which is free to block on its own thread, waits for it.
+#[cfg(test)]
+struct CatalogCacheStageTestSignal {
+    name: &'static str,
+    observed: std::sync::Mutex<usize>,
+    raised: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl CatalogCacheStageTestSignal {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            observed: std::sync::Mutex::new(0),
+            raised: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Never blocks, so it is safe to call from a runtime thread. Extra
+    /// observations are counted, not queued: a second one can never park.
+    fn signal(&self) {
+        *self
+            .observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        self.raised.notify_all();
+    }
+
+    fn wait(&self) {
+        let observed = self
+            .observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_observed, wait) = self
+            .raised
+            .wait_timeout_while(
+                observed,
+                CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT,
+                |observed| *observed == 0,
+            )
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !wait.timed_out(),
+            "catalog cache stage test signal `{}` was never raised within {:?}",
+            self.name,
+            CATALOG_CACHE_STAGE_TEST_WAIT_TIMEOUT
+        );
+    }
+}
+
 #[cfg(test)]
 struct CatalogCacheStageTestHook {
     claimed: std::sync::atomic::AtomicBool,
-    before_stage: std::sync::Arc<std::sync::Barrier>,
-    release_stage: std::sync::Arc<std::sync::Barrier>,
-    stage_completed: std::sync::Arc<std::sync::Barrier>,
-    timeout_observed: std::sync::Arc<std::sync::Barrier>,
-    before_project_copy: std::sync::Arc<std::sync::Barrier>,
-    release_project_copy: std::sync::Arc<std::sync::Barrier>,
+    /// Stall injected into the staging verifier BEFORE it claims the hook, so a
+    /// test can put the candidate budget's expiry ahead of the `before_stage`
+    /// meeting point deterministically. That is the ordering a loaded CI runner
+    /// produces on its own; see sc-19764.
+    verifier_delay: std::time::Duration,
+    before_stage: CatalogCacheStageTestRendezvous,
+    release_stage: CatalogCacheStageTestRendezvous,
+    stage_completed: CatalogCacheStageTestRendezvous,
+    timeout_observed: CatalogCacheStageTestSignal,
+    before_project_copy: CatalogCacheStageTestRendezvous,
+    release_project_copy: CatalogCacheStageTestRendezvous,
 }
 
 #[cfg(test)]
@@ -91,34 +232,44 @@ pub(crate) struct CatalogCacheStageTestControl {
 
 #[cfg(test)]
 impl CatalogCacheStageTestControl {
-    async fn wait(barrier: std::sync::Arc<std::sync::Barrier>) {
-        tokio::task::spawn_blocking(move || barrier.wait())
+    /// Always parks on a BLOCKING thread, never on the caller's runtime thread,
+    /// so the control side can never stall the runtime that has to drive the
+    /// materialization it is choreographing.
+    async fn meet(
+        &self,
+        select: fn(&CatalogCacheStageTestHook) -> &CatalogCacheStageTestRendezvous,
+    ) {
+        let hook = self.hook.clone();
+        tokio::task::spawn_blocking(move || select(&hook).wait())
             .await
-            .expect("catalog materialization test barrier joins");
+            .expect("catalog materialization test rendezvous joins");
     }
 
     pub(crate) async fn wait_before_stage(&self) {
-        Self::wait(self.hook.before_stage.clone()).await;
+        self.meet(|hook| &hook.before_stage).await;
     }
 
     pub(crate) async fn wait_for_timeout(&self) {
-        Self::wait(self.hook.timeout_observed.clone()).await;
+        let hook = self.hook.clone();
+        tokio::task::spawn_blocking(move || hook.timeout_observed.wait())
+            .await
+            .expect("catalog materialization test signal joins");
     }
 
     pub(crate) async fn wait_before_project_copy(&self) {
-        Self::wait(self.hook.before_project_copy.clone()).await;
+        self.meet(|hook| &hook.before_project_copy).await;
     }
 
     pub(crate) async fn release_stage(&self) {
-        Self::wait(self.hook.release_stage.clone()).await;
+        self.meet(|hook| &hook.release_stage).await;
     }
 
     pub(crate) async fn wait_for_stage_completion(&self) {
-        Self::wait(self.hook.stage_completed.clone()).await;
+        self.meet(|hook| &hook.stage_completed).await;
     }
 
     pub(crate) async fn release_project_copy(&self) {
-        Self::wait(self.hook.release_project_copy.clone()).await;
+        self.meet(|hook| &hook.release_project_copy).await;
     }
 }
 
@@ -138,16 +289,18 @@ impl Drop for CatalogCacheStageTestControl {
 }
 
 #[cfg(test)]
-pub(crate) fn install_catalog_cache_stage_test_hook() -> CatalogCacheStageTestControl {
-    let barrier = || std::sync::Arc::new(std::sync::Barrier::new(2));
+pub(crate) fn install_catalog_cache_stage_test_hook(
+    verifier_delay: std::time::Duration,
+) -> CatalogCacheStageTestControl {
     let hook = std::sync::Arc::new(CatalogCacheStageTestHook {
         claimed: std::sync::atomic::AtomicBool::new(false),
-        before_stage: barrier(),
-        release_stage: barrier(),
-        stage_completed: barrier(),
-        timeout_observed: barrier(),
-        before_project_copy: barrier(),
-        release_project_copy: barrier(),
+        verifier_delay,
+        before_stage: CatalogCacheStageTestRendezvous::new("before_stage"),
+        release_stage: CatalogCacheStageTestRendezvous::new("release_stage"),
+        stage_completed: CatalogCacheStageTestRendezvous::new("stage_completed"),
+        timeout_observed: CatalogCacheStageTestSignal::new("timeout_observed"),
+        before_project_copy: CatalogCacheStageTestRendezvous::new("before_project_copy"),
+        release_project_copy: CatalogCacheStageTestRendezvous::new("release_project_copy"),
     });
     *catalog_cache_stage_test_hook()
         .lock()
@@ -612,7 +765,7 @@ pub(crate) async fn materialize_catalog_results(
                 break 'pages;
             }
             let acquired = tokio::time::timeout(
-                remaining.min(materialization_candidate_timeout()),
+                remaining.min(materialization_candidate_timeout(staging_token)),
                 acquire_materialization_source(
                     &catalog_root,
                     staging.path(),
@@ -880,9 +1033,15 @@ fn verified_cached_source(
     let content_hash = verified.content_hash;
     verify_record_content_hash(record, &content_hash)?;
     #[cfg(test)]
-    let claimed_test_hook = claim_catalog_cache_stage_test_hook();
+    let claimed_test_hook = claim_catalog_cache_stage_test_hook(index);
     #[cfg(test)]
     if let Some(hook) = &claimed_test_hook {
+        // Stall AFTER claiming, never before. Sleeping first put a 400 ms
+        // scheduler-dependent gap between the two verifiers' claims, which is
+        // how the parked candidate stopped being deterministic (sc-19806).
+        if !hook.verifier_delay.is_zero() {
+            std::thread::sleep(hook.verifier_delay);
+        }
         hook.before_stage.wait();
         hook.release_stage.wait();
     }
@@ -916,22 +1075,52 @@ fn verify_record_content_hash(record: &CatalogRecord, actual: &str) -> Result<()
     Ok(())
 }
 
-fn materialization_candidate_timeout() -> std::time::Duration {
-    #[cfg(test)]
-    if catalog_cache_stage_test_hook()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some()
+/// The shortened budget, and the staging park, belong to this candidate and no
+/// other.
+///
+/// Both used to be first-come: whichever verifier thread reached the CAS first
+/// won. The two verifiers reach it only ~166 ms apart (measured: candidate 1 at
+/// t=406 ms, candidate 2 at t=572 ms), each after a `thread::sleep` whose
+/// wake-up is at the scheduler's discretion, so on a slower host candidate 2
+/// could win — and when it did, the hook parked the replacement candidate that
+/// the test needs to SUCCEED. The request then blocked forever awaiting that
+/// parked verifier, `before_project_copy` and `release_stage` were each left
+/// without a partner, and the test failed at the 120 s rendezvous bound
+/// (sc-19806, seen on the hosted macOS runner). Keying on the candidate index
+/// makes it deterministic on any host, at any speed.
+#[cfg(test)]
+const CATALOG_CACHE_STAGE_TEST_PARKED_CANDIDATE: usize = 1;
+
+#[cfg(test)]
+fn materialization_candidate_timeout(candidate_index: usize) -> std::time::Duration {
+    // Only the parked candidate gets the short budget. Every other candidate —
+    // including the replacement this test needs to succeed — keeps the
+    // production budget (sc-19764).
+    if candidate_index == CATALOG_CACHE_STAGE_TEST_PARKED_CANDIDATE
+        && catalog_cache_stage_test_hook()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     {
-        return std::time::Duration::from_millis(100);
+        return CATALOG_CACHE_STAGE_TEST_CANDIDATE_TIMEOUT;
     }
     MATERIALIZATION_CANDIDATE_TIMEOUT
 }
 
+#[cfg(not(test))]
+fn materialization_candidate_timeout(_candidate_index: usize) -> std::time::Duration {
+    MATERIALIZATION_CANDIDATE_TIMEOUT
+}
+
 #[cfg(test)]
-fn claim_catalog_cache_stage_test_hook() -> Option<std::sync::Arc<CatalogCacheStageTestHook>> {
+fn claim_catalog_cache_stage_test_hook(
+    candidate_index: usize,
+) -> Option<std::sync::Arc<CatalogCacheStageTestHook>> {
     use std::sync::atomic::Ordering;
 
+    if candidate_index != CATALOG_CACHE_STAGE_TEST_PARKED_CANDIDATE {
+        return None;
+    }
     let hook = catalog_cache_stage_test_hook()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -942,6 +1131,8 @@ fn claim_catalog_cache_stage_test_hook() -> Option<std::sync::Arc<CatalogCacheSt
         .map(|_| hook)
 }
 
+/// Called from the materialization future, i.e. ON the test's runtime thread.
+/// It must therefore never block — see `CatalogCacheStageTestSignal`.
 #[cfg(test)]
 fn signal_catalog_cache_timeout_test_hook() {
     if let Some(hook) = catalog_cache_stage_test_hook()
@@ -949,7 +1140,7 @@ fn signal_catalog_cache_timeout_test_hook() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
     {
-        hook.timeout_observed.wait();
+        hook.timeout_observed.signal();
     }
 }
 

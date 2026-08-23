@@ -1,7 +1,12 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import {
   AUDIO_MODES,
+  VIDEO_MODES,
   angleModelUsable,
   audioModelServesMode,
   audioModelUsable,
@@ -15,6 +20,7 @@ import {
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
+  videoModelServesMode,
   videoModelUsable,
   visionCaptionModelUsable,
 } from "./modelEligibility.js";
@@ -486,5 +492,209 @@ describe("missingRequiredModels", () => {
   it("tolerates missing arguments", () => {
     expect(missingRequiredModels(undefined, undefined)).toEqual([]);
     expect(missingRequiredModels(catalog, undefined)).toEqual([]);
+  });
+});
+
+// THE CLASS GUARD, web half (sc-17159, GH #2074). `VIDEO_MODES` is a reachability gate, not a
+// display list: `videoModelUsable` requires a model to serve at least one mode IN THIS ARRAY, and
+// `VideoStudio.jsx` falls a recipe back to `text_to_video` for any mode it does not contain. So a
+// capability the shipped manifest advertises but this array omits makes the model unusable in the
+// Video Studio however completely the server is wired.
+//
+// Read off BOTH real sources, like its Rust siblings — the advertisement from the shipped
+// `builtin.models.jsonc` bytes, the admission from the real exported `VIDEO_MODES`:
+//   * `every_declared_video_capability_is_submittable` (apps/rust-api) — the API allow-list;
+//   * `every_declared_video_capability_is_claimable_by_some_lane` (sceneworks-core) — the lanes.
+// The `fallbackModels` mirror is checked too, because App.jsx serves it to the real picker before
+// the catalog loads, and a mirror that drops a capability hides a mode for that whole window.
+describe("declared video capabilities are all offerable", () => {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const manifestPath = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
+  const manifest = JSON5.parse(readFileSync(manifestPath, "utf8"));
+  const shipped = (Array.isArray(manifest) ? manifest : manifest.models).filter(
+    (entry) => entry.type === "video",
+  );
+
+  it("reads a real video catalog, so the assertions below are not vacuous", () => {
+    expect(shipped.length).toBeGreaterThanOrEqual(12);
+    expect(shipped.flatMap((entry) => entry.capabilities ?? []).length).toBeGreaterThanOrEqual(30);
+  });
+
+  it("VIDEO_MODES admits every capability the shipped manifest advertises", () => {
+    for (const entry of shipped) {
+      expect(Array.isArray(entry.capabilities), `${entry.id} declares capabilities`).toBe(true);
+      for (const mode of entry.capabilities) {
+        expect(
+          VIDEO_MODES,
+          `${entry.id} advertises "${mode}" but VIDEO_MODES omits it, so videoModelServesMode can ` +
+            `never return true for it and the model is dropped from the Video Studio entirely`,
+        ).toContain(mode);
+      }
+    }
+  });
+
+  it("the fallbackModels mirror declares the same capabilities as the manifest", () => {
+    for (const entry of shipped) {
+      const mirrored = fallbackModels.find((model) => model.id === entry.id);
+      if (!mirrored) continue; // the mirror is deliberately partial; only drift is the defect.
+      expect(
+        [...(mirrored.capabilities ?? [])].sort(),
+        `${entry.id}: the constants.js mirror the picker uses before the catalog loads must not ` +
+          `drop or invent a capability`,
+      ).toEqual([...entry.capabilities].sort());
+    }
+  });
+
+  // sc-19504. The withdrawal, asserted where it is actually LOAD-BEARING.
+  //
+  // On a Mac the First/Last tab was already hidden for this model — `macSupport.features.videoModes`
+  // is built by mapping the real `video_mode_is_mlx_eligible`, which says false. OFF-Mac
+  // `macGatingActive` is false, `macVideoModeBlock` is inert, and `videoModelServesMode` collapses
+  // to `capabilities.includes(mode)` alone. So `capabilities` was the ONLY thing between a
+  // Windows/Linux user and a tab whose every submission queued forever — which is why the fix is
+  // the manifest array and not a gating flag.
+  it("the 14B I2V no longer offers First/Last Frame — on any platform", () => {
+    const entry = shipped.find((model) => model.id === "wan_2_2_i2v_14b");
+    expect(entry, "wan_2_2_i2v_14b is a shipped video model").toBeTruthy();
+    expect(entry.capabilities).not.toContain("first_last_frame");
+    expect(entry.ui?.recommendedFor ?? []).not.toContain("first_last_frame");
+
+    // Off-Mac: gating inactive, so this is `capabilities` speaking for itself.
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: false, platform: "win32" };
+    expect(videoModelServesMode(entry, "first_last_frame", offMac)).toBe(false);
+    // …and the modes a lane really does serve are untouched, so the withdrawal narrowed one
+    // capability rather than the model. Without this the assertion above would pass on an entry
+    // that had lost every capability.
+    for (const mode of ["image_to_video", "extend_clip", "video_bridge"]) {
+      expect(videoModelServesMode(entry, mode, offMac), `still serves ${mode}`).toBe(true);
+    }
+    expect(videoModelUsable({ ...entry, macSupport: undefined }, offMac)).toBe(true);
+  });
+
+  // sc-19570. THE OFF-MAC GATE, asserted with a FOREIGN-platform fixture.
+  //
+  // This is the same shape as the sc-19504 guard above, generalised: `capabilities` was the only
+  // thing between a Windows/Linux user and a tab whose every submission queued forever, for
+  // THIRTEEN advertised pairs rather than one. sc-19504 fixed its pair by withdrawing the
+  // capability, which is not available here — every pair below renders correctly on a Mac, so the
+  // manifest is right and the missing piece was a per-platform gate.
+  //
+  // The fixture is what makes this a real check. On the host these tests run on there is no
+  // off-Mac anything: `candleGatingActive` arrives from `GET /api/v1/capabilities/mac` and is
+  // false on a Mac, so every helper in candleGating.js is inert. Tagging the caps object with the
+  // foreign platform is what runs the branch.
+  it("an MLX-only video mode is not offered off-Mac, and is still offered on a Mac", () => {
+    // The per-model block the API now emits, in the shape `model_candle_support` serializes.
+    const candleSupport = (served) => ({
+      supported: served.length > 0,
+      features: { videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, served.includes(m)])) },
+    });
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, candleGatingActive: true, platform: "linux" };
+    const onMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" };
+
+    // LTX-2.3: candle serves `text_to_video` and nothing else, and the Mac serves all six.
+    const ltx = shipped.find((model) => model.id === "ltx_2_3");
+    expect(ltx, "ltx_2_3 is a shipped video model").toBeTruthy();
+    const ltxOffMac = { ...ltx, candleSupport: candleSupport(["text_to_video"]) };
+    const ltxOnMac = {
+      ...ltx,
+      macSupport: { supported: true, features: { videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, ltx.capabilities.includes(m)])) } },
+      candleSupport: candleSupport(["text_to_video"]),
+    };
+    for (const mode of [
+      "image_to_video",
+      "first_last_frame",
+      "extend_clip",
+      "video_bridge",
+      "replace_person",
+    ]) {
+      expect(
+        videoModelServesMode(ltxOffMac, mode, offMac),
+        `ltx_2_3 + ${mode} has no off-Mac lane and must not be offered there`,
+      ).toBe(false);
+      // …and is STILL offered on a Mac. Breaking the platform where it works, to fix the one where
+      // it does not, is the failure this leg exists to catch.
+      expect(
+        videoModelServesMode(ltxOnMac, mode, onMac),
+        `ltx_2_3 + ${mode} renders on a Mac and must stay offered there`,
+      ).toBe(true);
+    }
+    // The mode candle DOES serve is untouched, so the gate narrowed the tab list rather than the
+    // model — without this the assertions above would pass on a block that hid everything.
+    expect(videoModelServesMode(ltxOffMac, "text_to_video", offMac)).toBe(true);
+    expect(videoModelUsable(ltxOffMac, offMac)).toBe(true);
+
+    // A model with NO off-Mac lane at all disappears from the picker rather than showing every tab
+    // disabled: `wan_2_2_vace_fun_14b` advertises `replace_person` alone and candle does not route
+    // it, so `candleSupport.supported` is false.
+    const vaceFun = shipped.find((model) => model.id === "wan_2_2_vace_fun_14b");
+    const vaceOffMac = { ...vaceFun, candleSupport: candleSupport([]) };
+    expect(videoModelServesMode(vaceOffMac, "replace_person", offMac)).toBe(false);
+    expect(videoModelUsable(vaceOffMac, offMac)).toBe(false);
+    expect(downloadOffersFor([{ ...vaceOffMac, installState: "missing" }], videoModelUsable, offMac))
+      .toEqual([]);
+
+    // …and on a Mac, that same model is offered. Two platforms, two answers, one model.
+    const vaceOnMac = {
+      ...vaceFun,
+      macSupport: { supported: true, features: { videoModes: { replace_person: true } } },
+      candleSupport: candleSupport([]),
+    };
+    expect(videoModelServesMode(vaceOnMac, "replace_person", onMac)).toBe(true);
+    expect(videoModelUsable(vaceOnMac, onMac)).toBe(true);
+  });
+
+  // The switch itself: with `candleGatingActive` false — a Mac, or any client before the
+  // capabilities endpoint has answered — the block is inert even when it says `false`. A gate that
+  // read `candleSupport` unconditionally would hide Mac-served tabs on the Mac.
+  it("the candle block is inert until off-Mac gating is active", () => {
+    const model = {
+      type: "video",
+      capabilities: ["image_to_video"],
+      candleSupport: { supported: false, features: { videoModes: { image_to_video: false } } },
+    };
+    for (const inert of [
+      DEFAULT_MAC_CAPABILITIES,
+      { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" },
+    ]) {
+      expect(videoModelServesMode(model, "image_to_video", inert)).toBe(true);
+      expect(videoModelUsable(model, inert)).toBe(true);
+    }
+    const offMac = { ...DEFAULT_MAC_CAPABILITIES, candleGatingActive: true, platform: "win32" };
+    expect(videoModelServesMode(model, "image_to_video", offMac)).toBe(false);
+    expect(videoModelUsable(model, offMac)).toBe(false);
+  });
+
+  it("both MiniMax-H3 partitions are usable in the Video Studio, each on its own modes", () => {
+    // The regression this pins: the family installs on macOS ONLY, so if the server ever answers
+    // `macSupport.supported: false` for it again (it did until sc-17159 added the VIDEO_MODEL_CAPS
+    // rows), `macModelBlock` drops it from the picker on the only platform it runs on.
+    const gating = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "darwin" };
+    for (const [id, served] of [
+      ["minimax_h3", ["text_to_video", "image_to_video", "first_last_frame"]],
+      ["minimax_h3_ref", ["reference_to_video"]],
+    ]) {
+      const entry = shipped.find((model) => model.id === id);
+      const model = {
+        ...entry,
+        macSupport: {
+          supported: true,
+          features: {
+            videoModes: Object.fromEntries(VIDEO_MODES.map((m) => [m, served.includes(m)])),
+          },
+        },
+      };
+      expect(videoModelUsable(model, gating), `${id} must be usable on a Mac`).toBe(true);
+      for (const mode of VIDEO_MODES) {
+        expect(videoModelServesMode(model, mode, gating), `${id} serves ${mode}?`).toBe(
+          served.includes(mode),
+        );
+      }
+      // …and blocked outright the moment the server says the Mac lane does not serve it, which is
+      // what makes the assertion above about routing rather than about the manifest alone.
+      expect(
+        videoModelUsable({ ...model, macSupport: { supported: false, reason: null } }, gating),
+      ).toBe(false);
+    }
   });
 });

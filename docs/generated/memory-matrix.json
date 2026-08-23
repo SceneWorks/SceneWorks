@@ -1,24 +1,24 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c39ee4bc9767ecca4925881f96b4a63118a7bc1d4eb95d637437f97e9633ef44",
-    "inferenceRevision": "6f47e6707589158b89d0f238c5ef56be6f1bdd7a",
+    "sceneWorksRevision": "source-tree:f499937de99c925b48d847fa970f24af5ce75f53a5d412323209ea1d633273df",
+    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "db45d9369386f75ab33e13d258bbbb99c712e4c081eb885449fe152ec248d4d8"
+        "sha256": "487f2035f90acd98afd87c4e018314a95619a78f40499f54863944e05e193b0b"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "a60d163c3644df433e929fa8b7751714d67c73f10ddaca0b0e33f1f8751c2ccf"
+        "sha256": "951977f356a9e2103168476d8442f4d210617f9470411cd8d6721af1f3c050df"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "d54eaeb777184d0f0610177bfa00c8d9b2ea7a95eddfeb6353d2b1e6d91ff49d"
+        "sha256": "0867b5c59ffc50ccd387fda81de9deec44e8ae4ad99ee97c741fb96f3efd6d58"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "45c1cff1dbd1effd7fbb33d0018f8fe40fb777a7d0db6a35ead6201e5b5551a0"
+        "sha256": "57da581fc14e58dabba089b18b58c49264bbbe295e74903574c8858352ad2d51"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -30,7 +30,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "433287972eef09c31e3c7f708da05c7da7777a11537361dc649ad3bc2d0c5629"
+        "sha256": "84e9e93fb9472684ef1c3d7259a9f3419958b28d98810f15ca6aa968e0d4bb26"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -58,7 +58,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "5252ddee0639a01b6fb7c434d0cbc61ac10580415595d1491e40fc723115d965"
+        "sha256": "bd97b32a05808add71e6e615fbd2edac75897dd8d9e94538acc329144387f21a"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "e9013fd319929e18fb2ec196e2ba71ce59280fa38de3659984ef9bd33733cea5"
+        "sha256": "2d4fe1efd4113a782667886144276ab0a9d1dc3612842d3028927031f36c468b"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -74,7 +74,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "26b1d513b8d153b38e3d6160b63f20c965fb88ba938894d63bc54df7e3465b87"
+        "sha256": "4c8ba7debac6085012c6d707343bc991c38c34850717440dd4e9bf18a353f136"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
@@ -82,23 +82,27 @@
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "e7217a41b0556c222702db9f577da9ad738029766ea886e43e371884799c7f6f"
+        "sha256": "aaa275420987ad479aa7ffdfd59894f27ff410601cd51823ae84a2ebe2499b35"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "7ba91cb547f1fc37264f2deab67775db9c351f42315eca1600f9960abd12cdca"
+        "sha256": "180b8c9c1f16ad2e1ec13583bca17f03039df972be68c775084a6302bbe8b47c"
+      },
+      "rung4ContractPrerequisites": {
+        "path": "config/rung4-contract-prerequisites.json",
+        "sha256": "dd02b79706bb9fff6e587675114d9fab221916503451363acaa23674822076a9"
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "a23a5ab972509f2eae9f594617eda800f232c03a6096775cf992d54c4f467191"
+        "sha256": "f4a00074ecb91f68e9fb335e9c4377422d2c87dc213228519afce1748ae00cee"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "5528792e6194d8f3ddedd68950453292ce95b6483b4a03dacfb873567c459410"
+        "sha256": "7b03e32d060d8ecc1fa2915d71d6737379801bcd2cf6e701f7ee571d30dc8ea6"
       },
       "cargo": {
         "path": "Cargo.toml",
-        "sha256": "e697289fb05de2b6472c0e976d6b2b0c84558e1dde7d15f7e648933bc81f10c8"
+        "sha256": "ecd712b657f4d0fe3e558560846094981e7a53e47fa7df4e0eeed7702b73b061"
       }
     }
   },
@@ -182,18 +186,18 @@
     "videoMlxStagedStaticCoverageDenominator": 10,
     "unroutedEntries": [],
     "fullModels": 0,
-    "calibrationRuns": 89,
+    "calibrationRuns": 108,
     "calibrationRunsByStatus": {
-      "complete": 70,
-      "runtimeComplete": 19
+      "complete": 85,
+      "runtimeComplete": 23
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 72,
+      "providers": 73,
       "bespokeWaivers": 1,
-      "mismatches": 494,
+      "mismatches": 503,
       "byLeg": {
-        "engine_manifest": 275,
+        "engine_manifest": 284,
         "manifest_route": 70,
         "survey_engine": 149
       }
@@ -17992,6 +17996,27 @@
         ],
         "historicalVerification": [
           {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-8f2a6f6c75bee2ead9dd",
+            "hardware": "Apple M5 Max",
+            "tier": "q4",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:33:13Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 82.43114202842116,
+            "requiredHostBytes": 143340059580,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q4-1024-seed18218-step2"
+            }
+          },
+          {
             "source": "docs/generated/memory-calibration-evidence.json#imc-b6537074420d51413b38",
             "hardware": "Apple M5 Max",
             "tier": "q4",
@@ -18010,6 +18035,27 @@
               "metric": "maximum_absolute_error",
               "maximumError": 0,
               "fixture": "flux2-dev-mlx-q4-1024-seed18218-step2"
+            }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-d778d59acb0aae38dcbe",
+            "hardware": "Apple M5 Max",
+            "tier": "q4",
+            "geometry": "768x768",
+            "capturedAt": "2026-08-16T12:55:13Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 58.65180033072829,
+            "requiredHostBytes": 104477905112,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q4-768-seed18218-step2"
             }
           },
           {
@@ -18084,6 +18130,48 @@
           }
         ],
         "historicalVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-421a1bb45e9c2f5d916c",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:37:03Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 105.37975042685866,
+            "requiredHostBytes": 169244081084,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q8-1024-seed18218-step2"
+            }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-51dd1b02e0d1c2ec6fa0",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "768x768",
+            "capturedAt": "2026-08-16T12:34:31Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 81.63838785514235,
+            "requiredHostBytes": 142467644348,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q8-768-seed18218-step2"
+            }
+          },
           {
             "source": "docs/generated/memory-calibration-evidence.json#imc-747f54e1be89e30da943",
             "hardware": "Apple M5 Max",
@@ -18283,7 +18371,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "24ddfeae72a44f01b5a853a939770fee165452496b4d5ce3012c9fda03b64097",
+      "calibrationFingerprint": "c8f0d73603fb2e3f5e623d6db1ed2ed53646fa04cfe76790059fee8412ab1dcc",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -18356,7 +18444,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d14ed2bdfac6a1e81702221f6b90853b495e027b27ba00af547d7927c0888904",
+      "calibrationFingerprint": "b70cd4b8d1900d4363e4991bedd79aa239426f4deecd4d09208ac21fdff3b34f",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -19066,7 +19154,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7b8b2ae5f255a7da17fdf535835faad4dbe79552e4f6d7498b3e85d809367475",
+      "calibrationFingerprint": "c4e97ccb3bfe9ac2bdcbab745bf76027bee4849cc8a41e36cde648ad52fe24b4",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -19139,7 +19227,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "58c3e96608733ca6d2eae4fa3163146f3d29dc426759d1a100028ef96017d66b",
+      "calibrationFingerprint": "8a3a309845ab6c92b68521e049d2b2cd04f450165a7904a47253999c08be5ab9",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -19884,7 +19972,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e855fdd858d5abaf42813fc45e53e2f82e0867d150b7e2a347b19231ecf5f937",
+      "calibrationFingerprint": "0815cb255d76c9bc30f7d027876c5de7c0f7ef337a4eb62cbc99b7dbdc09c494",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -19957,7 +20045,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "cc897ea8682030142e1a7eaa5647f90432d54f516032d0ae2208bdf2be29cf8f",
+      "calibrationFingerprint": "2241df6103d358bf7b2f71e076085fc890a176c7a8791643139f60498073afc4",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -20913,7 +21001,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6d9a50c89a0a4bd85880d470ddc6c95badef762ffec092c5e0b11853a29b9c37",
+      "calibrationFingerprint": "d59028fe06ea1cd399ed30618e02a290a408153d81c0bcfc113c90128bd0773a",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -20978,7 +21066,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8dc136b27a3d4fd7ad07955a690ff773bf539d3af5f6749f5ee7f4f561dbdf61",
+      "calibrationFingerprint": "cea96404e9a9013d3e13387d9355f4f6b9809aa183726962594412c867e3f07b",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -21280,7 +21368,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0ec17039e165f7247c829e3e5261774dd3f34d0766a8e61caa655125240548c7",
+      "calibrationFingerprint": "ef670e85097b3154df1a5f9edcfd5feffa82be23fd93073fb3291c887fea4243",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -21345,7 +21433,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d4cbc1dd35f87865a30d923a2ab1a774347a642b3bcb8898fa6dd518fdca04af",
+      "calibrationFingerprint": "d65e82da18ce10ca6e01f6a71df40453be5049a26295b58130f5726a3c8c99e1",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -21647,7 +21735,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ea50cb812618ac8f486c8b7fa29a40fae754d82bfc5ab3cfc325f17f307e170a",
+      "calibrationFingerprint": "a1da38c13b7109e08bfc8d563233d5340e9f4013d0e98f63716fbca2091d743f",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -21712,7 +21800,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "23d43af8a608ed829dc717abb84bcf0687e42e2d6fa2aaa1f346e31c4abbeedf",
+      "calibrationFingerprint": "416582a8516d4528785bd9d4b90d757696d6818866d980ef4c87d184b15d854a",
       "owningFamilyStory": 15517,
       "owningModelStory": 15477,
       "evidence": {
@@ -21764,7 +21852,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "520f396e699de0ba7413c7c26b46b9950fc384aa17ca793a6a7a31fc3297d6eb",
+      "calibrationFingerprint": "412ff8ff818f3b29b6aeaab5b79f9261e05e16185ed35c4d95daa05f994d8485",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -21825,7 +21913,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "784a1a51a6c4d15b0c38391927bdadda9ddd97af441748493f68cc13598ff9ad",
+      "calibrationFingerprint": "7a32e606b46a434bcfc9badf6f3ddd371e3dc8349bc69e0d839b80f40fce5db9",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -21886,7 +21974,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f91cde09d45244558d615717b3ac69b4cc6d318b26be601d2b0a05408f67a96b",
+      "calibrationFingerprint": "cf38fd78e85b248b867b7fa350798341699181874b92de05a71c356428fb5941",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -21947,7 +22035,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1e8bfe32f24435e5bd3a05e4a74b875e89f07bf4fcd42208de8f59c64ee2e060",
+      "calibrationFingerprint": "ae40ed8cc1809b51cb20457dfa2e6d82a222dcbd91b974c695792c0ec8a8b34b",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -22008,7 +22096,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d9c15a63ca96a1ccdcc804758f245fd2fafe1148257f471eef2b13e247319f92",
+      "calibrationFingerprint": "44ed9407231842c573422e675827d9faf316ca4237ded1a3ae8de4f5b08f7333",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -22069,7 +22157,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "11dfd3cb9995d397ac9d86d04b3e1c883f734f4539c997ab622869cba9dd6272",
+      "calibrationFingerprint": "925b6ce1c1c604b9d8f86065e9b363e6c4b14040b82077393bed3c64ac2a85fc",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -22130,7 +22218,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "57bd00cefd22dec458774d9899570fc5794477d9cd871e97f39d425806f38fbe",
+      "calibrationFingerprint": "2663a94c7d97ed90028f908f30a23502f7b9da6ff067cf96b8d1a186c09dc527",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -22191,7 +22279,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "22a63cf1bebd4065fe1d2a9e9716f5f33ff083d94deaa9af8bec50e29b57f4eb",
+      "calibrationFingerprint": "69ea5770bf4e52a5c4a1781f7c7d542e0644cae0c713468cf5da5bcf773c09a6",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -22252,7 +22340,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "608820ded71b2a63c0427e350d15f3899d6a3b88ec668da6c5e950385cca6b7e",
+      "calibrationFingerprint": "2732d624224225258d02ff03cf30b0310db6dc27faa126d0eba6e661f02179f0",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -22313,7 +22401,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8934c5d553cbf121db69612e532228453862de85b6015509acefa410b8f087b7",
+      "calibrationFingerprint": "60d692adfde385bfb88dd24be59ef1d63122194bfbeaf195d58eebb4defc6330",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -22374,7 +22462,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f7054c8ef6899a45aa077c5a3ee1d1ba5ac1adadeef1c091d4e0842e5774d683",
+      "calibrationFingerprint": "23d7dc6b5231c1834988b04100e9a5f28d5c145e64b0b0dc8bef395a5620910d",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -22435,7 +22523,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ff6a5ceb5885233a702d63501e91eeef5e6639e302161295efc211e62581dc59",
+      "calibrationFingerprint": "2aeaac2fda954a04beeb5f89f1788be2d29d968795b3fb3dff72272278aee6dc",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -22496,7 +22584,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "82d275dbad092f13eea045b1d9f8c2e056fcac4d007e56f7d799ec2d60bc216d",
+      "calibrationFingerprint": "2bed9078eee7866f997f708e8c89f719cb0edef2cfe0e4b27d500b85a2d06c70",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -22557,7 +22645,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5ba741f72b60ab5f1836307280345b53fbcc469be33514f1c1e5bcc91074b5da",
+      "calibrationFingerprint": "b00d817887aeace539cb65118ad920cbfee166b32a95c3d86e0da16d2387523e",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -22618,7 +22706,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "32db76c55e91ef759c14cf4087c751fc8a3846c654744c11b0f8f49e280bcd20",
+      "calibrationFingerprint": "438b59fa20213dec624e7f5f408184e1c74ce6232e030f124f1d553a6cf8aafc",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -22679,7 +22767,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "a5bb8326cde40bdba1d9fddaa6f1eb3059f21a73b9b8fe84bf1033cd019d0e20",
+      "calibrationFingerprint": "a4bf87ec84f907beaaa7a14641f5d3718333864b6268c583889fb7ea7361c888",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -22740,7 +22828,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "257168dbb638b443406169a4f00c0176c6a11f6997e7917f7fb8e0933409775d",
+      "calibrationFingerprint": "662d7e3b71927429087730bd4aafa958a7bcdb3ab580de2dbc949d2cee8cab0e",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -22801,7 +22889,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d3cea516ba8f91e182f9020d581d10218d040f0d4737fe0c50fd3ad63daa9918",
+      "calibrationFingerprint": "93263322185200d1c9246ec7a3037270d3a73777c6148ec3f36316d7f6dd859e",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -22862,7 +22950,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "06d500a336e96901ad9f58e34e5365657e787db021bc2b0b45d5aeddf974660e",
+      "calibrationFingerprint": "a82ce0e72230f394fcbb93087c170bac13aec9f0c37e38cd053f30e4234daabc",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -22923,7 +23011,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1a333ee1166b684327e19bf7c79c7f8aa5ef02a5e8ebc52034df774d3a5e18f4",
+      "calibrationFingerprint": "dca7b6d0dad26b86b2dbfba9c8abb041b2601cb67368db7c23e976a4cd7c08dc",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -22984,7 +23072,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5b207d5a1094dac3294a3fd416a3ed49ba48569854241f78ac6f9c79d6a50794",
+      "calibrationFingerprint": "9c75ac484ef8415ebfd5284e3f361d541f7c337bcf4f94dace54cc2b3c0ddaf1",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -23045,7 +23133,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b552c042092ccd24bb76fb18e34cad67242d024c54b7e7c6c15074575cc2013d",
+      "calibrationFingerprint": "1e6dd84507e968288dbb1013555ed1b3b195efcadf4e0d7ec7469d0a713ce2eb",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -23106,7 +23194,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3fd967fed455b0bf71e0761778af523aea7d6b63e9a5c8bc42e5af0796dc326a",
+      "calibrationFingerprint": "d5fe22f1de4047084f006992ce640d097d96500eac3ba400cf1e98a1690039c3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -23167,7 +23255,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "91fa564fc6e0e2a73a0ff641b083c7c2cd60fe44d3803d3edf768cd94d3be378",
+      "calibrationFingerprint": "bf5d9c5b439991bdd58cbff19746f1ea47a22e0eac85cdf08802ee011687cf79",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -23228,7 +23316,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5bfc6d0babfb8d11764f9d69b464090ac75cdd7e25197e17709fd6f38e4d8edd",
+      "calibrationFingerprint": "a258704e83e90098f8cd025ae54b70217c6bf7c2effa62200daa699e64719106",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -23289,7 +23377,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7471fd728d1c6563d188b210db9919e0eeaf5c63fff95c81a48d0fc8ce773a27",
+      "calibrationFingerprint": "e03eaeb180ce12062e516c961300a4d0003d3e88d3b18c8a321730f7c3467412",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -23350,7 +23438,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "dba04dbf9a0dd7c45f7eb3a724809e87c2167c20f6632c4ab0b3aadc6b8abadc",
+      "calibrationFingerprint": "1e73a750265f5806f46859029acf1e38b8f6305856944e12046afaaa08a30845",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -23409,7 +23497,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ef8583e8c05e09758293f30921d2517b3a4f3324bb95d21bf86abab1af3e9fc2",
+      "calibrationFingerprint": "51b035200af3b9269ff5b7049381a047c5fc07968ba6a600b15021bc07404779",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -23459,7 +23547,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "be4729b52ef885fb66ec3256272c06ba3acb609ce0a4f3d80164a4036eb29f07",
+      "calibrationFingerprint": "91142c63ed28cee980fdb29d03c19f388fe14d2199631750886464ef7fc78a9a",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -23504,7 +23592,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4e68c73af6fe3d1fcc6990772f9af40c5195a6cc26832dbd55c73ed6e827bff0",
+      "calibrationFingerprint": "8c2dabc7a9bbf430287dfcedb95c2d4c1c6c76774dfed78646de6bf0dd93254a",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -23556,7 +23644,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "53b2c8af6695d954730533ac5cb9674430e883187404323bbfb011f37623927b",
+      "calibrationFingerprint": "4a850dff8e57d22876fe25008c9f9f22db58c3f81340557c96712f310826a2c3",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -23606,7 +23694,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2129ec528a0f2fb1ef796cf2dd3f5ecf737f76c0df311a0ce975ff989681c964",
+      "calibrationFingerprint": "583500077064edc633ecb5066a146981c4ccd56dbd64124a72ddda25d17ff0e8",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -23656,7 +23744,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3632d5ad106021bf29b66c35eeadc72f9d33987ae149c97cc2c655e068e71c37",
+      "calibrationFingerprint": "f062e108d28f8bc672a7bb9a08d713c56db4a117912752302afbae9e0202c8f2",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -23708,7 +23796,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "29b526273f0d4c95cc6f0dedfbc9410d4108de53919292bb9bed98e0f9f97af4",
+      "calibrationFingerprint": "9d40d3191452e85f065204d20e426daaaacd3d0a1d7cbba94561ea51219534bd",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "rung4Survey": {
@@ -23761,7 +23849,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ed84dd944c85aa1d69d6ed2ad286e14882f58c7bf443414e3b37d13a14cd8596",
+      "calibrationFingerprint": "76806dd02428e32be4a9f851b5a44fff9ea7205b91844b92505e47c1d2cda609",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -23813,7 +23901,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "567f17f7d0eb19cc83894c242156dff0e2f5e7a3ba3454a940acb4acbc46f05a",
+      "calibrationFingerprint": "dcecb766dec9356e169d56bffe50196459a3ddd912ba032d56e2e320a9930849",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -23863,7 +23951,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ae0f599bccbb96aee909abf396bbf0299ce5993c962d2cd5106ceda65aa294b1",
+      "calibrationFingerprint": "183a986474a2540ca86e706fb4b1f03befd6b86b2848b97c5c301b9fe4b35b5f",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -23913,7 +24001,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3a4489a4c9211ca4862841d9c3810641263ce5361f877c93ed37d10603e260dd",
+      "calibrationFingerprint": "9bedeec87036b4e2239ca7cbdd8f788a518c1113b0b5ea818e8d62bd8d209a57",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -23965,7 +24053,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e9c859119ec4bc4ee5cfc11a46f9e20176643f420695e9067872c2dd54dcd2ef",
+      "calibrationFingerprint": "e1d6b7bf2bb70dcfd5e31d194ac7d76fc48f240c9a1461fc3ae59a215727f5d6",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "rung4Survey": {
@@ -24018,7 +24106,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f224740d19acce4d3acf57169332a3c42b0ae694b72c1b2065cdba72dfda9ff7",
+      "calibrationFingerprint": "9d86dd5a24ad1cd52800970bb3664bdfc2b0c7f0d22ea28790ec877ad01d8e71",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -24070,7 +24158,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5f47e9e37a47b4cbbd41de7498f1bf633f7658760e1c06570e55d5884c3edc01",
+      "calibrationFingerprint": "56363a44b27c7f24d9abf560b23e0cfce661ac39609a350014b165a6456aae75",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -24150,6 +24238,29 @@
           }
         ],
         "historicalVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-3da38b0d88bbefc69973",
+            "hardware": "Apple M5 Max",
+            "tier": "bf16",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:03:25Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "observedPeakGb": 60.396572303026915,
+            "requiredHostBytes": 107550784675,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.16862745098039217,
+              "fixture": "qwen-image-bf16-seed15511-step2"
+            }
+          },
           {
             "source": "docs/generated/memory-calibration-evidence.json#imc-89e32a2b1f9d914b0ac1",
             "hardware": "Apple M5 Max",
@@ -24275,6 +24386,28 @@
               "bounded_decode"
             ],
             "observedPeakGb": 61.17602510005236,
+            "requiredHostBytes": 108928282409,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.16862745098039217,
+              "fixture": "qwen-image-bf16-seed15511-step2"
+            }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-52bee882710e199db994",
+            "hardware": "Apple M5 Max",
+            "tier": "bf16",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:11:36Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "bounded_decode"
+            ],
+            "observedPeakGb": 61.17608613520861,
             "requiredHostBytes": 108928282409,
             "parity": {
               "contract": "tolerance",
@@ -24444,6 +24577,31 @@
               "maximumError": 0.16862745098039217,
               "fixture": "qwen-image-bf16-seed15511-step2"
             }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-d2d0d1fca0aef4dee689",
+            "hardware": "Apple M5 Max",
+            "tier": "bf16",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T11:53:59Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "observedPeakGb": 15.021208003163338,
+            "requiredHostBytes": 26808225146,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.16862745098039217,
+              "fixture": "qwen-image-bf16-seed15511-step2"
+            }
           }
         ],
         "currentEnvironmentVerification": [],
@@ -24493,6 +24651,27 @@
           }
         ],
         "historicalVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-034f4ee6b25326bf8469",
+            "hardware": "Apple M5 Max",
+            "tier": "bf16",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T11:49:54Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 64.8376093506813,
+            "requiredHostBytes": 115497886990,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "qwen-image-bf16-seed15511-step2"
+            }
+          },
           {
             "source": "docs/generated/memory-calibration-evidence.json#imc-91c4f21972905626cbb2",
             "hardware": "Apple M5 Max",
@@ -24584,6 +24763,28 @@
           }
         ],
         "historicalVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-4dfe5ab630fd6bc25803",
+            "hardware": "Apple M5 Max",
+            "tier": "bf16",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:08:52Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "observedPeakGb": 15.021421626210213,
+            "requiredHostBytes": 26808225146,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "qwen-image-bf16-seed15511-step2"
+            }
+          },
           {
             "source": "docs/generated/memory-calibration-evidence.json#imc-7bae9f46b5088edbc313",
             "hardware": "Apple M5 Max",
@@ -24767,6 +24968,29 @@
               "maximumError": 0.09411764705882353,
               "fixture": "qwen-image-q4-seed16353-step2"
             }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-da75519dc939a5e7153f",
+            "hardware": "Apple M5 Max",
+            "tier": "q4",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:24:03Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "observedPeakGb": 31.559531833976507,
+            "requiredHostBytes": 56265484396,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.09411764705882353,
+              "fixture": "qwen-image-q4-seed16353-step2"
+            }
           }
         ],
         "currentEnvironmentVerification": [],
@@ -24931,6 +25155,31 @@
               "maximumError": 0.09411764705882353,
               "fixture": "qwen-image-q4-seed16353-step2"
             }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-c396ea2ec856867d8ebc",
+            "hardware": "Apple M5 Max",
+            "tier": "q4",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:27:27Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "observedPeakGb": 14.880537204444408,
+            "requiredHostBytes": 26490341053,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.09411764705882353,
+              "fixture": "qwen-image-q4-seed16353-step2"
+            }
           }
         ],
         "currentEnvironmentVerification": [],
@@ -25003,6 +25252,29 @@
           }
         ],
         "historicalVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-27f49d510f459aaa0cc9",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:50:21Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "observedPeakGb": 41.03065839037299,
+            "requiredHostBytes": 73113341306,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.11764705882352941,
+              "fixture": "qwen-image-q8-seed16353-step2"
+            }
+          },
           {
             "source": "docs/generated/memory-calibration-evidence.json#imc-37f40254d20bc43fa925",
             "hardware": "Apple M5 Max",
@@ -25235,6 +25507,31 @@
               "maximumError": 0.11764705882352941,
               "fixture": "qwen-image-q8-seed16353-step2"
             }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-b4ffa7e179d3102ad58b",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-16T12:53:46Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "observedPeakGb": 14.880537204444408,
+            "requiredHostBytes": 26490341053,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.11764705882352941,
+              "fixture": "qwen-image-q8-seed16353-step2"
+            }
           }
         ],
         "currentEnvironmentVerification": [],
@@ -25347,7 +25644,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1dca31a050b052be4dcae982004e98e44fa2f199128d8ae5c81af8ff6199ba03",
+      "calibrationFingerprint": "b34da645a1263088730bd78a302085b3329541a012b959deb5541e677038551e",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -25402,7 +25699,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d3fe3a5334033520753eb509cbcbfdf36a976908d7013b9f8734dbbde731c67b",
+      "calibrationFingerprint": "5b4ab52ed6d7fa4bd79228ef611d0b8fa881377393de6acbec67c57b1c95713d",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -25504,7 +25801,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2f1c59142cc05f43d5529d5ade3340433ae8a5b49e000909fc05e7edeb35f41d",
+      "calibrationFingerprint": "2eaf9a8d78dc7ecabeef6fba4ee969f95ef417ebc2a324ddfbeec554cefb7f66",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -25559,7 +25856,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7b9645775b358df992ff30a935383f4261bf80f61b5f7e508de84a1eb38a6086",
+      "calibrationFingerprint": "6577a3b11b15b5a39f85a124c63b309c87c3567b851685b9739aa9da1b578ea6",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -25661,7 +25958,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3120862c0105653102ac34502bc4272ccdbd2ec2569b2ccf15fd5c123acf6163",
+      "calibrationFingerprint": "36cc5aa0ce7455acc51dc037d02e3fef25ad7c6474b2b3f5d8fd830e7f861772",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -25716,7 +26013,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6d6d347410524dc1c85ec558f1dd2bae267aa4baa2686fa8c05b7347686cf59c",
+      "calibrationFingerprint": "1cc76fb17d8d5af394a6814845914b117fe49e0519662cd71bc8503dd80c934b",
       "owningFamilyStory": 15525,
       "owningModelStory": 15495,
       "evidence": {
@@ -26404,7 +26701,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "66883069e0aa331652bd40431246d7e59c6375649f50f532e196273f13298732",
+      "calibrationFingerprint": "8f687f1fbd2c65f44cd1c493efac45a71443950bf7805f22fd62e21376cb3cc6",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26456,7 +26753,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "af00bc4d374a08867ffd18ca41aad5ba837ca004eb3da279398a394fbfa64aa9",
+      "calibrationFingerprint": "4026b1e14f27fd574dd0cf01b55dd4e67eaeb4478d318523c397829649b65b95",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26702,7 +26999,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "91f7266aa52c946943f8a3fa9043aa636053917f64e9af94a3a80135a1dfb26e",
+      "calibrationFingerprint": "47ea44e6c41fcaad6f2d66d0ddc7aff1cc8596689d3d66739ef0f41801e56004",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26754,7 +27051,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0a85b7971fee4ae508dd2424834a55287aa4ce52917043fd62944d765849e44b",
+      "calibrationFingerprint": "f1945d46af823d0fbd0872d1d3ca4edc7f55ddd760b87d52ee405292c764f56e",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27000,7 +27297,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ac913fa392c2f7da3b6af8e9af56055b9cc1b55fd56cf6f379478b98e50d8c0b",
+      "calibrationFingerprint": "27aee4a4cc6a41667c452d3e335a07169ca476f61fd0d0c197b06a089ffeb646",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27052,7 +27349,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d15be9ecbec27d4fe56a56021483e0adf6a0fd2a99899ee00304b57a8192d29c",
+      "calibrationFingerprint": "c920eb336bc3256c5dcc01360f972e757d459b57a2632dc0fc64fe2341d9e8e0",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27298,7 +27595,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ee6c69adc43f77e88bd9be5c5679db37471b3085a0386fc0aa36dae2d9a7ffcc",
+      "calibrationFingerprint": "df51bbdebf15c7ff6767c7e4a7cfdf82789b92061b0860b926844f3d69e4277c",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27350,7 +27647,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "72af0160b2ab1446b0920f3955de1d20cb18be7bb0bc9af214057a187e04f10a",
+      "calibrationFingerprint": "3ac271763c24092e8933c823caa764d0014e29076cfe1a1a9c994082d345d4b5",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27596,7 +27893,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e3911c33fcd7d8152d7eb5fec9350b54f12598d11806709919f20174b8e5b909",
+      "calibrationFingerprint": "5eae08162544dbdfde04fcf9f9980d1c79734e46dbb20234b0d4870a54a425fb",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27648,7 +27945,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f2e204712ead299d06f32be2252ede2bb87731eca59e08a38804472f6768d2ca",
+      "calibrationFingerprint": "0c5dd8a16942ed1d39f771f4ad5e9255f9bfbf7372c2cccc671ebc39a0114324",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27894,7 +28191,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "dc0b938faff1586cc49ff8edc8ad70a6719f1809420c448fbdcef57d19e57735",
+      "calibrationFingerprint": "bbad90f7665b4fc7c37c7a8ddf0445cf22b999a689b54bc6cd700097f176cc04",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -27946,7 +28243,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f32df5ff1f804af58e7fe3b9a8c5250780c521a9d66b7b3379f460cf29f5c71f",
+      "calibrationFingerprint": "772f21056c4cedf327fb2e869f201554c2a5f98eb5a00c8fc07441fec319954b",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28192,7 +28489,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8adc22ee1419b362dd62cad084b70ecea18d401760f8b146035a1541be155274",
+      "calibrationFingerprint": "6d77439e83a9dd4d63e26262fc0e0f593b58dbfa82fea6be7bbc622661f485c3",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28244,7 +28541,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "1f27b1817d855d79a6b2461e48e3afd5861744dbf325acc9f2829bafb21935f2",
+      "calibrationFingerprint": "bcab7541978f0d1efc0776372d7e9fef43cb09c0d9f39eed45e2254981640082",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28490,7 +28787,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "108f473f03880374e5cddd785e04acd68c1d3d093b1b80fce9e9f982b91e5d39",
+      "calibrationFingerprint": "98d9e5a5e37bded60b3e40aa1029907ff6b97eb2870bd800307b47fd7d322e48",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28542,7 +28839,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2e574274616e608b667cf6d4766c43ec73d23e82fd82580f77111821c24d1607",
+      "calibrationFingerprint": "3c8670814f7d070bd852ae5d8fa682c8067ba4db5ccc91c84e6b4f6abc31fae9",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28788,7 +29085,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e79f25ed67ddeda5ba5e98f56fc6aad020c033714aed6bd8242774445202b46e",
+      "calibrationFingerprint": "0d4fbcde35e6565da4d7622e7dcfa29bc6086a34c28cb0e247a811c2c08c699d",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28840,7 +29137,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9e0c251aa7b876e3516ef3046b956f6db82216eb38c73315c35c47f86b6cc799",
+      "calibrationFingerprint": "a9dff1b95c0565b9ceeae0905b5446e488c7f2c26c450e42ecf1e9ca092e6f34",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -28956,6 +29253,54 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-033814e110b9c190da59"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-034f4ee6b25326bf8469",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T11:49:54Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-034f4ee6b25326bf8469"
       }
     },
     {
@@ -29513,6 +29858,56 @@
       }
     },
     {
+      "cellId": "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-27f49d510f459aaa0cc9",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "bounded_attention",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode",
+            "bounded_attention"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:50:21Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-27f49d510f459aaa0cc9"
+      }
+    },
+    {
       "cellId": "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
       "binding": {
         "eligible": true,
@@ -29722,6 +30117,57 @@
       },
       "semantics": "historical",
       "record": {
+        "id": "imc-3be162bcbe15f2955e9a",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_decode",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T11:57:10Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-3be162bcbe15f2955e9a"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "binding": {
+        "eligible": false,
+        "reasons": [
+          "strategy-parameters-mismatch"
+        ]
+      },
+      "semantics": "historical",
+      "record": {
         "id": "imc-3c1d70abfcccd95ea119",
         "status": "complete",
         "backend": "mlx",
@@ -29761,6 +30207,56 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-3c1d70abfcccd95ea119"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-3da38b0d88bbefc69973",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_attention",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode",
+            "bounded_attention"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:03:25Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-3da38b0d88bbefc69973"
       }
     },
     {
@@ -29809,6 +30305,54 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-3e535b3422a162b35758"
+      }
+    },
+    {
+      "cellId": "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-421a1bb45e9c2f5d916c",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-16T12:37:03Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-421a1bb45e9c2f5d916c"
       }
     },
     {
@@ -29861,6 +30405,55 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-4426a6e84c4d39d9bff3"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:staged_residency",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-4dfe5ab630fd6bc25803",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "staged_residency",
+          "engagedRungs": [
+            "resident",
+            "staged_residency"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:08:52Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-4dfe5ab630fd6bc25803"
       }
     },
     {
@@ -29963,6 +30556,103 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-516df6318c8f92cc63af"
+      }
+    },
+    {
+      "cellId": "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-51dd1b02e0d1c2ec6fa0",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 768,
+            "width": 768
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-16T12:34:31Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-51dd1b02e0d1c2ec6fa0"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-52bee882710e199db994",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_decode",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:11:36Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-52bee882710e199db994"
       }
     },
     {
@@ -31338,6 +32028,54 @@
       }
     },
     {
+      "cellId": "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-8f2a6f6c75bee2ead9dd",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q4"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-16T12:33:13Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-8f2a6f6c75bee2ead9dd"
+      }
+    },
+    {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
       "binding": {
         "eligible": false,
@@ -31586,6 +32324,57 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-93989adacdb7a35156a7"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "binding": {
+        "eligible": false,
+        "reasons": [
+          "strategy-parameters-mismatch"
+        ]
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-94b85b4d335afefd41cf",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_decode",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:14:30Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-94b85b4d335afefd41cf"
       }
     },
     {
@@ -32196,6 +32985,58 @@
       }
     },
     {
+      "cellId": "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-b4ffa7e179d3102ad58b",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "bounded_transformer_residency",
+          "engagedRungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:53:46Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-b4ffa7e179d3102ad58b"
+      }
+    },
+    {
       "cellId": "flux2_dev:flux2_dev:candle:q4:text_to_image:none:bounded_decode",
       "binding": {
         "eligible": true,
@@ -32392,6 +33233,58 @@
       }
     },
     {
+      "cellId": "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-c396ea2ec856867d8ebc",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "q4"
+        },
+        "strategy": {
+          "rung": "bounded_transformer_residency",
+          "engagedRungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:27:27Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-c396ea2ec856867d8ebc"
+      }
+    },
+    {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
       "binding": {
         "eligible": false,
@@ -32443,6 +33336,57 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-c3cd503a27098023d0b2"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "binding": {
+        "eligible": false,
+        "reasons": [
+          "strategy-parameters-mismatch"
+        ]
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-c46985e79e28a8f5e2dd",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_decode",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:17:45Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-c46985e79e28a8f5e2dd"
       }
     },
     {
@@ -32599,6 +33543,58 @@
       }
     },
     {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-d2d0d1fca0aef4dee689",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_transformer_residency",
+          "engagedRungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T11:53:59Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-d2d0d1fca0aef4dee689"
+      }
+    },
+    {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:resident",
       "binding": {
         "eligible": false,
@@ -32646,6 +33642,54 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-d314058df6e188459f3b"
+      }
+    },
+    {
+      "cellId": "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-d778d59acb0aae38dcbe",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 768,
+            "width": 768
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q4"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-16T12:55:13Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-d778d59acb0aae38dcbe"
       }
     },
     {
@@ -32700,6 +33744,56 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-da3533c476605929f10d"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-da75519dc939a5e7153f",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "q4"
+        },
+        "strategy": {
+          "rung": "bounded_attention",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode",
+            "bounded_attention"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:24:03Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-da75519dc939a5e7153f"
       }
     },
     {
@@ -32801,6 +33895,57 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-e2f3ea2668ba6f1331b7"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "binding": {
+        "eligible": false,
+        "reasons": [
+          "strategy-parameters-mismatch"
+        ]
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-e999971a33258b0856fd",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_decode",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:06:26Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-e999971a33258b0856fd"
       }
     },
     {
@@ -32954,6 +34099,57 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-ea87169a3ea1fd340791"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "binding": {
+        "eligible": false,
+        "reasons": [
+          "strategy-parameters-mismatch"
+        ]
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-eb9292564fb7cdd508de",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_decode",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:00:32Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-eb9292564fb7cdd508de"
       }
     },
     {
@@ -33155,6 +34351,57 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-f3badcb841c8707fd971"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "binding": {
+        "eligible": false,
+        "reasons": [
+          "strategy-parameters-mismatch"
+        ]
+      },
+      "semantics": "historical",
+      "record": {
+        "id": "imc-f3f892712d4dabcdcdd6",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "bf16"
+        },
+        "strategy": {
+          "rung": "bounded_decode",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-16T12:21:06Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
+            "dirty": false,
+            "revision": "75d66db50543ac288deb278853d0f0b432f92c5c"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:82cb4fe829fa6c8a752bb228a4a4084b99a3c2010c93e7992bdb376f1ff7317e",
+            "revision": "f84da5592387318e5251df996d51cdaa2ea60a8e"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-f3f892712d4dabcdcdd6"
       }
     },
     {

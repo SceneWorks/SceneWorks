@@ -104,6 +104,7 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             "crates/sceneworks-worker/src/video_jobs/candle.rs",
             "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
             "crates/sceneworks-worker/src/video_jobs/ltx.rs",
+            "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs",
             "crates/sceneworks-worker/src/video_jobs/mochi.rs",
             "crates/sceneworks-worker/src/video_jobs/scail2.rs",
             "crates/sceneworks-worker/src/video_jobs/svd.rs",

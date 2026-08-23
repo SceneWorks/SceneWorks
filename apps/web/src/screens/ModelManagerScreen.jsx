@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
@@ -33,10 +34,14 @@ import {
 import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useHostMemory } from "../hooks/useHostMemory.js";
+import {
+  readLicenseAck,
+  requiresLicenseAcknowledgment,
+  writeLicenseAck,
+} from "../licenseAcknowledgment.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
 import { blanketFloorGb, suggestTier, tierFits } from "../tierSuggestion.js";
-import { safeExternalUrl } from "../urls.js";
 
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
@@ -232,18 +237,6 @@ function loraGroupKey(lora) {
   return lora.family ?? extractFamilies(lora)[0] ?? "";
 }
 
-// The Hugging Face page of a gated model's primary download repo — where the user
-// clicks "Agree and access" to be granted access with their token (sc-5999). Derived
-// from the first HF download repo (or the mlx repo), so it covers every gated model
-// without a per-model manifest field. Falls back to `licenseUrl` when no repo is known.
-function gatedRepoUrl(model) {
-  const host = model.credentialHost || "huggingface.co";
-  const repo =
-    (model.downloads ?? []).find((entry) => entry.provider === "huggingface" && entry.repo)?.repo ??
-    model.mlx?.repo;
-  return repo ? `https://${host}/${repo}` : null;
-}
-
 // Per-model license acknowledgment (sc-7872). Gated models (FLUX.2 [dev],
 // SD3.5 Large/Turbo/Medium, …) carry a non-commercial / community license the
 // user must accept on Hugging Face before access is granted; we also require an
@@ -253,95 +246,13 @@ function gatedRepoUrl(model) {
 // it's a UX gate only — the server-side download still needs the HF credential +
 // granted access. localStorage may be unavailable (private mode, quota), so the
 // getters/setters swallow failures and default to "not acknowledged".
-const LICENSE_ACK_KEY_PREFIX = "sceneworks-license-ack:";
-
-function readLicenseAck(modelId) {
-  if (!modelId) {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem(`${LICENSE_ACK_KEY_PREFIX}${modelId}`) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function writeLicenseAck(modelId, acknowledged) {
-  if (!modelId) {
-    return;
-  }
-  try {
-    const key = `${LICENSE_ACK_KEY_PREFIX}${modelId}`;
-    if (acknowledged) {
-      window.localStorage.setItem(key, "true");
-    } else {
-      window.localStorage.removeItem(key);
-    }
-  } catch {
-    // localStorage unavailable — the ack just won't persist this session. The
-    // in-memory state still gates the download for the current view.
-  }
-}
-
-// Gated models (e.g. FLUX.1 [dev]) need an accepted license + a saved credential
-// before a download can succeed. The catalog flags these with `gated`/
-// `credentialHost`/`licenseUrl` (sc-1898). When the matching credential is already
-// present we soften the notice to a ready state; otherwise we point the user at the
-// Settings credential screen. `present` is undefined while presence is still
-// unknown (e.g. the credential list hasn't loaded) — we still show the link then.
-// `repoUrl` links the gated repo so the user can request access (sc-5999); shown
-// alongside `licenseUrl` only when the license lives on a different page (e.g.
-// Ideogram 4, whose terms are on the source repo but access is on the SceneWorks repo).
-// `acknowledged`/`onAcknowledgeChange` drive the in-app license-acknowledgment gate
-// (sc-7872): the download button stays disabled until the user checks the box.
-function GatedModelNotice({
-  host,
-  repoUrl,
-  licenseUrl,
-  present,
-  acknowledged,
-  onAcknowledgeChange,
-  onOpenSettings,
-}) {
-  const hostLabel = host || "the required service";
-  const safeRepoUrl = safeExternalUrl(repoUrl);
-  const safeLicenseUrl = safeExternalUrl(licenseUrl);
-  const showSeparateLicense = safeLicenseUrl && safeLicenseUrl !== safeRepoUrl;
-  return (
-    <div className={present ? "model-gated-notice ready" : "model-gated-notice"}>
-      <p className={present ? "inline-success" : "inline-warning"}>
-        {present
-          ? `Credential for ${hostLabel} saved — request access on the model page, then download.`
-          : `Gated download. Add a ${hostLabel} token, then request access on the model page and accept the license before downloading.`}
-      </p>
-      <div className="model-gated-actions">
-        {present ? null : (
-          <button type="button" onClick={onOpenSettings}>
-            Add token in Settings
-          </button>
-        )}
-        {safeRepoUrl ? (
-          <a href={safeRepoUrl} target="_blank" rel="noreferrer noopener">
-            Request access on Hugging Face
-          </a>
-        ) : null}
-        {showSeparateLicense ? (
-          <a href={safeLicenseUrl} target="_blank" rel="noreferrer noopener">
-            Review license
-          </a>
-        ) : null}
-      </div>
-      <label className="model-license-ack">
-        <input
-          type="checkbox"
-          checked={acknowledged}
-          onChange={(event) => onAcknowledgeChange(event.target.checked)}
-        />
-        <span>I have read and accept this model&rsquo;s license.</span>
-      </label>
-    </div>
-  );
-}
+// The predicate and the localStorage accessors moved to `../licenseAcknowledgment.js` (sc-17227):
+// this screen is only ONE of the surfaces that can start a download, and the gate is now enforced
+// at the shared choke point (`createModelDownloadJob`) plus server-side, with the same predicate.
+// See that module for why the acknowledgment is independent of the Hugging Face credential.
+// The MARKUP — the notice, `gatedRepoUrl`, the links and the checkbox — moved to
+// `../components/LicenseGateNotice.jsx` (sc-17137 review) once the Setup Wizard grew a second
+// copy of it; this screen renders the `"card"` variant of that one component.
 
 function referencedPresetNames(recipePresets, kind, id) {
   return recipePresets
@@ -793,7 +704,7 @@ export function ModelManagerScreen() {
   // notice checkbox both updates this map and persists to localStorage.
   const [licenseAcks, setLicenseAcks] = useState(() =>
     models.reduce((acc, model) => {
-      if (model.gated && readLicenseAck(model.id)) {
+      if (requiresLicenseAcknowledgment(model) && readLicenseAck(model.id)) {
         acc[model.id] = true;
       }
       return acc;
@@ -814,7 +725,11 @@ export function ModelManagerScreen() {
     setLicenseAcks((current) => {
       let next = current;
       for (const model of models) {
-        if (model.gated && current[model.id] === undefined && readLicenseAck(model.id)) {
+        if (
+          requiresLicenseAcknowledgment(model) &&
+          current[model.id] === undefined &&
+          readLicenseAck(model.id)
+        ) {
           if (next === current) {
             next = { ...current };
           }
@@ -824,6 +739,10 @@ export function ModelManagerScreen() {
       return next;
     });
   }, [models]);
+  // Keyed on `gated` ALONE, not on the acknowledgment flag (sc-17227): this is what decides
+  // whether to make the `list_credentials` keychain call at all. A licence-acknowledgment model
+  // on a public repo has no credential to look up, and asking would be a pointless keychain
+  // call on a deployment whose catalog has no gated model.
   const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = useMemo(
     () => loras.filter((lora) => matchesFamily(lora, familyFilter)),
@@ -939,12 +858,21 @@ export function ModelManagerScreen() {
     refreshModelCache();
   }, [refreshModelCache]);
 
-  // Bounded convergence refresh. It runs ONLY while the snapshot actually holds an entry the store
-  // is still moving (queued, copying, being removed) and stops the moment every entry is terminal,
-  // so an all-settled cache is read exactly once. `stalled` is the honest end of the bound: still
-  // in flight, but nothing is re-reading any more, which the card has to say rather than leave a
-  // "checking…" line that has quietly stopped meaning anything.
-  const { stalled: cacheConvergenceStalled } = useCacheConvergence(modelCache, refreshModelCache);
+  // The cache endpoint is also the cross-platform source of truth for whether this feature is on.
+  // Keep every local-copy surface hidden until the policy is both known and explicitly enabled:
+  // the feature is off by default, and an unavailable status read must not make an opt-in feature
+  // appear enabled. A disabled cache can still contain entries left from an earlier session, but
+  // those should not advertise an opt-in feature across every model card.
+  const localCopiesEnabled = modelCache?.policy?.enabled === true;
+
+  // Bounded convergence refresh. It runs ONLY while the enabled cache snapshot actually holds an
+  // entry the store is still moving (queued, copying, being removed) and stops the moment every
+  // entry is terminal, so an all-settled cache is read exactly once. A disabled cache never arms a
+  // hidden polling loop for old entries that may remain on disk.
+  const { stalled: cacheConvergenceStalled } = useCacheConvergence(
+    localCopiesEnabled ? modelCache : null,
+    refreshModelCache,
+  );
 
   // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
   // status afterwards rather than optimistically flipping the row: the UI must not claim a state
@@ -1312,14 +1240,43 @@ export function ModelManagerScreen() {
     const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
     const gated = Boolean(model.gated);
     const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
-    // License-acknowledgment gate (sc-7872): an uninstalled gated model can't be
-    // downloaded until the user accepts its license in-app. Already-installed
-    // gated models (no notice shown) are never blocked.
-    const licenseAcknowledged = licenseAcks[model.id] === true;
-    const licenseAckRequired = gated && !installed && !licenseAcknowledged;
     // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
     // + multi-select instead of the single Download button. Single-variant models are unchanged.
-    const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
+    const matrixVariants = orderedMatrixVariants(model);
+    const hasTierMatrix = model.hasVariantMatrix === true && matrixVariants.length > 0;
+    // License-acknowledgment gate (sc-7872, decoupled from the credential by sc-17227): a model
+    // whose licence must be acknowledged can't be downloaded until the user accepts it in-app.
+    // The requirement comes from `gated` OR the standalone `requiresLicenseAcknowledgment` — the
+    // latter covers a public repo whose licence still binds the user (MiniMax-H3).
+    //
+    // The predicate follows the DOWNLOAD CONTROLS, and is derived from the same conditions that
+    // decide whether any of them render — deliberately, because deriving it independently is how
+    // this went wrong: `!installed || updateAvailable` read "installed" as "nothing left to
+    // download", which is FALSE for a quant matrix. `install_state_for` (apps/rust-api/src/models.rs)
+    // marks a matrix model installed when ANY tier is present, so a MiniMax-H3 with q4 installed and
+    // q8/bf16 missing reported `installed: true`, `updateAvailable: false` — no notice, no
+    // checkbox — while the tier panel still offered bf16 and q8 and the choke point
+    // (`licenseAcknowledgmentBlocked`) still refused the click, telling the user to accept a licence
+    // on a card that rendered nothing to accept. Unrecoverable through the UI, and hit on every
+    // desktop relaunch, where localStorage does not survive.
+    //
+    // Each disjunct is a control that can start a download:
+    //   !installed           → the footer Download button
+    //   incomplete           → the footer Fix button (a torn cache re-fetches)
+    //   updateAvailable      → the Update button (MLX block and footer); also the `breaking_update`
+    //                          shape, which reports installed:false + updateAvailable:true
+    //   an uninstalled tier  → the tier panel's checkboxes + its Download button
+    // An installed model with none of those shows no notice: the acknowledgment is a pre-download
+    // step, and re-blocking a finished install would be noise.
+    const licenseGated = requiresLicenseAcknowledgment(model);
+    const downloadOnOffer =
+      !installed ||
+      incomplete ||
+      model.updateAvailable === true ||
+      (hasTierMatrix && matrixVariants.some((variant) => variant.installState !== "installed"));
+    const licenseGateApplies = licenseGated && downloadOnOffer;
+    const licenseAcknowledged = licenseAcks[model.id] === true;
+    const licenseAckRequired = licenseGateApplies && !licenseAcknowledged;
     const firstCapability = capabilities.length ? capabilityLabel(capabilities[0]) : null;
     const familyMeta = [model.family ?? "unassociated", firstCapability].filter(Boolean).join(" · ");
     const macBlock = macModelBlock(model, macCapabilities);
@@ -1330,20 +1287,27 @@ export function ModelManagerScreen() {
     // Where this model's files actually resolve from, straight off the typed judgement the one
     // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
     // discipline is the whole reason a second, drifting availability opinion can't exist.
-    const availability = availabilityBadge(model);
+    // `local_ready` is itself local-copy messaging, so suppress even a stale catalog judgement
+    // until the current cache policy is known to be enabled. The other availability badges still
+    // matter with caching off (for example, that the external library is disconnected).
+    const availability =
+      model.modelAvailability === "local_ready" && !localCopiesEnabled
+        ? null
+        : availabilityBadge(model);
     // How much of this model a local copy could ever serve, straight off the backend's typed
     // `cacheEligibility` (sc-19712 F-5). Null for a fully cacheable model and for a row with no
     // external requirement closure; a badge whenever the local-copy affordance would over-promise.
-    const cacheCoverage = cacheEligibilityBadge(model);
+    const cacheCoverage = localCopiesEnabled ? cacheEligibilityBadge(model) : null;
     // Local copies of THIS model, joined by the backend.
-    const localCopies = entriesForModel(modelCache, model.id);
+    const localCopies = localCopiesEnabled ? entriesForModel(modelCache, model.id) : [];
     // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
     // status read failed outright, and a returned snapshot carries `error` when the store exists
     // but could not be listed — in both cases the entry list is empty for want of an answer, not
     // because there are no copies. Gating on `cacheKnown` is what stops "No local copy yet." from
     // being rendered as a confident claim over a read that never succeeded.
     const cacheKnown = Boolean(modelCache) && !modelCache.error;
-    const showLocalCopySection = cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
+    const showLocalCopySection =
+      localCopiesEnabled && cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
     return (
       <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
         <div className="model-card-head">
@@ -1383,6 +1347,13 @@ export function ModelManagerScreen() {
           </span>
         </div>
         {isRecommendedModel(model) ? <span className="model-card-rec-chip">★ Recommended</span> : null}
+        {/* Licence-required UI attribution (sc-17227). Some upstream licences oblige the product
+            to display a specific string prominently — MiniMax H3 Community License §IV.2 requires
+            "MiniMax H3" on the user interface. Its own line above the description, not folded into
+            prose, so it is legible as attribution rather than marketing copy. */}
+        {model.ui?.attribution ? (
+          <p className="model-card-attribution">{model.ui.attribution}</p>
+        ) : null}
         <p className="model-card-description">{model.ui?.description ?? model.family ?? model.id}</p>
         {capabilities.length ? (
           <ul className="model-capabilities">
@@ -1402,11 +1373,13 @@ export function ModelManagerScreen() {
             ))}
           </ul>
         ) : null}
-        {!cleanupOnly && gated && !installed ? (
-          <GatedModelNotice
+        {!cleanupOnly && licenseGateApplies ? (
+          <LicenseGateNotice
+            credentialRequired={gated}
             host={model.credentialHost}
-            repoUrl={gatedRepoUrl(model) ?? model.licenseUrl ?? null}
+            repoUrl={gated ? (gatedRepoUrl(model) ?? model.licenseUrl ?? null) : null}
             licenseUrl={model.licenseUrl}
+            licenseNotice={model.licenseNotice}
             present={credentialPresent}
             acknowledged={licenseAcknowledged}
             onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
@@ -1467,9 +1440,11 @@ export function ModelManagerScreen() {
                     Boolean(downloadJob) ||
                     Boolean(convertJob) ||
                     Boolean(pendingUpdate[model.id]) ||
-                    !mlxEnoughMemory
+                    !mlxEnoughMemory ||
+                    licenseAckRequired
                   }
                   onClick={() => handleUpdateModel(model)}
+                  title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
                   type="button"
                 >
                   {convertJob
@@ -2201,7 +2176,7 @@ export function ModelManagerScreen() {
       {/* Stated once for the whole screen, because the read that failed was one read for the whole
           screen. Says what is unavailable and why, without implying anything about what is or is
           not cached — that is precisely what could not be determined. */}
-      {cacheError ? (
+      {localCopiesEnabled && cacheError ? (
         <p className="inline-warning">
           Local model copies can’t be shown right now, so their controls are hidden: {cacheError}
         </p>

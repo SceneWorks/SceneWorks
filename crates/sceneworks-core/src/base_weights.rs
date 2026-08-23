@@ -128,6 +128,12 @@ pub enum QuantFormat {
     /// (`~/models/kreamania_variant4.safetensors`) is not mislabelled as the
     /// unloadable fp4 bucket.
     Int8TensorwisePerRow,
+    /// NVIDIA NVFP4 as serialized by the ComfyUI Kitchen converter: each quantized Linear is a
+    /// U8 `[out,in/2]` E2M1 weight plus an F8_E4M3 blocked `.weight_scale` and scalar F32
+    /// `.weight_scale_2`. The converter declares `quant_format=NVFP4` in safetensors metadata.
+    /// This is not the descriptor-gated generic [`Self::ComfyQuantPacked`] bucket: the Krea Candle
+    /// loader consumes this exact triplet directly and swaps Kitchen's nibble convention losslessly.
+    Nvfp4,
     /// GGUF container (`Q8_0`, `Q4_K_S`, …) — detected by the `GGUF` magic, not the
     /// extension. Has no safetensors header; family/component are read from GGUF
     /// metadata by the loader slice, not here.
@@ -153,6 +159,7 @@ impl QuantFormat {
             Self::Fp8InlineScale => "fp8_inline_scale",
             Self::ComfyQuantPacked => "comfy_quant_packed",
             Self::Int8TensorwisePerRow => "int8_tensorwise_per_row",
+            Self::Nvfp4 => "nvfp4",
             Self::Gguf => "gguf",
             Self::UnrecognizedScaling => "unrecognized_scaling",
         }
@@ -290,9 +297,9 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 ///
 /// Written as a `match` with **one arm per supported loader** so a follow-on family / component /
 /// quant (the S0c assembly slice and the epic's later families) is a single added arm, not a
-/// rewrite. Today two triples are loadable: a Krea 2 transformer in either dense `bf16` or
-/// descriptor-gated [`QuantFormat::Int8TensorwisePerRow`], both of which reuse the existing Krea
-/// engine via the family-routing path. Everything else — an unrecognized/absent family, a
+/// rewrite. Today a Krea 2 transformer is loadable as dense `bf16`, descriptor-gated
+/// [`QuantFormat::Int8TensorwisePerRow`], or Kitchen [`QuantFormat::Nvfp4`]; all three reuse the
+/// existing Krea engine via the family-routing path. Everything else — an unrecognized/absent family, a
 /// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
 /// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF) — is refused with a specific reason.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
@@ -301,7 +308,7 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         (
             Some("krea_2"),
             ComponentRole::Transformer,
-            QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow | QuantFormat::Nvfp4,
         ) => Ok(()),
         (
             Some("sdxl"),
@@ -338,8 +345,9 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             ))
         }
         (Some("krea_2"), _, quant) => Err(format!(
-            "Model import for the 'krea_2' family supports dense bf16 or descriptor-gated \
-             int8-per-row weights, not {quant}. Re-export the checkpoint in bf16."
+            "Model import for the 'krea_2' family supports dense bf16, descriptor-gated \
+             int8-per-row, or NVIDIA Kitchen NVFP4 weights, not {quant}. Re-export the checkpoint \
+             in bf16."
         )),
         (Some("sdxl"), _, quant) => Err(format!(
             "Model import for the 'sdxl' family supports dense f16, bf16, or f32 fused checkpoints, \
@@ -428,7 +436,7 @@ pub fn classify_base_header(header: &Value) -> BaseWeightDetection {
         };
     }
 
-    let quant = detect_quant_format(&keys, &dtypes);
+    let quant = detect_quant_format(entries, &keys, &dtypes);
     let component = detect_component_role(&keys);
     let family = detect_base_family(&keys);
 
@@ -471,18 +479,24 @@ fn any_key_contains(keys: &[&str], needle: &str) -> bool {
 /// conventions share the `F8_E4M3` dtype and are separable only by the scale
 /// tensors that ride alongside:
 ///
-/// 1. `.comfy_quant` present → split by dtype: bulk `I8` weights ⇒ int8-tensorwise
+/// 1. explicit Kitchen `quant_format=NVFP4` metadata plus an exact U8/F8/F32 triplet surface →
+///    [`QuantFormat::Nvfp4`]. Both pieces are required; metadata alone is never trusted.
+/// 2. `.comfy_quant` present → split by dtype: bulk `I8` weights ⇒ int8-tensorwise
 ///    per-row ([`QuantFormat::Int8TensorwisePerRow`], a loadable-in-principle quant);
 ///    otherwise fp4/mxfp4-packed `U8` nibbles ([`QuantFormat::ComfyQuantPacked`]).
-/// 2. a top-level `scaled_fp8` marker or a `.scale_weight` companion →
+/// 3. a top-level `scaled_fp8` marker or a `.scale_weight` companion →
 ///    [`QuantFormat::ScaledFp8Companion`] (wan / Kijai / umt5).
-/// 3. a `.weight_scale`/`.input_scale` inline triplet →
+/// 4. a `.weight_scale`/`.input_scale` inline triplet →
 ///    [`QuantFormat::Fp8InlineScale`] (flux2).
 ///
 /// Only if none matches do dtypes decide. `scale_shift` keys are deliberately
 /// ignored: `scale_shift_table` is adaLN modulation (a real model weight in every
 /// PixArt/LTX-style DiT), **not** a quant scale.
-fn detect_quant_format(keys: &[&str], dtypes: &BTreeMap<String, usize>) -> QuantFormat {
+fn detect_quant_format(
+    entries: &serde_json::Map<String, Value>,
+    keys: &[&str],
+    dtypes: &BTreeMap<String, usize>,
+) -> QuantFormat {
     let count = |name: &str| dtypes.get(name).copied().unwrap_or(0);
     // `U8` holds packed nibbles when it appears in bulk; a stray one or two are
     // tokenizer bytes (`spiece_model`, `tekken_model`) or `I64` bookkeeping
@@ -494,6 +508,10 @@ fn detect_quant_format(keys: &[&str], dtypes: &BTreeMap<String, usize>) -> Quant
     // them); a genuine fp4 file packs nibbles into `U8` and carries no `I8` weight.
     // A `>4` floor (matching `packed_u8`) shrugs off a stray bookkeeping `I8`.
     let int8_bulk = count("I8") > 4;
+
+    if metadata_declares_nvfp4(entries) && has_kitchen_nvfp4_triplets(entries) {
+        return QuantFormat::Nvfp4;
+    }
 
     if any_key_contains(keys, ".comfy_quant") || keys.contains(&"comfy_quant") {
         // Both int8-tensorwise and fp4-packed ride the `.comfy_quant` marker (and
@@ -540,6 +558,121 @@ fn detect_quant_format(keys: &[&str], dtypes: &BTreeMap<String, usize>) -> Quant
         return QuantFormat::F32;
     }
     QuantFormat::UnrecognizedScaling
+}
+
+fn metadata_declares_nvfp4(entries: &serde_json::Map<String, Value>) -> bool {
+    entries
+        .get("__metadata__")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("quant_format"))
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
+}
+
+fn tensor_header<'a>(
+    entries: &'a serde_json::Map<String, Value>,
+    name: &str,
+) -> Option<(&'a str, Vec<u64>)> {
+    let tensor = entries.get(name)?.as_object()?;
+    let dtype = tensor.get("dtype")?.as_str()?;
+    let shape = tensor
+        .get("shape")?
+        .as_array()?
+        .iter()
+        .map(Value::as_u64)
+        .collect::<Option<Vec<_>>>()?;
+    Some((dtype, shape))
+}
+
+fn round_up_u64(value: u64, multiple: u64) -> Option<u64> {
+    value
+        .checked_add(multiple.checked_sub(1)?)?
+        .checked_div(multiple)?
+        .checked_mul(multiple)
+}
+
+/// Header-only proof of the exact Kitchen NVFP4 tensor surface the Candle Krea loader accepts.
+/// The global metadata prevents a coincidental U8 triplet scheme from being mislabeled, while these
+/// shape/dtype checks prevent a forged or stale metadata string from opening the loader.
+fn has_kitchen_nvfp4_triplets(entries: &serde_json::Map<String, Value>) -> bool {
+    // The current Kitchen converter writes no per-layer descriptors. Descriptor-gated NVFP4 belongs
+    // to the generic ComfyQuant bucket until its extra key surface has a consumer.
+    if entries.keys().any(|name| name.ends_with(".comfy_quant")) {
+        return false;
+    }
+    let u8_weights = entries
+        .iter()
+        .filter(|(name, tensor)| {
+            name.ends_with(".weight")
+                && tensor
+                    .get("dtype")
+                    .and_then(Value::as_str)
+                    .is_some_and(|dtype| dtype.eq_ignore_ascii_case("u8"))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    let scale_2 = entries
+        .keys()
+        .filter(|name| name.ends_with(".weight_scale_2"))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if u8_weights.len() <= 4 || u8_weights.len() != scale_2.len() {
+        return false;
+    }
+
+    let valid_weight = |weight_name: &str| {
+        let Some(base) = weight_name.strip_suffix(".weight") else {
+            return false;
+        };
+        let Some((weight_dtype, weight_shape)) = tensor_header(entries, weight_name) else {
+            return false;
+        };
+        let [rows, packed_cols] = weight_shape.as_slice() else {
+            return false;
+        };
+        let Some(cols) = packed_cols.checked_mul(2) else {
+            return false;
+        };
+        if !weight_dtype.eq_ignore_ascii_case("u8")
+            || *rows == 0
+            || cols == 0
+            || *rows % 16 != 0
+            || cols % 16 != 0
+        {
+            return false;
+        }
+
+        let Some((block_dtype, block_shape)) =
+            tensor_header(entries, &format!("{base}.weight_scale"))
+        else {
+            return false;
+        };
+        let block_values = block_shape
+            .iter()
+            .try_fold(1u64, |product, dim| product.checked_mul(*dim));
+        let expected_blocks = round_up_u64(*rows, 128).and_then(|scale_rows| {
+            round_up_u64(cols / 16, 4).and_then(|scale_cols| scale_rows.checked_mul(scale_cols))
+        });
+        if !matches!((block_values, expected_blocks), (Some(actual), Some(expected)) if actual == expected)
+            || !matches!(
+                block_dtype.to_ascii_uppercase().as_str(),
+                "F8_E4M3" | "F8E4M3" | "FLOAT8_E4M3FN"
+            )
+        {
+            return false;
+        }
+
+        matches!(
+            tensor_header(entries, &format!("{base}.weight_scale_2")),
+            Some((dtype, shape)) if dtype.eq_ignore_ascii_case("f32") && shape.is_empty()
+        )
+    };
+
+    u8_weights.iter().all(|name| valid_weight(name))
+        && scale_2.iter().all(|name| {
+            name.strip_suffix(".weight_scale_2")
+                .is_some_and(|base| valid_weight(&format!("{base}.weight")))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -781,9 +914,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Build a safetensors-shaped header from `(name, dtype)` pairs. Only the
-    /// fields the classifier reads (`dtype`) are populated; shapes/offsets are
-    /// omitted because [`classify_base_header`] never inspects them.
+    /// Build a safetensors-shaped header from `(name, dtype)` pairs. Ordinary dtype-based
+    /// classification does not need shapes; the native-NVFP4 tests build their exact header below.
     fn header(entries: &[(&str, &str)]) -> Value {
         let mut map = serde_json::Map::new();
         map.insert("__metadata__".to_owned(), json!({"format": "pt"}));
@@ -914,6 +1046,80 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("krea_2"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Int8TensorwisePerRow);
+    }
+
+    #[test]
+    fn krea2_kitchen_nvfp4_single_file_is_transformer() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "__metadata__".to_owned(),
+            json!({"format": "pt", "quant_format": "NVFP4"}),
+        );
+        map.insert(
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            json!({"dtype": "BF16", "shape": [128, 128]}),
+        );
+        for index in 0..6 {
+            let base = format!("model.diffusion_model.blocks.{index}.attn.wq");
+            map.insert(
+                format!("{base}.weight"),
+                json!({"dtype": "U8", "shape": [128, 32]}),
+            );
+            map.insert(
+                format!("{base}.weight_scale"),
+                json!({"dtype": "F8_E4M3", "shape": [128, 4]}),
+            );
+            map.insert(
+                format!("{base}.weight_scale_2"),
+                json!({"dtype": "F32", "shape": []}),
+            );
+        }
+
+        let verdict = recognized(classify_base_header(&Value::Object(map)));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Nvfp4);
+    }
+
+    #[test]
+    fn nvfp4_metadata_without_exact_triplets_stays_refused_inline_fp8() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "__metadata__".to_owned(),
+            json!({"format": "pt", "quant_format": "NVFP4"}),
+        );
+        map.insert(
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            json!({"dtype": "BF16", "shape": [128, 128]}),
+        );
+        for index in 0..6 {
+            let base = format!("model.diffusion_model.blocks.{index}.attn.wq");
+            map.insert(
+                format!("{base}.weight"),
+                json!({"dtype": "U8", "shape": [128, 32]}),
+            );
+            map.insert(
+                format!("{base}.weight_scale"),
+                json!({"dtype": "F8_E4M3", "shape": [128, 4]}),
+            );
+        }
+
+        let verdict = recognized(classify_base_header(&Value::Object(map)));
+        assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
+    }
+
+    #[test]
+    #[ignore = "requires KREAMANIA_VARIANT7 to point at the local checkpoint"]
+    fn validate_real_kreamania_variant7_nvfp4_checkpoint() {
+        let path = PathBuf::from(
+            std::env::var("KREAMANIA_VARIANT7")
+                .expect("set KREAMANIA_VARIANT7 to kreamania_variant7.safetensors"),
+        );
+        let verdict = recognized(detect_base_weight_file(&path).expect("read safetensors header"));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Nvfp4);
+        import_supported(&verdict).expect("the real NVFP4 checkpoint must be importable");
     }
 
     #[test]
@@ -1467,8 +1673,12 @@ mod tests {
     }
 
     #[test]
-    fn import_supported_accepts_krea2_transformer_bf16_and_int8_per_row() {
-        for quant in [QuantFormat::Bf16, QuantFormat::Int8TensorwisePerRow] {
+    fn import_supported_accepts_krea2_transformer_loadable_encodings() {
+        for quant in [
+            QuantFormat::Bf16,
+            QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Nvfp4,
+        ] {
             assert!(
                 import_supported(&verdict(Some("krea_2"), ComponentRole::Transformer, quant))
                     .is_ok(),
@@ -1508,7 +1718,7 @@ mod tests {
         ))
         .expect_err("packed quant must be refused");
         assert!(
-            reason.contains("bf16") && reason.contains("int8"),
+            reason.contains("bf16") && reason.contains("int8") && reason.contains("NVFP4"),
             "reason should name the required quant: {reason}"
         );
         assert!(

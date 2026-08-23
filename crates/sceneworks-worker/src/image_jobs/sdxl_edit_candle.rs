@@ -1,6 +1,6 @@
 use super::{
     admit_candle_base, consume_gen_events, dense_tier_subdir, drive_gen_items, fit_engine_image,
-    load_reference_image, non_empty, pid_effective_dims, pid_output_tier, resolve_adapters,
+    load_reference_image, non_empty, pid_effective_dims, pid_output_tier,
     resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
     resolve_sdxl_components, resolve_seed, standard_tier_subdir, start_gen_stream,
     uses_standard_tier_layout, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest,
@@ -227,15 +227,6 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             "SDXL edit requires edit_image mode + a source image".to_owned(),
         )
     })?;
-    let adapters = resolve_adapters(request, settings)?;
-    let adapter_bytes =
-        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "SDXL edit could not determine the resident size of the selected adapter stack"
-                        .to_owned(),
-                )
-            })?;
     admit_candle_base(
         request,
         settings,
@@ -244,7 +235,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
         CandleBaseEvidence::Ungateable(
             "SDXL-family Candle edit has not been CUDA-calibrated per tier",
         ),
-        adapter_bytes,
+        0,
         false,
     )
     .await?;
@@ -376,7 +367,9 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                 tokenizer_clip_l,
                 tokenizer_clip_bigg,
                 vae_fp16_fix,
-                adapters,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                adapters: Vec::new(),
             })
             .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
