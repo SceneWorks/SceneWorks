@@ -252,6 +252,36 @@ fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
+fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let clips = vec![clip(1), clip(2)];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &clips),
+        "multi_video"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "multi_video_to_video", &clips),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &[clip(1)]),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
 fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
     for reference_asset_ids in [
         Vec::<&str>::new(),

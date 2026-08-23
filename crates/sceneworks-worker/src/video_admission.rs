@@ -47,6 +47,8 @@ use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Se
 
 pub(crate) const BERNINI_R2V_RECEIPT_DOMAIN: &str = "bernini-r2v-references-v2";
 pub(crate) const BERNINI_R2V_SEAL_DOMAIN: &str = "bernini-r2v-request-seal-v1";
+pub(crate) const BERNINI_MV2V_RECEIPT_DOMAIN: &str = "bernini-mv2v-clips-v1";
+pub(crate) const BERNINI_MV2V_SEAL_DOMAIN: &str = "bernini-mv2v-request-seal-v1";
 pub(crate) const BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN: &str = "bernini-adapter-receipt-v1";
 
 pub(crate) fn bernini_adapter_receipt_axis(component_id: &str) -> String {
@@ -266,6 +268,101 @@ pub(crate) fn bernini_r2v_reference_receipt(
         packed_surface.as_deref().unwrap_or_default(),
         entries.join("|"),
         request_seal.finalize()
+    ))
+}
+
+fn bernini_mv2v_source_ids(count: usize) -> Vec<String> {
+    if count <= 5 {
+        return (1..=count).map(|id| id.to_string()).collect();
+    }
+    (0..count)
+        .map(|index| {
+            let id = 1.0 + 4.0 * index as f64 / (count - 1) as f64;
+            if id.fract() == 0.0 {
+                format!("{id:.0}")
+            } else {
+                format!("{id:.6}")
+            }
+        })
+        .collect()
+}
+
+/// Worker twin of the provider's MV2V receipt.  Clips remain ordered and independently sealed;
+/// curve lookup receives the complete normalized VAE/DiT and source-id surface but not RGB bytes.
+pub(crate) fn bernini_mv2v_clip_receipt(
+    lane: VideoLane,
+    width: u32,
+    height: u32,
+    conditioning: &[Conditioning],
+) -> Result<String, String> {
+    if !(2..=8).contains(&conditioning.len())
+        || conditioning
+            .iter()
+            .any(|entry| !matches!(entry, Conditioning::VideoClip { .. }))
+    {
+        return Err(
+            "Bernini MV2V admission requires exactly 2-8 ordered VideoClips and no images"
+                .to_owned(),
+        );
+    }
+    let backend = match lane {
+        VideoLane::Mlx => "mlx",
+        VideoLane::Candle => "candle",
+    };
+    let mut seal = sha2::Sha256::new();
+    seal.update(BERNINI_MV2V_SEAL_DOMAIN.as_bytes());
+    let mut total_tokens = 0_u64;
+    let mut entries = Vec::with_capacity(conditioning.len());
+    let (vae_width, vae_height) = bernini_full_vae_shape(width, height);
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|pixels| usize::try_from(pixels).ok())
+        .ok_or_else(|| "Bernini MV2V clip geometry overflow".to_owned())?;
+    for (clip_index, entry) in conditioning.iter().enumerate() {
+        let Conditioning::VideoClip {
+            frames,
+            frame_idx,
+            strength,
+        } = entry
+        else {
+            unreachable!()
+        };
+        if *frame_idx != 0
+            || strength.to_bits() != 1.0_f32.to_bits()
+            || !matches!(frames.len(), 45 | 61 | 77)
+        {
+            return Err(format!("Bernini MV2V clip {clip_index} requires normalized 45/61/77 frames at frame 0 with strength 1"));
+        }
+        seal.update((clip_index as u32).to_le_bytes());
+        seal.update(frame_idx.to_le_bytes());
+        seal.update(strength.to_bits().to_le_bytes());
+        for (frame_index, frame) in frames.iter().enumerate() {
+            if frame.width != width || frame.height != height || frame.pixels.len() != expected {
+                return Err(format!("Bernini MV2V clip {clip_index} frame {frame_index} is not exact output-sized RGB8"));
+            }
+            seal.update((frame_index as u32).to_le_bytes());
+            seal.update(frame.width.to_le_bytes());
+            seal.update(frame.height.to_le_bytes());
+            seal.update(&frame.pixels);
+        }
+        let tokens =
+            bernini_packed_source_tokens(frames.len(), vae_width as u32, vae_height as u32)?;
+        total_tokens = total_tokens
+            .checked_add(tokens)
+            .ok_or_else(|| "Bernini MV2V combined source-token count overflow".to_owned())?;
+        entries.push(format!(
+            "video-{}:frames-{};native-{width}x{height};vae-{}x{}x{};tokens-{tokens}",
+            clip_index + 1,
+            frames.len(),
+            (frames.len() - 1) / 4 + 1,
+            vae_width / 8,
+            vae_height / 8,
+        ));
+    }
+    Ok(format!(
+        "{BERNINI_MV2V_RECEIPT_DOMAIN}:backend-{backend}:source-preprocess-full-vae624-v1:count-{}:packed-source-tokens-{total_tokens}:source-ids-{}:{}+{BERNINI_MV2V_SEAL_DOMAIN}-{:x}",
+        conditioning.len(), bernini_mv2v_source_ids(conditioning.len()).join(","), entries.join("|"), seal.finalize()
     ))
 }
 
@@ -1283,7 +1380,10 @@ fn bernini_memory_attempt(request: &VideoAdmissionInputs<'_>) -> bool {
     request.model_id == "bernini"
         && (matches!(
             request.mode,
-            "video_to_video" | "reference_to_video" | "reference_video_to_video"
+            "video_to_video"
+                | "reference_to_video"
+                | "reference_video_to_video"
+                | "multi_video_to_video"
         ) || request.reference_count > 0)
 }
 
@@ -1363,6 +1463,7 @@ fn bernini_surface_is_exact(
         "video_to_video" => "provider_video_mode:v2v",
         "reference_to_video" => "provider_video_mode:r2v",
         "reference_video_to_video" => "provider_video_mode:rv2v",
+        "multi_video_to_video" => "provider_video_mode:mv2v",
         _ => return false,
     };
     let reference_prefix = match request.lane {
@@ -1371,6 +1472,14 @@ fn bernini_surface_is_exact(
         }
         VideoLane::Candle => {
             "bernini-r2v-references-v2:backend-candle:source-preprocess-full-vae624-v1:count-"
+        }
+    };
+    let mv2v_prefix = match request.lane {
+        VideoLane::Mlx => {
+            "bernini-mv2v-clips-v1:backend-mlx:source-preprocess-full-vae624-v1:count-"
+        }
+        VideoLane::Candle => {
+            "bernini-mv2v-clips-v1:backend-candle:source-preprocess-full-vae624-v1:count-"
         }
     };
     let axes: Vec<_> = request
@@ -1395,6 +1504,22 @@ fn bernini_surface_is_exact(
         .iter()
         .filter(|axis| axis.starts_with(BERNINI_R2V_SEAL_DOMAIN))
         .count();
+    let mv2v_axis = axes
+        .iter()
+        .copied()
+        .find(|axis| axis.starts_with(mv2v_prefix));
+    let mv2v_seal = axes
+        .iter()
+        .copied()
+        .find(|axis| axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN));
+    let mv2v_axis_count = axes
+        .iter()
+        .filter(|axis| axis.starts_with(mv2v_prefix))
+        .count();
+    let mv2v_seal_count = axes
+        .iter()
+        .filter(|axis| axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN))
+        .count();
     let reference_count = reference_axis.and_then(|axis| {
         axis.strip_prefix(reference_prefix)?
             .split_once(':')?
@@ -1410,6 +1535,8 @@ fn bernini_surface_is_exact(
                 || Some(*axis) == expected_adapter.as_deref()
                 || axis.starts_with(reference_prefix)
                 || axis.starts_with(BERNINI_R2V_SEAL_DOMAIN)
+                || axis.starts_with(mv2v_prefix)
+                || axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN)
         });
     let carrier_is_exact = match request.mode {
         "video_to_video" => {
@@ -1445,6 +1572,23 @@ fn bernini_surface_is_exact(
                 && seal_axis.is_some()
                 && seal_axis_count == 1
         }
+        "multi_video_to_video" => {
+            (2..=8).contains(&request.reference_count)
+                && request.reference_shape == "multi_video"
+                && mv2v_axis.is_some_and(|axis| {
+                    axis.contains(&format!(":count-{}:", request.reference_count))
+                        && axis.matches("video-").count() == request.reference_count as usize
+                        && axis.contains(&format!(
+                            "source-ids-{}",
+                            bernini_mv2v_source_ids(request.reference_count as usize).join(",")
+                        ))
+                })
+                && mv2v_axis_count == 1
+                && mv2v_seal.is_some()
+                && mv2v_seal_count == 1
+                && reference_axis_count == 0
+                && seal_axis_count == 0
+        }
         _ => false,
     };
     request.model_id == "bernini"
@@ -1468,7 +1612,7 @@ fn bernini_evidence_refusal(
     contract: Option<&MemoryProviderContract>,
 ) -> String {
     if !bernini_surface_is_exact(request, contract) {
-        return "Bernini memory admission refused: exact surface requires one VideoClip/V2V, one ordered MultiReference with 1-8 images/R2V, or one normalized VideoClip plus one ordered MultiReference with 1-8 images/RV2V; FPS16, frames 45/61/77, one public geometry, supported tier, backend-specific source receipt, and the exact loaded adapter receipt".to_owned();
+        return "Bernini memory admission refused: exact surface requires one VideoClip/V2V, one ordered MultiReference with 1-8 images/R2V, one normalized VideoClip plus one ordered MultiReference with 1-8 images/RV2V, or 2-8 ordered normalized VideoClips/MV2V; FPS16, frames 45/61/77, one public geometry, supported tier, backend-specific source receipt, and the exact loaded adapter receipt".to_owned();
     }
     format!(
         "Bernini {} memory admission refused: no current calibrated evidence matches route={}, lane={}, tier={:?}, geometry={}x{} frames={} references={} shape={} overlay={:?}",
