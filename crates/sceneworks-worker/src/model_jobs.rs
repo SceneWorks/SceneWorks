@@ -5093,7 +5093,14 @@ pub(crate) async fn run_model_import_job(
             .await
         }
     };
-    let install = match ingest.finalize(&primary_relative, model_file_sha256.as_deref()) {
+    // The DECLARED digest, not the one just computed from these bytes. Handing `finalize` the
+    // file's own hash would make its integrity check compare the bytes to themselves and pass
+    // unconditionally — a disabled guard that still looks like a guard. The block above verifies
+    // and fails first with a more actionable message; this is the transactional line of defence
+    // behind it, so a caller that reaches `finalize` by any other route is still checked.
+    let declared_sha256 =
+        optional_payload_string(&job.payload, "expectedSha256").and_then(normalize_sha256);
+    let install = match ingest.finalize(&primary_relative, declared_sha256.as_deref()) {
         Ok(install) => install,
         Err(error) => {
             return fail_job(
