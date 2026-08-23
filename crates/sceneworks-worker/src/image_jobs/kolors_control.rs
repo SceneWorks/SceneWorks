@@ -1,5 +1,6 @@
 use super::advanced;
 use super::{
+    candle_artifact_path_matches, candle_certified_hf_artifact_path, candle_resolved_tier_key,
     curated_image_menu, normalize_sampling_knob, pid_effective_dims, pid_output_tier, pose_entries,
     read_advanced_sampling_knobs, resolve_adapters, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, resolve_pid_weights, run_candle_strict_control,
@@ -8,8 +9,8 @@ use super::{
     Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
 };
 use super::{
-    ensure_hf_cached_file, huggingface_snapshot_dir, resolve_app_managed_model_dir,
-    safe_weight_filename, standard_tier_subdir, DownloadContext,
+    ensure_hf_cached_file, resolve_app_managed_model_dir, safe_weight_filename,
+    standard_tier_subdir, DownloadContext,
 };
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use serde_json::json;
@@ -47,7 +48,9 @@ const KOLORS_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
 #[cfg(test)]
 pub(super) const KOLORS_CONTROL_REVISION: &str = "83e35a8033a89d2e75044b412d0e2474111578f7";
 /// The Kolors base diffusers repo when the manifest omits `repo`.
-const KOLORS_CONTROL_DEFAULT_REPO: &str = "Kwai-Kolors/Kolors-diffusers";
+const KOLORS_CONTROL_DEFAULT_REPO: &str = KOLORS_BASE_REPO;
+const KOLORS_BASE_REPO: &str = "SceneWorks/kolors-mlx";
+const KOLORS_BASE_REVISION: &str = "aadbd49f53b66a33ef1be09384eac409cbc44061";
 /// ControlNet conditioning-scale default (the strict-pose tier).
 const KOLORS_CONTROL_DEFAULT_SCALE: f32 = 1.0;
 /// Denoise-steps default (Kolors production — diffusers `KolorsPipeline`).
@@ -83,17 +86,12 @@ fn resolve_kolors_control_base(
         return resolve_app_managed_model_dir(settings, &path, "Kolors control modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            crate::engines::default_repo_for(&request.model).unwrap_or(KOLORS_CONTROL_DEFAULT_REPO)
-        });
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
-        .map(|root| standard_tier_subdir(&root, request)))
+    Ok(crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        KOLORS_BASE_REPO,
+        KOLORS_BASE_REVISION,
+    )
+    .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible Kolors strict-pose job: `kolors` with a non-empty
@@ -147,8 +145,8 @@ pub(super) fn kolors_control_repo_file(request: &ImageRequest) -> WorkerResult<(
 }
 
 /// Resolve the Kolors ControlNet weight **file** the `KolorsControl` provider loads, downloading on first
-/// use. Order: an env-pinned file (`SCENEWORKS_CONTROLNET_KOLORS`) → a whole-repo HF cache snapshot →
-/// download into the app cache. Mirrors `ensure_qwen_control_weights`.
+/// use. Only the registered immutable revision's HF snapshot or revision-keyed app cache may resolve;
+/// arbitrary env/main sources are outside the optimized receipt boundary.
 async fn ensure_kolors_control_weights(
     api: &ApiClient,
     settings: &Settings,
@@ -156,12 +154,6 @@ async fn ensure_kolors_control_weights(
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
     let (repo, file) = kolors_control_repo_file(request)?;
-    if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_KOLORS") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Ok(p);
-        }
-    }
     let revision =
         trusted_control_weight_revision(request, KOLORS_CONTROL_ENGINE_ID, &repo, &file)?;
     if let Some(snapshot) =
@@ -185,6 +177,7 @@ async fn ensure_kolors_control_weights(
         .data_dir
         .join("cache")
         .join("controlnet-kolors")
+        .join(&revision)
         .join(&file);
     // Pin the exact commit for the default control repo so `main` moving under us can't swap the
     // ControlNet checkpoint (sc-9879). Registered overlays carry their own immutable pin.
@@ -246,6 +239,7 @@ pub(super) struct KolorsStrictControl {
     /// `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native SDXL VAE decode.
     pid: Option<gen_core::PidWeights>,
     adapters: Vec<gen_core::AdapterSpec>,
+    memory_context: gen_core::MemoryRunContext,
 }
 
 #[cfg(test)]
@@ -310,16 +304,14 @@ impl CandleStrictControl for KolorsStrictControl {
             controlnet: self.controlnet.clone(),
             adapters: self.adapters.clone(),
         };
-        let model = KolorsControl::load(&paths).map_err(|error| {
+        KolorsControl::load_with_memory_context_and_pid(
+            &paths,
+            self.pid.as_ref(),
+            self.memory_context.clone(),
+        )
+        .map_err(|error| {
             WorkerError::Engine(format!("Kolors strict-pose control load failed: {error}"))
-        })?;
-        // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
-        match &self.pid {
-            Some(pid) => model.with_pid(pid).map_err(|error| {
-                WorkerError::Engine(format!("Kolors control PiD decoder load failed: {error}"))
-            }),
-            None => Ok(model),
-        }
+        })
     }
 
     fn generate_one(
@@ -350,9 +342,11 @@ impl CandleStrictControl for KolorsStrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model.generate(&req, control, on_progress).map_err(|error| {
-            WorkerError::Engine(format!("Kolors strict-pose generation failed: {error}"))
-        })
+        model
+            .generate_with_memory_context(&self.memory_context, &req, control, on_progress)
+            .map_err(|error| {
+                WorkerError::Engine(format!("Kolors strict-pose generation failed: {error}"))
+            })
     }
 }
 
@@ -438,6 +432,142 @@ pub(super) async fn generate_candle_kolors_control_stream(
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     let adapters = resolve_adapters(request, settings)?;
+    let contract_paths = KolorsControlPaths {
+        kolors_base: kolors_base.clone(),
+        controlnet: controlnet.clone(),
+        adapters: adapters.clone(),
+    };
+    let tier = candle_resolved_tier_key(request, &kolors_base, false);
+    let contract = runtime_cuda::providers::kolors::memory_strategy::provider_contract_for_control(
+        &contract_paths,
+        pid_weights.as_ref(),
+    )
+    .map_err(|error| {
+        WorkerError::Engine(format!("Kolors control memory contract failed: {error}"))
+    })?;
+    let overlay_receipt = crate::candle_memory_strategy::kolors_overlay_receipt_identity(
+        KOLORS_CONTROL_ENGINE,
+        &contract,
+        use_pid,
+    )?
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Kolors control provider omitted its exact overlay receipt".into(),
+        )
+    })?;
+    let mut strategy_spec =
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(kolors_base.clone()))
+            .with_adapters(adapters.clone())
+            .with_control(gen_core::WeightsSource::File(controlnet.clone()));
+    if let Some(pid) = pid_weights.as_ref() {
+        strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+    let (control_repo, control_file) = kolors_control_repo_file(request)?;
+    let control_revision = trusted_control_weight_revision(
+        request,
+        KOLORS_CONTROL_ENGINE_ID,
+        &control_repo,
+        &control_file,
+    )?;
+    let pinned_control = candle_certified_hf_artifact_path(
+        settings,
+        &control_repo,
+        &control_revision,
+        Path::new(&control_file),
+        &controlnet,
+    );
+    let revision_cache = settings
+        .data_dir
+        .join("cache")
+        .join("controlnet-kolors")
+        .join(&control_revision)
+        .join(&control_file);
+    let artifact_is_certified = candle_certified_hf_artifact_path(
+        settings,
+        KOLORS_BASE_REPO,
+        KOLORS_BASE_REVISION,
+        Path::new(tier),
+        &kolors_base,
+    ) && (pinned_control
+        || candle_artifact_path_matches(&controlnet, &revision_cache));
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_bespoke_image(
+        KOLORS_CONTROL_ENGINE,
+        "kolors",
+        &strategy_spec,
+        artifact_is_certified,
+        &request.model_manifest_entry,
+        tier,
+        &request.mode,
+        Some("control"),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        false,
+        use_pid,
+        false,
+        raw_budget,
+        predicted_peak,
+        0,
+        gen_core::MemoryCacheState::Cold,
+        contract,
+        crate::candle_memory_strategy::KOLORS_REQUEST_EVIDENCE_REVISION,
+    )?
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Kolors control request has no exact authoritative memory candidate; refusing before load"
+                .into(),
+        )
+    })?;
+    raw_settings.insert(
+        "memoryStrategy".to_owned(),
+        Value::String(format!(
+            "{:?}",
+            memory_evaluation.context.selection.strategy
+        )),
+    );
+    raw_settings.insert(
+        "memoryEvidenceRevision".to_owned(),
+        Value::String(memory_evaluation.context.evidence_revision.clone()),
+    );
+    raw_settings.insert("memoryReceipt".to_owned(), Value::String(overlay_receipt));
+    tracing::info!(
+        event = "image_memory_strategy_selected",
+        route = KOLORS_CONTROL_ENGINE,
+        actual_tier = tier,
+        mode = request.mode.as_str(),
+        reference_count = 0,
+        use_pid,
+        overlay = memory_evaluation.context.overlay.as_deref().unwrap_or("none"),
+        strategy = ?memory_evaluation.context.selection.strategy,
+        predicted_peak_bytes = memory_evaluation.context.predicted_peak_bytes,
+        evidence_revision = %memory_evaluation.context.evidence_revision,
+        "Kolors control exact receipt-backed memory strategy selected"
+    );
+    crate::emit_event(
+        "image_memory_strategy_selected",
+        json!({
+            "backend": "candle",
+            "route": KOLORS_CONTROL_ENGINE,
+            "actualTier": tier,
+            "mode": request.mode,
+            "referenceCount": 0,
+            "geometry": { "width": width, "height": height, "batch": 1, "frames": 1 },
+            "usePid": use_pid,
+            "overlay": memory_evaluation.context.overlay.clone(),
+            "strategy": format!("{:?}", memory_evaluation.context.selection.strategy),
+            "predictedPeakBytes": memory_evaluation.context.predicted_peak_bytes,
+            "evidenceRevision": memory_evaluation.context.evidence_revision.clone(),
+        }),
+    );
     let provider = KolorsStrictControl {
         kolors_base,
         controlnet,
@@ -452,6 +582,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
         scheduler,
         pid: pid_weights,
         adapters,
+        memory_context: memory_evaluation.context,
     };
 
     run_candle_strict_control(

@@ -180,10 +180,12 @@ pub enum MemoryRouteLoadProfile {
     Lora,
     LoraPid,
     LoraSingleControl,
+    LoraSingleControlPid,
     LoraIpAdapter,
     IpAdapterPid,
     LoraIpAdapterPid,
     SingleControl,
+    SingleControlPid,
     MultiControl,
     IpAdapter,
     Pid,
@@ -191,15 +193,17 @@ pub enum MemoryRouteLoadProfile {
 }
 
 impl MemoryRouteLoadProfile {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::Plain,
         Self::Lora,
         Self::LoraPid,
         Self::LoraSingleControl,
+        Self::LoraSingleControlPid,
         Self::LoraIpAdapter,
         Self::IpAdapterPid,
         Self::LoraIpAdapterPid,
         Self::SingleControl,
+        Self::SingleControlPid,
         Self::MultiControl,
         Self::IpAdapter,
         Self::Pid,
@@ -212,10 +216,12 @@ impl MemoryRouteLoadProfile {
             Self::Lora => "lora",
             Self::LoraPid => "lora_pid",
             Self::LoraSingleControl => "lora_single_control",
+            Self::LoraSingleControlPid => "lora_single_control_pid",
             Self::LoraIpAdapter => "lora_ip_adapter",
             Self::IpAdapterPid => "ip_adapter_pid",
             Self::LoraIpAdapterPid => "lora_ip_adapter_pid",
             Self::SingleControl => "single_control",
+            Self::SingleControlPid => "single_control_pid",
             Self::MultiControl => "multi_control",
             Self::IpAdapter => "ip_adapter",
             Self::Pid => "pid",
@@ -227,9 +233,11 @@ impl MemoryRouteLoadProfile {
         match self {
             Self::Plain | Self::Pid => MemoryRouteOverlay::None,
             Self::Lora | Self::LoraPid => MemoryRouteOverlay::Lora,
-            Self::SingleControl | Self::LoraSingleControl | Self::MultiControl => {
-                MemoryRouteOverlay::Control
-            }
+            Self::SingleControl
+            | Self::SingleControlPid
+            | Self::LoraSingleControl
+            | Self::LoraSingleControlPid
+            | Self::MultiControl => MemoryRouteOverlay::Control,
             Self::IpAdapter
             | Self::LoraIpAdapter
             | Self::IpAdapterPid
@@ -244,10 +252,12 @@ impl MemoryRouteLoadProfile {
             "lora" => Some(Self::Lora),
             "lora_pid" => Some(Self::LoraPid),
             "lora_single_control" => Some(Self::LoraSingleControl),
+            "lora_single_control_pid" => Some(Self::LoraSingleControlPid),
             "lora_ip_adapter" => Some(Self::LoraIpAdapter),
             "ip_adapter_pid" => Some(Self::IpAdapterPid),
             "lora_ip_adapter_pid" => Some(Self::LoraIpAdapterPid),
             "single_control" => Some(Self::SingleControl),
+            "single_control_pid" => Some(Self::SingleControlPid),
             "multi_control" => Some(Self::MultiControl),
             "ip_adapter" => Some(Self::IpAdapter),
             "pid" => Some(Self::Pid),
@@ -274,6 +284,8 @@ impl MemoryRouteLoadProfile {
             return match (has_lora, has_pid, has_ip_adapter) {
                 (false, false, false) => Some(Self::SingleControl),
                 (true, false, false) => Some(Self::LoraSingleControl),
+                (false, true, false) => Some(Self::SingleControlPid),
+                (true, true, false) => Some(Self::LoraSingleControlPid),
                 _ => None,
             };
         }
@@ -417,6 +429,14 @@ const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
     MemoryRouteMode::StyleVariations,
 ];
 const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
+const SANA_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage];
+const IDEOGRAM_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::ImageToImage,
+    MemoryRouteMode::EditImage,
+    MemoryRouteMode::ImageInpaint,
+];
 const QWEN_EDIT_MODES: &[MemoryRouteMode] =
     &[MemoryRouteMode::EditImage, MemoryRouteMode::CharacterImage];
 const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
@@ -444,6 +464,17 @@ const KOLORS_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::EditImage,
     MemoryRouteMode::CharacterImage,
 ];
+// SC-20790: Candle Kolors has three distinct provider identities.  Do not collapse the base
+// registered generator, IP-Adapter character route, and pose-ControlNet route into an MLX-shaped
+// "kolors" row: their artifacts and residency receipts are not interchangeable.
+const KOLORS_CANDLE_BASE_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::TextToImage, MemoryRouteMode::EditImage];
+const KOLORS_CANDLE_IP_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::CharacterImage];
+const KOLORS_CANDLE_CONTROL_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::StyleVariations,
+    MemoryRouteMode::CharacterImage,
+];
 const PLAIN_IP: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Plain,
     MemoryRouteLoadProfile::IpAdapter,
@@ -452,6 +483,16 @@ const PLAIN_LORA_IP: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Plain,
     MemoryRouteLoadProfile::Lora,
     MemoryRouteLoadProfile::IpAdapter,
+];
+const KOLORS_CANDLE_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::IpAdapter,
+    MemoryRouteLoadProfile::LoraIpAdapter,
+];
+const KOLORS_CANDLE_CONTROL_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::SingleControl,
+    MemoryRouteLoadProfile::SingleControlPid,
+    MemoryRouteLoadProfile::LoraSingleControl,
+    MemoryRouteLoadProfile::LoraSingleControlPid,
 ];
 const Q4_Q8: &[MemoryRouteTier] = &[MemoryRouteTier::Q4, MemoryRouteTier::Q8];
 const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
@@ -819,6 +860,105 @@ const RULES: &[MemoryRouteRule] = &[
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
+        provider: "sana_1600m",
+        tiers: BF16_ONLY,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: true,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "sana_sprint_1600m",
+        tiers: BF16_ONLY,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: true,
+        legacy_shaping: false,
+    },
+    // SC-20788: all three Chroma turnkey routes expose the same exact request-scoped Candle
+    // Resident/Staged surface. Their public identity remains route-local, and PiD is a typed load
+    // profile rather than a mode or an untracked overlay.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "chroma1_hd",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "chroma1_base",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "chroma1_flash",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    // SC-20790: the Candle base/edit, IP character, and pose-ControlNet routes remain separate
+    // receipt/evidence domains.  In particular this leaves impossible IP+control and IP+PiD shapes
+    // without a matching rule instead of granting them through the base profile.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "kolors",
+        tiers: BF16_Q4_Q8,
+        modes: KOLORS_CANDLE_BASE_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "candle_kolors_ipadapter",
+        tiers: BF16_Q4_Q8,
+        modes: KOLORS_CANDLE_IP_MODES,
+        load_profiles: KOLORS_CANDLE_IP_PROFILES,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "candle_kolors_control",
+        tiers: BF16_Q4_Q8,
+        modes: KOLORS_CANDLE_CONTROL_MODES,
+        load_profiles: KOLORS_CANDLE_CONTROL_PROFILES,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    // SC-20789: Ideogram Base and Turbo share the public request surface but retain distinct
+    // provider receipts (Base owns two DiTs; Turbo owns one DiT plus its mandatory bundled
+    // TurboTime adapter). Native/PiD and ordered user-adapter loads are exact typed profiles.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "ideogram_4",
+        tiers: BF16_Q4_Q8,
+        modes: IDEOGRAM_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "ideogram_4_turbo",
+        tiers: BF16_Q4_Q8,
+        modes: IDEOGRAM_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
         provider: "z_image_turbo",
         tiers: ALL_TIERS,
         modes: TEXT_AND_STYLE,
@@ -1001,6 +1141,50 @@ fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> boo
     matching_rules(selector).any(|rule| !rule.requires_sequential_selection || sequential_selected)
 }
 
+/// Exact typed authority for bespoke Candle providers whose physical contract is assembled from
+/// request-local component paths instead of the registered catalog loader. This is intentionally
+/// independent of legacy load shaping: absence or a crossed coordinate is a terminal pre-load
+/// refusal, never permission to fall through to an older estimate.
+#[cfg_attr(
+    not(any(test, all(not(target_os = "macos"), feature = "backend-candle"))),
+    allow(dead_code)
+)]
+pub(crate) fn declared_candle_bespoke_request(
+    runtime_provider: &'static str,
+    resolved_tier: Option<&str>,
+    request_mode: &str,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> bool {
+    let (Some(tier), Some(mode), Some(load_profile)) = (
+        resolved_tier.and_then(MemoryRouteTier::from_resolved_tier),
+        MemoryRouteMode::from_request(request_mode),
+        MemoryRouteLoadProfile::from_spec(spec),
+    ) else {
+        return false;
+    };
+    if context.mode != mode || context.use_pid != spec.pid.is_some() || context.has_phases {
+        return false;
+    }
+    let reference_shape_matches = match runtime_provider {
+        "candle_kolors_ipadapter" => context.reference_count == 1 && !context.use_pid,
+        "candle_kolors_control" => context.reference_count == 0,
+        _ => false,
+    };
+    reference_shape_matches
+        && rule_matches(
+            MemoryRouteSelector {
+                backend: MemoryRouteBackend::Candle,
+                provider: runtime_provider,
+                tier,
+                mode,
+                overlay: load_profile.overlay(),
+                load_profile,
+            },
+            false,
+        )
+}
+
 fn closed_array_contains<T: Copy + PartialEq>(
     implementation: &JsonObject<String, Value>,
     field: &str,
@@ -1117,8 +1301,37 @@ fn mlx_request_implementation_matches(
     context: MemoryRouteRequestContext,
     requires_request_context: bool,
 ) -> Result<bool, ()> {
-    let selector_matches =
-        implementation_declares_selector(implementation, contract_provider, selector)?;
+    let implementation_object = implementation.as_object().ok_or(())?;
+    if implementation_object.get("requestContexts").is_none() {
+        if requires_request_context {
+            return Err(());
+        }
+        // Legacy BTR declarations predate load-profile/source/provider-overlay request ownership.
+        // Preserve their established selector-only predicate exactly.
+        return implementation_declares_selector(implementation, contract_provider, selector);
+    }
+    let static_axes_match = request_implementation_static_axes_match(
+        implementation,
+        contract_provider,
+        selector,
+        spec,
+        Some("bounded_transformer_residency"),
+    )?;
+    let context_matches = request_implementation_context_matches(
+        implementation,
+        contract_provider,
+        context,
+        requires_request_context,
+    )?;
+    Ok(static_axes_match && context_matches)
+}
+
+fn request_implementation_context_matches(
+    implementation: &Value,
+    contract_provider: &str,
+    context: MemoryRouteRequestContext,
+    requires_request_context: bool,
+) -> Result<bool, ()> {
     let implementation = implementation.as_object().ok_or(())?;
     let Some(request_contexts) = implementation.get("requestContexts") else {
         if requires_request_context {
@@ -1126,12 +1339,62 @@ fn mlx_request_implementation_matches(
         }
         // Existing declaration-owned routes predate the request-context schema. Their exact
         // provider/tier/mode/overlay/source predicate remains authoritative and unchanged.
-        return Ok(selector_matches);
+        return Ok(true);
     };
     let runtime_provider = implementation_runtime_provider(implementation, contract_provider)?;
-    if runtime_provider != selector.provider {
+    let request_contexts = request_contexts.as_array().ok_or(())?;
+    let matches = request_contexts
+        .iter()
+        .map(|request_context| {
+            request_strategy_provider_mode_is_exact(request_context, runtime_provider)?;
+            request_strategy_context_matches(request_context, context)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let matching = request_contexts
+        .iter()
+        .zip(matches)
+        .filter_map(|(request_context, matched)| matched.then_some(request_context))
+        .collect::<Vec<_>>();
+    let [matching] = matching.as_slice() else {
+        return Ok(false);
+    };
+    let expected_provider_mode = expected_provider_mode(runtime_provider, context);
+    Ok(matching.get("providerMode").and_then(Value::as_str) == Some(expected_provider_mode))
+}
+
+fn request_implementation_static_axes_match(
+    implementation: &Value,
+    contract_provider: &str,
+    selector: MemoryRouteSelector,
+    spec: &LoadSpec,
+    expected_rung: Option<&str>,
+) -> Result<bool, ()> {
+    let implementation = implementation.as_object().ok_or(())?;
+    let rung = implementation_rung(implementation)?;
+    let runtime_provider = implementation_runtime_provider(implementation, contract_provider)?;
+    if runtime_provider != selector.provider
+        || expected_rung.is_some_and(|expected| rung != expected)
+    {
         return Ok(false);
     }
+    let tier_matches = closed_array_contains(
+        implementation,
+        "tiers",
+        selector.tier,
+        MemoryRouteTier::from_str,
+    )?;
+    let mode_matches = closed_array_contains(
+        implementation,
+        "modes",
+        selector.mode,
+        MemoryRouteMode::from_manifest,
+    )?;
+    let overlay_matches = closed_array_contains(
+        implementation,
+        "overlays",
+        selector.overlay,
+        MemoryRouteOverlay::from_str,
+    )?;
     let Some(load_profile) = MemoryRouteLoadProfile::from_spec(spec) else {
         return Ok(false);
     };
@@ -1178,31 +1441,12 @@ fn mlx_request_implementation_matches(
             )
         })
         .ok_or(())?;
-    let request_contexts = request_contexts.as_array().ok_or(())?;
-    let matches = request_contexts
-        .iter()
-        .map(|request_context| {
-            request_strategy_provider_mode_is_exact(request_context, runtime_provider)?;
-            request_strategy_context_matches(request_context, context)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !selector_matches
-        || !load_profile_matches
-        || !source_kind_matches
-        || declared_provider_overlay != expected_provider_overlay
-    {
-        return Ok(false);
-    }
-    let matching = request_contexts
-        .iter()
-        .zip(matches)
-        .filter_map(|(request_context, matched)| matched.then_some(request_context))
-        .collect::<Vec<_>>();
-    let [matching] = matching.as_slice() else {
-        return Ok(false);
-    };
-    let expected_provider_mode = expected_provider_mode(runtime_provider, context);
-    Ok(matching.get("providerMode").and_then(Value::as_str) == Some(expected_provider_mode))
+    Ok(tier_matches
+        && mode_matches
+        && overlay_matches
+        && load_profile_matches
+        && source_kind_matches
+        && declared_provider_overlay == expected_provider_overlay)
 }
 
 fn expected_provider_mode(
@@ -1248,6 +1492,11 @@ fn expected_provider_mode(
         ) if (2..=8).contains(&context.reference_count) => "edit_image",
         ("flux2_dev_control", MemoryRouteMode::TextToImage) if context.reference_count == 1 => {
             "text_to_image"
+        }
+        ("ideogram_4" | "ideogram_4_turbo", MemoryRouteMode::ImageInpaint)
+            if context.reference_count == 2 =>
+        {
+            "edit_image"
         }
         (_, MemoryRouteMode::EditImage) => "edit_image",
         (_, MemoryRouteMode::CharacterImage) if context.reference_count == 1 => "image_to_image",
@@ -1671,6 +1920,47 @@ fn manifest_declares_selector(
                     == Ok(true)
             })
         })
+}
+
+/// Require every declaration row at one exact static coordinate to carry the same singular typed
+/// request identity. The selector may choose any rung after admission, so validating only the BTR or
+/// staged row would let a lower rung borrow authority from a sibling whose request surface differs.
+fn manifest_declares_selector_for_request(
+    manifest: &JsonObject<String, Value>,
+    selector: MemoryRouteSelector,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> Result<bool, ()> {
+    if context.mode != selector.mode || context.use_pid != spec.pid.is_some() {
+        return Ok(false);
+    }
+    let contract = manifest_contract(manifest, selector.backend).ok_or(())?;
+    let contract_provider = contract.get("provider").and_then(Value::as_str).ok_or(())?;
+    let implementations = contract
+        .get("implementations")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    let mut relevant = 0_usize;
+    for implementation in implementations {
+        if request_implementation_static_axes_match(
+            implementation,
+            contract_provider,
+            selector,
+            spec,
+            None,
+        )? {
+            relevant += 1;
+            if !request_implementation_context_matches(
+                implementation,
+                contract_provider,
+                context,
+                true,
+            )? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(relevant > 0)
 }
 
 /// Whether the exact manifest row declares staged residency in the same request as rung 4.
@@ -2234,23 +2524,47 @@ pub fn declared_candle_selector_contract(
     mode: Option<MemoryRouteMode>,
     manifest: &JsonObject<String, Value>,
     spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+) -> Option<gen_core::MemoryProviderContract> {
+    declared_candle_selector_contract_with(
+        runtime_provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        context,
+        |candidate| {
+            crate::inference_runtime::media()
+                .memory_strategy_contract(runtime_provider, candidate)
+                .ok()
+                .flatten()
+        },
+    )
+}
+
+fn declared_candle_selector_contract_with(
+    runtime_provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: &LoadSpec,
+    context: MemoryRouteRequestContext,
+    provider_contract: impl FnOnce(&LoadSpec) -> Option<gen_core::MemoryProviderContract>,
 ) -> Option<gen_core::MemoryProviderContract> {
     if spec.load_shape_declaration_result != LoadShapeDeclarationResult::Eligible {
         return None;
     }
     let mut contract = None;
-    let revalidated = evaluate_declared_candle_load_shape_with(
+    let revalidated = evaluate_declared_candle_load_shape_for_request_with(
         runtime_provider,
         resolved_tier,
         mode,
         manifest,
         spec.clone(),
         false,
+        Some(context),
         |candidate| {
-            contract = crate::inference_runtime::media()
-                .memory_strategy_contract(runtime_provider, candidate)
-                .ok()
-                .flatten();
+            contract = provider_contract(candidate);
             contract.as_ref().is_some_and(|contract| {
                 contract
                     .capability(MemoryStrategy::BoundedTransformerResidency)
@@ -2272,6 +2586,29 @@ fn evaluate_declared_candle_load_shape_with(
     manifest: &JsonObject<String, Value>,
     spec: LoadSpec,
     sequential_selected: bool,
+    provider_implements: impl FnOnce(&LoadSpec) -> bool,
+) -> LoadSpec {
+    evaluate_declared_candle_load_shape_for_request_with(
+        runtime_provider,
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        sequential_selected,
+        None,
+        provider_implements,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_declared_candle_load_shape_for_request_with(
+    runtime_provider: &str,
+    resolved_tier: Option<&str>,
+    mode: Option<MemoryRouteMode>,
+    manifest: &JsonObject<String, Value>,
+    spec: LoadSpec,
+    sequential_selected: bool,
+    request_context: Option<MemoryRouteRequestContext>,
     provider_implements: impl FnOnce(&LoadSpec) -> bool,
 ) -> LoadSpec {
     match has_relevant_btr_declaration(manifest, MemoryRouteBackend::Candle) {
@@ -2307,6 +2644,11 @@ fn evaluate_declared_candle_load_shape_with(
         load_profile,
     };
     if selector.provider.is_empty() || !matches!(spec.weights, WeightsSource::Dir(_)) {
+        return spec.with_refused_load_shape_declaration();
+    }
+    if request_context.is_some_and(|context| {
+        manifest_declares_selector_for_request(manifest, selector, &spec, context) != Ok(true)
+    }) {
         return spec.with_refused_load_shape_declaration();
     }
     let matching = matching_rules(selector)
@@ -2686,6 +3028,67 @@ mod tests {
         contract
     }
 
+    fn sana_contract(provider: &str) -> gen_core::MemoryProviderContract {
+        let mut contract = staged_contract(provider);
+        contract.load_shape = LoadShape::DeferredMaterialization;
+        for capability in &mut contract.strategies {
+            capability.support = MemoryStrategySupport::Implemented;
+            capability.parameters = match capability.strategy {
+                MemoryStrategy::BoundedDecode => gen_core::MemoryParameterRanges {
+                    decode_tile_edges: vec![512],
+                    decode_overlaps: vec![128],
+                    ..Default::default()
+                },
+                MemoryStrategy::BoundedAttention => gen_core::MemoryParameterRanges {
+                    attention_chunk_sizes: vec![4_194_304, 2_097_152, 1_048_576],
+                    ..Default::default()
+                },
+                MemoryStrategy::BoundedTransformerResidency => gen_core::MemoryParameterRanges {
+                    transformer_window_sizes: vec![1, 2, 4, 5, 10],
+                    transformer_window_components: vec![gen_core::TransformerComponent::Dit],
+                    ..Default::default()
+                },
+                _ => Default::default(),
+            };
+        }
+        contract.additional_prerequisites = [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ]
+        .into_iter()
+        .map(|strategy| {
+            (
+                strategy,
+                gen_core::MemoryStrategyPrerequisite::Rung {
+                    rung: MemoryStrategy::StagedResidency,
+                    scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                },
+            )
+        })
+        .collect();
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            decode_tiling: true,
+            attention_chunking: true,
+            transformer_window_materialization: true,
+        };
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            if provider == "sana_1600m" {
+                "sana-candle-dense-base-full-ladder-v1"
+            } else {
+                "sana-candle-dense-sprint-full-ladder-v1"
+            },
+            LoadShape::DeferredMaterialization,
+        ));
+        contract
+    }
+
     fn request_strategy_declaration() -> JsonObject<String, Value> {
         serde_json::json!({
             "id": "krea_2_raw",
@@ -2818,6 +3221,17 @@ mod tests {
                     gen_core::AdapterKind::Lora,
                 )])
                 .with_control(WeightsSource::File("control.safetensors".into())),
+            MemoryRouteLoadProfile::LoraSingleControlPid => base
+                .with_adapters(vec![gen_core::AdapterSpec::new(
+                    "adapter.safetensors".into(),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )])
+                .with_control(WeightsSource::File("control.safetensors".into()))
+                .with_pid(
+                    WeightsSource::File("pid.safetensors".into()),
+                    WeightsSource::Dir("gemma".into()),
+                ),
             MemoryRouteLoadProfile::LoraIpAdapter => base
                 .with_adapters(vec![gen_core::AdapterSpec::new(
                     "adapter.safetensors".into(),
@@ -2845,6 +3259,12 @@ mod tests {
             MemoryRouteLoadProfile::SingleControl => {
                 base.with_control(WeightsSource::File("control.safetensors".into()))
             }
+            MemoryRouteLoadProfile::SingleControlPid => base
+                .with_control(WeightsSource::File("control.safetensors".into()))
+                .with_pid(
+                    WeightsSource::File("pid.safetensors".into()),
+                    WeightsSource::Dir("gemma".into()),
+                ),
             MemoryRouteLoadProfile::MultiControl => base
                 .with_control(WeightsSource::File("control.safetensors".into()))
                 .with_extra_control(WeightsSource::File("control-2.safetensors".into())),
@@ -6966,14 +7386,21 @@ mod tests {
         assert_eq!(
             providers,
             [
+                "chroma1_base",
+                "chroma1_flash",
+                "chroma1_hd",
+                "ideogram_4",
+                "ideogram_4_turbo",
                 "krea_2_edit",
                 "krea_2_raw",
                 "krea_2_turbo_edit",
                 "qwen_image_edit",
+                "sana_1600m",
+                "sana_sprint_1600m",
             ]
             .into()
         );
-        assert_eq!(witnesses.len(), 36);
+        assert_eq!(witnesses.len(), 172);
         assert!(witnesses.iter().all(|witness| {
             matches!(
                 witness.tier,
@@ -6989,6 +7416,548 @@ mod tests {
                     | MemoryRouteLoadProfile::Pid
             )
         }));
+    }
+
+    #[test]
+    fn shipped_sana_candle_declarations_are_dense_route_exact_and_complete() {
+        for (provider, revision, fingerprint) in [
+            (
+                "sana_1600m",
+                "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
+                "sana-candle-dense-base-full-ladder-v1",
+            ),
+            (
+                "sana_sprint_1600m",
+                "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
+                "sana-candle-dense-sprint-full-ladder-v1",
+            ),
+        ] {
+            let manifest = shipped_model(provider);
+            let candle = &manifest["candle"]["memoryStrategyContract"];
+            assert_eq!(candle["provider"], provider);
+            assert_eq!(candle["exhaustive"], true);
+            let rows = candle["implementations"].as_array().unwrap();
+            assert_eq!(rows.len(), 5);
+            assert!(rows
+                .iter()
+                .all(|row| row["tiers"] == serde_json::json!(["bf16"])
+                    && row["fingerprint"] == fingerprint));
+            let hires_contexts = serde_json::json!([
+                {
+                    "mode": "text_to_image",
+                    "providerMode": "text_to_image",
+                    "referenceCounts": [0],
+                    "pid": [false],
+                    "hasPhases": false
+                },
+                {
+                    "mode": "image_to_image",
+                    "providerMode": "image_to_image",
+                    "referenceCounts": [1],
+                    "pid": [false],
+                    "hasPhases": false
+                },
+                {
+                    "mode": "image_to_image",
+                    "providerMode": "image_to_image",
+                    "referenceCounts": [1],
+                    "pid": [false],
+                    "hasPhases": true
+                }
+            ]);
+            assert!(rows
+                .iter()
+                .all(|row| row["requestContexts"] == hires_contexts));
+            let off_mac = manifest["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|download| {
+                    download["platforms"].as_array().is_some_and(|platforms| {
+                        platforms.iter().any(|platform| platform == "windows")
+                    })
+                })
+                .unwrap();
+            assert_eq!(off_mac["revision"], revision);
+            assert_eq!(off_mac["variant"], "bf16");
+            assert_eq!(off_mac["subdir"], "");
+
+            let plain = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+                "immutable-dense",
+            )))
+            .with_resolved_route(provider);
+            for (mode, references, has_phases) in [
+                (MemoryRouteMode::TextToImage, 0, false),
+                (MemoryRouteMode::ImageToImage, 1, false),
+                (MemoryRouteMode::ImageToImage, 1, true),
+            ] {
+                let result = declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("bf16"),
+                    &manifest,
+                    &plain,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count: references,
+                        use_pid: false,
+                        has_phases,
+                    },
+                    |_| Some(sana_contract(provider)),
+                );
+                assert!(
+                    matches!(&result, DeclaredCandleStrategyContract::Applied { .. }),
+                    "{provider} {mode:?}"
+                );
+            }
+
+            let eligible = evaluate_declared_candle_load_shape_with(
+                provider,
+                Some("bf16"),
+                Some(MemoryRouteMode::ImageToImage),
+                &manifest,
+                plain.clone(),
+                false,
+                |_| true,
+            );
+            assert_eq!(
+                eligible.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Eligible,
+                "SANA must defer Sequential to the request-authoritative selector"
+            );
+            assert_eq!(eligible.load_shape, LoadShape::EagerMaterialization);
+            let first_pass = MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: false,
+            };
+            let final_pass = MemoryRouteRequestContext {
+                mode: MemoryRouteMode::ImageToImage,
+                reference_count: 1,
+                use_pid: false,
+                has_phases: true,
+            };
+            for context in [first_pass, final_pass] {
+                let provider_calls = std::cell::Cell::new(0_u32);
+                let selected = declared_candle_selector_contract_with(
+                    provider,
+                    Some("bf16"),
+                    Some(context.mode),
+                    &manifest,
+                    &eligible,
+                    context,
+                    |_| {
+                        provider_calls.set(provider_calls.get() + 1);
+                        Some(sana_contract(provider))
+                    },
+                );
+                assert!(
+                    selected.is_some(),
+                    "{provider} must admit {context:?}; provider calls={}",
+                    provider_calls.get()
+                );
+                assert_eq!(provider_calls.get(), 1);
+            }
+
+            let mut missing_final = manifest.clone();
+            for row in missing_final["candle"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .unwrap()
+            {
+                row["requestContexts"].as_array_mut().unwrap().pop();
+            }
+            let mut crossed_final = manifest.clone();
+            crossed_final["candle"]["memoryStrategyContract"]["implementations"][2]
+                ["requestContexts"][2]["referenceCounts"] = serde_json::json!([0]);
+            for (label, crossed) in [
+                ("missing-final", &missing_final),
+                ("crossed-final", &crossed_final),
+            ] {
+                let provider_calls = std::cell::Cell::new(0_u32);
+                let selected = declared_candle_selector_contract_with(
+                    provider,
+                    Some("bf16"),
+                    Some(final_pass.mode),
+                    crossed,
+                    &eligible,
+                    final_pass,
+                    |_| {
+                        provider_calls.set(provider_calls.get() + 1);
+                        Some(sana_contract(provider))
+                    },
+                );
+                assert!(selected.is_none(), "{provider} accepted {label}");
+                assert_eq!(
+                    provider_calls.get(),
+                    0,
+                    "missing/crossed Hires-final rows must refuse before loader construction"
+                );
+            }
+            assert!(matches!(
+                declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("q4"),
+                    &manifest,
+                    &plain,
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::TextToImage,
+                        reference_count: 0,
+                        use_pid: false,
+                        has_phases: false
+                    },
+                    |_| Some(staged_contract(provider)),
+                ),
+                DeclaredCandleStrategyContract::Refused
+            ));
+            let adapter = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+                "immutable-dense",
+            )))
+            .with_resolved_route(provider)
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                std::path::PathBuf::from("crossed.safetensors"),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )]);
+            assert!(matches!(
+                declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("bf16"),
+                    &manifest,
+                    &adapter,
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::TextToImage,
+                        reference_count: 0,
+                        use_pid: false,
+                        has_phases: false
+                    },
+                    |_| Some(staged_contract(provider)),
+                ),
+                DeclaredCandleStrategyContract::Refused
+            ));
+        }
+    }
+
+    #[test]
+    fn shipped_chroma_candle_declarations_bind_every_route_tier_and_load_profile() {
+        let context = |use_pid| MemoryRouteRequestContext {
+            mode: MemoryRouteMode::TextToImage,
+            reference_count: 0,
+            use_pid,
+            has_phases: false,
+        };
+        for provider in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            let manifest = shipped_model(provider);
+            assert_eq!(
+                manifest["candle"]["memoryStrategyContract"]["exhaustive"],
+                true
+            );
+            assert_eq!(manifest["candle"]["measured"], false);
+            for tier in ["bf16", "q4", "q8"] {
+                let resident = manifest["candle"]["vramGbByTier"][tier]
+                    .as_f64()
+                    .expect("Chroma resident structural row");
+                let staged = manifest["candle"]["sequentialPeakGb"][tier]
+                    .as_f64()
+                    .expect("Chroma staged structural row");
+                assert!(staged > 0.0 && staged < resident, "{provider}:{tier}");
+                for profile in [
+                    MemoryRouteLoadProfile::Plain,
+                    MemoryRouteLoadProfile::Lora,
+                    MemoryRouteLoadProfile::Pid,
+                    MemoryRouteLoadProfile::LoraPid,
+                ] {
+                    let numeric = MemoryRouteTier::from_resolved_tier(tier).unwrap();
+                    let mut load = spec(numeric, profile).with_resolved_route(provider);
+                    // Chroma's physical turnkey tier owns quantization; the load-time selector is
+                    // intentionally None for q4/q8 as well as bf16.
+                    load.quantize = None;
+                    assert!(
+                        matches!(
+                            declared_candle_request_strategy_contract_with(
+                                provider,
+                                Some(tier),
+                                &manifest,
+                                &load,
+                                context(matches!(
+                                    profile,
+                                    MemoryRouteLoadProfile::Pid | MemoryRouteLoadProfile::LoraPid
+                                )),
+                                |_| Some(staged_contract(provider)),
+                            ),
+                            DeclaredCandleStrategyContract::Applied { provider_mode, .. }
+                                if provider_mode == "text_to_image"
+                        ),
+                        "{provider}:{tier}:{profile:?}"
+                    );
+                }
+            }
+
+            let plain =
+                LoadSpec::new(WeightsSource::Dir("fixture".into())).with_resolved_route(provider);
+            for crossed in [
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::StyleVariations,
+                    ..context(false)
+                },
+                MemoryRouteRequestContext {
+                    reference_count: 1,
+                    ..context(false)
+                },
+                MemoryRouteRequestContext {
+                    has_phases: true,
+                    ..context(false)
+                },
+            ] {
+                assert!(matches!(
+                    declared_candle_request_strategy_contract_with(
+                        provider,
+                        Some("q4"),
+                        &manifest,
+                        &plain,
+                        crossed,
+                        |_| Some(staged_contract(provider)),
+                    ),
+                    DeclaredCandleStrategyContract::Refused
+                ));
+            }
+            assert!(matches!(
+                declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("nvfp4"),
+                    &manifest,
+                    &plain,
+                    context(false),
+                    |_| Some(staged_contract(provider)),
+                ),
+                DeclaredCandleStrategyContract::Refused
+            ));
+        }
+
+        let hd_manifest = shipped_model("chroma1_hd");
+        let crossed_route =
+            LoadSpec::new(WeightsSource::Dir("fixture".into())).with_resolved_route("chroma1_base");
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "chroma1_hd",
+                Some("q4"),
+                &hd_manifest,
+                &crossed_route,
+                context(false),
+                |_| Some(staged_contract("chroma1_hd")),
+            ),
+            DeclaredCandleStrategyContract::Refused
+        ));
+    }
+
+    #[test]
+    fn shipped_ideogram_candle_declarations_bind_exact_modes_references_tiers_and_profiles() {
+        let contexts = [
+            (MemoryRouteMode::TextToImage, 0, "text_to_image"),
+            (MemoryRouteMode::TextToImage, 1, "image_to_image"),
+            (MemoryRouteMode::ImageToImage, 1, "image_to_image"),
+            (MemoryRouteMode::EditImage, 1, "edit_image"),
+            (MemoryRouteMode::ImageInpaint, 2, "edit_image"),
+        ];
+        for provider in ["ideogram_4", "ideogram_4_turbo"] {
+            let manifest = shipped_model(provider);
+            assert_eq!(
+                manifest["candle"]["memoryStrategyContract"]["exhaustive"],
+                true
+            );
+            let implementations = manifest["candle"]["memoryStrategyContract"]["implementations"]
+                .as_array()
+                .expect("Ideogram implementations");
+            for (profile, overlay) in [("plain", "none"), ("lora", "lora")] {
+                for (rung, engaged) in [
+                    (
+                        "bounded_decode",
+                        vec!["resident", "staged_residency", "bounded_decode"],
+                    ),
+                    (
+                        "bounded_attention",
+                        vec![
+                            "resident",
+                            "staged_residency",
+                            "bounded_decode",
+                            "bounded_attention",
+                        ],
+                    ),
+                    (
+                        "bounded_transformer_residency",
+                        vec![
+                            "resident",
+                            "staged_residency",
+                            "bounded_decode",
+                            "bounded_attention",
+                            "bounded_transformer_residency",
+                        ],
+                    ),
+                ] {
+                    let matching =
+                        implementations
+                            .iter()
+                            .filter(|implementation| {
+                                implementation["rung"] == rung
+                                    && implementation["loadProfiles"].as_array().is_some_and(
+                                        |values| values.iter().any(|value| value == profile),
+                                    )
+                                    && implementation["overlays"].as_array().is_some_and(|values| {
+                                        values.iter().any(|value| value == overlay)
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                    let [implementation] = matching.as_slice() else {
+                        panic!("{provider}:{profile}:{rung} must have exactly one declaration");
+                    };
+                    assert_eq!(implementation["engagedRungs"], serde_json::json!(engaged));
+                }
+            }
+            for tier in ["bf16", "q4", "q8"] {
+                let resident = manifest["candle"]["vramGbByTier"][tier]
+                    .as_f64()
+                    .expect("Ideogram resident row");
+                let staged = manifest["candle"]["sequentialPeakGb"][tier]
+                    .as_f64()
+                    .expect("Ideogram staged row");
+                assert!(staged > 0.0 && staged < resident, "{provider}:{tier}");
+                for profile in [
+                    MemoryRouteLoadProfile::Plain,
+                    MemoryRouteLoadProfile::Lora,
+                    MemoryRouteLoadProfile::Pid,
+                    MemoryRouteLoadProfile::LoraPid,
+                ] {
+                    let mut load =
+                        spec(MemoryRouteTier::from_resolved_tier(tier).unwrap(), profile)
+                            .with_resolved_route(provider);
+                    load.quantize = None;
+                    let use_pid = matches!(
+                        profile,
+                        MemoryRouteLoadProfile::Pid | MemoryRouteLoadProfile::LoraPid
+                    );
+                    for (mode, reference_count, expected_provider_mode) in contexts {
+                        let applied = declared_candle_request_strategy_contract_with(
+                            provider,
+                            Some(tier),
+                            &manifest,
+                            &load,
+                            MemoryRouteRequestContext {
+                                mode,
+                                reference_count,
+                                use_pid,
+                                has_phases: false,
+                            },
+                            |_| Some(staged_contract(provider)),
+                        );
+                        assert!(
+                            matches!(
+                                applied,
+                                DeclaredCandleStrategyContract::Applied { provider_mode, .. }
+                                    if provider_mode == expected_provider_mode
+                            ),
+                            "{provider}:{tier}:{profile:?}:{mode:?}:{reference_count}"
+                        );
+                    }
+                    if use_pid {
+                        let native_hires_refinement =
+                            declared_candle_request_strategy_contract_with(
+                                provider,
+                                Some(tier),
+                                &manifest,
+                                &load,
+                                MemoryRouteRequestContext {
+                                    mode: MemoryRouteMode::ImageToImage,
+                                    reference_count: 1,
+                                    use_pid: false,
+                                    has_phases: false,
+                                },
+                                |_| Some(staged_contract(provider)),
+                            );
+                        assert!(matches!(
+                            native_hires_refinement,
+                            DeclaredCandleStrategyContract::Applied { provider_mode, .. }
+                                if provider_mode == "image_to_image"
+                        ));
+                        assert!(matches!(
+                            declared_candle_request_strategy_contract_with(
+                                provider,
+                                Some(tier),
+                                &manifest,
+                                &load,
+                                MemoryRouteRequestContext {
+                                    mode: MemoryRouteMode::TextToImage,
+                                    reference_count: 0,
+                                    use_pid: false,
+                                    has_phases: false,
+                                },
+                                |_| Some(staged_contract(provider)),
+                            ),
+                            DeclaredCandleStrategyContract::Refused
+                        ));
+                    }
+                }
+            }
+
+            let plain =
+                LoadSpec::new(WeightsSource::Dir("fixture".into())).with_resolved_route(provider);
+            for crossed in [
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 2,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    reference_count: 2,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::ImageInpaint,
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: false,
+                    has_phases: true,
+                },
+            ] {
+                assert!(matches!(
+                    declared_candle_request_strategy_contract_with(
+                        provider,
+                        Some("q4"),
+                        &manifest,
+                        &plain,
+                        crossed,
+                        |_| Some(staged_contract(provider)),
+                    ),
+                    DeclaredCandleStrategyContract::Refused
+                ));
+            }
+        }
+
+        let manifest = shipped_model("ideogram_4");
+        let crossed = LoadSpec::new(WeightsSource::Dir("fixture".into()))
+            .with_resolved_route("ideogram_4_turbo");
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "ideogram_4",
+                Some("q4"),
+                &manifest,
+                &crossed,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                |_| Some(staged_contract("ideogram_4")),
+            ),
+            DeclaredCandleStrategyContract::Refused
+        ));
     }
 
     #[test]
@@ -7264,5 +8233,123 @@ mod tests {
             LoadShapeDeclarationResult::Refused
         );
         assert_eq!(provider_refused.load_shape, LoadShape::EagerMaterialization);
+    }
+
+    #[test]
+    fn kolors_bespoke_authority_binds_exact_provider_tier_mode_profile_and_reference_shape() {
+        for tier in [
+            MemoryRouteTier::Bf16,
+            MemoryRouteTier::Q4,
+            MemoryRouteTier::Q8,
+        ] {
+            for profile in [
+                MemoryRouteLoadProfile::IpAdapter,
+                MemoryRouteLoadProfile::LoraIpAdapter,
+            ] {
+                let load = spec(tier, profile);
+                assert!(declared_candle_bespoke_request(
+                    "candle_kolors_ipadapter",
+                    Some(tier.as_str()),
+                    "character_image",
+                    &load,
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::CharacterImage,
+                        reference_count: 1,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                ));
+            }
+
+            for mode in KOLORS_CANDLE_CONTROL_MODES {
+                for profile in KOLORS_CANDLE_CONTROL_PROFILES {
+                    let load = spec(tier, *profile);
+                    let use_pid = matches!(
+                        profile,
+                        MemoryRouteLoadProfile::SingleControlPid
+                            | MemoryRouteLoadProfile::LoraSingleControlPid
+                    );
+                    assert!(declared_candle_bespoke_request(
+                        "candle_kolors_control",
+                        Some(tier.as_str()),
+                        mode.as_str(),
+                        &load,
+                        MemoryRouteRequestContext {
+                            mode: *mode,
+                            reference_count: 0,
+                            use_pid,
+                            has_phases: false,
+                        },
+                    ));
+                }
+            }
+        }
+
+        let ip = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::IpAdapter);
+        let control = spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl);
+        let exact_ip = MemoryRouteRequestContext {
+            mode: MemoryRouteMode::CharacterImage,
+            reference_count: 1,
+            use_pid: false,
+            has_phases: false,
+        };
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("nvfp4"),
+            "character_image",
+            &ip,
+            exact_ip,
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("q4"),
+            "text_to_image",
+            &ip,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                ..exact_ip
+            },
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("q4"),
+            "character_image",
+            &ip,
+            MemoryRouteRequestContext {
+                reference_count: 0,
+                ..exact_ip
+            },
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_ipadapter",
+            Some("q4"),
+            "character_image",
+            &control,
+            exact_ip,
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_control",
+            Some("q4"),
+            "text_to_image",
+            &control,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 1,
+                use_pid: false,
+                has_phases: false,
+            },
+        ));
+        assert!(!declared_candle_bespoke_request(
+            "candle_kolors_control",
+            Some("q4"),
+            "text_to_image",
+            &control,
+            MemoryRouteRequestContext {
+                mode: MemoryRouteMode::TextToImage,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: true,
+            },
+        ));
     }
 }
