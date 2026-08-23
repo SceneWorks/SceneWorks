@@ -14,10 +14,12 @@ here.
   Read its *Current state* section before acting on any branch protection
   assumption. As of 2026-08-11 **neither SceneWorks nor inference has a merge
   queue** — both were removed the same day after the queue was measured catching
-  zero integration failures in 103 groups while adding ~21m per merge. `main` is
-  `strict: false` in both; `feature/*` is `strict: true` in both. Any procedure
-  or memory that mentions staging, activating, or recovering a per-branch queue
-  ruleset is obsolete.
+  zero integration failures in 103 groups while adding ~21m per merge. `main`
+  and `feature/*` are `strict: false` in both repos (inference `main` drifted
+  back to `strict: true` twice and was reset on 2026-08-23 — do not re-enable
+  it; a strict policy forces a full CI re-run of every open PR after each
+  merge). Any procedure or memory that mentions staging, activating, or
+  recovering a per-branch queue ruleset is obsolete.
 
   Likewise, the pin-keyed verification gates were **deliberately dismantled**
   on 2026-08-15/16 (sc-19758, sc-19751, `e14171984`): disabled or unwired check
