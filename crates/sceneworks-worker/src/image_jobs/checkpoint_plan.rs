@@ -25,7 +25,7 @@
 // procedural stub (see `CheckpointPlanSelection::into_unclaimed_refusal`).
 
 use sceneworks_core::checkpoint_plan_store::{
-    CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1,
+    CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1, ResolvedLayerV1,
 };
 
 /// The adapter/engine id recorded on assets rendered through the plan-driven route.
@@ -34,9 +34,93 @@ const CHECKPOINT_PLAN_ENGINE: &str = "mlx_checkpoint_plan";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CHECKPOINT_PLAN_ENGINE: &str = "candle_checkpoint_plan";
 
-/// Plan layer roles the skeleton maps to a provider source shape.
+/// Plan layer roles the route maps to a provider source shape.
+///
+/// These are the inspector's role vocabulary (`checkpoint_inspector::infer_role_from_path` and
+/// `base_weights::ComponentRole::as_str`), not a family list: which of them a given checkpoint
+/// carries, and which source shape that implies, is decided by the family's registered
+/// [`gen_core::CheckpointAdapterRegistration`], never by a branch on the family name.
 const CHECKPOINT_PLAN_TRANSFORMER_ROLE: &str = "transformer";
 const CHECKPOINT_PLAN_FUSED_ROLE: &str = "checkpoint";
+
+/// The portable checkpoint-adapter authority for this plan's family, or a typed refusal.
+///
+/// This is the seam that makes a family's truth PLAN truth (E2/E5): eligible backends, the dialect
+/// source shapes, the component topology and the per-operation capability policy are all read from
+/// the adapter the provider crate registered, so adding a family is a registration rather than a
+/// worker edit. A family with no registered adapter on this backend refuses here, before any loader
+/// is constructed (E7).
+fn checkpoint_plan_adapter(
+    family: &str,
+    checkpoint_id: &str,
+) -> WorkerResult<&'static gen_core::CheckpointAdapterRegistration> {
+    crate::inference_runtime::checkpoint_adapter(family).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: this runtime \
+             registers no {family:?} checkpoint adapter, so its plan cannot be loaded on this \
+             backend"
+        ))
+    })
+}
+
+/// Whether the family's own adapter declares this build's backend eligible.
+///
+/// Backend eligibility is ADAPTER truth, not an inference from "did a provider happen to register a
+/// binding": Z-Image declares Candle only and Mage-Flow declares MLX only, and a request for the
+/// other backend must say so with the adapter's own word rather than dying as a missing route.
+fn checkpoint_plan_backend_eligible(
+    adapter: &gen_core::CheckpointAdapterRegistration,
+    checkpoint_id: &str,
+) -> WorkerResult<()> {
+    if adapter
+        .eligible_backends
+        .contains(&crate::inference_runtime::CHECKPOINT_BACKEND)
+    {
+        return Ok(());
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "[checkpoint-plan:backend-ineligible] checkpoint {checkpoint_id:?} ({} family) declares \
+         eligible backends {:?}; this build binds {:?}, so the family is not runnable here",
+        adapter.family,
+        adapter.eligible_backends,
+        crate::inference_runtime::CHECKPOINT_BACKEND
+    )))
+}
+
+/// The one on-disk source shape this family's registered dialects describe.
+///
+/// Read from [`gen_core::CheckpointDialectRegistration::source`] rather than inferred from which
+/// roles the plan happens to carry: the dialect table is the adapter's declaration of what its
+/// loader opens (a single transformer file, a fused checkpoint, a component directory, a ComfyUI
+/// tree), and a plan whose roles could be read two ways must not be silently resolved one of them.
+///
+/// A family whose dialects disagree refuses rather than guessing. Nothing shipped today declares
+/// two shapes; the refusal exists so that the day one does, it is a planning-time diagnostic and not
+/// a load-time surprise.
+fn checkpoint_plan_source_shape(
+    adapter: &gen_core::CheckpointAdapterRegistration,
+    checkpoint_id: &str,
+) -> WorkerResult<gen_core::ImportedModelSource> {
+    let mut shapes: Vec<gen_core::ImportedModelSource> =
+        adapter.dialects.iter().map(|dialect| dialect.source).collect();
+    shapes.sort();
+    shapes.dedup();
+    match shapes.as_slice() {
+        [shape] => Ok(*shape),
+        [] => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?} ({} family): the \
+             registered adapter declares no dialects, so no source shape can be resolved",
+            adapter.family
+        ))),
+        many => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:ambiguous-component] checkpoint {checkpoint_id:?} ({} family): the \
+             registered adapter declares {} distinct dialect source shapes ({many:?}); a compiled \
+             plan records component roles, not a dialect id, so the shape cannot be resolved",
+            adapter.family,
+            many.len()
+        ))),
+    }
+}
 
 /// The persisted checkpoint id a manifest entry is bound to, when it is plan-backed. The same
 /// reader the scheduler's imported claim uses (`jobs_store::checkpoint_plan_checkpoint_id`), so
@@ -45,13 +129,202 @@ pub(crate) fn checkpoint_plan_checkpoint_id(entry: &JsonObject) -> Option<&str> 
     sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
 }
 
-/// The request shapes this skeleton serves: plain text-to-image, no adapters, no reference, no
-/// Hires.fix. sc-20644 moves each family's remaining surface onto the route.
-fn checkpoint_plan_serves_request_shape(request: &ImageRequest) -> bool {
-    !imported_generate_request_has_unsupported_shape(request)
-        && request.loras.is_empty()
-        && request.reference_asset_id.is_none()
-        && !request.hires_fix.enabled
+/// The registry operation this request asks for.
+///
+/// The same four-way discrimination every imported lane makes, in the same precedence order: an
+/// explicit phase list is the finest-grained control and wins over everything; a strict-pose set
+/// outside edit mode is the control surface; `edit_image` is the edit surface; everything else is
+/// generation (plain text-to-image and reference-guided img2img both live there, because a
+/// reference-guided init is the Generate descriptor's `Reference` conditioning, not a second
+/// operation).
+fn checkpoint_plan_operation(request: &ImageRequest) -> gen_core::ImportedModelOperation {
+    if request_has_multiphase(request) {
+        gen_core::ImportedModelOperation::MultiPhase
+    } else if !pose_entries(request).is_empty() && request.mode != "edit_image" {
+        gen_core::ImportedModelOperation::Pose
+    } else if request.mode == "edit_image" {
+        gen_core::ImportedModelOperation::Edit
+    } else {
+        gen_core::ImportedModelOperation::Generate
+    }
+}
+
+/// Whether THIS build binds a provider for the entry's family at the request's operation.
+///
+/// The per-request claim discriminator's registry half, and the reason the claim can widen family by
+/// family without a family list here: a family whose row has landed binds every operation its
+/// adapter declares, so the plan route takes its whole surface; a family still on its bespoke lane
+/// binds only the operations that lane already delegated, so that lane keeps the rest.
+///
+/// Reads the entry's DECLARED family rather than the plan's, because this predicate must answer
+/// without opening the plan store. The two disagreeing is a corrupt/edited entry, and the
+/// conservative answer there is "the plan route owns it" — it then refuses with the plan's own
+/// family, which is strictly better than handing a mislabelled entry to a family lane.
+fn checkpoint_plan_binds_request_operation(request: &ImageRequest) -> bool {
+    let Some(family) = request
+        .model_manifest_entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+    else {
+        return true;
+    };
+    let Some(adapter) = crate::inference_runtime::checkpoint_adapter(family) else {
+        return true;
+    };
+    let Ok(source) = checkpoint_plan_source_shape(adapter, "") else {
+        return true;
+    };
+    crate::inference_runtime::imported_model_descriptor(
+        family,
+        source,
+        checkpoint_plan_operation(request),
+    )
+    .is_some()
+}
+
+/// Every request axis the SELECTED provider cannot execute, as a typed refusal — or `None` when the
+/// exact registered descriptor advertises everything this request asks for.
+///
+/// This is the generalization of what each bespoke imported lane used to answer with its own
+/// hand-written predicate, and every gate below is read from the resolved
+/// [`gen_core::ModelDescriptor`] rather than from a per-family constant:
+///
+/// * **adapters** — `supports_lora` / `supports_lokr`, which the registry already forces to `false`
+///   for a binding declaring `inherit_adapters: false` (a full fine-tune whose moved base weights
+///   cannot safely take an adapter fitted to the published checkpoint). So "may this family take a
+///   LoRA on this source shape" is adapter truth, not a lane's opinion.
+/// * **conditioning** — `Reference` / `MultiReference` / `Mask` / `Control` membership decides
+///   img2img, the edit surface's reference count, masked edit, and strict pose.
+/// * **operation** — the descriptor only exists because the binding for this exact
+///   (family, source, operation) exists, so reaching here means the operation is bound.
+///
+/// The axes that are NOT descriptor-expressible stay explicit and fail closed: an identity
+/// (`character_id` / `character_look_id`) needs asset-resolution paths this route does not own, and
+/// Hires.fix on a pose set has no lane because the pose loop renders one image per pose and never
+/// reads `hires_fix` — admitting it would return a successful image that silently ignored the
+/// request (E8).
+fn checkpoint_plan_request_shape_refusal(
+    request: &ImageRequest,
+    descriptor: &gen_core::ModelDescriptor,
+    operation: gen_core::ImportedModelOperation,
+    checkpoint_id: &str,
+) -> Option<String> {
+    let caps = &descriptor.capabilities;
+    let refuse = |detail: &str| {
+        Some(format!(
+            "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?}: the registered \
+             {:?} provider {:?} for this checkpoint's source shape {detail}",
+            operation, descriptor.id
+        ))
+    };
+    if imported_model_quant(request, descriptor, "Checkpoint plan").is_err() {
+        return refuse("does not accept the requested quantization tier");
+    }
+    if request.character_id.is_some() || request.character_look_id.is_some() {
+        return refuse(
+            "cannot render a character or look identity, which needs base-tier identity components \
+             the plan-driven route does not stage",
+        );
+    }
+    if !request.loras.is_empty() && !(caps.supports_lora || caps.supports_lokr) {
+        return refuse("does not accept LoRA/LoKr adapters");
+    }
+    if non_empty(&request.mask_asset_id)
+        && !caps.conditioning.contains(&gen_core::ConditioningKind::Mask)
+    {
+        return refuse("does not accept a mask");
+    }
+    // Material strict-control intent that did NOT resolve to the Pose operation (a pose set inside
+    // edit mode, or a control payload the pose-mode reader rejects) has no lane anywhere.
+    if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
+        && operation != gen_core::ImportedModelOperation::Pose
+    {
+        return refuse("cannot combine strict control intent with this operation");
+    }
+    match operation {
+        gen_core::ImportedModelOperation::MultiPhase => {
+            // Multi-phase renders one trajectory from pure noise: every conditioning field would be
+            // silently dropped by the phase driver, so each one is refused rather than ignored.
+            if request.mode == "edit_image"
+                || !pose_entries(request).is_empty()
+                || !request.reference_asset_ids.is_empty()
+                || request.reference_asset_id.is_some()
+                || request.source_asset_id.is_some()
+            {
+                return refuse("renders a multi-phase trajectory from noise and takes no reference, \
+                     source, pose, or edit conditioning");
+            }
+        }
+        gen_core::ImportedModelOperation::Pose => {
+            if !sceneworks_core::jobs_store::imported_pose_control_mode_is_supported(
+                &request.advanced,
+            ) {
+                return refuse("does not support the requested pose control mode");
+            }
+            if !caps
+                .conditioning
+                .contains(&gen_core::ConditioningKind::Control)
+            {
+                return refuse("does not accept control conditioning");
+            }
+            if request.hires_fix.enabled {
+                return refuse(
+                    "renders one image per pose and never applies Hires.fix, so a Hires.fix pose \
+                     request would silently drop the refinement",
+                );
+            }
+            // The plural edit set and a bare `sourceAssetId` are read by neither the pose resolver
+            // nor the pose render loop; a single `referenceAssetId` is the likeness source.
+            if !request.reference_asset_ids.is_empty() || request.source_asset_id.is_some() {
+                return refuse(
+                    "reads a single reference as the pose likeness source and would drop a plural \
+                     reference set or a bare source asset",
+                );
+            }
+        }
+        gen_core::ImportedModelOperation::Edit => {
+            let has_edit_reference = !request.reference_asset_ids.is_empty()
+                || non_empty(&request.reference_asset_id)
+                || non_empty(&request.source_asset_id);
+            if !has_edit_reference {
+                return refuse("requires a source or reference image to edit");
+            }
+            if !caps
+                .conditioning
+                .contains(&gen_core::ConditioningKind::Reference)
+            {
+                return refuse("does not accept reference conditioning");
+            }
+            if request.reference_asset_ids.len() > 1
+                && !caps
+                    .conditioning
+                    .contains(&gen_core::ConditioningKind::MultiReference)
+            {
+                return refuse("accepts a single edit reference, not a plural reference set");
+            }
+        }
+        gen_core::ImportedModelOperation::Generate => {
+            // img2img rides a single `referenceAssetId`. The plural edit set and a bare
+            // `sourceAssetId` are not read by the generate conditioning resolver, so admitting
+            // either would silently render plain text-to-image.
+            if !request.reference_asset_ids.is_empty() || request.source_asset_id.is_some() {
+                return refuse(
+                    "reads a single reference as the img2img init and would drop a plural \
+                     reference set or a bare source asset",
+                );
+            }
+            if request.reference_asset_id.is_some()
+                && !caps
+                    .conditioning
+                    .contains(&gen_core::ConditioningKind::Reference)
+            {
+                return refuse("does not accept a reference-guided init");
+            }
+        }
+    }
+    None
 }
 
 /// A SceneWorks-owned install path on the entry, if it has one. A MANAGED install (sc-20636) keeps
@@ -73,15 +346,36 @@ fn checkpoint_plan_entry_has_bespoke_lane(request: &ImageRequest) -> bool {
 /// Whether the plan-driven route claims this request (the single-claim discriminator the bespoke
 /// imported lanes consult so exactly one lane owns each request).
 ///
-/// Plan-backed alone is not the discriminator: this skeleton serves plain text-to-image only, and a
-/// managed install reached that state by being imported — it had a full family lane a moment
-/// earlier. Handing the route every request and refusing most of them would mean importing a model
-/// through the managed path REMOVED its edit, pose, reference, LoRA, and Hires.fix support until
-/// sc-20644. So the claim is per-request: this route takes the shapes it serves, and the family's
-/// bespoke lane keeps the rest.
+/// Plan-backed alone is not the discriminator while any family is still mid-migration: a managed
+/// install reached that state by being imported — it had a full family lane a moment earlier — so
+/// handing the route every request and refusing the ones its family's row has not reached would mean
+/// importing a model through the managed path REMOVED a capability it had. The claim is therefore
+/// per-request, and its width is REGISTRY-derived
+/// ([`checkpoint_plan_binds_request_operation`]): the route takes every operation this build binds
+/// for the entry's family, and that family's bespoke lane keeps only what is not yet bound. When a
+/// family's last operation is bound, its lane claims nothing and can be deleted (E4).
 pub(crate) fn request_is_checkpoint_plan_backed(request: &ImageRequest) -> bool {
     checkpoint_plan_checkpoint_id(&request.model_manifest_entry).is_some()
+        && checkpoint_plan_binds_request_operation(request)
         && checkpoint_plan_serves_request_shape(request)
+}
+
+/// The request shapes the route's own generation body implements today.
+///
+/// Distinct from [`checkpoint_plan_binds_request_operation`], which asks the REGISTRY whether a
+/// provider exists: this asks whether THIS route can drive that provider for the request's
+/// conditioning. Both must hold for the route to claim, and the two are separate because they move
+/// at different times — a family's binding is registered in the inference repo, while the body that
+/// feeds it lives here.
+///
+/// Each family row of sc-20644 lifts one part of this gate and deletes the bespoke lane that was
+/// holding the corresponding shape. Anything still listed here stays with its family lane, which is
+/// what keeps importing a model from REMOVING a capability it had (sc-20636).
+fn checkpoint_plan_serves_request_shape(request: &ImageRequest) -> bool {
+    !imported_generate_request_has_unsupported_shape(request)
+        && request.loras.is_empty()
+        && request.reference_asset_id.is_none()
+        && !request.hires_fix.enabled
 }
 
 /// How this route answers "I cannot serve this request": decline so the entry's own bespoke family
@@ -160,56 +454,175 @@ fn checkpoint_plan_refusal(error: CheckpointPlanError) -> WorkerError {
 struct PreparedCheckpointPlanSources {
     checkpoint_id: String,
     resolved: ResolvedCheckpointV1,
+    /// The family's portable checkpoint-adapter authority — eligible backends, dialect source
+    /// shapes, component topology and per-operation capability policy.
+    adapter: &'static gen_core::CheckpointAdapterRegistration,
     /// The registered provider that loads this family/source/operation.
     descriptor: gen_core::ModelDescriptor,
     source: gen_core::ImportedModelSource,
-    /// The plan's primary weight file, pinned.
-    primary: gen_core::PinnedWeightsFile,
+    /// The registry operation the request selected, and the one the descriptor was resolved for.
+    operation: gen_core::ImportedModelOperation,
+    /// The provider's primary weights, as the loader will receive them (a File for a single-file
+    /// backbone, a Dir for a component-directory dialect).
+    primary: WeightsSource,
     /// Components the provider declares as required, resolved to local sources.
     components: Vec<(&'static str, WeightsSource)>,
+    /// Every payload-selected File token the route retains from selection through load: the
+    /// primary's file(s) plus any component sourced from a plan layer.
+    pins: Vec<gen_core::PinnedWeightsFile>,
 }
 
-/// The plan layer that supplies the provider's primary weights, and the registry source shape it
-/// implies. A plan without one refuses as a missing component.
-fn checkpoint_plan_primary_layer(
-    resolved: &ResolvedCheckpointV1,
-) -> WorkerResult<(gen_core::ImportedModelSource, &sceneworks_core::checkpoint_plan_store::ResolvedLayerV1)>
-{
-    let transformers: Vec<_> = resolved
-        .layers_with_role(CHECKPOINT_PLAN_TRANSFORMER_ROLE)
-        .collect();
-    let fused: Vec<_> = resolved
-        .layers_with_role(CHECKPOINT_PLAN_FUSED_ROLE)
-        .collect();
-    match (transformers.as_slice(), fused.as_slice()) {
-        ([transformer], []) => Ok((
-            gen_core::ImportedModelSource::TransformerFile,
-            transformer,
-        )),
-        ([], [checkpoint]) => Ok((gen_core::ImportedModelSource::FusedCheckpoint, checkpoint)),
-        ([], []) => Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:missing-component] checkpoint {:?} ({} family) has no '{}' or '{}' \
-             layer; its plan carries roles [{}]",
+/// The backbone role a given source shape's primary layer must carry.
+///
+/// A fused checkpoint is the one shape whose backbone is the inspector's `checkpoint` role (an
+/// all-in-one LDM/A1111 container); every other shape's backbone is a `transformer`. Derived from
+/// the shape rather than from the family, so a new family that declares an existing dialect shape
+/// inherits the rule with no edit here.
+fn checkpoint_plan_primary_role(source: gen_core::ImportedModelSource) -> &'static str {
+    match source {
+        gen_core::ImportedModelSource::FusedCheckpoint => CHECKPOINT_PLAN_FUSED_ROLE,
+        gen_core::ImportedModelSource::TransformerFile
+        | gen_core::ImportedModelSource::TransformerDirectory
+        | gen_core::ImportedModelSource::ComfyUiTree => CHECKPOINT_PLAN_TRANSFORMER_ROLE,
+    }
+}
+
+/// The provider's primary weights, resolved from the plan, plus every plan layer that resolution
+/// consumed and every payload-selected File token that must stay pinned from selection to load.
+struct CheckpointPlanPrimary {
+    weights: WeightsSource,
+    consumed: std::collections::BTreeSet<String>,
+    pins: Vec<gen_core::PinnedWeightsFile>,
+}
+
+/// Resolve the plan's primary weights for `source`.
+///
+/// The shape decides the artifact the loader is handed:
+///
+/// * `TransformerFile` / `FusedCheckpoint` / `ComfyUiTree` — the single backbone layer's FILE. (A
+///   ComfyUI tree's encoder and VAE are separate FILES too, but they arrive as declared provider
+///   COMPONENTS, not as the primary; see [`checkpoint_plan_component_from_layers`].)
+/// * `TransformerDirectory` — the DIRECTORY holding the single backbone layer, which is what a
+///   diffusers component dir's loader opens. Every other plan layer inside that directory (its
+///   `config.json` sidecar, sharded weights) is consumed by the directory itself and pinned, so a
+///   torn artifact is caught at selection rather than mid-load.
+///
+/// Exactly one backbone layer, always: two would mean the plan describes two models and the route
+/// would have to pick, which is the silent substitution E8 forbids.
+/// The PURE half of [`checkpoint_plan_primary`]: which artifact the loader gets and which plan
+/// layers that artifact covers, decided entirely from the plan and the source shape with no
+/// filesystem access. Split out so the shape rules are unit-testable over a synthesized
+/// [`ResolvedCheckpointV1`] without materializing multi-gigabyte files.
+#[derive(Debug)]
+struct CheckpointPlanPrimarySelection<'a> {
+    /// `Some` only for a component-directory dialect, whose loader opens the directory itself.
+    directory: Option<PathBuf>,
+    /// Every layer the primary artifact covers, in plan order. The backbone is always first.
+    layers: Vec<&'a ResolvedLayerV1>,
+}
+
+fn checkpoint_plan_primary_selection<'a>(
+    resolved: &'a ResolvedCheckpointV1,
+    source: gen_core::ImportedModelSource,
+) -> WorkerResult<CheckpointPlanPrimarySelection<'a>> {
+    let role = checkpoint_plan_primary_role(source);
+    let backbones: Vec<_> = resolved.layers_with_role(role).collect();
+    let backbone = match backbones.as_slice() {
+        [backbone] => *backbone,
+        [] => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:missing-component] checkpoint {:?} ({} family) resolves to a \
+                 {source:?} source, which needs exactly one {role:?} layer; its plan carries roles \
+                 [{}]",
+                resolved.checkpoint_id,
+                resolved.family(),
+                checkpoint_plan_layer_roles(resolved)
+            )))
+        }
+        many => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:ambiguous-component] checkpoint {:?} ({} family) carries {} \
+                 {role:?} layers; a {source:?} source has exactly one primary",
+                resolved.checkpoint_id,
+                resolved.family(),
+                many.len()
+            )))
+        }
+    };
+    if source != gen_core::ImportedModelSource::TransformerDirectory {
+        return Ok(CheckpointPlanPrimarySelection {
+            directory: None,
+            layers: vec![backbone],
+        });
+    }
+    let directory = backbone.path.parent().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] checkpoint {:?} ({} family) resolves to a \
+             component directory, but its {role:?} layer {:?} has no parent directory",
             resolved.checkpoint_id,
             resolved.family(),
-            CHECKPOINT_PLAN_TRANSFORMER_ROLE,
-            CHECKPOINT_PLAN_FUSED_ROLE,
-            resolved
-                .plan
-                .layers
-                .iter()
-                .map(|layer| layer.role.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-        _ => Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:ambiguous-component] checkpoint {:?} carries {} transformer and {} \
-             fused-checkpoint layer(s); the plan-driven route serves exactly one primary layer",
-            resolved.checkpoint_id,
-            transformers.len(),
-            fused.len()
-        ))),
+            backbone.layer.layer_id
+        ))
+    })?;
+    let mut layers = vec![backbone];
+    layers.extend(resolved.layers.iter().filter(|layer| {
+        layer.layer.layer_id != backbone.layer.layer_id && layer.path.parent() == Some(directory)
+    }));
+    Ok(CheckpointPlanPrimarySelection {
+        directory: Some(directory.to_path_buf()),
+        layers,
+    })
+}
+
+fn checkpoint_plan_primary(
+    resolved: &ResolvedCheckpointV1,
+    source: gen_core::ImportedModelSource,
+) -> WorkerResult<CheckpointPlanPrimary> {
+    let selection = checkpoint_plan_primary_selection(resolved, source)?;
+    let mut consumed = std::collections::BTreeSet::new();
+    let mut pins = Vec::with_capacity(selection.layers.len());
+    for layer in &selection.layers {
+        consumed.insert(layer.layer.layer_id.clone());
+        pins.push(checkpoint_plan_pin(layer)?);
     }
+    let weights = match selection.directory {
+        Some(directory) => WeightsSource::Dir(directory),
+        None => WeightsSource::File(
+            pins.first()
+                .expect("a primary selection always carries its backbone layer")
+                .loader_path()
+                .to_path_buf(),
+        ),
+    };
+    Ok(CheckpointPlanPrimary {
+        weights,
+        consumed,
+        pins,
+    })
+}
+
+/// Pin one resolved plan layer's bytes for the life of the request.
+///
+/// The plan store already proved these bytes are the bytes the plan compiled from; the pin is what
+/// keeps the async job preamble from being able to retarget the path between selection and load
+/// (sc-18306), exactly as every bespoke imported lane pins its payload-selected files.
+fn checkpoint_plan_pin(
+    layer: &ResolvedLayerV1,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    gen_core::PinnedWeightsFile::pin(&layer.path).map_err(|error| {
+        crate::classify_engine_error("Checkpoint plan source preparation failed", error)
+    })
+}
+
+/// Every role the plan carries, for diagnostics.
+fn checkpoint_plan_layer_roles(resolved: &ResolvedCheckpointV1) -> String {
+    resolved
+        .plan
+        .layers
+        .iter()
+        .map(|layer| layer.role.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Every plan layer this route does not source, as a typed refusal.
@@ -223,49 +636,173 @@ fn checkpoint_plan_primary_layer(
 /// source, until sc-20644 maps each remaining role onto a provider component.
 fn checkpoint_plan_unconsumed_layers(
     resolved: &ResolvedCheckpointV1,
-    primary: &sceneworks_core::checkpoint_plan_store::ResolvedLayerV1,
+    consumed: &std::collections::BTreeSet<String>,
 ) -> WorkerResult<()> {
     let unconsumed: Vec<&str> = resolved
         .layers
         .iter()
-        .filter(|layer| layer.layer.layer_id != primary.layer.layer_id)
+        .filter(|layer| !consumed.contains(&layer.layer.layer_id))
         .map(|layer| layer.layer.role.as_str())
         .collect();
     if unconsumed.is_empty() {
         return Ok(());
     }
+    // Name BOTH halves: the roles that would go unloaded, and the roles that were sourced. Without
+    // the second half the diagnostic says a checkpoint is unservable without saying what the route
+    // did take, which is the difference between an actionable message and a dead end.
+    let sourced: Vec<&str> = resolved
+        .layers
+        .iter()
+        .filter(|layer| consumed.contains(&layer.layer.layer_id))
+        .map(|layer| layer.layer.role.as_str())
+        .collect();
     Err(WorkerError::InvalidPayload(format!(
         "[checkpoint-plan:unconsumed-layer] checkpoint {:?} ({} family) compiles to {} layers, but \
-         the plan-driven route sources only its primary {:?} layer; layer role(s) [{}] would be \
+         the plan-driven route sources only its {:?} layer(s); layer role(s) [{}] would be \
          silently replaced by the resident base tier's own components, so this checkpoint is not \
-         servable on this route yet",
+         servable on this route",
         resolved.checkpoint_id,
         resolved.family(),
         resolved.plan.layers.len(),
-        primary.layer.role,
+        sourced.join(", "),
         unconsumed.join(", ")
     )))
 }
 
-/// Resolve one provider-declared required component to a local source. `base_snapshot` is the
-/// resident family base tier that supplies the shared encoder / VAE / tokenizer / architecture
-/// config a bare transformer file omits. Family base resolution stays with each family's resident
-/// tier helper until the registry's `base_compatibility` metadata reaches the pinned runtime.
+/// One provider-declared component, resolved from the plan's own layers by inspector role.
+///
+/// This is what makes a multi-artifact checkpoint — a ComfyUI tree's DiT + text encoder + VAE — a
+/// PLAN load rather than a catalog assembly: the encoder and VAE the provider declares as
+/// components come from the same verified plan the backbone did, so every byte the route loads was
+/// hashed by the inspector and re-checked by the store. Exactly one layer per role, for the
+/// [`checkpoint_plan_primary`] reason.
+fn checkpoint_plan_component_from_layers(
+    resolved: &ResolvedCheckpointV1,
+    component: &str,
+    role: &'static str,
+) -> WorkerResult<(WeightsSource, String, gen_core::PinnedWeightsFile)> {
+    let layers: Vec<_> = resolved.layers_with_role(role).collect();
+    match layers.as_slice() {
+        [layer] => {
+            let pin = checkpoint_plan_pin(layer)?;
+            Ok((
+                WeightsSource::File(pin.loader_path().to_path_buf()),
+                layer.layer.layer_id.clone(),
+                pin,
+            ))
+        }
+        [] => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] checkpoint {:?} ({} family) requires component \
+             {component:?}, which is sourced from this plan's {role:?} layer; the plan carries \
+             roles [{}]",
+            resolved.checkpoint_id,
+            resolved.family(),
+            checkpoint_plan_layer_roles(resolved)
+        ))),
+        many => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:ambiguous-component] checkpoint {:?} ({} family) carries {} {role:?} \
+             layers; component {component:?} is sourced from exactly one",
+            resolved.checkpoint_id,
+            resolved.family(),
+            many.len()
+        ))),
+    }
+}
+
+/// One provider-declared component, resolved to bytes this backend can load.
+struct CheckpointPlanComponent {
+    id: &'static str,
+    source: WeightsSource,
+    /// The plan layer this component consumed, when it came from the plan rather than from a
+    /// resident tier. Feeds [`checkpoint_plan_unconsumed_layers`].
+    consumed: Option<String>,
+    /// The payload-selected File token to keep pinned, when the component is a plan layer.
+    pin: Option<gen_core::PinnedWeightsFile>,
+}
+
+/// Resolve one provider-declared required component to a local source.
+///
+/// Two kinds of component, and the difference is which authority owns the bytes:
+///
+/// * **From the plan** — a ComfyUI tree's `text_encoder` / `vae` are artifacts of the very
+///   checkpoint being loaded, so they come from its verified plan layers and are marked consumed.
+/// * **Resident** — `base_snapshot` is the family's installed base tier, which supplies the shared
+///   tokenizer and architecture config a bare backbone omits. WHETHER a family needs one, and which
+///   families may satisfy it, is adapter truth
+///   ([`gen_core::CheckpointAdapterRegistration::component_topology`] / `base_compatibility`);
+///   WHERE that tier's bytes live is SceneWorks catalog data, which is what
+///   [`CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`] records.
+///
+/// Any component id this route cannot source refuses by name during planning, never inside a loader
+/// (E7).
 fn resolve_checkpoint_plan_component(
     component: &'static str,
+    resolved: &ResolvedCheckpointV1,
+    settings: &Settings,
+) -> WorkerResult<CheckpointPlanComponent> {
+    let family = resolved.family();
+    let from_layers = |role: &'static str| -> WorkerResult<CheckpointPlanComponent> {
+        let (source, layer_id, pin) =
+            checkpoint_plan_component_from_layers(resolved, component, role)?;
+        Ok(CheckpointPlanComponent {
+            id: component,
+            source,
+            consumed: Some(layer_id),
+            pin: Some(pin),
+        })
+    };
+    match component {
+        gen_core::BASE_SNAPSHOT_COMPONENT => {
+            Ok(CheckpointPlanComponent {
+                id: component,
+                source: WeightsSource::Dir(checkpoint_plan_resident_base_tier(
+                    family,
+                    &resolved.checkpoint_id,
+                    settings,
+                )?),
+                consumed: None,
+                pin: None,
+            })
+        }
+        gen_core::COMFYUI_TEXT_ENCODER_COMPONENT => from_layers("text_encoder"),
+        gen_core::COMFYUI_VAE_COMPONENT => from_layers("vae"),
+        _ => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] checkpoint {:?} ({family} family) requires \
+             component '{component}', which this runtime cannot supply for that family",
+            resolved.checkpoint_id
+        ))),
+    }
+}
+
+/// Each plan family's resident base tier resolver: `(plan family, resolver)`.
+///
+/// Catalog data, not family truth: the adapter already declares that the family HAS a
+/// `base-snapshot` dependency and which families may satisfy it. This is only the app's answer to
+/// "and where did we install it, and is it complete". Each entry is the family's EXISTING resolver
+/// — the same function, not a copy — so the plan route and that family's other consumers refuse a
+/// missing or torn base with one message and one completeness probe. Adding a family is a one-row
+/// change; a family with no row refuses by name rather than loading a neighbour's tier (E8).
+#[allow(clippy::type_complexity)]
+const CHECKPOINT_PLAN_RESIDENT_BASE_TIERS: &[(&str, fn(&Settings) -> WorkerResult<PathBuf>)] =
+    &[("krea_2", resolve_krea_imported_base_tier)];
+
+/// The installed base tier directory for `family`, or that family's own typed refusal.
+fn checkpoint_plan_resident_base_tier(
     family: &str,
     checkpoint_id: &str,
     settings: &Settings,
-) -> WorkerResult<WeightsSource> {
-    match (component, family) {
-        (gen_core::BASE_SNAPSHOT_COMPONENT, "krea_2") => {
-            resolve_krea_imported_base_tier(settings).map(WeightsSource::Dir)
-        }
-        _ => Err(WorkerError::InvalidPayload(format!(
+) -> WorkerResult<PathBuf> {
+    let Some((_, resolve)) = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
+        .iter()
+        .find(|(candidate, _)| *candidate == family)
+    else {
+        return Err(WorkerError::InvalidPayload(format!(
             "[checkpoint-plan:missing-component] checkpoint {checkpoint_id:?} ({family} family) \
-             requires component '{component}', which this runtime cannot supply for that family"
-        ))),
-    }
+             requires a resident base tier, and this build records no installed base tier for that \
+             family"
+        )));
+    };
+    resolve(settings)
 }
 
 /// The companion directories the candle floor prices for this plan's declared components.
@@ -329,45 +866,78 @@ fn prepare_checkpoint_plan_sources(
     // through to a lane that would load the same bytes unverified.
     let resolved = store.resolve(checkpoint_id).map_err(checkpoint_plan_refusal)?;
     let family = resolved.family().to_owned();
-    let (source, primary_layer) = match checkpoint_plan_primary_layer(&resolved) {
-        Ok(primary) => primary,
+    // Family truth, in the order a planner needs it: is there an adapter at all, is this backend
+    // eligible for it, and what on-disk shape do its dialects describe. All three come from the
+    // registered adapter, so a family is added by registering one (E2).
+    let adapter = match checkpoint_plan_adapter(&family, checkpoint_id) {
+        Ok(adapter) => adapter,
         Err(error) => return checkpoint_plan_unservable(request, error.to_string()),
     };
-    if let Err(error) = checkpoint_plan_unconsumed_layers(&resolved, primary_layer) {
+    if let Err(error) = checkpoint_plan_backend_eligible(adapter, checkpoint_id) {
         return checkpoint_plan_unservable(request, error.to_string());
     }
-    let Some(descriptor) = crate::inference_runtime::imported_model_descriptor(
-        &family,
-        source,
-        gen_core::ImportedModelOperation::Generate,
-    ) else {
+    let source = match checkpoint_plan_source_shape(adapter, checkpoint_id) {
+        Ok(source) => source,
+        Err(error) => return checkpoint_plan_unservable(request, error.to_string()),
+    };
+    let operation = checkpoint_plan_operation(request);
+    let Some(descriptor) =
+        crate::inference_runtime::imported_model_descriptor(&family, source, operation)
+    else {
         return checkpoint_plan_unservable(
             request,
             format!(
                 "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: this runtime's \
-                 provider registry has no {family:?} adapter bound for {source:?} Generate on this \
-                 backend"
+                 provider registry has no {family:?} adapter bound for {source:?} {operation:?} on \
+                 this backend"
             ),
         );
     };
-    let primary = gen_core::PinnedWeightsFile::pin(&primary_layer.path).map_err(|error| {
-        crate::classify_engine_error("Checkpoint plan source preparation failed", error)
-    })?;
+    if let Some(reason) =
+        checkpoint_plan_request_shape_refusal(request, &descriptor, operation, checkpoint_id)
+    {
+        return checkpoint_plan_unservable(request, reason);
+    }
+    let primary = match checkpoint_plan_primary(&resolved, source) {
+        Ok(primary) => primary,
+        Err(error) => return checkpoint_plan_unservable(request, error.to_string()),
+    };
+    let CheckpointPlanPrimary {
+        weights: primary_weights,
+        mut consumed,
+        mut pins,
+    } = primary;
     let mut components = Vec::with_capacity(descriptor.required_components.len());
     for component in descriptor.required_components {
-        components.push((
-            *component,
-            resolve_checkpoint_plan_component(component, &family, checkpoint_id, settings)?,
-        ));
+        let resolved_component =
+            match resolve_checkpoint_plan_component(component, &resolved, settings) {
+                Ok(component) => component,
+                Err(error) => return checkpoint_plan_unservable(request, error.to_string()),
+            };
+        if let Some(layer_id) = resolved_component.consumed {
+            consumed.insert(layer_id);
+        }
+        if let Some(pin) = resolved_component.pin {
+            pins.push(pin);
+        }
+        components.push((resolved_component.id, resolved_component.source));
+    }
+    // Last, because a component is one of the things that CAN consume a layer: only now is the
+    // consumed set complete, so only now can "this plan carries bytes nobody loads" be decided.
+    if let Err(error) = checkpoint_plan_unconsumed_layers(&resolved, &consumed) {
+        return checkpoint_plan_unservable(request, error.to_string());
     }
     Ok(CheckpointPlanSelection::served(
         PreparedCheckpointPlanSources {
             checkpoint_id: checkpoint_id.to_owned(),
             resolved,
+            adapter,
             descriptor,
             source,
-            primary,
+            operation,
+            primary: primary_weights,
             components,
+            pins,
         },
     ))
 }
@@ -410,17 +980,18 @@ fn checkpoint_plan_load_spec(
     quant: Option<Quant>,
 ) -> WorkerResult<LoadSpec> {
     let mut spec = sources.components.iter().cloned().fold(
-        LoadSpec::new(WeightsSource::File(
-            sources.primary.loader_path().to_path_buf(),
-        )),
+        LoadSpec::new(sources.primary.clone()),
         |spec, (id, source)| spec.with_component(id, source),
     );
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
+    // Every File token the plan contributed — the primary's file(s) and each component sourced from
+    // a plan layer — finalized in one atomic pass on the spec admission and load both use, so no
+    // await between selection and load can retarget one of them (sc-18306).
     crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
-        [sources.primary.clone()],
+        sources.pins.iter().cloned(),
         "Checkpoint plan source preparation failed",
     )?;
     Ok(spec)
@@ -466,6 +1037,17 @@ fn checkpoint_plan_raw_settings(
     raw.insert(
         "importPlanSource".to_owned(),
         Value::String(format!("{:?}", sources.source)),
+    );
+    // The authority that decided this render's family truth, recorded beside the plan identity that
+    // decided its bytes: an asset can be traced back to the exact adapter registration and the exact
+    // registry operation the route resolved, not just to the provider that ran.
+    raw.insert(
+        "importPlanAdapter".to_owned(),
+        Value::String(sources.adapter.adapter_id.to_owned()),
+    );
+    raw.insert(
+        "importPlanOperation".to_owned(),
+        Value::String(format!("{:?}", sources.operation)),
     );
     if let Some(steps) = steps {
         raw.insert("numInferenceSteps".to_owned(), json!(steps));

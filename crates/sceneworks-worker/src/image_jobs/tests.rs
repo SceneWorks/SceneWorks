@@ -19716,36 +19716,48 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // lanes. Their primary source must remain `File`, their companion snapshot must be explicit, and the
     // live handoff must go through the cached loader. The gate above separately proves the Candle
     // live-VRAM floor remains ahead of that handoff.
-    const REGISTRY_IMPORTED: &[(&str, &str, &str)] = &[
+    //
+    // The plan-driven route is the one entry with a different primary marker, and deliberately
+    // (sc-20644): its primary is whatever the family's registered dialect declares its loader opens,
+    // which for a component-directory dialect is a `Dir`, not a `File`. The invariant it must keep is
+    // therefore "the primary is what `checkpoint_plan_primary` resolved from the PLAN" rather than
+    // "the primary is literally a File" — so its marker is the construction that builds the spec from
+    // that value. Deleting or inlining it past the plan still turns this red.
+    const REGISTRY_IMPORTED: &[(&str, &str, &str, &str)] = &[
         (
             "KreaImported",
             "krea_imported.rs",
             include_str!("krea_imported.rs"),
+            "LoadSpec::new(WeightsSource::File(",
         ),
         (
             "CheckpointPlan",
             "checkpoint_plan.rs",
             include_str!("checkpoint_plan.rs"),
+            "LoadSpec::new(sources.primary.clone())",
         ),
         (
             "ZimageComfyui",
             "zimage_comfyui_candle.rs",
             include_str!("zimage_comfyui_candle.rs"),
+            "LoadSpec::new(WeightsSource::File(",
         ),
         (
             "QwenImageComfyui",
             "qwen_comfyui_candle.rs",
             include_str!("qwen_comfyui_candle.rs"),
+            "LoadSpec::new(WeightsSource::File(",
         ),
         (
             "Flux2Comfyui",
             "flux2_comfyui_candle.rs",
             include_str!("flux2_comfyui_candle.rs"),
+            "LoadSpec::new(WeightsSource::File(",
         ),
     ];
-    for (route, file, source) in REGISTRY_IMPORTED {
+    for (route, file, source, primary_marker) in REGISTRY_IMPORTED {
         for marker in [
-            "LoadSpec::new(WeightsSource::File(",
+            *primary_marker,
             "with_component(",
             "start_cached_gen_stream",
         ] {
@@ -20343,8 +20355,8 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
         gen_core::ImportedModelSource::TransformerFile
     );
     assert_eq!(
-        prepared.primary.loader_path(),
-        fx.library_dir.join("kreamania.safetensors")
+        prepared.primary,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
     );
     assert_eq!(
         prepared.components,
@@ -20805,37 +20817,93 @@ fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
         }
     };
 
-    let transformer_only = resolved(&["transformer"]);
-    let (source, layer) = checkpoint_plan_primary_layer(&transformer_only).unwrap();
-    assert_eq!(source, gen_core::ImportedModelSource::TransformerFile);
-    assert_eq!(layer.layer.role, "transformer");
-    let fused_only = resolved(&["checkpoint"]);
-    let (source, _) = checkpoint_plan_primary_layer(&fused_only).unwrap();
-    assert_eq!(source, gen_core::ImportedModelSource::FusedCheckpoint);
+    use gen_core::ImportedModelSource::{
+        ComfyUiTree, FusedCheckpoint, TransformerDirectory, TransformerFile,
+    };
 
-    let missing = checkpoint_plan_primary_layer(&resolved(&["vae", "text_encoder"]))
-        .expect_err("no primary layer must refuse");
+    // sc-20644: the source shape is the ADAPTER's declaration, and the primary is whichever backbone
+    // role that shape implies — a `checkpoint` layer for a fused dialect, a `transformer` for every
+    // other. The two questions are separate, so a plan is never resolved by guessing which of its
+    // roles "looks like" the backbone.
+    let transformer_only = resolved(&["transformer"]);
+    for shape in [TransformerFile, ComfyUiTree] {
+        let selection = checkpoint_plan_primary_selection(&transformer_only, shape).unwrap();
+        assert!(
+            selection.directory.is_none(),
+            "{shape:?} hands the loader the backbone FILE, not its directory"
+        );
+        assert_eq!(selection.layers.len(), 1);
+        assert_eq!(selection.layers[0].layer.role, "transformer");
+    }
+    let fused_only = resolved(&["checkpoint"]);
+    let fused = checkpoint_plan_primary_selection(&fused_only, FusedCheckpoint).unwrap();
+    assert!(fused.directory.is_none());
+    assert_eq!(fused.layers[0].layer.role, "checkpoint");
+
+    // A component-directory dialect hands the loader the DIRECTORY and consumes every plan layer
+    // inside it — the `config.json` sidecar a diffusers transformer dir carries included. Without
+    // that, the sidecar would be reported as an unsourced layer and a perfectly ordinary fine-tune
+    // would refuse.
+    let component_dir = resolved(&["transformer", "descriptor"]);
+    let directory =
+        checkpoint_plan_primary_selection(&component_dir, TransformerDirectory).unwrap();
+    assert_eq!(directory.directory.as_deref(), Some(Path::new("/library")));
+    assert_eq!(
+        directory
+            .layers
+            .iter()
+            .map(|layer| layer.layer.role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["transformer", "descriptor"],
+        "the backbone leads, and its co-located sidecar is consumed by the directory"
+    );
+
+    // The backbone role is shape-derived, so asking a fused shape of a transformer-only plan (and
+    // vice versa) is a MISSING primary, not a silently accepted neighbour.
+    let missing =
+        checkpoint_plan_primary_selection(&resolved(&["vae", "text_encoder"]), TransformerFile)
+            .expect_err("no primary layer must refuse");
     assert!(
         missing
             .to_string()
             .contains("[checkpoint-plan:missing-component]"),
         "{missing}"
     );
-    let ambiguous = checkpoint_plan_primary_layer(&resolved(&["transformer", "transformer"]))
-        .expect_err("two primaries must refuse");
+    let wrong_shape = checkpoint_plan_primary_selection(&transformer_only, FusedCheckpoint)
+        .expect_err("a fused dialect needs a fused-checkpoint layer");
+    assert!(
+        wrong_shape
+            .to_string()
+            .contains("[checkpoint-plan:missing-component]"),
+        "{wrong_shape}"
+    );
+    let ambiguous = checkpoint_plan_primary_selection(
+        &resolved(&["transformer", "transformer"]),
+        TransformerFile,
+    )
+    .expect_err("two primaries must refuse");
     assert!(
         ambiguous
             .to_string()
             .contains("[checkpoint-plan:ambiguous-component]"),
         "{ambiguous}"
     );
-    let mixed = checkpoint_plan_primary_layer(&resolved(&["transformer", "checkpoint"]))
-        .expect_err("a transformer beside a fused checkpoint must refuse");
+    // A transformer beside a fused checkpoint still refuses, but now as an UNCONSUMED layer: the
+    // shape says which one is the backbone, and the other is bytes nobody loads.
+    let mixed = resolved(&["transformer", "checkpoint"]);
+    let selection = checkpoint_plan_primary_selection(&mixed, TransformerFile).unwrap();
+    let consumed = selection
+        .layers
+        .iter()
+        .map(|layer| layer.layer.layer_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let error = checkpoint_plan_unconsumed_layers(&mixed, &consumed)
+        .expect_err("the unclaimed fused-checkpoint layer must refuse");
     assert!(
-        mixed
+        error
             .to_string()
-            .contains("[checkpoint-plan:ambiguous-component]"),
-        "{mixed}"
+            .contains("[checkpoint-plan:unconsumed-layer]"),
+        "{error}"
     );
 }
 
@@ -20927,6 +20995,161 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
     assert_eq!(selected, vec![base.join("vae")]);
 }
 
+/// sc-20644: a provider component whose bytes belong to the checkpoint itself is sourced from the
+/// checkpoint's own PLAN LAYERS, not assembled from a catalog row.
+///
+/// This is the mechanism the ComfyUI-tree families (Z-Image, Qwen-Image, FLUX.2) need: their
+/// providers declare `comfyui_text_encoder` / `comfyui_vae` components, and those files sit beside
+/// the DiT in the same tree. Sourcing them from the plan is what makes every byte the route loads a
+/// byte the inspector hashed and the store re-verified — the difference between a plan load and the
+/// live filesystem assembly it replaces.
+///
+/// Backend-neutral, so it runs on the MLX lane too even though no MLX catalog registers a
+/// ComfyUI-tree adapter: the helper under test is family-agnostic by construction.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn checkpoint_plan_sources_declared_components_from_the_plans_own_layers() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+    };
+    use sceneworks_core::checkpoint_plan_store::{ResolvedCheckpointV1, ResolvedLayerV1};
+
+    let tree = tempfile::Builder::new()
+        .prefix(&format!("plan-components-{}-", std::process::id()))
+        .tempdir()
+        .unwrap();
+    let root = std::fs::canonicalize(tree.path()).unwrap();
+
+    let resolved = |roles: &[&str]| -> ResolvedCheckpointV1 {
+        let layers: Vec<ImportLayerV1> = roles
+            .iter()
+            .map(|role| {
+                let name = format!("{role}.safetensors");
+                std::fs::write(root.join(&name), b"weights").unwrap();
+                ImportLayerV1 {
+                    layer_id: format!("artifact:{name}"),
+                    role: (*role).to_owned(),
+                    target_path: name.clone(),
+                    source: SourceLocatorV1::linked("root-test", name, "0".repeat(64)).unwrap(),
+                }
+            })
+            .collect();
+        let plan = ImportPlanV1::new("plan-test", "z-image", layers.clone()).unwrap();
+        let record = CheckpointCatalogRecordV1::from_plan("linked/root-test/x", &plan).unwrap();
+        ResolvedCheckpointV1 {
+            checkpoint_id: "linked/root-test/x".to_owned(),
+            record,
+            layers: plan
+                .layers
+                .iter()
+                .cloned()
+                .map(|layer| ResolvedLayerV1 {
+                    path: root.join(&layer.target_path),
+                    layer,
+                    rehashed: false,
+                })
+                .collect(),
+            plan,
+        }
+    };
+
+    let tree_plan = resolved(&["transformer", "text_encoder", "vae"]);
+    let (source, layer_id, pin) =
+        checkpoint_plan_component_from_layers(&tree_plan, gen_core::COMFYUI_VAE_COMPONENT, "vae")
+            .expect("the plan's vae layer sources the declared component");
+    assert_eq!(
+        source,
+        WeightsSource::File(root.join("vae.safetensors")),
+        "the component is the plan's OWN vae file, not a resident tier's"
+    );
+    assert_eq!(layer_id, "artifact:vae.safetensors");
+    assert_eq!(pin.loader_path(), root.join("vae.safetensors"));
+
+    // Missing and duplicated roles both refuse during planning, naming the component that could not
+    // be sourced — never a `None` that a loader would discover later (E7).
+    let no_encoder = resolved(&["transformer", "vae"]);
+    let missing = checkpoint_plan_component_from_layers(
+        &no_encoder,
+        gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
+        "text_encoder",
+    )
+    .expect_err("a declared component with no plan layer must refuse");
+    let message = missing.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:missing-component]")
+            && message.contains(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT),
+        "{message}"
+    );
+}
+
+/// sc-20644: a family's truth — which backends it may run on, and what on-disk shape its loader
+/// opens — is read from the REGISTERED checkpoint adapter, never from a branch on the family name in
+/// this repository (E2). This is what makes adding a family a registration rather than a worker
+/// edit, and it is the property every family row of sc-20644 depends on.
+///
+/// Asserted against the LIVE registry of this build, so a catalog that stops registering a family,
+/// or registers it with a different dialect shape, turns this red rather than silently changing what
+/// the plan route loads.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_family_truth_is_read_from_the_registered_adapter() {
+    let id = "linked/root-test/x";
+    // The three families the MLX catalog registers adapters for, and the source shape each one's
+    // dialect table declares. The shapes differ (a single DiT file, a fused LDM checkpoint, a
+    // diffusers component directory), which is exactly why the route must not guess.
+    for (family, expected) in [
+        ("krea_2", gen_core::ImportedModelSource::TransformerFile),
+        ("sdxl", gen_core::ImportedModelSource::FusedCheckpoint),
+        (
+            "mage-flow",
+            gen_core::ImportedModelSource::TransformerDirectory,
+        ),
+    ] {
+        let adapter = checkpoint_plan_adapter(family, id)
+            .unwrap_or_else(|error| panic!("{family} must have a registered adapter: {error}"));
+        assert_eq!(
+            checkpoint_plan_source_shape(adapter, id).unwrap(),
+            expected,
+            "{family} source shape must come from its registered dialect table"
+        );
+        checkpoint_plan_backend_eligible(adapter, id)
+            .unwrap_or_else(|error| panic!("{family} declares MLX eligible: {error}"));
+    }
+
+    // A family this build registers no adapter for refuses BY NAME during planning, rather than
+    // reaching a loader or falling through to the procedural stub (E7).
+    let unknown = checkpoint_plan_adapter("wan-video", id)
+        .expect_err("an unregistered family must refuse, not resolve");
+    let message = unknown.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:no-adapter-binding]") && message.contains("wan-video"),
+        "{message}"
+    );
+
+    // Backend eligibility is the ADAPTER's declaration, not "did a provider happen to bind". Today
+    // every registered adapter declares the backend it was registered on, so the refusing case is
+    // unreachable through the live registry — assert it against an explicit registration instead of
+    // leaving the guard with no proof it can ever fire.
+    let candle_only = gen_core::CheckpointAdapterRegistration {
+        eligible_backends: &[gen_core::CheckpointBackend::Candle],
+        ..gen_core::Z_IMAGE_CHECKPOINT_ADAPTER
+    };
+    let refusal = checkpoint_plan_backend_eligible(&candle_only, id)
+        .expect_err("an MLX build must refuse a Candle-only family");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:backend-ineligible]") && message.contains("z-image"),
+        "{message}"
+    );
+    assert!(
+        matches!(refusal, WorkerError::InvalidPayload(_)),
+        "backend ineligibility is a typed payload diagnostic, not an engine error"
+    );
+}
+
 /// The plan is consumed everywhere or refused (sc-20634 review). The inspector emits multi-layer
 /// plans — a linked directory Krea checkpoint compiles to `transformer` + `vae` + `text_encoder` —
 /// and this route sources only the primary layer, taking the rest from the resident base tier.
@@ -20978,15 +21201,24 @@ fn a_plan_with_a_layer_this_route_cannot_source_refuses_instead_of_substituting(
         }
     };
 
+    // The consumed set a `TransformerFile` primary produces, as the route computes it.
+    let consumed_by_primary = |resolved: &ResolvedCheckpointV1| {
+        checkpoint_plan_primary_selection(resolved, gen_core::ImportedModelSource::TransformerFile)
+            .unwrap()
+            .layers
+            .iter()
+            .map(|layer| layer.layer.layer_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
     // The single-layer plan the skeleton serves: nothing is left unconsumed.
     let single = resolved(&["transformer"]);
-    let (_, primary) = checkpoint_plan_primary_layer(&single).unwrap();
-    checkpoint_plan_unconsumed_layers(&single, primary).expect("a lone primary consumes the plan");
+    checkpoint_plan_unconsumed_layers(&single, &consumed_by_primary(&single))
+        .expect("a lone primary consumes the plan");
 
     // The two-layer plan the inspector emits for a linked DIRECTORY checkpoint.
     let two_layer = resolved(&["transformer", "vae"]);
-    let (_, primary) = checkpoint_plan_primary_layer(&two_layer).unwrap();
-    let error = checkpoint_plan_unconsumed_layers(&two_layer, primary)
+    let error = checkpoint_plan_unconsumed_layers(&two_layer, &consumed_by_primary(&two_layer))
         .expect_err("an unsourced vae layer must refuse");
     let message = error.to_string();
     assert!(
@@ -21004,8 +21236,7 @@ fn a_plan_with_a_layer_this_route_cannot_source_refuses_instead_of_substituting(
 
     // Every additional role the inspector can emit is covered, not just `vae`.
     let full = resolved(&["transformer", "vae", "text_encoder", "descriptor"]);
-    let (_, primary) = checkpoint_plan_primary_layer(&full).unwrap();
-    let message = checkpoint_plan_unconsumed_layers(&full, primary)
+    let message = checkpoint_plan_unconsumed_layers(&full, &consumed_by_primary(&full))
         .expect_err("three unsourced layers must refuse")
         .to_string();
     for role in ["vae", "text_encoder", "descriptor"] {
@@ -21163,8 +21394,8 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
     );
     assert_eq!(prepared.descriptor.id, "krea_2_turbo");
     assert_eq!(
-        prepared.primary.loader_path(),
-        library_dir.join(&file_name).as_path()
+        prepared.primary,
+        WeightsSource::File(library_dir.join(&file_name))
     );
     // Rendered as the route builds it (plain resident spec): the production handler additionally
     // runs `apply_residency_policy`, which the existing KreaImported smoke proves numerically inert
