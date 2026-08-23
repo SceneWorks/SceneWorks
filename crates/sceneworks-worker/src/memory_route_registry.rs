@@ -817,6 +817,36 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
+    // SC-20788: all three Chroma turnkey routes expose the same exact request-scoped Candle
+    // Resident/Staged surface. Their public identity remains route-local, and PiD is a typed load
+    // profile rather than a mode or an untracked overlay.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "chroma1_hd",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "chroma1_base",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "chroma1_flash",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
         provider: "z_image_turbo",
@@ -6966,6 +6996,9 @@ mod tests {
         assert_eq!(
             providers,
             [
+                "chroma1_base",
+                "chroma1_flash",
+                "chroma1_hd",
                 "krea_2_edit",
                 "krea_2_raw",
                 "krea_2_turbo_edit",
@@ -6973,7 +7006,7 @@ mod tests {
             ]
             .into()
         );
-        assert_eq!(witnesses.len(), 36);
+        assert_eq!(witnesses.len(), 72);
         assert!(witnesses.iter().all(|witness| {
             matches!(
                 witness.tier,
@@ -6989,6 +7022,118 @@ mod tests {
                     | MemoryRouteLoadProfile::Pid
             )
         }));
+    }
+
+    #[test]
+    fn shipped_chroma_candle_declarations_bind_every_route_tier_and_load_profile() {
+        let context = |use_pid| MemoryRouteRequestContext {
+            mode: MemoryRouteMode::TextToImage,
+            reference_count: 0,
+            use_pid,
+            has_phases: false,
+        };
+        for provider in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            let manifest = shipped_model(provider);
+            assert_eq!(
+                manifest["candle"]["memoryStrategyContract"]["exhaustive"],
+                true
+            );
+            assert_eq!(manifest["candle"]["measured"], false);
+            for tier in ["bf16", "q4", "q8"] {
+                let resident = manifest["candle"]["vramGbByTier"][tier]
+                    .as_f64()
+                    .expect("Chroma resident structural row");
+                let staged = manifest["candle"]["sequentialPeakGb"][tier]
+                    .as_f64()
+                    .expect("Chroma staged structural row");
+                assert!(staged > 0.0 && staged < resident, "{provider}:{tier}");
+                for profile in [
+                    MemoryRouteLoadProfile::Plain,
+                    MemoryRouteLoadProfile::Lora,
+                    MemoryRouteLoadProfile::Pid,
+                    MemoryRouteLoadProfile::LoraPid,
+                ] {
+                    let numeric = MemoryRouteTier::from_resolved_tier(tier).unwrap();
+                    let mut load = spec(numeric, profile).with_resolved_route(provider);
+                    // Chroma's physical turnkey tier owns quantization; the load-time selector is
+                    // intentionally None for q4/q8 as well as bf16.
+                    load.quantize = None;
+                    assert!(
+                        matches!(
+                            declared_candle_request_strategy_contract_with(
+                                provider,
+                                Some(tier),
+                                &manifest,
+                                &load,
+                                context(matches!(
+                                    profile,
+                                    MemoryRouteLoadProfile::Pid | MemoryRouteLoadProfile::LoraPid
+                                )),
+                                |_| Some(staged_contract(provider)),
+                            ),
+                            DeclaredCandleStrategyContract::Applied { provider_mode, .. }
+                                if provider_mode == "text_to_image"
+                        ),
+                        "{provider}:{tier}:{profile:?}"
+                    );
+                }
+            }
+
+            let plain =
+                LoadSpec::new(WeightsSource::Dir("fixture".into())).with_resolved_route(provider);
+            for crossed in [
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::StyleVariations,
+                    ..context(false)
+                },
+                MemoryRouteRequestContext {
+                    reference_count: 1,
+                    ..context(false)
+                },
+                MemoryRouteRequestContext {
+                    has_phases: true,
+                    ..context(false)
+                },
+            ] {
+                assert!(matches!(
+                    declared_candle_request_strategy_contract_with(
+                        provider,
+                        Some("q4"),
+                        &manifest,
+                        &plain,
+                        crossed,
+                        |_| Some(staged_contract(provider)),
+                    ),
+                    DeclaredCandleStrategyContract::Refused
+                ));
+            }
+            assert!(matches!(
+                declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("nvfp4"),
+                    &manifest,
+                    &plain,
+                    context(false),
+                    |_| Some(staged_contract(provider)),
+                ),
+                DeclaredCandleStrategyContract::Refused
+            ));
+        }
+
+        let hd_manifest = shipped_model("chroma1_hd");
+        let crossed_route =
+            LoadSpec::new(WeightsSource::Dir("fixture".into())).with_resolved_route("chroma1_base");
+        assert!(matches!(
+            declared_candle_request_strategy_contract_with(
+                "chroma1_hd",
+                Some("q4"),
+                &hd_manifest,
+                &crossed_route,
+                context(false),
+                |_| Some(staged_contract("chroma1_hd")),
+            ),
+            DeclaredCandleStrategyContract::Refused
+        ));
     }
 
     #[test]

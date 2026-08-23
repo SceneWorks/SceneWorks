@@ -9869,6 +9869,31 @@
           ]
         }
       },
+      "candle": {
+        "supportsSequentialOffload": true,
+        // SC-20788: request-owned Chroma execution. Physical q4/q8/bf16 artifacts all arrive with
+        // LoadSpec.quantize=None; the provider receipt identifies packed versus dense tensors.
+        // These are conservative structural envelopes, not empirical calibration: resident keeps
+        // T5 + transformer + VAE together, while staged holds only the largest phase. Admission
+        // maxes each row against the sealed provider tensor-header projection and adds exact
+        // materialized adapter/PiD bytes, so a changed inventory can only raise or refuse the gate.
+        "vramGbByTier": { "q4": 18.0, "q8": 22.0, "bf16": 46.0 },
+        "sequentialPeakGb": { "q4": 13.0, "q8": 14.0, "bf16": 38.0 },
+        "measured": false,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "chroma1_hd", "exhaustive": true,
+          "implementations": [
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-hd","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"}
+          ]
+        }
+      },
       "defaults": {
         // True classifier-free guidance with negative prompts: ~40 steps, guidance 3.0.
         "resolution": "1024x1024",
@@ -10376,6 +10401,27 @@
           ]
         }
       },
+      "candle": {
+        "supportsSequentialOffload": true,
+        // Structural, estimate-backed rows. Runtime admission maxes these against the exact
+        // provider receipt and charges materialized adapter/PiD networks separately.
+        "vramGbByTier": { "q4": 18.0, "q8": 22.0, "bf16": 46.0 },
+        "sequentialPeakGb": { "q4": 13.0, "q8": 14.0, "bf16": 38.0 },
+        "measured": false,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "chroma1_base", "exhaustive": true,
+          "implementations": [
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-base","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"}
+          ]
+        }
+      },
       "defaults": {
         // Neutral finetuning foundation: ~40 steps, guidance 3.0, true CFG + negative prompts.
         "resolution": "1024x1024",
@@ -10826,6 +10872,27 @@
               "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/chroma1_flash"
             }
             // END generated-from-engine-capabilities
+          ]
+        }
+      },
+      "candle": {
+        "supportsSequentialOffload": true,
+        // Structural, estimate-backed rows. Runtime admission maxes these against the exact
+        // provider receipt and charges materialized adapter/PiD networks separately.
+        "vramGbByTier": { "q4": 18.0, "q8": 22.0, "bf16": 46.0 },
+        "sequentialPeakGb": { "q4": 13.0, "q8": 14.0, "bf16": 38.0 },
+        "measured": false,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "chroma1_flash", "exhaustive": true,
+          "implementations": [
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"},
+            {"rung":"staged_residency","requiredOffloadPolicy":"sequential","fingerprint":"chroma1-candle-request-scoped-staged-residency-static-v1-chroma1-flash","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"lora","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"}
           ]
         }
       },

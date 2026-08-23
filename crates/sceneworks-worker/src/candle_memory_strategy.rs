@@ -35,9 +35,89 @@ const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-sco
 const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
 const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
 const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
+const CHROMA_REQUEST_EVIDENCE_REVISION: &str = "sc-20788-candle-chroma-staged-residency-v2";
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
+
+fn is_chroma(engine_id: &str) -> bool {
+    matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+}
+
+/// Resolve the public `lora` cell to the exact ordered adapter load identity sealed by the
+/// provider. The public manifest intentionally groups LoRA and LoKr as one compatibility cell;
+/// the provider handshake does not — it binds kind, order, scale, target, digest, and materialized
+/// bytes into this receipt identity.
+fn chroma_provider_overlay_identity(
+    contract: &gen_core::MemoryProviderContract,
+    declared_overlay: Option<&str>,
+) -> WorkerResult<Option<String>> {
+    let identities = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.id.starts_with(CHROMA_ADAPTER_OVERLAY_PREFIX))
+        .collect::<Vec<_>>();
+    if identities.iter().any(|component| {
+        component.kind != gen_core::MemoryComponentKind::AdapterStack
+            || component.resident_bytes == 0
+            || component.id.len() != CHROMA_ADAPTER_OVERLAY_PREFIX.len() + 64
+            || !component.id[CHROMA_ADAPTER_OVERLAY_PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(WorkerError::InvalidPayload(
+            "Chroma provider returned a malformed materialized adapter receipt".to_owned(),
+        ));
+    }
+    match declared_overlay {
+        None => {
+            if identities.is_empty() {
+                Ok(None)
+            } else {
+                Err(WorkerError::InvalidPayload(
+                    "Chroma plain load crossed a provider adapter receipt".to_owned(),
+                ))
+            }
+        }
+        Some("lora") => match identities.as_slice() {
+            [component] => Ok(Some(component.id.clone())),
+            _ => Err(WorkerError::InvalidPayload(
+                "Chroma adapter load is missing its singular exact provider receipt".to_owned(),
+            )),
+        },
+        Some(other) => Err(WorkerError::InvalidPayload(format!(
+            "Chroma does not advertise provider overlay {other}"
+        ))),
+    }
+}
+
+fn validate_chroma_asset_facts(contract: &gen_core::MemoryProviderContract) -> WorkerResult<()> {
+    let facts = contract.asset_facts;
+    let complete = facts.conditioning_bytes > 0
+        && facts.transformer_bytes > 0
+        && facts.decoder_bytes > 0
+        && facts.base_bytes
+            == facts
+                .conditioning_bytes
+                .saturating_add(facts.transformer_bytes)
+                .saturating_add(facts.decoder_bytes)
+        && contract.auxiliary_resident_bytes() == facts.overlay_bytes;
+    if !complete {
+        return Err(WorkerError::InvalidPayload(
+            "Chroma provider returned incomplete or crossed materialized asset facts".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn chroma_base_phase_floor_bytes(contract: &gen_core::MemoryProviderContract) -> u64 {
+    let facts = contract.asset_facts;
+    facts
+        .conditioning_bytes
+        .max(facts.transformer_bytes)
+        .max(facts.decoder_bytes)
+}
 
 pub(crate) struct CandleMemoryEvaluation {
     pub memory: Option<GenerationMemory>,
@@ -515,10 +595,12 @@ fn estimate_floor_parameters(
 /// (`crate::vram_gate::predicted_peak_gb` conventions) — never a tuned coefficient and never a
 /// promised unmeasured saving:
 ///
-/// * `StagedResidency` — the measured `candle.sequentialPeakGb` row (the staged working set) plus
-///   the standard headroom, exactly the number the legacy sequential-offload gate compares. Absent
-///   the row, the resident estimate itself: staging is still selectable, but no unmeasured saving
-///   is promised so it can only admit where resident does.
+/// * `StagedResidency` — the `candle.sequentialPeakGb` row (a measured working set for legacy
+///   adopters, or an explicitly unmeasured structural floor for Chroma) plus standard headroom,
+///   exactly the number the legacy sequential-offload gate compares. Chroma additionally maxes it
+///   against the provider receipt's largest materialized phase and requires it to remain genuinely
+///   below resident. Absent the row, other adopters use the resident estimate: staging stays
+///   selectable but promises no unmeasured saving.
 /// * Rungs 2–4 bound transients/residency the manifest has NOT measured for this cell, so they
 ///   take the STAGED floor unreduced — selectable without promising an unmeasured saving. (Where a
 ///   measured record for a rung exists it is a `verified_candidates` candidate and supersedes the
@@ -548,12 +630,29 @@ fn synthesize_estimate_floors(
     request_evidence_revision: &str,
 ) -> Vec<(MemorySelection, MemoryEvidence)> {
     let calibration = contract.calibration.as_ref();
-    let staged_floor_bytes = crate::vram_gate::predicted_sequential_peak_gb(manifest, tier_key)
-        .map(|gb| {
-            ((gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64)
-                .saturating_add(runtime_overlay_bytes)
-        })
-        .unwrap_or(resident_peak_bytes);
+    let staged_floor_bytes = if is_chroma(engine_id) {
+        let structural = chroma_base_phase_floor_bytes(contract)
+            .saturating_add((crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64);
+        let declared = crate::vram_gate::predicted_sequential_peak_gb(manifest, tier_key)
+            .map(|gb| (gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64)
+            .unwrap_or(0);
+        contract
+            .predicted_peak_from_base(declared.max(structural))
+            .predicted_peak_bytes()
+    } else {
+        crate::vram_gate::predicted_sequential_peak_gb(manifest, tier_key)
+            .map(|gb| {
+                ((gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64)
+                    .saturating_add(runtime_overlay_bytes)
+            })
+            .unwrap_or(resident_peak_bytes)
+    };
+    // Chroma claims a staged saving only when the receipt-derived largest phase plus exact
+    // auxiliaries is genuinely below its receipt-derived co-resident floor. Equal or crossed rows
+    // are not an optimized strategy and cannot become selectable through a tier label.
+    if is_chroma(engine_id) && staged_floor_bytes >= resident_peak_bytes {
+        return Vec::new();
+    }
     let mut synthesized = Vec::new();
     for strategy in MemoryStrategy::ALL {
         if strategy == MemoryStrategy::Resident {
@@ -834,6 +933,7 @@ fn evaluate_shared_image_inner(
         | "mage_flow_edit_base"
         | "mage_flow_edit"
         | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => CHROMA_REQUEST_EVIDENCE_REVISION,
         _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -850,9 +950,20 @@ fn evaluate_shared_image_inner(
     let Some(budget) = budget else {
         return Ok(None);
     };
+    let chroma = is_chroma(engine_id);
     let Some(resident_peak_gb) = predicted_peak_gb else {
+        if chroma && artifact_is_certified {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{engine_id}/{tier_key} is missing its structural resident peak row"
+            )));
+        }
         return Ok(None);
     };
+    if chroma && !artifact_is_certified {
+        // Chroma's optimized contract is tied to the immutable turnkey revision and physical tier.
+        // An imported/custom root retains the historical resident path and receives no estimate.
+        return Ok(None);
+    }
     let contract = match contract_override {
         Some(contract) => contract,
         None => {
@@ -867,6 +978,13 @@ fn evaluate_shared_image_inner(
             contract
         }
     };
+    let provider_overlay = if chroma {
+        validate_chroma_asset_facts(&contract)?;
+        chroma_provider_overlay_identity(&contract, provider_overlay)?
+    } else {
+        provider_overlay.map(str::to_owned)
+    };
+    let provider_overlay = provider_overlay.as_deref();
     let calibration = contract.calibration.as_ref();
     let resident_selection = MemorySelection {
         strategy: MemoryStrategy::Resident,
@@ -901,7 +1019,20 @@ fn evaluate_shared_image_inner(
         sceneworks_revision: request_evidence_revision.to_owned(),
         inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned(),
         harness_version: String::new(),
-        predicted_peak_bytes: (resident_peak_gb * BYTES_PER_GIB).ceil() as u64,
+        predicted_peak_bytes: {
+            let declared = (resident_peak_gb * BYTES_PER_GIB).ceil() as u64;
+            if chroma {
+                let structural = contract
+                    .asset_facts
+                    .base_bytes
+                    .saturating_add((crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64);
+                contract
+                    .predicted_peak_from_base(declared.max(structural))
+                    .predicted_peak_bytes()
+            } else {
+                declared
+            }
+        },
         observed_peak_bytes: None,
         parity: MemoryParityContract::Exact,
         parity_result: MemoryParityResult::NotRun,
@@ -952,8 +1083,14 @@ fn evaluate_shared_image_inner(
     }
     // Calibration records describe the certified overlay fixture. User-provided adapters can be
     // larger, so every optimized candidate must reserve the bytes for the actual request before
-    // the common selector performs its fit check. The resident estimate already includes these
-    // bytes through `predicted_peak_gb_with_adapter_bytes` and must not be adjusted twice.
+    // the common selector performs its fit check. Legacy resident estimates already include the
+    // caller's source-byte charge and must not be adjusted twice. Chroma instead ignores that raw
+    // value and uses the provider receipt's materialized adapter + PiD aggregate here and above.
+    let runtime_overlay_bytes = if chroma {
+        contract.asset_facts.overlay_bytes
+    } else {
+        runtime_overlay_bytes
+    };
     account_for_runtime_overlay_bytes(&mut verified, runtime_overlay_bytes);
     if let Some(exact) = verified.first() {
         resident
@@ -1062,6 +1199,11 @@ fn evaluate_shared_image_inner(
         &candidates,
     );
     let Selection::Selected { selection, .. } = selected else {
+        if chroma {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{engine_id} has no exact resident or staged strategy that fits the sealed provider receipt"
+            )));
+        }
         return Ok(None);
     };
     let matches_selection = |item: &MemoryEvidence| {
@@ -1088,7 +1230,11 @@ fn evaluate_shared_image_inner(
         predicted_peak_gb: selected_evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB,
         context: MemoryRunContext {
             selection,
-            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
+            optimization_authority: if estimate_scoped {
+                gen_core::MemoryOptimizationAuthority::Estimated
+            } else {
+                gen_core::MemoryOptimizationAuthority::Calibrated
+            },
             calibration_abi: selected_evidence.calibration_abi,
             calibration_fingerprint: selected_evidence.calibration_fingerprint.clone(),
             mode: mode.mode,
@@ -1177,6 +1323,221 @@ mod tests {
             })),
         )
         .is_some());
+    }
+
+    fn gib(value: u64) -> u64 {
+        value.saturating_mul(BYTES_PER_GIB as u64)
+    }
+
+    fn chroma_probe_contract(
+        adapter_identity: Option<&str>,
+        adapter_bytes: u64,
+        pid_bytes: u64,
+    ) -> gen_core::MemoryProviderContract {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "chroma1_base",
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| gen_core::MemoryStrategyCapability {
+                strategy,
+                support: if matches!(
+                    strategy,
+                    MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+                ) {
+                    gen_core::MemoryStrategySupport::Implemented
+                } else {
+                    gen_core::MemoryStrategySupport::Missing
+                },
+                parameters: Default::default(),
+            })
+            .collect();
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            decode_tiling: false,
+            attention_chunking: false,
+            transformer_window_materialization: false,
+        };
+        let mut resident_components = Vec::new();
+        if let Some(identity) = adapter_identity {
+            resident_components.push(gen_core::MemoryResidentComponent {
+                id: identity.to_owned(),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: adapter_bytes,
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        if pid_bytes > 0 {
+            resident_components.push(gen_core::MemoryResidentComponent {
+                id: "chroma.pid.flux-student-and-gemma".to_owned(),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: pid_bytes,
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![
+                gen_core::MemoryFormulaVariable::AssetBytes,
+                gen_core::MemoryFormulaVariable::PixelCount,
+                gen_core::MemoryFormulaVariable::BatchCount,
+                gen_core::MemoryFormulaVariable::ConditioningTokenCount,
+                gen_core::MemoryFormulaVariable::OverlayBytes,
+            ],
+            resident_components,
+        };
+        contract.asset_facts = gen_core::MemoryAssetFacts {
+            conditioning_bytes: gib(6),
+            transformer_bytes: gib(10),
+            decoder_bytes: gib(2),
+            base_bytes: gib(18),
+            overlay_bytes: adapter_bytes.saturating_add(pid_bytes),
+        };
+        contract
+    }
+
+    fn chroma_structural_manifest() -> JsonObject<String, Value> {
+        json!({
+            "candle": {
+                "vramGbByTier": { "q4": 18.0 },
+                "sequentialPeakGb": { "q4": 11.0 },
+                "measured": false
+            }
+        })
+        .as_object()
+        .expect("Chroma structural manifest")
+        .clone()
+    }
+
+    #[test]
+    fn chroma_structural_rows_are_complete_differentiated_and_unmeasured() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .expect("embedded model manifest");
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
+        let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+        for model_id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            let model = root["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .expect("Chroma model");
+            let candle = &model["candle"];
+            assert_eq!(candle["measured"], false);
+            for tier in ["q4", "q8", "bf16"] {
+                let resident = candle["vramGbByTier"][tier]
+                    .as_f64()
+                    .expect("resident structural row");
+                let staged = candle["sequentialPeakGb"][tier]
+                    .as_f64()
+                    .expect("staged structural row");
+                assert!(staged > 0.0 && staged < resident, "{model_id}/{tier}");
+            }
+            assert!(candle["vramGbByTier"]["q4"] != candle["vramGbByTier"]["q8"]);
+            assert!(candle["vramGbByTier"]["q8"] != candle["vramGbByTier"]["bf16"]);
+        }
+    }
+
+    #[test]
+    fn chroma_selects_receipt_priced_staged_and_refuses_crossed_or_no_fit_requests() {
+        let identity = format!("{CHROMA_ADAPTER_OVERLAY_PREFIX}{}", "a".repeat(64));
+        let contract = chroma_probe_contract(Some(&identity), gib(2), gib(3));
+        let manifest = chroma_structural_manifest();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-chroma-q4")))
+            .with_resolved_route("chroma1_base");
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let evaluate = |free_gb: f64, provider_overlay: Option<&str>, contract| {
+            evaluate_shared_image_inner(
+                "chroma1_base",
+                "chroma1_base",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                Some("lora"),
+                provider_overlay,
+                geometry,
+                false,
+                true,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                }),
+                crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
+                gib(80),
+                MemoryCacheState::Cold,
+                None,
+                Some(contract),
+                Some(CHROMA_REQUEST_EVIDENCE_REVISION),
+            )
+        };
+
+        // The raw staged estimate is 11 + 2 headroom + 2 adapter + 3 PiD = 18 GiB. The shared
+        // 4% estimate margin makes that 18.72; with the selector's 2 GiB reserve, 22 GiB free fits
+        // staged while the 25 GiB resident receipt does not. The deliberately bogus 80 GiB generic
+        // adapter input must not affect this receipt-priced result.
+        let staged = evaluate(22.0, Some("lora"), contract.clone())
+            .expect("exact Chroma evaluation")
+            .expect("staged strategy fits");
+        assert_eq!(
+            staged.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert_eq!(staged.context.overlay.as_deref(), Some(identity.as_str()));
+        assert_eq!(staged.context.predicted_peak_bytes, gib(18));
+        assert_eq!(
+            staged.context.optimization_authority,
+            gen_core::MemoryOptimizationAuthority::Estimated
+        );
+
+        let no_fit = evaluate(20.0, Some("lora"), contract.clone())
+            .err()
+            .expect("a budget below the widened exact staged floor must fail closed");
+        assert!(no_fit.to_string().contains("no exact resident or staged"));
+
+        let crossed = evaluate(22.0, Some("lora"), chroma_probe_contract(None, 0, gib(3)))
+            .err()
+            .expect("a public adapter cell without its exact provider receipt must fail");
+        assert!(crossed
+            .to_string()
+            .contains("singular exact provider receipt"));
+
+        let stale = evaluate(22.0, Some("lora"), contract.clone())
+            .expect("the declared public cell resolves the receipt internally")
+            .expect("staged still fits");
+        assert_ne!(stale.context.overlay.as_deref(), Some("lora"));
+
+        let mut crossed_facts = contract;
+        crossed_facts.asset_facts.overlay_bytes = gib(4);
+        let crossed = evaluate(22.0, Some("lora"), crossed_facts)
+            .err()
+            .expect("typed adapter/PiD bytes must equal the aggregate footprint");
+        assert!(crossed.to_string().contains("materialized asset facts"));
     }
 
     #[test]
@@ -1915,6 +2276,11 @@ mod tests {
             .expect("optimized selection carries memory");
         assert!(memory.stage_residency);
         assert!(!memory.tile_vae_decode);
+        assert_eq!(
+            evaluation.context.optimization_authority,
+            gen_core::MemoryOptimizationAuthority::Estimated,
+            "a structural floor must never impersonate measured calibration"
+        );
         // Estimate admissions are legacy-scoped in telemetry, exactly like the resident estimate.
         assert_eq!(
             evaluation.context.evidence_revision,

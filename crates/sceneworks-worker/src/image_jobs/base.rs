@@ -3302,6 +3302,122 @@ pub(super) fn candle_certified_load_spec(
         })
 }
 
+/// Seal every file the Chroma provider can read before selector evaluation. The same finalized
+/// `LoadSpec` is moved into the generator cache, so a cold or warm load cannot silently re-resolve
+/// a pathname after admission.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn seal_chroma_load_spec(
+    engine_id: &str,
+    artifact_is_certified: bool,
+    spec: &mut LoadSpec,
+) -> WorkerResult<()> {
+    if !matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+        || !artifact_is_certified
+    {
+        return Ok(());
+    }
+
+    fn visit(root: &Path, files: &mut Vec<PathBuf>) -> WorkerResult<()> {
+        for entry in std::fs::read_dir(root).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Chroma artifact inventory cannot read {}: {error}",
+                root.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| WorkerError::InvalidPayload(format!("Chroma artifact inventory failed: {error}")))?
+                .path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "Chroma artifact member cannot be inspected: {error}"
+                ))
+            })?;
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::metadata(&path).map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Chroma artifact symlink target cannot be inspected: {error}"
+                    ))
+                })?;
+                if target.is_file() {
+                    files.push(std::path::absolute(&path).map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "Chroma artifact member cannot be absolutized: {error}"
+                        ))
+                    })?);
+                    continue;
+                }
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Chroma artifact symlink must resolve directly to a file: {}",
+                    path.display()
+                )));
+            }
+            if metadata.is_dir() {
+                visit(&path, files)?;
+            } else if metadata.is_file() {
+                files.push(std::path::absolute(&path).map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Chroma artifact member cannot be absolutized: {error}"
+                    ))
+                })?);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = spec
+        .file_source_paths()
+        .into_iter()
+        .map(std::path::absolute)
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| WorkerError::InvalidPayload(format!(
+            "Chroma file source cannot be absolutized: {error}"
+        )))?;
+    for root in spec.directory_source_paths() {
+        visit(root, &mut files)?;
+    }
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Chroma artifact inventory is empty".to_owned(),
+        ));
+    }
+    let pins = files
+        .iter()
+        .map(|path| {
+            gen_core::PinnedWeightsFile::pin(path)
+                .map_err(|error| crate::classify_engine_error("Chroma load pin", error))
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "Chroma load preparation")?;
+    spec.validate_prepared_file_pins()
+        .map_err(|error| crate::classify_engine_error("Chroma load preparation", error))
+}
+
+#[cfg(test)]
+mod chroma_load_seal_tests {
+    use super::*;
+
+    #[test]
+    fn exact_inventory_is_carried_to_cache_load_and_mutation_fails_closed() {
+        let temp = tempfile::tempdir().expect("temporary Chroma artifact");
+        let root = temp.path().join("q4");
+        std::fs::create_dir_all(root.join("transformer")).expect("artifact directory");
+        let config = root.join("transformer/config.json");
+        std::fs::write(&config, b"{}").expect("artifact member");
+        let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+            .with_resolved_route("chroma1_base");
+
+        seal_chroma_load_spec("chroma1_base", true, &mut spec).expect("seal Chroma load");
+        assert!(spec.prepared_file_pins().is_prepared());
+        assert_eq!(spec.prepared_file_pins().len(), 1);
+        spec.validate_prepared_file_pins().expect("stable prepared spec");
+
+        std::fs::write(config, b"{\"changed\":true}").expect("mutate artifact member");
+        assert!(spec.validate_prepared_file_pins().is_err());
+    }
+}
+
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod mage_artifact_certification_tests {
     use super::*;
@@ -3358,6 +3474,65 @@ mod mage_artifact_certification_tests {
             .join(revision);
         fs::create_dir_all(&root).expect("create fixture snapshot");
         root
+    }
+
+    #[test]
+    fn chroma_certification_binds_exact_route_revision_and_physical_tier() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
+        let data = tempfile::tempdir().expect("temp data dir");
+        let settings = settings(data.path());
+        for (model, repo, revision) in [
+            (
+                "chroma1_hd",
+                "SceneWorks/chroma1-hd-mlx",
+                "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
+            ),
+            (
+                "chroma1_base",
+                "SceneWorks/chroma1-base-mlx",
+                "e7330dda29d00ffdeeb719b28e92ee74cff0884c",
+            ),
+            (
+                "chroma1_flash",
+                "SceneWorks/chroma1-flash-mlx",
+                "6a9cb6178709559461506bf247f708d0d1008d00",
+            ),
+        ] {
+            let snapshot = cached_snapshot(data.path(), repo, revision);
+            let tier = snapshot.join("q4");
+            fs::create_dir_all(&tier).expect("tier dir");
+            let spec = LoadSpec::new(WeightsSource::Dir(tier.clone()))
+                .with_resolved_route(model);
+            let manifest = model_manifest(model);
+            assert!(candle_certified_load_spec(
+                model, &settings, &spec, &manifest, "q4"
+            ));
+
+            let wrong_tier = LoadSpec::new(WeightsSource::Dir(snapshot.join("q8")))
+                .with_resolved_route(model);
+            assert!(!candle_certified_load_spec(
+                model,
+                &settings,
+                &wrong_tier,
+                &manifest,
+                "q4"
+            ));
+            let wrong_revision = data.path().join("wrong-revision/q4");
+            fs::create_dir_all(&wrong_revision).expect("wrong revision dir");
+            let wrong_revision = LoadSpec::new(WeightsSource::Dir(wrong_revision))
+                .with_resolved_route(model);
+            assert!(!candle_certified_load_spec(
+                model,
+                &settings,
+                &wrong_revision,
+                &manifest,
+                "q4"
+            ));
+        }
     }
 
     #[test]
@@ -3571,6 +3746,8 @@ fn optimized_shared_memory_context(
 fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -> &'a str {
     if engine_id == "flux2_dev"
         || (engine_id == "flux2_klein_9b"
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
             && matches!(request_mode, "image_generation" | "text_to_image"))
     {
         "text_to_image"
@@ -8332,7 +8509,13 @@ fn rejects_unverified_shared_memory_fallback(
 ) -> bool {
     matches!(
         engine_id,
-        "z_image" | "z_image_turbo" | "flux2_dev" | "flux2_klein_9b"
+        "z_image"
+            | "z_image_turbo"
+            | "flux2_dev"
+            | "flux2_klein_9b"
+            | "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
     )
         && !optimized_strategy_selected
 }
@@ -8346,6 +8529,7 @@ fn verified_only_memory_family_label(engine_id: &str) -> Option<&'static str> {
         "z_image" | "z_image_turbo" => Some("Z-Image"),
         "flux2_dev" => Some("FLUX.2-dev"),
         "flux2_klein_9b" => Some("FLUX.2 Klein"),
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => Some("Chroma1"),
         _ => None,
     }
 }
@@ -8526,6 +8710,11 @@ mod candle_request_residency_tests {
             "flux2_klein_9b",
             false
         ));
+        for engine in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            assert!(rejects_unverified_shared_memory_fallback(engine, false));
+            assert!(!rejects_unverified_shared_memory_fallback(engine, true));
+            assert_eq!(verified_only_memory_family_label(engine), Some("Chroma1"));
+        }
         assert!(!rejects_unverified_shared_memory_fallback(
             "z_image", true
         ));
@@ -8575,6 +8764,21 @@ mod candle_request_residency_tests {
             assert_eq!(
                 candle_base_memory_request_mode(engine, "style_variations"),
                 "style_variations"
+            );
+        }
+        for engine in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "image_generation"),
+                "text_to_image"
+            );
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "text_to_image"),
+                "text_to_image"
+            );
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "style_variations"),
+                "style_variations",
+                "retired Chroma style alias must reach the exhaustive declaration and be refused"
             );
         }
     }
@@ -9181,6 +9385,15 @@ fn candle_quant_for_resolved_tier(
     if is_dense_te_tier(request) {
         return (None, resolved_bits);
     }
+    // Chroma turnkeys contain physically packed q4/q8 transformer tensors which the provider
+    // detects from their exact header/config receipt. LoadSpec.quantize is therefore always None;
+    // setting it would request a second on-the-fly quantization and the provider correctly refuses.
+    if matches!(
+        request.model.as_str(),
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash"
+    ) {
+        return (None, resolved_bits);
+    }
     if force_dense || !supports_quant {
         return (None, None);
     }
@@ -9229,6 +9442,28 @@ mod candle_resolved_tier_contract_tests {
             _ => "{}",
         };
         std::fs::write(transformer.join("config.json"), config).expect("tier config");
+    }
+
+    #[test]
+    fn chroma_packed_turnkeys_keep_load_quantization_none_for_every_public_route() {
+        for model in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            for (tier, expected_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
+                let request = ImageRequest::from_payload(
+                    json!({
+                        "model": model,
+                        "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+                    })
+                    .as_object()
+                    .expect("request object"),
+                );
+                let weights = PathBuf::from(tier);
+                assert_eq!(
+                    candle_quant_for_resolved_tier(&request, tier, &weights, true, false),
+                    (None, expected_bits),
+                    "{model}:{tier}"
+                );
+            }
+        }
     }
 
     fn mage_spec(engine_id: &str, weights: &Path, quant: Option<Quant>) -> LoadSpec {
@@ -10053,6 +10288,24 @@ async fn generate_candle_stream(
         tier,
         adapter_resident_bytes,
     );
+    // Chroma's selector prices the exact provider receipt after the load spec is sealed. Passing
+    // generic source-file adapter bytes here would double-charge adapters, omit PiD's materialized
+    // student/Gemma footprint, and let the public `lora` cell stand in for load identity. Other
+    // providers retain their established source-byte accounting.
+    let chroma_receipt_priced = matches!(
+        engine_id,
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash"
+    );
+    let shared_predicted_peak_gb = if chroma_receipt_priced {
+        crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
+    } else {
+        needed
+    };
+    let shared_runtime_overlay_bytes = if chroma_receipt_priced {
+        0
+    } else {
+        adapter_resident_bytes
+    };
     let krea_runtime_context = krea_turbo_ladder
         .then(|| krea_runtime_evidence_context(request, settings, tier, &weights_dir))
         .flatten();
@@ -10109,17 +10362,19 @@ async fn generate_candle_stream(
         edit_mask.is_some(),
         hires_fix.is_some(),
     );
+    let artifact_is_certified = candle_certified_load_spec(
+        engine_id,
+        settings,
+        &shared_contract_spec,
+        &request.model_manifest_entry,
+        tier,
+    );
+    seal_chroma_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
         &shared_contract_spec,
-        candle_certified_load_spec(
-            engine_id,
-            settings,
-            &shared_contract_spec,
-            &request.model_manifest_entry,
-            tier,
-        ),
+        artifact_is_certified,
         &request.model_manifest_entry,
         tier,
         shared_request_mode,
@@ -10136,8 +10391,8 @@ async fn generate_candle_stream(
         hires_fix.is_some(),
         false,
         budget,
-        needed,
-        adapter_resident_bytes,
+        shared_predicted_peak_gb,
+        shared_runtime_overlay_bytes,
         if reclaimable_gb > 0.0 {
             gen_core::MemoryCacheState::Warm
         } else {
