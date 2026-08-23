@@ -1515,6 +1515,82 @@ pub(super) fn video_admission_overlay(input: &VideoGenInput) -> Option<String> {
                 strength.to_bits()
             ));
         }
+        // SC-20776: native LTX replacement has a different physical carrier than I2V. Its exact
+        // `ControlClip + MultiReference` request becomes a deterministic ordered contact sheet at
+        // frame zero plus masked IC-LoRA clip tokens. Include every observable request fact in the
+        // admission key so it cannot borrow an I2V/clip curve or silently erase a reference order.
+        let controls = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| match conditioning {
+                Conditioning::ControlClip {
+                    frames,
+                    mask,
+                    masking_strength,
+                    start_frame,
+                    mode,
+                } => Some((
+                    frames.as_slice(),
+                    mask.as_slice(),
+                    *masking_strength,
+                    *start_frame,
+                    mode,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let multi_references = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| match conditioning {
+                Conditioning::MultiReference { images } => Some(images.as_slice()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if let ([(frames, masks, masking_strength, start_frame, mode)], [references]) =
+            (controls.as_slice(), multi_references.as_slice())
+        {
+            if (1..=4).contains(&references.len())
+                && frames.len() == masks.len()
+                && *start_frame == 0
+            {
+                let reference_shapes = references
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, image)| format!("{ordinal}:{}x{}", image.width, image.height))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let control_shapes = frames
+                    .iter()
+                    .zip(masks.iter())
+                    .enumerate()
+                    .map(|(ordinal, (frame, mask))| {
+                        format!(
+                            "{ordinal}:{}x{}@{}x{}",
+                            frame.width, frame.height, mask.width, mask.height
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let grid = match references.len() {
+                    1 => "1x1",
+                    2 => "2x1",
+                    3 | 4 => "2x2",
+                    _ => unreachable!("the cardinality guard is closed above"),
+                };
+                overlays.push(format!(
+                    "replace_person:control:frames:{}:shapes:{}:frame:0:mode:{mode:?}:strength:{:08x}:references:ordered_grid:{}:count:{}:shapes:{}:composite:{}x{}",
+                    frames.len(),
+                    control_shapes,
+                    masking_strength.to_bits(),
+                    grid,
+                    references.len(),
+                    reference_shapes,
+                    input.width,
+                    input.height,
+                ));
+            }
+        }
         let keyframes = input
             .conditioning
             .iter()

@@ -210,6 +210,45 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         Some("enhancer:uncensored"),
         "reordered bridge clips must not mint the ordered endpoint receipt"
     );
+
+    input.conditioning = vec![
+        Conditioning::ControlClip {
+            frames: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            mask: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            masking_strength: 0.75,
+            start_frame: 0,
+            mode: ReplacementMode::FaceOnly,
+        },
+        Conditioning::MultiReference {
+            images: vec![
+                gen_core::Image {
+                    width: 256,
+                    height: 512,
+                    pixels: Vec::new(),
+                },
+                gen_core::Image {
+                    width: 512,
+                    height: 256,
+                    pixels: Vec::new(),
+                },
+            ],
+        },
+    ];
+    input.width = 704;
+    input.height = 512;
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored+replace_person:control:frames:1:shapes:0:768x512@768x512:frame:0:mode:FaceOnly:strength:3f400000:references:ordered_grid:2x1:count:2:shapes:0:256x512,1:512x256:composite:704x512"),
+        "LTX replacement must seal the ordered control/reference carrier rather than borrowing I2V evidence"
+    );
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
@@ -6975,6 +7014,63 @@ fn vace_conditioning_builds_control_clip_plus_references() {
         vec![frame(1)],
         vec![mask(), mask()],
         Vec::new(),
+        1.0,
+        ReplacementMode::FaceOnly,
+    )
+    .is_err());
+}
+
+/// SC-20776: LTX has one frame-zero IC-LoRA image-latent carrier, so replacement is explicitly a
+/// ControlClip plus one ordered `MultiReference` item. This guards both MLX and Candle dispatch,
+/// which share this worker resolver; no reference can be dropped or reinterpreted as ordinary I2V.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ltx_replace_conditioning_is_one_control_plus_ordered_multi_reference() {
+    let frame = |value: u8| Image {
+        width: 2,
+        height: 2,
+        pixels: vec![value; 12],
+    };
+    let mask = || image::RgbImage::from_pixel(2, 2, image::Rgb([255, 255, 255]));
+    for reference_count in 1..=4 {
+        let references = (0..reference_count)
+            .map(|ordinal| frame(30 + ordinal as u8))
+            .collect::<Vec<_>>();
+        let conditioning = build_ltx_replace_conditioning(
+            vec![frame(10), frame(20)],
+            vec![mask(), mask()],
+            references,
+            0.75,
+            ReplacementMode::FullPersonKeepOutfit,
+        )
+        .expect("closed 1–4 LTX replace surface builds");
+        assert_eq!(conditioning.len(), 2);
+        assert!(matches!(conditioning[0], Conditioning::ControlClip { .. }));
+        let Conditioning::MultiReference { images } = &conditioning[1] else {
+            panic!("the second LTX carrier must preserve MultiReference ordering");
+        };
+        assert_eq!(images.len(), reference_count);
+        assert_eq!(images[0].pixels[0], 30);
+        assert_eq!(
+            images[reference_count - 1].pixels[0],
+            30 + reference_count as u8 - 1
+        );
+    }
+    assert!(build_ltx_replace_conditioning(
+        vec![frame(10)],
+        vec![mask()],
+        Vec::new(),
+        1.0,
+        ReplacementMode::FaceOnly,
+    )
+    .is_err());
+    assert!(build_ltx_replace_conditioning(
+        vec![frame(10)],
+        vec![mask()],
+        vec![frame(30); 5],
         1.0,
         ReplacementMode::FaceOnly,
     )

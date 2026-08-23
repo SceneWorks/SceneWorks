@@ -18440,8 +18440,8 @@
       },
       "ui": {
         "label": "LTX-2.3",
-        "description": "First-class short-shot video target for image-to-video and text-to-video.",
-        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+        "description": "First-class short-shot video target for image-to-video, text-to-video, and masked character replacement with one to four ordered identity references.",
+        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
         "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow.",
         "promptGuide": {
           "title": "LTX-2.3 Prompt Guide",
@@ -18590,8 +18590,8 @@
       },
       "ui": {
         "label": "LTX-2.3 10Eros",
-        "description": "Community LTX-2.3 merge tuned for image-to-video. Same family as LTX-2.3 — uses LTX-video LoRAs. Responds to detailed, command-style prompts.",
-        "recommendedFor": ["image_to_video", "text_to_video"],
+        "description": "Community LTX-2.3 merge tuned for image-to-video and masked character replacement with one to four ordered identity references. Same family as LTX-2.3 — uses LTX-video LoRAs. Responds to detailed, command-style prompts.",
+        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
         "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow.",
         "promptGuide": {
           "title": "LTX-2.3 10Eros Prompt Guide",
