@@ -1260,6 +1260,7 @@
         "modality": "video",
         "conditioning": [
           "reference",
+          "multiReference",
           "keyframe",
           "videoClip",
           "controlClip"
@@ -1548,7 +1549,6 @@
         "conditioning": [
           "reference",
           "mask",
-          "multiReference",
           "controlClip"
         ],
         "supports_lora": true,

@@ -2009,19 +2009,39 @@ fn sana_manifest_entry_gates_correctly() {
         "sana defaults to the packed q4 tier"
     );
     // Per-tier variants present (q4 default + q8 + bf16), each its own installable artifact (sc-8508).
-    let variants: Vec<&str> = entry
+    let downloads = entry
         .get("downloads")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.get("variant").and_then(Value::as_str))
-                .collect()
+        .expect("sana downloads");
+    let variants: Vec<&str> = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"]
+                .as_array()
+                .is_some_and(|platforms| platforms.iter().any(|platform| platform == "macos"))
         })
-        .unwrap_or_default();
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect();
     assert_eq!(
         variants,
         vec!["q4", "q8", "bf16"],
         "sana ships the q4/q8/bf16 tier matrix"
+    );
+    let candle_variants = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"].as_array().is_some_and(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform == "windows" || platform == "linux")
+            })
+        })
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candle_variants,
+        vec!["bf16"],
+        "sana Candle ships only the immutable dense physical tier"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
@@ -2105,19 +2125,39 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some(4),
         "sana-sprint defaults to the packed q4 tier"
     );
-    let variants: Vec<&str> = entry
+    let downloads = entry
         .get("downloads")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.get("variant").and_then(Value::as_str))
-                .collect()
+        .expect("sana-sprint downloads");
+    let variants: Vec<&str> = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"]
+                .as_array()
+                .is_some_and(|platforms| platforms.iter().any(|platform| platform == "macos"))
         })
-        .unwrap_or_default();
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect();
     assert_eq!(
         variants,
         vec!["q4", "q8", "bf16"],
         "sana-sprint ships the q4/q8/bf16 tier matrix"
+    );
+    let candle_variants = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"].as_array().is_some_and(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform == "windows" || platform == "linux")
+            })
+        })
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candle_variants,
+        vec!["bf16"],
+        "sana-sprint Candle ships only the immutable dense physical tier"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),

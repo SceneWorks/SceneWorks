@@ -319,10 +319,96 @@ async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResul
     .map_err(|error| task_join_error("frame decode task", error))?
 }
 
-/// The approved character reference images (≤4) for the replacement (Python
-/// `character_reference_images`): the selected look's `approvedReferenceIds`, else the
-/// character's approved `references`. Errors when none are readable (the torch
-/// `_validate_inputs` parity). The engine cover-fits each to the output size.
+/// One immutable character-reference receipt plus its decoded RGB identity image. Keeping the
+/// asset id beside the pixels lets provider-specific paths record exactly which approved identities
+/// were physically conditioned, rather than reporting only an untraceable count.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) struct CharacterReferenceReceipt {
+    pub(super) asset_id: String,
+    pub(super) image: Image,
+}
+
+/// The approved character reference receipts (1–4) for replacement: the selected look's
+/// `approvedReferenceIds`, else the character's approved `references`. Every selected identity is
+/// mandatory: dropping an unreadable item or silently truncating the ordered list changes the model
+/// input while retaining a misleading successful replacement receipt.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn resolve_character_reference_receipts(
+    settings: &Settings,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<CharacterReferenceReceipt>> {
+    let character_id = request.character_id.as_deref().ok_or_else(|| {
+        WorkerError::InvalidPayload("replace_person requires a character (characterId).".to_owned())
+    })?;
+    let character = CharacterStore::new(&settings.data_dir, project_path.to_path_buf())
+        .get_character(&request.project_id, character_id)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("character {character_id}: {error}"))
+        })?;
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(look_id) = request.character_look_id.as_deref() {
+        if let Some(looks) = character.get("looks").and_then(Value::as_array) {
+            for look in looks {
+                if look.get("id").and_then(Value::as_str) == Some(look_id) {
+                    if let Some(approved) =
+                        look.get("approvedReferenceIds").and_then(Value::as_array)
+                    {
+                        ids.extend(approved.iter().filter_map(Value::as_str).map(str::to_owned));
+                    }
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Some(references) = character.get("references").and_then(Value::as_array) {
+            for reference in references {
+                if reference
+                    .get("approved")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if let Some(asset_id) = reference.get("assetId").and_then(Value::as_str) {
+                        ids.push(asset_id.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let attempted: Vec<String> = ids.into_iter().filter(|id| !id.is_empty()).collect();
+    if !(1..=4).contains(&attempted.len()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "replace_person requires 1–4 approved ordered character reference images (got {})",
+            attempted.len()
+        )));
+    }
+    let mut references = Vec::with_capacity(attempted.len());
+    for asset_id in attempted {
+        let image = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            &asset_id,
+            project_path,
+        )
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "replace_person: approved character reference {asset_id} is unreadable: {error}"
+            ))
+        })?;
+        references.push(CharacterReferenceReceipt { asset_id, image });
+    }
+    Ok(references)
+}
+
+/// Legacy image-only resolver for existing Wan/SCAIL paths. Keep its historical best-effort
+/// semantics isolated here; LTX replacement must use [`resolve_character_reference_receipts`],
+/// whose immutable carrier cannot truthfully omit an approved identity.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -369,11 +455,6 @@ pub(super) fn resolve_character_references(
             }
         }
     }
-    // The approved references we will attempt (capped at the engine's 4-reference contract). A
-    // reference that fails to load must NOT be dropped silently: a corrupted approved reference
-    // otherwise quietly weakens identity conditioning with zero signal (sc-8922, F-120). Warn per
-    // skipped reference (asset id + error) and, when some — but not all — loaded, emit a summary the
-    // operator can compare against the approved count.
     let attempted: Vec<String> = ids
         .into_iter()
         .filter(|id| !id.is_empty())

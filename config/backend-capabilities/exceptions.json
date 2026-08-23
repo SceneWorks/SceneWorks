@@ -301,6 +301,7 @@
       "cells": [
         "models/ltx_2_3_eros/conditioningShape/controlClip",
         "models/ltx_2_3_eros/conditioningShape/keyframe",
+        "models/ltx_2_3_eros/conditioningShape/multiReference",
         "models/ltx_2_3_eros/conditioningShape/reference",
         "models/ltx_2_3_eros/conditioningShape/videoClip"
       ]

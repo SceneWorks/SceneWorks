@@ -954,14 +954,14 @@ def test_measured_memory_rows_declare_their_workload_geometry():
             candle_rows.append((model["id"], candle))
 
     assert len(mlx_rows) == 16
-    assert len(candle_rows) == 36
+    assert len(candle_rows) == 44
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
     assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
 
     measured_rows = [row for row in candle_rows if row[1]["measured"]]
     unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
     assert len(measured_rows) == 24
-    assert len(unmeasured_rows) == 12
+    assert len(unmeasured_rows) == 20
 
     measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
     assert all(

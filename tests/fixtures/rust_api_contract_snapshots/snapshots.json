@@ -1657,6 +1657,235 @@
           "modelManifestEntries": [
             {
               "adapter": "sdxl_diffusers",
+              "candle": {
+                "measured": false,
+                "memoryStrategyCapabilities": {
+                  "bounded_attention": {
+                    "overlays": [
+                      "none",
+                      "lora",
+                      "control"
+                    ],
+                    "parameters": {
+                      "attentionChunkSize": 67108864
+                    }
+                  },
+                  "bounded_decode": {
+                    "overlays": [
+                      "none",
+                      "lora",
+                      "control"
+                    ],
+                    "parameters": {
+                      "decodeOverlap": 64,
+                      "decodeTileEdge": 512
+                    }
+                  }
+                },
+                "memoryStrategyContract": {
+                  "abi": 1,
+                  "implementations": [
+                    {
+                      "engagedRungs": [
+                        "resident"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "pid",
+                        "lora_pid",
+                        "single_control",
+                        "lora_single_control",
+                        "ip_adapter",
+                        "lora_ip_adapter",
+                        "ip_adapter_pid",
+                        "lora_ip_adapter_pid"
+                      ],
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_to_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control",
+                        "identity"
+                      ],
+                      "parameterRanges": {},
+                      "parameters": {},
+                      "rung": "resident",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "staged_residency"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "single_control",
+                        "lora_single_control"
+                      ],
+                      "modes": [
+                        "text_to_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control"
+                      ],
+                      "parameterRanges": {},
+                      "parameters": {},
+                      "rung": "staged_residency",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "bounded_decode"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "single_control",
+                        "lora_single_control",
+                        "ip_adapter",
+                        "lora_ip_adapter"
+                      ],
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_to_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control",
+                        "identity"
+                      ],
+                      "parameterRanges": {
+                        "decodeOverlaps": [
+                          64
+                        ],
+                        "decodeTileEdges": [
+                          512
+                        ]
+                      },
+                      "parameters": {
+                        "decodeOverlap": 64,
+                        "decodeTileEdge": 512
+                      },
+                      "rung": "bounded_decode",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "bounded_decode",
+                        "bounded_attention"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "single_control",
+                        "lora_single_control",
+                        "ip_adapter",
+                        "lora_ip_adapter"
+                      ],
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_to_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control",
+                        "identity"
+                      ],
+                      "parameterRanges": {
+                        "attentionChunkSizes": [
+                          67108864
+                        ],
+                        "decodeOverlaps": [
+                          64
+                        ],
+                        "decodeTileEdges": [
+                          512
+                        ]
+                      },
+                      "parameters": {
+                        "attentionChunkSize": 67108864,
+                        "decodeOverlap": 64,
+                        "decodeTileEdge": 512
+                      },
+                      "rung": "bounded_attention",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    }
+                  ],
+                  "provider": "sdxl"
+                },
+                "minMemoryGb": 12,
+                "sequentialPeakGb": {
+                  "bf16": 16,
+                  "q4": 8,
+                  "q8": 11
+                },
+                "supportsSequentialOffload": true,
+                "vramGbByTier": {
+                  "bf16": 24,
+                  "q4": 12,
+                  "q8": 16
+                },
+                "vramMeasuredPixels": 1048576
+              },
               "capabilities": [
                 "text_to_image",
                 "edit_image",

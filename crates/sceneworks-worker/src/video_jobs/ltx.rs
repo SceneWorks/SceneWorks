@@ -5,8 +5,9 @@ use super::prelude::*;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use super::vace::{
-    build_vace_conditioning, load_source_video_frames, replacement_mode_from,
-    replacement_status_value, resolve_character_references, FRAME_PAD_COLOR,
+    load_source_video_frames, replacement_mode_from, replacement_status_value,
+    resolve_character_reference_receipts, rgb_image_to_engine, CharacterReferenceReceipt,
+    FRAME_PAD_COLOR,
 };
 #[cfg(target_os = "macos")]
 use super::wan::{generate_video, VideoGenInput};
@@ -860,6 +861,7 @@ pub(super) fn resolve_ltx_conditioning(
     }
     match request.source_asset_id.as_deref() {
         Some(asset_id) => {
+            let strength = ltx_i2v_conditioning_strength(request)?;
             let image = load_reference_image(
                 &settings.data_dir,
                 &request.project_id,
@@ -878,13 +880,30 @@ pub(super) fn resolve_ltx_conditioning(
             )?;
             Ok(vec![Conditioning::Reference {
                 image,
-                strength: None,
+                strength: Some(strength),
             }])
         }
         None => Err(WorkerError::InvalidPayload(
             "image_to_video requires a source image (sourceAssetId).".to_owned(),
         )),
     }
+}
+
+/// The SC20772 conditioned memory cells are calibrated only for a fully pinned starting image.
+/// Keep the public advanced knob explicit: accepting another value and silently borrowing the
+/// 1.0 receipt would admit a different workload under the same evidence identity.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx_i2v_conditioning_strength(request: &VideoRequest) -> WorkerResult<f32> {
+    let strength = advanced::f32(&request.advanced, "imageConditioningStrength", 1.0);
+    if strength.to_bits() != 1.0f32.to_bits() {
+        return Err(WorkerError::InvalidPayload(
+            "LTX image_to_video memory coverage requires imageConditioningStrength 1.0.".to_owned(),
+        ));
+    }
+    Ok(strength)
 }
 
 /// Read an `advanced` boolean flag (JSON bool), default `false` (Python `bool(.get(k))`).
@@ -1247,11 +1266,127 @@ pub(super) async fn resolve_video_clip_conditioning(
     build_video_clip_conditioning(request, left_frames, right_frames)
 }
 
-/// Resolve native LTX/Eros person replacement into the provider's `ControlClip` plus character
-/// references. The selected IC-LoRA is mandatory because it teaches the keyframe-append tokens used
-/// by this mode; without it the source clip would be accepted but its replacement conditioning would
-/// be inert. This helper is backend-neutral and preserves the selected LTX model instead of silently
-/// substituting the unrelated Wan-VACE checkpoint.
+/// Build the closed native LTX replacement composite: one masked control clip plus one ordered 1–4
+/// character-reference carrier. This differs from Wan-VACE's repeated `Reference` layout: LTX
+/// physically composites all identities into its one frame-zero IC-LoRA latent, so repeated
+/// `Reference` values would be rejected (or worse, permit a later backend to ignore all but one).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn build_ltx_replace_conditioning(
+    frames: Vec<Image>,
+    masks: Vec<image::RgbImage>,
+    references: Vec<Image>,
+    masking_strength: f32,
+    mode: ReplacementMode,
+) -> WorkerResult<Vec<Conditioning>> {
+    if frames.len() != masks.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "replace_person: control frames ({}) and masks ({}) length mismatch",
+            frames.len(),
+            masks.len()
+        )));
+    }
+    if !(1..=4).contains(&references.len()) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LTX replace person requires 1–4 ordered character references (got {})",
+            references.len()
+        )));
+    }
+    Ok(vec![
+        Conditioning::ControlClip {
+            frames,
+            mask: masks.into_iter().map(rgb_image_to_engine).collect(),
+            masking_strength,
+            start_frame: 0,
+            mode,
+        },
+        Conditioning::MultiReference { images: references },
+    ])
+}
+
+/// Extend the generic replacement status with LTX's immutable physical carrier receipt: source
+/// asset ids and order, source image shapes, contact-sheet geometry, exact control geometry, and
+/// the fixed native schedule. This is the data the worker actually passes to both MLX and Candle.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn ltx_replace_status_value(
+    mut status: Value,
+    request: &VideoRequest,
+    frames: &[Image],
+    masks: &[image::RgbImage],
+    references: &[CharacterReferenceReceipt],
+) -> Value {
+    let grid = match references.len() {
+        1 => "1x1",
+        2 => "2x1",
+        3 | 4 => "2x2",
+        _ => "invalid",
+    };
+    let source = frames.first().map(|frame| {
+        json!({
+            "width": frame.width,
+            "height": frame.height,
+        })
+    });
+    let mask = masks.first().map(|image| {
+        json!({
+            "width": image.width(),
+            "height": image.height(),
+        })
+    });
+    let reference_receipts = references
+        .iter()
+        .enumerate()
+        .map(|(ordinal, reference)| {
+            json!({
+                "ordinal": ordinal,
+                "assetId": reference.asset_id,
+                "width": reference.image.width,
+                "height": reference.image.height,
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Some(object) = status.as_object_mut() {
+        object.insert(
+            "ltxReplaceConditioning".to_owned(),
+            json!({
+                "providerCarrier": "control_clip+ordered_multi_reference_grid",
+                "referenceGrid": grid,
+                "references": reference_receipts,
+                "control": {
+                    "frameCount": frames.len(),
+                    "maskCount": masks.len(),
+                    "sourceGeometry": source,
+                    "maskGeometry": mask,
+                    "startFrame": 0,
+                },
+                "requestGeometry": {
+                    "width": request.width,
+                    "height": request.height,
+                    "frames": ltx_frame_count(request.raw_frame_count()),
+                    "fps": request.fps,
+                },
+                "nativeSchedule": {
+                    "steps": 8,
+                    "sampler": "euler",
+                    "scheduler": Value::Null,
+                    "cfg": Value::Null,
+                },
+            }),
+        );
+    }
+    status
+}
+
+/// Resolve native LTX/Eros person replacement into the provider's `ControlClip` plus ordered
+/// `MultiReference` carrier. The selected IC-LoRA is mandatory because it teaches the
+/// keyframe-append tokens used by this mode; without it the source clip would be accepted but its
+/// replacement conditioning would be inert. This helper is backend-neutral and preserves the
+/// selected LTX model instead of silently substituting the unrelated Wan-VACE checkpoint.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1290,25 +1425,35 @@ pub(super) async fn resolve_ltx_replace_conditioning(
         request.height,
         frames.len(),
     )?;
-    let references = resolve_character_references(settings, request, project_path)?;
+    let references = resolve_character_reference_receipts(settings, request, project_path)?;
     let reference_count = references.len();
     let frame_total = frames.len();
     let masking_strength = advanced::f32(&request.advanced, "maskingStrength", 1.0);
-    let conditioning = build_vace_conditioning(
-        frames,
-        masks,
-        references,
+    let reference_images = references
+        .iter()
+        .map(|reference| reference.image.clone())
+        .collect();
+    let conditioning = build_ltx_replace_conditioning(
+        frames.clone(),
+        masks.clone(),
+        reference_images,
         masking_strength,
         replacement_mode_from(&request.replacement_mode),
     )?;
-    let status = replacement_status_value(
-        &track,
-        track_id,
-        mask_mode,
-        masking_strength,
-        reference_count,
-        frame_total,
-        adapter,
+    let status = ltx_replace_status_value(
+        replacement_status_value(
+            &track,
+            track_id,
+            mask_mode,
+            masking_strength,
+            reference_count,
+            frame_total,
+            adapter,
+        ),
+        request,
+        &frames,
+        &masks,
+        &references,
     );
     Ok((conditioning, status))
 }

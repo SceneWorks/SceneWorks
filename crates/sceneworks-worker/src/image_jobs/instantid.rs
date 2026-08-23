@@ -994,7 +994,7 @@ async fn generate_instantid_stream(
             // native-VAE generation. Both face backends expose the same `with_pid(&PidWeights)` seam, so
             // one arm serves the mlx and candle lanes.
             #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
-            let model = match &pid_weights {
+            let mut model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
                     WorkerError::Engine(format!("InstantID PiD decoder load failed: {error}"))
                 })?,

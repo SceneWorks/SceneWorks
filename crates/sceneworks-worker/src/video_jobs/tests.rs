@@ -60,14 +60,492 @@ fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
 #[test]
 fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     let mut input = VideoGenInput::default();
-    assert_eq!(video_admission_overlay(&input), None);
+    assert_eq!(video_admission_overlay(&input, None).unwrap(), None);
 
     input.video_mode = Some("no_audio".to_owned());
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some("provider_video_mode:no_audio"),
         "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
     );
+
+    input.enhance_prompt = true;
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:standard+provider_video_mode:no_audio"),
+        "standard prompt enhancement and provider mode remain exact identity axes"
+    );
+
+    input.use_uncensored_enhancer = true;
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored+provider_video_mode:no_audio"),
+        "uncensored enhancement must not borrow standard prompt-enhancement evidence"
+    );
+
+    input.video_mode = None;
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored"),
+        "removing the request-only mode must not erase the loaded enhancer axis"
+    );
+
+    input.engine_id = "ltx_2_3";
+    input.conditioning = vec![Conditioning::Reference {
+        image: gen_core::Image {
+            width: 768,
+            height: 512,
+            pixels: Vec::new(),
+        },
+        strength: Some(1.0),
+    }];
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored+reference:image:768x512:strength:3f800000"),
+        "the fitted LTX image and exact strength bits must reach the evidence identity"
+    );
+
+    input.conditioning.push(Conditioning::Reference {
+        image: gen_core::Image {
+            width: 768,
+            height: 512,
+            pixels: Vec::new(),
+        },
+        strength: Some(1.0),
+    });
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored"),
+        "a multi-reference request must not mint the single-reference receipt"
+    );
+
+    input.conditioning = vec![
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: -1,
+            strength: 1.0,
+        },
+    ];
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some(
+            "enhancer:uncensored+keyframe:first:image:768x512:frame:0:strength:3f800000+keyframe:last:image:768x512:frame:-1:strength:3f800000"
+        ),
+        "the ordered first/last carrier, shape, latent anchors, and independent strengths must reach the evidence identity"
+    );
+
+    input.conditioning.swap(0, 1);
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored"),
+        "reordered keyframes must not mint the ordered first/last receipt"
+    );
+
+    input.conditioning = vec![Conditioning::VideoClip {
+        frames: vec![
+            gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new()
+            };
+            153
+        ],
+        frame_idx: 0,
+        strength: 1.0,
+    }];
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000"),
+        "the one IC-LoRA clip's source-frame count, image shape, appended-token anchor, and strength must be sealed"
+    );
+
+    input.conditioning = vec![
+        Conditioning::VideoClip {
+            frames: vec![
+                gen_core::Image {
+                    width: 768,
+                    height: 512,
+                    pixels: Vec::new(),
+                };
+                153
+            ],
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        Conditioning::VideoClip {
+            frames: vec![
+                gen_core::Image {
+                    width: 768,
+                    height: 512,
+                    pixels: Vec::new(),
+                };
+                153
+            ],
+            frame_idx: -1,
+            strength: 1.0,
+        },
+    ];
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000+clip:append:frames:153:image:768x512:frame:-1:strength:3f800000"),
+        "the bridge must preserve both ordered endpoint clips, source-frame domains, latent anchors, and strengths"
+    );
+
+    input.conditioning.swap(0, 1);
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored"),
+        "reordered bridge clips must not mint the ordered endpoint receipt"
+    );
+    assert_eq!(
+        video_admission_reference_count("ltx_2_3", "video_bridge", &input.conditioning),
+        0,
+        "IC-LoRA clip endpoints are temporal carriers, never image-reference count evidence"
+    );
+    assert_eq!(
+        video_admission_reference_shape("ltx_2_3", "video_bridge", &input.conditioning),
+        "none",
+        "bridge must retain its temporal receipt identity after cumulative Bernini integration"
+    );
+
+    input.conditioning = vec![
+        Conditioning::ControlClip {
+            frames: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            mask: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            masking_strength: 0.75,
+            start_frame: 0,
+            mode: ReplacementMode::FaceOnly,
+        },
+        Conditioning::MultiReference {
+            images: vec![
+                gen_core::Image {
+                    width: 256,
+                    height: 512,
+                    pixels: Vec::new(),
+                },
+                gen_core::Image {
+                    width: 512,
+                    height: 256,
+                    pixels: Vec::new(),
+                },
+            ],
+        },
+    ];
+    input.width = 704;
+    input.height = 512;
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("enhancer:uncensored+replace_person:control:frames:1:shapes:0:768x512@768x512:frame:0:mode:FaceOnly:strength:3f400000:references:ordered_grid:2x1:count:2:shapes:0:256x512,1:512x256:composite:704x512"),
+        "LTX replacement must seal the ordered control/reference carrier rather than borrowing I2V evidence"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_adapter_overlay_records_exact_artifact_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter_path = root.path().join("style.safetensors");
+    std::fs::write(&adapter_path, b"weights-free-adapter").unwrap();
+    let input = VideoGenInput {
+        engine_id: "bernini",
+        adapters: vec![AdapterSpec::new(
+            adapter_path.clone(),
+            0.75,
+            gen_core::AdapterKind::Lora,
+        )],
+        ..Default::default()
+    };
+
+    const RECEIPT: &str = "adapters:[artifact=safetensors;path_hex=2f746d702f7374796c652e7361666574656e736f7273;digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;kind=Lora;scale_bits=3f400000;pass_scale_bits=none;expert=None;verified_bytes=20;stable=true]";
+    let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+        "bernini",
+        gen_core::MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: false,
+            block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+        phases: vec![gen_core::MemoryPhase::Denoise],
+        variables: vec![gen_core::MemoryFormulaVariable::OverlayBytes],
+        resident_components: vec![gen_core::MemoryResidentComponent {
+            id: RECEIPT.to_owned(),
+            kind: gen_core::MemoryComponentKind::AdapterStack,
+            resident_bytes: 20,
+            bounded_by: None,
+            residency: gen_core::MemoryComponentResidency::WholeRender,
+        }],
+    };
+
+    assert_eq!(
+        video_admission_overlay(&input, Some(&contract))
+            .unwrap()
+            .as_deref(),
+        Some(crate::video_admission::bernini_adapter_receipt_axis(RECEIPT).as_str()),
+        "the worker must bind the opaque request axis to the provider's load-exact receipt"
+    );
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("bernini-adapter-unverified"),
+        "missing provider receipt must fail closed, never trigger a second filesystem reconstruction"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[clip]),
+        "video"
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[]),
+        "none"
+    );
+    assert_eq!(
+        video_admission_reference_shape(
+            "bernini",
+            "video_to_video",
+            &[Conditioning::Reference {
+                image: Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0; 12],
+                },
+                strength: Some(1.0),
+            }],
+        ),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_admission_flattens_the_single_multi_reference_carrier() {
+    let images = vec![
+        Image {
+            width: 640,
+            height: 360,
+            pixels: vec![11; 640 * 360 * 3],
+        },
+        Image {
+            width: 360,
+            height: 640,
+            pixels: vec![29; 360 * 640 * 3],
+        },
+    ];
+    let conditioning = vec![Conditioning::MultiReference { images }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &conditioning),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &conditioning),
+        2
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
+    let image = Image {
+        width: 2,
+        height: 2,
+        pixels: vec![1; 12],
+    };
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![2; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let one_clip_one_image = vec![
+        clip,
+        Conditioning::MultiReference {
+            images: vec![image.clone()],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &one_clip_one_image),
+        "video+multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_video_to_video", &one_clip_one_image),
+        2
+    );
+
+    let two_images = vec![Conditioning::MultiReference {
+        images: vec![image.clone(), image],
+    }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &two_images),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &two_images),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &two_images),
+        "other",
+        "zero clips plus two images must not borrow the clip-plus-image surface"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let clips = vec![clip(1), clip(2)];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &clips),
+        "multi_video"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "multi_video_to_video", &clips),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &[clip(1)]),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_ads2v_admission_keeps_two_clip_roles_and_flattened_images() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let conditioning = vec![
+        clip(1),
+        clip(2),
+        Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![3; 12],
+                },
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![4; 12],
+                },
+            ],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &conditioning),
+        "ads2v"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "ads2v", &conditioning),
+        4
+    );
+    let mut crossed = conditioning.clone();
+    crossed.swap(1, 2);
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &crossed),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
+    for reference_asset_ids in [
+        Vec::<&str>::new(),
+        vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        vec!["same", "same"],
+    ] {
+        let request = request(serde_json::json!({
+            "projectId": "p",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "ordered subjects",
+            "referenceAssetIds": reference_asset_ids,
+        }));
+        assert!(validate_r2v_reference_ids(&request).is_err());
+    }
+
+    let exact = request(serde_json::json!({
+        "projectId": "p",
+        "model": "bernini",
+        "mode": "reference_to_video",
+        "prompt": "ordered subjects",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"],
+    }));
+    validate_r2v_reference_ids(&exact).expect("one ordered wrapper may contain eight distinct ids");
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
@@ -4193,8 +4671,9 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         },
     );
 
-    // Weights absent (empty env override, empty data dir) ⇒ the route falls to Stub, BUT the Stub
-    // arm's fail-loud gate must refuse rather than hand back a procedural fake video.
+    // Weights absent ⇒ the route falls to Stub, BUT the Stub arm's fail-loud gate must refuse
+    // rather than hand back a procedural fake video. Isolate every HF cache variable so a developer's
+    // real downloaded Krea tier cannot turn this absence fixture into an available route.
     let empty_guard = tempfile::Builder::new()
         .prefix("krea_empty_")
         .tempdir()
@@ -4204,18 +4683,26 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         data_dir: empty.to_path_buf(),
         ..Settings::from_env()
     };
-    temp_env_var("SCENEWORKS_MLX_KREA_REALTIME_DIR", "", || {
-        assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
-        let err = ensure_video_engine_weights(&req, &bare)
-            .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
-        let WorkerError::InvalidPayload(message) = err else {
-            panic!("expected an actionable InvalidPayload");
-        };
-        assert!(
-            message.contains("krea_realtime_14b") && message.contains("Model Manager"),
-            "the error must name the model and tell the user what to do: {message}"
-        );
-    });
+    temp_env_vars(
+        &[
+            ("SCENEWORKS_MLX_KREA_REALTIME_DIR", ""),
+            ("HF_HUB_CACHE", empty.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ],
+        || {
+            assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
+            let err = ensure_video_engine_weights(&req, &bare)
+                .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
+            let WorkerError::InvalidPayload(message) = err else {
+                panic!("expected an actionable InvalidPayload");
+            };
+            assert!(
+                message.contains("krea_realtime_14b") && message.contains("Model Manager"),
+                "the error must name the model and tell the user what to do: {message}"
+            );
+        },
+    );
 }
 
 /// The caller-side mapping pin: drives `generate_krea_realtime_using` end to end (through the
@@ -4712,7 +5199,17 @@ fn write_complete_krea_tier(root: &Path, tier: &str) {
     for file in files {
         let path = root.join(tier).join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"x").unwrap();
+        let contents: &[u8] = if file == &"config.json" {
+            match tier {
+                "q4" => br#"{"quantization":{"bits":4,"group_size":64}}"#,
+                "q8" => br#"{"quantization":{"bits":8,"group_size":64}}"#,
+                "bf16" => b"{}",
+                _ => unreachable!("the tier file table only exposes published tiers"),
+            }
+        } else {
+            b"x"
+        };
+        std::fs::write(path, contents).unwrap();
     }
 }
 
@@ -11694,6 +12191,36 @@ fn advanced_numeric_helpers_parse_flf_keyframe_knobs() {
         1.0
     );
     assert_eq!(advanced::i32(&bare.advanced, "imageFrameIndex", 0), 0);
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ltx_i2v_strength_is_fixed_to_the_calibrated_identity() {
+    let defaulted = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+        "mode": "image_to_video"
+    }));
+    assert_eq!(ltx_i2v_conditioning_strength(&defaulted).unwrap(), 1.0);
+
+    let explicit = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+        "mode": "image_to_video", "advanced": { "imageConditioningStrength": 1.0 }
+    }));
+    assert_eq!(ltx_i2v_conditioning_strength(&explicit).unwrap(), 1.0);
+
+    for value in [json!(0.8), json!("0.8"), json!(0.0)] {
+        let crossed = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "mode": "image_to_video", "advanced": { "imageConditioningStrength": value }
+        }));
+        let error = ltx_i2v_conditioning_strength(&crossed)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires imageConditioningStrength 1.0"));
+    }
 }
 
 /// `resolve_keyframe_conditioning` fails clearly when an FLF source/last-frame asset id is

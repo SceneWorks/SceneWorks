@@ -63,9 +63,144 @@ use gen_core::Image;
 use runtime_cuda::media::candle_core::{DType, Device, Tensor};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda::providers::sensenova::{
-    load_understanding, smart_resize, tensor_to_image, Sampler, T2iOptions, INTERLEAVE_RESOLUTIONS,
-    INTERLEAVE_SYSTEM_MESSAGE,
+    load_understanding_with_spec, smart_resize, tensor_to_image, Sampler, T2iOptions,
+    INTERLEAVE_RESOLUTIONS, INTERLEAVE_SYSTEM_MESSAGE,
 };
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Debug)]
+struct SenseNovaDirectAdmission {
+    model_id: String,
+    tier: &'static str,
+    total_gb: f64,
+    free_gb: f64,
+    predicted_peak_gb: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+struct SenseNovaDirectAdmission;
+
+#[cfg(target_os = "macos")]
+async fn sensenova_direct_admission(
+    _request: &ImageRequest,
+    _settings: &Settings,
+    _weights_dir: &Path,
+) -> WorkerResult<Option<SenseNovaDirectAdmission>> {
+    Ok(None)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn sensenova_direct_admission(
+    request: &ImageRequest,
+    settings: &Settings,
+    weights_dir: &Path,
+) -> WorkerResult<Option<SenseNovaDirectAdmission>> {
+    let tier = candle_resolved_tier_key(request, weights_dir, false);
+    let predicted_peak_gb =
+        crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier).ok_or_else(
+            || {
+                WorkerError::InvalidPayload(format!(
+                    "SenseNova-U1 has no Candle memory declaration for its resolved {tier} tier"
+                ))
+            },
+        )?;
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let (total_gb, free_gb) = budget
+        .map(|budget| (budget.total_gb, budget.free_gb))
+        .unwrap_or((predicted_peak_gb, predicted_peak_gb));
+    if predicted_peak_gb > free_gb {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SenseNova-U1 {tier} needs {predicted_peak_gb:.1} GB of free VRAM including headroom, but only {free_gb:.1} GB is available"
+        )));
+    }
+    Ok(Some(SenseNovaDirectAdmission {
+        model_id: if request.model.trim().is_empty() {
+            "sensenova_u1_8b".to_owned()
+        } else {
+            request.model.clone()
+        },
+        tier,
+        total_gb,
+        free_gb,
+        predicted_peak_gb,
+    }))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn sensenova_direct_spec(
+    weights_dir: &Path,
+    admission: &SenseNovaDirectAdmission,
+) -> gen_core::LoadSpec {
+    let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(weights_dir.to_path_buf()))
+        .with_resolved_route(admission.model_id.clone());
+    match admission.tier {
+        "q4" => spec.with_quant(gen_core::Quant::Q4),
+        "q8" => spec.with_quant(gen_core::Quant::Q8),
+        "bf16" => spec,
+        tier => unreachable!("validated SenseNova tier {tier}"),
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn sensenova_resident_context(
+    contract: &gen_core::MemoryProviderContract,
+    admission: &SenseNovaDirectAdmission,
+    mode: gen_core::MemoryMode,
+    width: u32,
+    height: u32,
+    batch: u32,
+    reference_count: u32,
+) -> gen_core::MemoryRunContext {
+    const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let bytes = |gb: f64| (gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64;
+    let calibration = contract.calibration.as_ref();
+    gen_core::MemoryRunContext {
+        selection: gen_core::MemorySelection {
+            strategy: gen_core::MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier: gen_core::MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: match admission.tier {
+                    "q4" => Some(gen_core::Quant::Q4),
+                    "q8" => Some(gen_core::Quant::Q8),
+                    "bf16" => None,
+                    tier => unreachable!("validated SenseNova tier {tier}"),
+                },
+                component_precision_floors: &[],
+            },
+        },
+        optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
+        calibration_abi: calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
+        calibration_fingerprint: calibration
+            .map_or_else(String::new, |item| item.fingerprint.clone()),
+        load_shape: contract.load_shape,
+        mode,
+        has_reference: reference_count > 0,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width,
+            height,
+            batch,
+            frames: 1,
+            reference_count,
+        },
+        overlay: None,
+        budget: gen_core::MemoryBudget {
+            total_bytes: bytes(admission.total_gb),
+            committed_bytes: bytes((admission.total_gb - admission.free_gb).max(0.0)),
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: bytes(admission.predicted_peak_gb),
+        cache_state: gen_core::MemoryCacheState::Cold,
+        evidence_revision: "manifest-resident-v1".to_owned(),
+    }
+}
 
 /// The adapter id recorded on the generated assets + the interleaved document, matching the
 /// per-backend `adapter_label` the image rows use: `mlx_sensenova` on macOS, `candle_sensenova` on
@@ -184,6 +319,7 @@ pub(crate) async fn run_vqa_job(
 
     let weights_dir = resolve_weights_dir(&request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
+    let direct_admission = sensenova_direct_admission(&request, settings, &weights_dir).await?;
 
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
@@ -254,6 +390,7 @@ pub(crate) async fn run_vqa_job(
                 max_image_pixels,
                 &job_id,
                 &task_cancel,
+                direct_admission,
             )
         }),
     )
@@ -282,6 +419,7 @@ pub(crate) async fn run_vqa_job(
 /// [`load_sensenova_model`] and calls `T2iModel::vqa`. The candle sibling below mirrors it exactly
 /// bar the engine-typed load/preprocess (sc-8839).
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn vqa_generate(
     weights_dir: &Path,
     source: &Image,
@@ -290,6 +428,7 @@ fn vqa_generate(
     max_image_pixels: i64,
     job_id: &str,
     cancel: &gen_core::CancelFlag,
+    _direct_admission: Option<SenseNovaDirectAdmission>,
 ) -> WorkerResult<String> {
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let (model, tokenizer) = load_sensenova_model(weights_dir)?;
@@ -313,10 +452,11 @@ fn vqa_generate(
 }
 
 /// Candle (Windows/CUDA) VQA seam — the off-Mac sibling of [`vqa_generate`] (sc-5501). Builds the
-/// dense `runtime_cuda::providers::sensenova::T2iModel` via `load_understanding` and calls `T2iModel::vqa`,
-/// retiring the Python torch `image_vqa` path off-Mac. Same shape as the macOS seam; only the
-/// engine-typed load/preprocess differ.
+/// the typed admitted SenseNova understanding runtime and calls `run_vqa`, retiring the Python
+/// torch `image_vqa` path off-Mac. Same shape as the macOS seam; only the engine-typed
+/// load/preprocess and request-scope lifecycle differ.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
 fn vqa_generate(
     weights_dir: &Path,
     source: &Image,
@@ -325,21 +465,55 @@ fn vqa_generate(
     max_image_pixels: i64,
     job_id: &str,
     cancel: &gen_core::CancelFlag,
+    direct_admission: Option<SenseNovaDirectAdmission>,
 ) -> WorkerResult<String> {
+    let direct_admission = direct_admission.ok_or_else(|| {
+        WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
+    })?;
+    let spec = sensenova_direct_spec(weights_dir, &direct_admission);
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let (model, tokenizer) = load_understanding(weights_dir)
+    let runtime = load_understanding_with_spec(&spec)
         .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
     // pixel budget (default 768², min 256²).
     let pixel_values = image_to_chw01_candle(source, 256 * 256, max_image_pixels)?;
-    let answer = model
-        .vqa(
-            &tokenizer,
+    let (height, width) = smart_resize(
+        source.height as i32,
+        source.width as i32,
+        32,
+        256 * 256,
+        max_image_pixels,
+    );
+    let context = sensenova_resident_context(
+        runtime.memory_strategy_contract(),
+        &direct_admission,
+        gen_core::MemoryMode::Other("vqa".to_owned()),
+        width as u32,
+        height as u32,
+        1,
+        1,
+    );
+    let request = gen_core::GenerationRequest {
+        prompt: question.to_owned(),
+        width: width as u32,
+        height: height as u32,
+        count: 1,
+        conditioning: vec![gen_core::Conditioning::Reference {
+            image: Image::default(),
+            strength: None,
+        }],
+        ..Default::default()
+    };
+    let answer = runtime
+        .run_vqa(
+            &context,
+            request,
             question,
             std::slice::from_ref(&pixel_values),
             max_new_tokens,
             Sampler::Greedy,
+            T2iOptions::default(),
             Some(cancel),
         )
         .map_err(|error| {
@@ -483,6 +657,7 @@ pub(crate) async fn run_interleave_job(
 
     let weights_dir = resolve_weights_dir(&request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
+    let direct_admission = sensenova_direct_admission(&request, settings, &weights_dir).await?;
 
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
@@ -585,6 +760,7 @@ pub(crate) async fn run_interleave_job(
                 &params,
                 &job_id,
                 &task_cancel,
+                direct_admission,
             )
         });
     // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
@@ -691,6 +867,7 @@ fn interleave_generate(
     params: &InterleaveParams,
     job_id: &str,
     cancel: &gen_core::CancelFlag,
+    _direct_admission: Option<SenseNovaDirectAdmission>,
 ) -> WorkerResult<(String, Vec<Image>)> {
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let (model, tokenizer) = load_sensenova_model(weights_dir)?;
@@ -752,11 +929,9 @@ fn interleave_generate(
 }
 
 /// Candle (Windows/CUDA) interleave seam — the off-Mac sibling of [`interleave_generate`] (sc-5501).
-/// Builds the dense `runtime_cuda::providers::sensenova::T2iModel` via `load_understanding` and calls
-/// `T2iModel::interleave_gen`, decoding each model-space tensor with `tensor_to_image`, retiring the
-/// Python torch `image_interleave` path off-Mac. The candle engine's `interleave_gen` takes
-/// `width`/`height` as `usize` and no `init_noises`/`on_progress` args — arg shapes intrinsic to the
-/// candle API, not shared with the MLX sibling (sc-8839).
+/// Builds the typed admitted SenseNova understanding runtime and calls `run_interleave`, decoding
+/// each model-space tensor with `tensor_to_image` and retiring the Python torch `image_interleave`
+/// path off-Mac.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn interleave_generate(
     weights_dir: &Path,
@@ -765,9 +940,14 @@ fn interleave_generate(
     params: &InterleaveParams,
     job_id: &str,
     cancel: &gen_core::CancelFlag,
+    direct_admission: Option<SenseNovaDirectAdmission>,
 ) -> WorkerResult<(String, Vec<Image>)> {
+    let direct_admission = direct_admission.ok_or_else(|| {
+        WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
+    })?;
+    let spec = sensenova_direct_spec(weights_dir, &direct_admission);
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let (model, tokenizer) = load_understanding(weights_dir)
+    let runtime = load_understanding_with_spec(&spec)
         .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
 
@@ -791,14 +971,43 @@ fn interleave_generate(
     };
     // The engine polls the threaded flag between text tokens / denoise steps, and the keepalive's
     // cancel poll trips it (sc-9123).
-    let out = model
-        .interleave_gen(
-            &tokenizer,
+    let reference_count = u32::try_from(input_arrays.len()).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave has too many source images".to_owned())
+    })?;
+    let count = u32::try_from(params.max_images).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave maxImages overflows".to_owned())
+    })?;
+    let context = sensenova_resident_context(
+        runtime.memory_strategy_contract(),
+        &direct_admission,
+        gen_core::MemoryMode::Other("interleave".to_owned()),
+        params.width as u32,
+        params.height as u32,
+        count,
+        reference_count,
+    );
+    let request = gen_core::GenerationRequest {
+        prompt: prompt.to_owned(),
+        width: params.width as u32,
+        height: params.height as u32,
+        count,
+        conditioning: (reference_count > 0)
+            .then(|| gen_core::Conditioning::MultiReference {
+                images: vec![Image::default(); reference_count as usize],
+            })
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = runtime
+        .run_interleave(
+            &context,
+            request,
             prompt,
             &input_arrays,
             params.width as usize,
             params.height as usize,
-            &opts,
+            opts,
             &params.system_message,
             params.max_new_tokens,
             params.max_images,

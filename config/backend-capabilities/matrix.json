@@ -4,8 +4,8 @@
   "summary": {
     "modelCount": 94,
     "importedFamilyCount": 3,
-    "cellCount": 918,
-    "mlxOnlyCellCount": 75,
+    "cellCount": 919,
+    "mlxOnlyCellCount": 76,
     "candleOnlyCellCount": 47,
     "exceptionCount": 18
   },
@@ -15,14 +15,14 @@
     "apiGeneration": "6fc635408be65424e4f35f7b651dfc6db276d3e83598cc7941435552f4074b6b",
     "apiValidation": "62c9d13220f46a19b59ca9a66b1d3e3af2b1b3afcc36d21b3311d4fe953162d1",
     "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
-    "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
+    "descriptorAudioFacts": "3de330df21dd3ae4d40e7b7ee1c4f09ca47f1ca63eb36d8b3872d4f5dbeb45a4",
     "descriptorCandleFacts": "e2b4448d0ee00cd84af113ee3367bc36b1d615f131779c0d53ce934bc47c7b90",
-    "descriptorCandleRuntime": "24888b0ebde298d11eb0961a86e3d701b1a242e5684717652964b8e9625a8d4e",
-    "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
-    "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
-    "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
-    "exceptionRegister": "cfb1370284c87c61b61a44d55ef645a8bde6c0cb3484969397ea4adb87039e54",
-    "manifest": "2b5c6f6925297454359499121646717c5f72bf723d1f6d7adfac579a9ba886a8",
+    "descriptorCandleRuntime": "dc5322ed353e0a4901b5f99159f7c1c298d79cb37099ef1d3e13ab5073b05aa0",
+    "descriptorMlxFacts": "25d70db45cd1fdb639c43c18beb776b29f932805667ad1e00bda9f66b9d71bd3",
+    "descriptorMlxRuntime": "84c822f6be536dc733916d79319e9a47f2aaf763f6babe37c4fcadd9a4c9cd7b",
+    "descriptorPreviewFacts": "7fb9b2cf592f4d9c87578791baecd181486febc6d0882bbf214416ef30d2b1ed",
+    "exceptionRegister": "6cae1b3f611bbc98dc1ac60392d275838ba095e6788032422f2115333db20aa8",
+    "manifest": "9fafad2bed71a4e90303836221823f82d72b23cbc1a92a9cbf4bb86ce6de731a",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
     "routerCandle": "307f4fe042e3e2ad0c09be1995d5a5cc5aecd08b1c3815e3ec4a3d7f2659c58d",
     "routerCatalog": "cc9cf0a18b0196b75841fdd4a1689be8c92a82df5336b43ffcb45e953b0ba51d",
@@ -48,26 +48,26 @@
     "workerDispatch": "38a455fc266032473665fa78f7f0fe346af4ed2fbe90c13929188de508040a11",
     "workerEngineTable": "03c64b8abe9c47424d601d4def9a255ef4c9da081098d972a23925bbce16e63b",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "bbd246c230adda5a9b5c39fae2d059720040e8d59b80593cfa3b55055682bb41",
+    "workerImageDispatch": "d13158c21581e1b5f9b9b72ff9c0c98736a9cf6591360ab0338057062ea1626a",
     "workerImageKreaImported": "0ce6e705505c9e75ead843201d2cb88f996962247b6f4b5d8e19bab326401d2c",
-    "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
+    "workerImageMageFinetuned": "84dad283dd6e8f747b95ebec700cb27a2f30d51488caddcaa887910fb61b50c5",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
-    "workerImagePulidCandle": "e03c33082e5e8c1762a166769ada64cc4942abc5c06a8c6990a5a8914ea205c2",
-    "workerImageQwenEditCandle": "13d893e31e031ca1fadafa1b93f284ef669f7154d4d3fdf954838fb00884ae2c",
-    "workerImageSdxlImported": "63e5f2891be1f3e8ea1dc77ef3837254ab188ccc63fdaf608de2d37499332efd",
+    "workerImagePulidCandle": "ef37dd61757bd6a35cf2da1255527d3a557ebc93ca91a7a9b49e69d687610359",
+    "workerImageQwenEditCandle": "1f77a1cfe7a3b6e9fe4f1114dfbdd6861db1a1a00ab0ac5df0b9da29626e8886",
+    "workerImageSdxlImported": "cd4966612f5f876c6b6de271e711622999ba43d46e5a1e778973e9fdb533e025",
     "workerTrainingDispatch": "479520bfabe44f79ff1e18617c442fadead941e2a8dac973b26ee1e54100c447",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
-    "workerVideoBernini": "352991ae26c8d842c9af1c37e9c6d3261ae6554debe5089744ef8e7972fd15ed",
+    "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "4527f7c7f42bac9d65daa2004f993657391ec3cdc872bac0bc9e2c012c93e949",
     "workerVideoDispatch": "ee8f351bde3163b092d37e3ad2c462e6960b5631c00ea02526e923d62d45fb03",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "974d5c3f5a4ef2a3316d8a39aef830a4482662bd7cd6920305a7a13cc7a147b7",
+    "workerVideoLtx": "ad1a8bf109ab85e4b6c3bcb0a5fd8782be7553d3a6b66a8b23a896779eeba0c5",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "49e53adb08ea322e674150e6f2d6eb7183e915d6df2b6eb3e5ffd3c6acaa24a2",
     "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
-    "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
-    "workerVideoWan": "7075c99b863098aaef4cc80e46e49cbee27545c294f412a978aa21e4bde385c8"
+    "workerVideoVace": "466e9a6a9fc26d3ee3bb185685278c1ac8b38b4325fd6e430c1447a397f52462",
+    "workerVideoWan": "7dc50f0379dd6c57374c63ab8e097d82d79a61370cc6a6d6d99e84505989ef8e"
   },
   "models": [
     {
@@ -2760,6 +2760,11 @@
           "candle": true
         },
         {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
           "capability": "reference",
           "mlx": true,
           "candle": true
@@ -2936,6 +2941,16 @@
         },
         {
           "capability": "keyframe",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "multiReference",
           "mlx": true,
           "candle": false,
           "parityObligation": {
@@ -4790,11 +4805,6 @@
         },
         {
           "capability": "mask",
-          "mlx": true,
-          "candle": true
-        },
-        {
-          "capability": "multiReference",
           "mlx": true,
           "candle": true
         },
@@ -7706,6 +7716,7 @@
       "cells": [
         "models/ltx_2_3_eros/conditioningShape/controlClip",
         "models/ltx_2_3_eros/conditioningShape/keyframe",
+        "models/ltx_2_3_eros/conditioningShape/multiReference",
         "models/ltx_2_3_eros/conditioningShape/reference",
         "models/ltx_2_3_eros/conditioningShape/videoClip"
       ]

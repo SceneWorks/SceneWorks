@@ -450,7 +450,7 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
     );
 
     let (clip_l, clip_bigg, vae) =
-        resolve_candle_detail_components(&request, &settings, &weights_dir, false)
+        resolve_candle_detail_components(&request, &settings, &weights_dir)
             .expect("dense base and all authoritative co-requisites resolve");
     assert!(matches!(clip_l, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
     assert!(matches!(clip_bigg, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
@@ -463,7 +463,7 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
         .expect("fallback tier resolves")
         .expect("q4 sibling remains installed");
     assert_eq!(tier_key_from_resolved_dir(&packed_fallback), Some("q4"));
-    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback, false)
+    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback)
         .expect_err("a packed sibling must not masquerade as the requested dense detail base");
     assert!(
         error
@@ -816,6 +816,8 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
         None,
         None,
         None,
+        None,
+        None,
         &PromptEnhance::default(),
         Some(HiresFixPlan {
             width: 8,
@@ -897,6 +899,8 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
         None,
         None,
         false,
+        None,
+        None,
         None,
         None,
         None,
@@ -1001,7 +1005,9 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         false,
         None,
         None,
+        None,
         context,
+        None,
         &PromptEnhance::default(),
         Some(hires_fix),
         gen_core::PreviewSink::default(),
@@ -1033,12 +1039,11 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
 /// that differs from the admitted geometry, and gen-core's shared safety check rejects a
 /// `has_reference` disagreeing with `reference_count > 0`.
 ///
-/// Hires fix runs TWO passes under ONE admission: the base-size first pass, then the upscaled
-/// refinement. Admission describes the upscaled pass (it sets the memory ceiling), so running the
-/// first pass under that same context declared the WRONG width/height (and, with no request
-/// reference, the wrong count) and refused the first pass of every hires render on a scope-adopting
-/// provider. This grades what each pass DECLARED against what that same pass SENT, so neither side
-/// can be restated wrongly without the test failing.
+/// Hires fix runs two pass-specific admissions: the base-size first pass, then the upscaled
+/// refinement. The final pass sets the memory ceiling, while the first retains its own
+/// mode/reference/geometry identity under the same conservative strategy. This grades what each
+/// pass declared against what that same pass sent, so neither side can be restated wrongly without
+/// the test failing.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1048,7 +1053,7 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     let generator = HiresProbeGenerator::new();
     let cancel = CancelFlag::new();
     // The admission the lane makes for a hires job: the FINAL pass's geometry.
-    let admitted = hires_memory_context(gen_core::MemorySelection {
+    let mut admitted = hires_memory_context(gen_core::MemorySelection {
         strategy: gen_core::MemoryStrategy::Resident,
         parameters: Default::default(),
         tier: gen_core::MemoryNumericTier {
@@ -1057,6 +1062,20 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
             component_precision_floors: &[],
         },
     });
+    admitted.mode = gen_core::MemoryMode::ImageToImage;
+    let mut first_pass = hires_first_pass_context(&admitted, 4, 4, 0);
+    first_pass.mode = gen_core::MemoryMode::TextToImage;
+    let final_memory = gen_core::GenerationMemory {
+        stage_residency: true,
+        tile_vae_decode: true,
+        decode_tile_edge: Some(512),
+        decode_overlap: Some(64),
+        ..Default::default()
+    };
+    let first_memory = gen_core::GenerationMemory {
+        stage_residency: true,
+        ..Default::default()
+    };
 
     generate_one_with_hires(
         &generator,
@@ -1080,8 +1099,10 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
         None,
         false,
         None,
-        None,
+        Some(final_memory),
+        Some(first_memory),
         Some(&admitted),
+        Some(&first_pass),
         &PromptEnhance::default(),
         Some(HiresFixPlan {
             width: 8,
@@ -1101,6 +1122,8 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     let requests = generator.requests.lock().unwrap();
     let contexts = generator.contexts.lock().unwrap();
     assert_eq!(requests.len(), 2, "hires fix runs exactly two passes");
+    assert_eq!(requests[0].memory, Some(first_memory));
+    assert_eq!(requests[1].memory, Some(final_memory));
     assert_eq!(
         contexts.len(),
         requests.len(),
@@ -1140,6 +1163,38 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     }
     // The final pass is the one admission was made for, and it is unchanged.
     assert_eq!(contexts[1].geometry, admitted.geometry);
+    assert_eq!(contexts[0].mode, gen_core::MemoryMode::TextToImage);
+    assert_eq!(contexts[1].mode, gen_core::MemoryMode::ImageToImage);
+}
+
+#[test]
+fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() {
+    let source = include_str!("base.rs");
+    let telemetry = source
+        .split_once("let passes = match hires_first_pass_memory_context.as_ref()")
+        .expect("Ideogram per-pass telemetry")
+        .1
+        .split_once("} else {")
+        .expect("end of Ideogram telemetry branch")
+        .0;
+    for required in [
+        "hires_first",
+        "hires_final",
+        "passIdentity",
+        "actualTier",
+        "physicalReceipt",
+        "referenceCount",
+        "usePid",
+        "overlay",
+        "strategy",
+        "physicalFloor",
+        "evidenceRevision",
+    ] {
+        assert!(
+            telemetry.contains(required),
+            "Ideogram telemetry must bind {required}"
+        );
+    }
 }
 
 /// Production-seam regression for the normal imported-Krea lane. This invokes the exact driver
@@ -6472,7 +6527,7 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
     let model = InstantId::load(&paths).expect("InstantID load");
     let scrfd = Weights::from_file(&scrfd_path).expect("SCRFD weights");
     let arcface = Weights::from_file(&arcface_path).expect("ArcFace weights");
-    let model = model.with_face(&scrfd, &arcface).expect("face stack");
+    let mut model = model.with_face(&scrfd, &arcface).expect("face stack");
 
     // Reference identity embedding (frontal source).
     let ref_face = model
@@ -16672,6 +16727,151 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
     );
 }
 
+/// SC-20790's Candle modules are cfg-gated off on macOS, so keep a native source-contract guard for
+/// the production ordering that the Linux/CUDA build also type-checks. The authoritative selector
+/// must run before either provider dispatches to a loader, and the selected context must reach both
+/// load and generation rather than remaining telemetry-only metadata.
+#[test]
+fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
+    let ip = include_str!("kolors_ipadapter.rs");
+    let control = include_str!("kolors_control.rs");
+
+    for (route, source, dispatch_marker) in [
+        (
+            "IP-Adapter",
+            ip,
+            "IpAdapterKolors::load_with_memory_context",
+        ),
+        ("ControlNet", control, "run_candle_strict_control("),
+    ] {
+        let selector = source
+            .find("evaluate_shared_bespoke_image(")
+            .unwrap_or_else(|| panic!("{route} omitted the shared bespoke selector"));
+        let dispatch = source[selector..]
+            .find(dispatch_marker)
+            .map(|offset| selector + offset)
+            .unwrap_or_else(|| panic!("{route} omitted request-bound dispatch"));
+        assert!(
+            selector < dispatch,
+            "{route} must refuse an unselected request before load"
+        );
+        for marker in [
+            "provider_contract_for_",
+            "KOLORS_BASE_REVISION",
+            "KOLORS_REQUEST_EVIDENCE_REVISION",
+            "image_memory_strategy_selected",
+            "generate_with_memory_context",
+        ] {
+            assert!(source.contains(marker), "{route} omitted {marker}");
+        }
+    }
+
+    assert!(ip.contains("KOLORS_IPADAPTER_REVISION"));
+    assert!(ip.contains("ipadapter-kolors"));
+    assert!(control.contains("KOLORS_CONTROL_REVISION"));
+    assert!(control.contains("controlnet-kolors"));
+    for mutable_source in [
+        "SCENEWORKS_KOLORS_IPADAPTER_DIR",
+        "SCENEWORKS_CONTROLNET_KOLORS",
+        "\"refs/pr/4\"",
+    ] {
+        assert!(
+            !ip.contains(mutable_source) && !control.contains(mutable_source),
+            "mutable Kolors source {mutable_source} re-entered production resolution"
+        );
+    }
+}
+
+#[test]
+fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
+    let source = include_str!("base.rs");
+    let selector = include_str!("../candle_memory_strategy.rs");
+    let registry = include_str!("../memory_route_registry.rs");
+    for required in [
+        "SANA_CANDLE_DIFFUSERS_REVISION",
+        "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
+        "SANA_SPRINT_CANDLE_DIFFUSERS_REVISION",
+        "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
+        "huggingface_pinned_snapshot_dir(",
+        "\"sana_1600m\" | \"sana_sprint_1600m\"",
+        "hires_first_pass_generation_memory",
+        "hires_first_pass_memory_context",
+        "requires an exact receipt-priced pre-load memory selection for every render pass",
+        "if is_ideogram || is_sana",
+        "sana_physical_receipt_identity",
+        "passIdentity",
+    ] {
+        assert!(
+            source.contains(required),
+            "SANA production route omitted {required}"
+        );
+    }
+    let force_dense = source
+        .split_once("fn candle_quant_for_resolved_tier(")
+        .expect("Candle tier resolver")
+        .1
+        .split_once("let resolved_bits")
+        .expect("SANA dense guard precedes generic tier mapping")
+        .0;
+    assert!(force_dense.contains("sana_1600m") && force_dense.contains("return (None, None)"));
+    let final_mode = source
+        .split_once("let shared_admission_mode = if hires_fix.is_some()")
+        .expect("final-pass admission")
+        .1
+        .split_once("let first_pass_reference_count")
+        .expect("end final-pass admission")
+        .0;
+    assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
+    let final_selector = source
+        .split_once("let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(")
+        .expect("final-pass selector")
+        .1
+        .split_once("let first_pass_shared_memory")
+        .expect("end final-pass selector")
+        .0;
+    assert!(
+        final_selector.contains("hires_fix.is_some(),\n        hires_fix.is_some(),"),
+        "SANA Hires final pass must carry worker multipass and typed hasPhases authority"
+    );
+    let first_mode = source
+        .split_once("let first_pass_shared_memory = if hires_fix.is_some()")
+        .expect("first-pass admission")
+        .1
+        .split_once("if let Some(evaluation) = shared_memory")
+        .expect("end first-pass admission")
+        .0;
+    assert!(first_mode.contains("sana_1600m") && first_mode.contains("shared_request_mode"));
+    assert!(
+        first_mode.contains("use_pid,\n            false,\n            false,"),
+        "SANA Hires first pass must retain its independent non-phase request context"
+    );
+    for marker in [
+        "fn is_sana(",
+        "|| is_sana(engine_id)",
+        "worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id)",
+        "validate_sana_asset_facts(engine_id, &contract)",
+        "SANA_PHYSICAL_RECEIPT_PREFIX",
+        "declared_candle_selector_contract(",
+        "reference_count: geometry.reference_count",
+        "has_phases: request_has_phases",
+        "sana_dense_receipts_admit_t2i_i2i_and_hires_but_refuse_crossed_or_no_fit",
+    ] {
+        assert!(
+            selector.contains(marker),
+            "SANA shared selector omitted {marker}"
+        );
+    }
+    for marker in [
+        "manifest_declares_selector_for_request",
+        "missing/crossed Hires-final rows must refuse before loader construction",
+    ] {
+        assert!(
+            registry.contains(marker),
+            "SANA route registry omitted {marker}"
+        );
+    }
+}
+
 /// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed
 /// `SceneWorks/krea-2-turbo-mlx` turnkey const on-demand; the repo is non-overridable here, so it must
 /// pin an exact commit rather than the mutable `main` branch (sc-9879, F-077 follow-up).
@@ -19522,7 +19722,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "SdxlIpAdapter",
             "sdxl_ipadapter.rs",
             include_str!("sdxl_ipadapter.rs"),
-            "admit_conditioning_paths(",
+            "admit_sdxl_bespoke_memory(",
         ),
         (
             "KolorsIpAdapter",
@@ -19626,9 +19826,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "Flux2Comfyui",
         // Bernini still-image companion: a plain base load.
         "Bernini",
-        // The two reject arms error before any generation, so they never allocate.
+        // These reject arms error before any generation, so they never allocate.
         "PoseReject",
         "PoseControlBaseMissing",
+        "KolorsCompositeReject",
         // Generic provider arms — both reach the shared `generate_candle_stream` gate.
         "CandleTxt2Img",
     ];
@@ -19643,7 +19844,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "SdxlEdit",
             "sdxl_edit_candle.rs",
             include_str!("sdxl_edit_candle.rs"),
-            "admit_candle_base(",
+            "admit_sdxl_bespoke_memory(",
         ),
         (
             "Flux2Edit",
@@ -20211,4 +20412,43 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
         "the Step arm is the POST that carries the parked frame"
     );
+}
+
+#[test]
+fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
+    let edit = include_str!("sdxl_edit_candle.rs");
+    let ip = include_str!("sdxl_ipadapter.rs");
+    let detail = include_str!("detail.rs");
+    let base = include_str!("base.rs");
+    for (label, source) in [("edit", edit), ("ip", ip)] {
+        assert!(
+            source.contains("let adapters = resolve_adapters(request, settings)?;"),
+            "{label} must resolve the request's ordered adapter stack"
+        );
+        assert!(
+            source.contains("adapters,"),
+            "{label} must pass the resolved stack into the provider constructor"
+        );
+        assert!(
+            !source.contains("adapters: Vec::new()"),
+            "{label} must not drop adapters at the provider boundary"
+        );
+        assert!(source.contains("admit_sdxl_bespoke_memory("));
+        assert!(source.contains("load_admitted("));
+    }
+    assert!(detail.contains("admit_sdxl_bespoke_memory("));
+    assert!(detail.contains("SdxlDetail::load_admitted("));
+    assert!(detail.contains("TILE_CONTROLNET_REVISION"));
+    assert!(detail.contains("detail_memory_receipt.as_ref()"));
+    assert!(detail.contains("raw_adapter_settings[\"memoryStrategy\"]"));
+    assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));
+    assert!(!detail.contains("packed/request-quantized detail is not supported"));
+    assert!(base.contains("context.mode = if reference_count == 0"));
+    assert!(base.contains(
+        "let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode)"
+    ));
+    assert!(base.contains("let shared_admission_mode = if hires_fix.is_some()"));
+    assert!(base.contains("let first_pass_shared_memory = if hires_fix.is_some()"));
+    assert!(base.contains("| \"sdxl\""));
+    assert!(base.contains("provider_contract_for_spec(&spec)"));
 }

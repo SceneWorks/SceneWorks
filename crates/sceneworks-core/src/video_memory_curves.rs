@@ -187,6 +187,8 @@ pub struct VideoCurveQuery<'a> {
     pub reference_shape: &'a str,
     pub reference_count: u32,
     pub frames_per_second: u32,
+    /// Content-independent workload axes only. Request-specific byte seals and asset ids must be
+    /// removed before constructing a query so equal memory shapes can reuse one fitted curve.
     pub overlay: Option<&'a str>,
     pub rung: StrategyRung,
     pub load_shape: VideoCurveLoadShape,
