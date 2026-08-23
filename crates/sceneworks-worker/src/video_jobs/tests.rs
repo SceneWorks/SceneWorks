@@ -11746,7 +11746,10 @@ fn advanced_numeric_helpers_parse_flf_keyframe_knobs() {
     assert_eq!(advanced::i32(&bare.advanced, "imageFrameIndex", 0), 0);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn ltx_i2v_strength_is_fixed_to_the_calibrated_identity() {
     let defaulted = request(json!({
