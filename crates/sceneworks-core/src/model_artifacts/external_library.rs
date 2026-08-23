@@ -516,19 +516,8 @@ impl ExternalLibraryBindingStore {
                     LibraryRelocationRejection::NotAModelLibrary,
                 ));
             }
-            let mut missing = Vec::new();
-            for closure in &closures {
-                if validate_requirements_at_root(&canonical_before, closure).is_err() {
-                    missing.extend(
-                        closure
-                            .iter()
-                            .map(|requirement| requirement.repository.clone()),
-                    );
-                }
-            }
+            let missing = requirements_missing_for_relocation(&canonical_before, &closures);
             if !missing.is_empty() {
-                missing.sort();
-                missing.dedup();
                 return Err(LibraryRelocationError::Rejected(
                     LibraryRelocationRejection::MissingInstalledModels {
                         repositories: missing,
@@ -1042,6 +1031,135 @@ pub fn resolve_relocation_target(
         }),
         _ => Err(LibraryRelocationRejection::HubDirectoryExpected),
     }
+}
+
+/// How one evidence requirement reads at a candidate library root, for relocation only.
+///
+/// Availability and binding keep using [`validate_requirements_at_root`]'s exact rule; relocation
+/// needs the middle case: the per-tier delete (`remove_tier_artifacts`) reclaims a quant tier's
+/// bytes but never rewrites the download receipt or prunes the validated-closure ledger, so a real,
+/// healthy library legitimately lacks WHOLE variants its evidence still records. Demanding them
+/// byte-exactly makes every install that ever deleted a tier un-relocatable (the sc-21389 field
+/// failure: 18 repos refused, all deleted-`q4` tiers).
+enum RequirementPresence {
+    /// Some snapshot carries every file — the requirement is installed here.
+    Present,
+    /// Not a single one of the requirement's files exists in any candidate snapshot: the shape a
+    /// whole-tier delete leaves behind. Tolerated when the same repository proves itself through
+    /// another fully present requirement; refused otherwise (an entirely absent model is the
+    /// wrong-folder signal, not tier reclaim).
+    WhollyAbsent,
+    /// Partially present (or unreadable): torn content is never what tier reclaim produces, so it
+    /// stays a refusal regardless of siblings.
+    Missing,
+}
+
+fn requirement_presence_at_root(
+    canonical_root: &Path,
+    requirement: &ExternalArtifactRequirement,
+) -> RequirementPresence {
+    let Some(repo_name) = safe_repo_dir_name(&requirement.repository) else {
+        return RequirementPresence::Missing;
+    };
+    let repo_root = canonical_root.join(format!("models--{repo_name}"));
+    let Ok(canonical_repo) = std::fs::canonicalize(&repo_root) else {
+        return RequirementPresence::Missing;
+    };
+    if !canonical_repo.starts_with(canonical_root) {
+        return RequirementPresence::Missing;
+    }
+    // Same snapshot universe as `validate_requirements_at_root`: the receipted revision when
+    // pinned, every snapshot otherwise. A pinned revision whose snapshot directory is gone
+    // contributes zero files, i.e. reads WhollyAbsent — the same judgement as a deleted tier.
+    let snapshots: Vec<PathBuf> = if let Some(revision) = requirement.revision.as_deref() {
+        vec![canonical_repo.join("snapshots").join(revision)]
+    } else {
+        match std::fs::read_dir(canonical_repo.join("snapshots")) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    entry
+                        .file_type()
+                        .ok()
+                        .filter(|kind| kind.is_dir())
+                        .map(|_| entry.path())
+                })
+                .collect(),
+            Err(_) => return RequirementPresence::Missing,
+        }
+    };
+    let file_exists = |snapshot: &Path, relative: &Path| {
+        std::fs::canonicalize(snapshot.join(relative))
+            .map(|canonical| canonical.is_file() && canonical.starts_with(&canonical_repo))
+            .unwrap_or(false)
+    };
+    let mut any_file_present = false;
+    for snapshot in &snapshots {
+        let mut all = true;
+        for relative in &requirement.files {
+            if file_exists(snapshot, relative) {
+                any_file_present = true;
+            } else {
+                all = false;
+            }
+        }
+        if all {
+            return RequirementPresence::Present;
+        }
+    }
+    if any_file_present {
+        RequirementPresence::Missing
+    } else {
+        RequirementPresence::WhollyAbsent
+    }
+}
+
+/// The repositories a relocation candidate is judged to be missing, deleted-tier drift excluded.
+///
+/// A requirement that is [`RequirementPresence::WhollyAbsent`] is dropped when the SAME repository
+/// has a [`RequirementPresence::Present`] requirement anywhere in the evidence (its other quant
+/// tier, typically): after adoption that variant truthfully reads uninstalled, exactly as it does
+/// today. Everything else — a partially present requirement, a malformed closure, a repository
+/// whose every requirement is absent — still refuses, so a decoy or wrong folder fails closed.
+fn requirements_missing_for_relocation(
+    canonical_root: &Path,
+    closures: &[Vec<ExternalArtifactRequirement>],
+) -> Vec<String> {
+    let mut present_repositories = std::collections::HashSet::new();
+    let mut wholly_absent = Vec::new();
+    let mut missing = Vec::new();
+    for closure in closures {
+        if validate_requirements_shape(closure).is_err() {
+            missing.extend(
+                closure
+                    .iter()
+                    .map(|requirement| requirement.repository.clone()),
+            );
+            continue;
+        }
+        for requirement in closure {
+            match requirement_presence_at_root(canonical_root, requirement) {
+                RequirementPresence::Present => {
+                    present_repositories.insert(requirement.repository.clone());
+                }
+                RequirementPresence::WhollyAbsent => {
+                    wholly_absent.push(requirement.repository.clone());
+                }
+                RequirementPresence::Missing => missing.push(requirement.repository.clone()),
+            }
+        }
+    }
+    missing.extend(
+        wholly_absent
+            .into_iter()
+            .filter(|repository| !present_repositories.contains(repository)),
+    );
+    // Note the asymmetry: a torn (partially present) requirement refuses even when the same
+    // repository is fully present through another one — tier reclaim never leaves partial files,
+    // so torn content is never explainable as drift.
+    missing.sort();
+    missing.dedup();
+    missing
 }
 
 /// The relocation TOCTOU rule, pure so it can be asserted directly: the exact canonical path AND
