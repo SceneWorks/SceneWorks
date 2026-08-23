@@ -578,7 +578,7 @@ pub fn managed_install_id(checkpoint_id: &str) -> Option<&str> {
 /// `inventory.json` before being joined onto the install root. So this is the choke point: every
 /// read, write, and delete of an install directory goes through
 /// [`CheckpointPlanStore::install_dir`], which validates first.
-fn validate_install_id(install_id: &str) -> Result<(), CheckpointPlanError> {
+pub fn validate_install_id(install_id: &str) -> Result<(), CheckpointPlanError> {
     let invalid = |reason: &'static str| CheckpointPlanError::InvalidInstallId {
         install_id: install_id.to_owned(),
         reason,

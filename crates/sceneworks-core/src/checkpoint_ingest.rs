@@ -9,12 +9,14 @@
 //!   stage_*()             write EVERY byte into staging; nothing outside it is touched
 //! finalize()
 //!   1. verify             SHA-256 of the staged primary artifact vs the source's declared digest
-//!   2. validate           full-content inspection of the staged tree (checkpoint_inspector)
-//!   3. commit             ONE atomic rename: .import-staging/<id>  ->  models/imports/<id>
-//!   4. publish            compile the plan/record/bindings against the committed install
+//!   2. commit             ONE atomic rename: .import-staging/<id>  ->  models/imports/<id>
+//!   3. validate+publish   full-content inspection (checkpoint_inspector) and plan/record/binding
+//!                         compilation, both against the COMMITTED bytes; a refusal here rolls the
+//!                         commit back (`remove_managed` + discard), so it ends where step 1's
+//!                         refusals do
 //! ```
 //!
-//! The rename in step 3 is the commit point, and it is what makes the failure modes uniform: a
+//! The rename in step 2 is the commit point, and it is what makes the failure modes uniform: a
 //! cancel, a crash, a full disk, or a hash mismatch all end with the staging directory discarded
 //! and NO directory at `models/imports/<installId>`, so nothing partially written is ever
 //! addressable as an install, no plan or catalog record exists for it, and no manifest entry can be
@@ -24,7 +26,20 @@
 //!
 //! A crash is the one case no destructor can clean up. It cannot produce a runnable install (the
 //! rename never ran), but it does leave the staging directory behind, so [`sweep_staging`] reclaims
-//! orphans at startup.
+//! orphans at startup (`sceneworks_worker::reclaim_import_staging`).
+//!
+//! Two accepted regressions from the pre-transaction behaviour, both consequences of "there is
+//! exactly one partial state and it is not addressable":
+//!
+//!  * A partial transfer is no longer RESUMED across job retries. It used to accumulate in the
+//!    final install directory, so a retry continued where the last attempt stopped; a retry now
+//!    starts a fresh staging tree. Resume within one attempt is unaffected. Keeping cross-retry
+//!    resume would mean an install assembled from two attempts' bytes — possibly two revisions' —
+//!    which is the silent substitution this module exists to remove.
+//!  * After a CRASH (not a refusal — a refusal discards), a retry of the same install id refuses
+//!    with `InstallIdTaken` naming the staging path, until [`sweep_staging`] reclaims the orphan.
+//!    `begin` cannot distinguish a crashed session's tree from another worker process's live one,
+//!    and destroying a live transfer is the worse failure.
 //!
 //! Secrets: provenance records WHERE the bytes came from — url, version/file identity, and the host
 //! whose stored credential authorized the fetch — never the credential.
@@ -36,6 +51,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
@@ -46,19 +62,25 @@ use crate::checkpoint_plan_store::{
 
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
-/// Query parameters that carry a secret on the download URLs SceneWorks attaches credentials to
-/// (`downloads::download_source_url` appends `token`; Civitai and mirrors also accept the others).
-/// Matched case-insensitively on the whole parameter name.
-const SECRET_QUERY_PARAMS: &[&str] = &[
+/// Markers that make a query parameter secret-bearing on the download URLs SceneWorks follows
+/// (`downloads::download_source_url` appends `token`; Civitai and mirrors accept the others; a
+/// presigned S3 or CloudFront redirect carries `X-Amz-Signature`, `X-Amz-Credential`,
+/// `X-Amz-Security-Token`, `Key-Pair-Id`, and `Policy`).
+///
+/// Matched case-insensitively as a SUBSTRING of the parameter name, not as the whole name: the
+/// vendor-prefixed and hyphen-segmented forms above are the common shape, and a whole-name match
+/// would persist a full presigned signature into a world-readable plan document (sc-20636 review).
+/// Over-redaction — dropping a benign `keyword=` — is the deliberately cheap side of that trade:
+/// provenance is a human reference, never a re-fetch handle.
+const SECRET_QUERY_PARAM_MARKERS: &[&str] = &[
     "token",
-    "access_token",
-    "api_key",
-    "apikey",
-    "key",
-    "password",
     "secret",
+    "password",
     "signature",
     "sig",
+    "credential",
+    "key",
+    "policy",
 ];
 
 /// Every way a managed ingest refuses. Each one leaves no install directory, no plan, no catalog
@@ -84,6 +106,10 @@ pub enum ManagedIngestError {
         relative_path: String,
         reason: &'static str,
     },
+    /// A directory the caller asked to copy holds an entry that is neither a regular file nor a
+    /// directory (a symlink, a fifo, a device node). Refused rather than skipped: a skip stages an
+    /// incomplete tree with no error anywhere.
+    UnsupportedSourceEntry { path: PathBuf, kind: &'static str },
     /// Compile/validation of the committed install refused. The install has already been rolled
     /// back by the time this is returned.
     Plan(CheckpointPlanError),
@@ -99,6 +125,7 @@ impl ManagedIngestError {
             Self::HashMismatch { .. } => "hash-mismatch",
             Self::PrimaryMissing { .. } => "primary-missing",
             Self::InvalidRelativePath { .. } => "invalid-relative-path",
+            Self::UnsupportedSourceEntry { .. } => "unsupported-source-entry",
             Self::Plan(error) => error.code(),
             Self::Io { .. } => "io",
         }
@@ -138,6 +165,11 @@ impl fmt::Display for ManagedIngestError {
             } => write!(
                 f,
                 "staged relative path {relative_path:?} is invalid: {reason}"
+            ),
+            Self::UnsupportedSourceEntry { path, kind } => write!(
+                f,
+                "cannot stage {} ({kind}); copy a directory of regular files, or point the import at the file itself",
+                path.display()
             ),
             Self::Plan(_) => Ok(()),
             Self::Io { path, message } => write!(f, "{}: {message}", path.display()),
@@ -183,8 +215,8 @@ impl ManagedInstallV1 {
     }
 }
 
-/// Strip everything secret from a URL before it can be recorded as provenance: userinfo, and any
-/// query parameter whose name is one a SceneWorks download attaches a credential to.
+/// Strip everything secret from a URL before it can be recorded as provenance: userinfo, and every
+/// query parameter whose name carries a [`SECRET_QUERY_PARAM_MARKERS`] substring.
 ///
 /// Returns `None` for a URL that cannot be parsed — provenance then records no URL rather than an
 /// unexamined string, because a string this function could not inspect is a string whose secrets it
@@ -198,9 +230,10 @@ pub fn sanitize_provenance_url(source_url: &str) -> Option<String> {
     let redacted: Vec<(String, String)> = url
         .query_pairs()
         .filter(|(name, _)| {
-            !SECRET_QUERY_PARAMS
+            let name = name.to_ascii_lowercase();
+            !SECRET_QUERY_PARAM_MARKERS
                 .iter()
-                .any(|secret| name.eq_ignore_ascii_case(secret))
+                .any(|marker| name.contains(marker))
         })
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
@@ -300,13 +333,29 @@ impl ManagedIngest {
         }
         let staging_root = store.staging_root().to_path_buf();
         fs::create_dir_all(&staging_root).map_err(|error| io_error(&staging_root, error))?;
-        // Keyed on the install id, not a random token: an orphan left by a crash is then
-        // attributable, and two sessions for the same id cannot both be staging at once.
+        // Keyed on the install id, not a random token, so an orphan left by a crash is
+        // attributable to the install it was staging for.
+        //
+        // Created with `create_dir` and NO pre-removal, so the directory itself is the mutual
+        // exclusion: a second session for the same id gets `AlreadyExists` and refuses. Clearing an
+        // existing staging tree here instead would let session B delete session A's in-flight bytes
+        // and then have A's destructor delete B's — two live transfers destroying each other with
+        // no error on either side (sc-20636 review). An orphan from a crashed session is
+        // [`sweep_staging`]'s job, not `begin`'s: `begin` cannot tell a crashed session's tree from
+        // a running one's.
         let staging_path = staging_root.join(install_id);
-        if staging_path.exists() {
-            fs::remove_dir_all(&staging_path).map_err(|error| io_error(&staging_path, error))?;
-        }
-        fs::create_dir(&staging_path).map_err(|error| io_error(&staging_path, error))?;
+        fs::create_dir(&staging_path).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                CheckpointPlanError::InstallIdTaken {
+                    install_id: install_id.to_owned(),
+                    checkpoint_id: managed_checkpoint_id(install_id),
+                    path: staging_path.clone(),
+                }
+                .into()
+            } else {
+                io_error(&staging_path, error)
+            }
+        })?;
         Ok(Self {
             store: store.clone(),
             install_id: install_id.to_owned(),
@@ -398,14 +447,26 @@ impl ManagedIngest {
             } else {
                 format!("{relative_prefix}/{name}")
             };
-            // `file_type` does not follow links, so a symlink in the user's source directory is
-            // never followed out of it: it is copied as the file it points at only when that file
-            // is inside, and otherwise refused as an unsupported entry below.
+            // `file_type` does NOT follow links, so a symlink is neither a dir nor a file here and
+            // must be refused explicitly. Falling through instead would silently SKIP it: an HF
+            // cache snapshot dir is entirely symlinks into `blobs/`, so it would stage EMPTY and
+            // the caller would learn about it as a missing-primary refusal at finalize, or worse as
+            // a valid-looking install of nothing (sc-20636 review). Following the link is not the
+            // fix either — it reads bytes outside the directory the user pointed at.
             let file_type = entry.file_type().map_err(|error| io_error(source, error))?;
             if file_type.is_dir() {
                 total += self.stage_copy_dir(&entry.path(), &relative)?;
             } else if file_type.is_file() {
                 total += self.stage_copy_file(&entry.path(), &relative)?;
+            } else {
+                return Err(ManagedIngestError::UnsupportedSourceEntry {
+                    path: entry.path(),
+                    kind: if file_type.is_symlink() {
+                        "symbolic link"
+                    } else {
+                        "not a regular file or directory"
+                    },
+                });
             }
         }
         Ok(total)
@@ -515,6 +576,52 @@ impl Drop for ManagedIngest {
     }
 }
 
+/// The staging ids that look like a LIVE transfer rather than a crashed one, for a caller that has
+/// to build [`sweep_staging`]'s `in_flight` set without being the process that owns them.
+///
+/// A SceneWorks install runs several worker processes against ONE data dir (a GPU worker plus
+/// `utility_workers` CPU workers), so "in flight" is not knowable from this process's own state: an
+/// unconditional sweep at worker B's startup would delete the multi-gigabyte tree worker A is still
+/// downloading into, and A would then refuse at finalize with a missing primary. A live transfer
+/// writes continuously, so the newest mtime anywhere under its staging tree stays inside `within`;
+/// an orphan's stopped at the crash.
+///
+/// Fail-safe by construction: an entry whose age cannot be determined is reported as active, so an
+/// unreadable tree is kept rather than reclaimed.
+pub fn active_staging_ids(store: &CheckpointPlanStore, within: Duration) -> Vec<String> {
+    let cutoff = SystemTime::now()
+        .checked_sub(within)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let Ok(entries) = fs::read_dir(store.staging_root()) else {
+        return Vec::new();
+    };
+    let mut active = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        // `map_or(true, ..)` not `is_none_or`: the latter is stable only since 1.82 and the
+        // workspace MSRV is 1.80 (the candle clippy config catches it).
+        if newest_mtime(&entry.path()).map_or(true, |mtime| mtime > cutoff) {
+            active.push(name);
+        }
+    }
+    active
+}
+
+/// The newest mtime anywhere at or under `path`, or `None` when any of it could not be read.
+fn newest_mtime(path: &Path) -> Option<SystemTime> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let mut newest = metadata.modified().ok()?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).ok()? {
+            let child = newest_mtime(&entry.ok()?.path())?;
+            newest = newest.max(child);
+        }
+    }
+    Some(newest)
+}
+
 /// Remove every staging directory left behind by a crash.
 ///
 /// A staging directory is by construction never referenced by a plan, a catalog record, or a
@@ -584,8 +691,56 @@ mod tests {
             .as_deref(),
             Some("https://civitai.com/api/download/models/42?type=Model&format=SafeTensor")
         );
-        // Every secret name, alone, leaves a query-free URL rather than an empty `?`.
-        for name in SECRET_QUERY_PARAMS {
+        // sc-20636 review: the presigned S3 / CloudFront parameter names. Whole-name matching
+        // missed every one of them, so a redirect SceneWorks followed to fetch a checkpoint
+        // persisted its full signature, credential, and policy into a world-readable plan document.
+        // Named explicitly rather than derived from the marker list — the list is the mechanism,
+        // these are the parameters that must be covered whatever the mechanism becomes.
+        for name in [
+            "X-Amz-Signature",
+            "X-Amz-Credential",
+            "X-Amz-Security-Token",
+            "Key-Pair-Id",
+            "Policy",
+            "Signature",
+            "AWSAccessKeyId",
+        ] {
+            assert_eq!(
+                sanitize_provenance_url(&format!(
+                    "https://bucket.s3.example/f.safetensors?{name}=AKIAEXAMPLESECRETVALUE"
+                ))
+                .as_deref(),
+                Some("https://bucket.s3.example/f.safetensors"),
+                "{name} must be stripped"
+            );
+        }
+        // A whole presigned URL: nothing signature-bearing survives, the benign parts do.
+        let presigned = sanitize_provenance_url(
+            "https://bucket.s3.example/model.safetensors             ?response-content-type=application%2Foctet-stream             &X-Amz-Algorithm=AWS4-HMAC-SHA256             &X-Amz-Credential=AKIAIOSFODNN7%2F20260823%2Fus-east-1%2Fs3%2Faws4_request             &X-Amz-Date=20260823T000000Z             &X-Amz-Security-Token=FwoGZXIvYXdzEXAMPLE             &X-Amz-SignedHeaders=host             &X-Amz-Signature=6f1c9e5d2b8a4703f1c9e5d2b8a4703f1c9e5d2b8a4703f1c9e5d2b8a4703f1c",
+        )
+        .expect("a presigned url is still a url");
+        for secret in [
+            "AKIAIOSFODNN7",
+            "FwoGZXIvYXdzEXAMPLE",
+            "6f1c9e5d2b8a4703f1c9e5d2b8a4703f1c9e5d2b8a4703f1c9e5d2b8a4703f1c",
+            "X-Amz-Signature",
+            "X-Amz-Credential",
+            "X-Amz-Security-Token",
+        ] {
+            assert!(
+                !presigned
+                    .to_ascii_lowercase()
+                    .contains(&secret.to_ascii_lowercase()),
+                "{secret} survived sanitization: {presigned}"
+            );
+        }
+        assert!(
+            presigned.contains("response-content-type"),
+            "a benign parameter must survive: {presigned}"
+        );
+
+        // Every marker, alone, leaves a query-free URL rather than an empty `?`.
+        for name in SECRET_QUERY_PARAM_MARKERS {
             assert_eq!(
                 sanitize_provenance_url(&format!("https://host.example/f.safetensors?{name}=x"))
                     .as_deref(),

@@ -5218,6 +5218,14 @@ pub(crate) async fn run_model_import_job(
             .map(|quant| Value::String(quant.to_owned()))
             .unwrap_or(Value::Null),
     );
+    // sc-20636: the duplicates the compile found, on the JOB RESULT and not only in a log line.
+    // "This is the same checkpoint you already have as X" is the user's decision to make — nothing
+    // deletes either copy — and a `tracing::info!` never reaches them. Always present (an empty
+    // array when there are none) so a client can render it without probing for the key.
+    result.insert(
+        "duplicateCheckpointIds".to_owned(),
+        json!(install.duplicate_checkpoint_ids()),
+    );
     result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
     update_job(
         api,

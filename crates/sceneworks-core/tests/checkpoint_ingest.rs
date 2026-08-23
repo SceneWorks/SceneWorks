@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use sceneworks_core::checkpoint_import::{ManagedProvenanceV1, SourceLocatorV1};
 use sceneworks_core::checkpoint_ingest::{
-    sanitize_provenance_url, sweep_staging, ManagedIngest, ManagedIngestError,
+    active_staging_ids, sanitize_provenance_url, sweep_staging, ManagedIngest, ManagedIngestError,
 };
 use sceneworks_core::checkpoint_plan_store::{
     linked_checkpoint_id, managed_checkpoint_id, CheckpointPlanError, CheckpointPlanStore,
@@ -325,6 +325,160 @@ fn a_crashed_ingest_leaves_no_runnable_install_and_sweep_reclaims_its_staging() 
     assert!(!fixture.staging_root().join("install-x1").exists());
     fixture.assert_no_trace_of("install-x1", "after sweep");
     assert!(source.is_file(), "sweep must not touch the user's own file");
+}
+
+/// sc-20636 review: the sweep has a production caller now
+/// (`sceneworks_worker::reclaim_import_staging`, at worker startup), and a SceneWorks install runs
+/// SEVERAL worker processes against ONE data dir. So the sweep's `in_flight` set has to be
+/// derivable WITHOUT owning the sessions, or worker B's startup deletes the multi-gigabyte tree
+/// worker A is still downloading into.
+///
+/// Unix-only for the mtime backdating, which is what separates a live transfer from an orphan.
+#[cfg(unix)]
+#[test]
+fn the_active_staging_set_keeps_a_live_transfer_and_releases_a_crash_orphan() {
+    let fixture = fixture("active");
+    let source = fixture.user_file();
+
+    // A live transfer: staged bytes written just now.
+    let live = ManagedIngest::begin(&fixture.store, "install-live", civitai_provenance()).unwrap();
+    live.stage_copy_file(&source, KREA_FILE).unwrap();
+
+    // A crash orphan: the same shape on disk, backdated well past any plausible transfer.
+    let orphan =
+        ManagedIngest::begin(&fixture.store, "install-orphan", civitai_provenance()).unwrap();
+    orphan.stage_copy_file(&source, KREA_FILE).unwrap();
+    let orphan_root = fixture.staging_root().join("install-orphan");
+    std::mem::forget(orphan);
+    backdate_tree(&orphan_root, std::time::Duration::from_secs(6 * 60 * 60));
+
+    let within = std::time::Duration::from_secs(60 * 60);
+    let mut active = active_staging_ids(&fixture.store, within);
+    active.sort();
+    assert_eq!(
+        active,
+        vec!["install-live".to_owned()],
+        "a tree written moments ago is a live transfer; a backdated one is a crash orphan"
+    );
+
+    // ...and that is exactly the set the sweep must be handed: the orphan goes, the live tree stays.
+    let in_flight: Vec<&str> = active.iter().map(String::as_str).collect();
+    assert_eq!(sweep_staging(&fixture.store, &in_flight).unwrap(), 1);
+    assert!(
+        fixture.staging_root().join("install-live").is_dir(),
+        "the sweep must never delete another process's in-flight staging tree"
+    );
+    assert!(!orphan_root.exists(), "the crash orphan must be reclaimed");
+    assert!(live.staging_dir().join(KREA_FILE).is_file());
+
+    // A tree whose newest byte is inside the window is live even if its ROOT is old: a long
+    // single-file download bumps the file, never the directory it sits in.
+    let deep = fixture.staging_root().join("install-deep");
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("part.bin"), b"in flight").unwrap();
+    set_mtime(&deep, std::time::Duration::from_secs(6 * 60 * 60));
+    assert!(
+        active_staging_ids(&fixture.store, within).contains(&"install-deep".to_owned()),
+        "age must be the NEWEST mtime under the tree, not the root's own"
+    );
+}
+
+/// sc-20636 review: `begin` used to `remove_dir_all` an existing staging tree before creating its
+/// own. Two sessions for the same install id could then both "succeed": B's begin deleted A's
+/// in-flight bytes, and A's Drop then deleted B's — two live transfers destroying each other with
+/// no error on either side. The directory itself is now the mutual exclusion.
+#[test]
+fn a_second_session_for_the_same_install_id_refuses_instead_of_deleting_the_first() {
+    let fixture = fixture("concurrent");
+    let source = fixture.user_file();
+
+    let first = ManagedIngest::begin(&fixture.store, "install-s1", civitai_provenance()).unwrap();
+    first.stage_copy_file(&source, KREA_FILE).unwrap();
+    let staged = first.staging_dir().join(KREA_FILE);
+    let staged_bytes = fs::read(&staged).unwrap();
+
+    let error = ManagedIngest::begin(&fixture.store, "install-s1", civitai_provenance())
+        .expect_err("a second session for the same install id must refuse");
+    assert!(
+        matches!(
+            error,
+            ManagedIngestError::Plan(CheckpointPlanError::InstallIdTaken { .. })
+        ),
+        "expected InstallIdTaken, got {error}"
+    );
+
+    // The first session's bytes are untouched, and it still finalizes.
+    assert_eq!(fs::read(&staged).unwrap(), staged_bytes);
+    let install = first.finalize(KREA_FILE, None).unwrap();
+    assert!(install.install_path.join(KREA_FILE).is_file());
+    assert_eq!(
+        fs::read(install.install_path.join(KREA_FILE)).unwrap(),
+        staged_bytes
+    );
+}
+
+/// sc-20636 review: `entry.file_type()` does not follow links, so a symlink was neither `is_dir`
+/// nor `is_file` and fell out of the loop — SILENTLY SKIPPED. An HF cache snapshot dir is entirely
+/// symlinks into `blobs/`, so it would have staged EMPTY with no error anywhere.
+#[cfg(unix)]
+#[test]
+fn staging_a_directory_refuses_an_entry_that_is_neither_a_file_nor_a_directory() {
+    let fixture = fixture("copydir");
+    let source_dir = fixture.library_dir.join("snapshot");
+    fs::create_dir_all(&source_dir).unwrap();
+    write_krea_native_file(&source_dir.join(KREA_FILE), 0x44);
+
+    let ingest = ManagedIngest::begin(&fixture.store, "install-cd1", civitai_provenance()).unwrap();
+    // The all-regular-files case still copies.
+    let copied = ingest.stage_copy_dir(&source_dir, "").unwrap();
+    assert!(copied > 0);
+    assert!(ingest.staging_dir().join(KREA_FILE).is_file());
+
+    // Now the HF-cache shape: the payload reachable only through a symlink.
+    let blobs = fixture.library_dir.join("blobs");
+    fs::create_dir_all(&blobs).unwrap();
+    let blob = blobs.join("deadbeef");
+    write_krea_native_file(&blob, 0x55);
+    std::os::unix::fs::symlink(&blob, source_dir.join("linked.safetensors")).unwrap();
+
+    let error = ingest
+        .stage_copy_dir(&source_dir, "again")
+        .expect_err("a symlinked entry must refuse, not be skipped");
+    assert_eq!(error.code(), "unsupported-source-entry");
+    let message = error.to_string();
+    assert!(
+        message.contains("linked.safetensors") && message.contains("symbolic link"),
+        "the refusal must name the entry and why it could not be staged: {message}"
+    );
+    assert!(
+        !ingest
+            .staging_dir()
+            .join("again/linked.safetensors")
+            .exists(),
+        "the link must not be followed out of the directory the user pointed at"
+    );
+    assert!(blob.is_file(), "the user's own bytes are only ever read");
+}
+
+/// Backdate every mtime at or under `path` by `age`, so a tree written moments ago reads as one
+/// abandoned that long ago. Bottom-up: setting a child's times never bumps its parent.
+#[cfg(unix)]
+fn backdate_tree(path: &Path, age: std::time::Duration) {
+    if path.is_dir() {
+        for entry in fs::read_dir(path).unwrap() {
+            backdate_tree(&entry.unwrap().path(), age);
+        }
+    }
+    set_mtime(path, age);
+}
+
+#[cfg(unix)]
+fn set_mtime(path: &Path, age: std::time::Duration) {
+    let when = std::time::SystemTime::now() - age;
+    let handle = fs::File::open(path).unwrap();
+    handle
+        .set_times(fs::FileTimes::new().set_modified(when))
+        .unwrap();
 }
 
 #[test]

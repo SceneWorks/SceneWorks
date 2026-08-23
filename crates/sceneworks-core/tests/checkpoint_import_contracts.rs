@@ -2049,6 +2049,19 @@ fn schema_expressible_rules_are_bidirectionally_aligned_and_semantic_gaps_are_ex
         json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":" "}}),
         json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","reference":" "}}),
         json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","extra":true}}),
+        // sc-20636: every field `ManagedProvenanceV1` serializes must be expressible under the
+        // schema's `additionalProperties:false` provenance, set and blank alike. Without these the
+        // alignment loop never carries a post-`reference` field and cannot see the schema drift.
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"url","url":"https://example.test/model.safetensors"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"url","url":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","versionId":"refs/pr/3"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"huggingface","versionId":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","fileId":"884422"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","fileId":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","credentialHost":"civitai.com"}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","credentialHost":" "}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","url":null,"versionId":null,"fileId":null,"credentialHost":null}}),
+        json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":"model.safetensors","sha256":DIGEST,"provenance":{"source":"civitai","reference":"flux/v1","url":"https://civitai.test/api/download/884422","versionId":"12345","fileId":"884422","credentialHost":"civitai.test"}}),
     ];
     for value in aligned_locator_mutations {
         assert_eq!(
@@ -2172,6 +2185,21 @@ fn schema_expressible_rules_are_bidirectionally_aligned_and_semantic_gaps_are_ex
     assert!(validator.is_valid(&keyed_duplicate_layers));
     assert!(serde_json::from_value::<ImportPlanV1>(keyed_duplicate_layers).is_err());
 
+    // sc-20636: now that the schema admits `provenance.url`, the userinfo refusal becomes a
+    // semantic-only gap — JSON Schema can require a non-blank string but not the absence of a
+    // `user:token@` authority, so serde must stay the gate that keeps a credential out of a plan.
+    let userinfo_url = json!({"kind":"managed","schemaVersion":1,"installId":"install",
+        "relativePath":"model.safetensors","sha256":DIGEST,
+        "provenance":{"source":"url","url":"https://user:token@example.test/model.safetensors"}});
+    assert!(
+        validator.is_valid(&userinfo_url),
+        "schema is expected to admit a userinfo url; it is a semantic-only rule"
+    );
+    assert!(
+        serde_json::from_value::<SourceLocatorV1>(userinfo_url).is_err(),
+        "serde must refuse a provenance url embedding credentials"
+    );
+
     let mut count_mismatch = serde_json::to_value(import_plan.summary().unwrap()).unwrap();
     count_mismatch["layerCount"] = json!(1);
     assert!(validator.is_valid(&count_mismatch));
@@ -2196,6 +2224,7 @@ fn schema_expressible_rules_are_bidirectionally_aligned_and_semantic_gaps_are_ex
         "sorted layers",
         "summary counts",
         "reference/summary digest agreement",
+        "credential-free provenance urls",
     ] {
         assert!(
             readme.contains(documented),

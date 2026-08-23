@@ -1692,6 +1692,61 @@ pub(crate) async fn delete_model(
         )
         .await,
     );
+    // ---- checkpoint teardown (epic 20398) ---------------------------------------------------
+    // `remove_whole_model_artifacts` removed the BYTES. A plan-backed entry also owns documents
+    // under `<data>/checkpoints/` — catalog record, plan, bindings — which that sweep never sees.
+    // Left behind for a MANAGED install they make the id permanently un-reimportable: the manifest
+    // entry is gone, so this route's `existing_ids` check passes on the next import, and the
+    // worker's `ManagedIngest::begin` then refuses forever with `InstallIdTaken` naming a path that
+    // no longer exists.
+    //
+    // Deliberately one block that discriminates on ownership, because the two ownerships need
+    // opposite treatment and only ONE of them is this story's.
+    let plan_checkpoint_id = cleanup_source
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(str::to_owned);
+    match plan_checkpoint_id.as_deref().map(|checkpoint_id| {
+        (
+            checkpoint_id,
+            sceneworks_core::checkpoint_plan_store::managed_install_id(checkpoint_id),
+        )
+    }) {
+        // MANAGED: SceneWorks owns the install tree, so the record, plan and bindings go with it.
+        Some((checkpoint_id, Some(install_id))) => {
+            let data_dir = state.settings.data_dir.clone();
+            let owned_install_id = install_id.to_owned();
+            let outcome = tokio::task::spawn_blocking(move || {
+                sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+                    .remove_managed(&owned_install_id)
+            })
+            .await;
+            let failure = match outcome {
+                Ok(Ok(_)) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(error) => Some(error.to_string()),
+            };
+            // The files are already gone; a failure here cannot un-delete the model, so it is
+            // surfaced rather than raised. The warning names the checkpoint because that id is the
+            // only handle on the stranded record.
+            if let Some(failure) = failure {
+                tracing::warn!(
+                    checkpoint_id = %checkpoint_id,
+                    error = %failure,
+                    "managed checkpoint teardown failed after a model delete"
+                );
+                warnings.push(format!(
+                    "The managed checkpoint {checkpoint_id} could not be removed ({failure}); re-importing this model id may be refused until it is cleared."
+                ));
+            }
+        }
+        // LINKED (or any non-managed checkpoint id): the bytes are the user's own library copy,
+        // which this route never owned, so `remove_managed` must not be reached — it would be the
+        // wrong operation on the wrong tree. Invalidating a linked entry's plan and the derivatives
+        // compiled from it is sc-20635's work; this arm is where it lands.
+        Some((_, None)) => {}
+        None => {}
+    }
     let policy = if removed_entry.is_some() {
         "Removed the model registry entry and SceneWorks-owned local model files."
     } else {
@@ -2488,6 +2543,50 @@ impl ModelImportProvenance {
         }
         Value::Object(object)
     }
+
+    /// The `source.provider` value the model manifest entry records for this import.
+    ///
+    /// Deliberately COARSER than [`Self::source`]: `upload` and `local-copy` both record the
+    /// historical `"local"`. That is the value every model entry written before epic 20398 carries
+    /// and every reader of this field was written against, so splitting it in two would be a silent
+    /// manifest-vocabulary change nothing asked for. The finer distinction is not lost — it is
+    /// recorded in `importProvenance.source`, a new field with no legacy readers. A REMOTE import
+    /// does widen the provider (`civitai` rather than the generic `url` its transfer shares),
+    /// because that names a genuinely new provider rather than re-spelling an existing one.
+    fn manifest_provider(&self) -> &'static str {
+        match self.source {
+            "upload" | "local-copy" => "local",
+            remote => remote,
+        }
+    }
+}
+
+/// Reconcile a discriminated source's `expectedSha256` with the flat `payload.expectedSha256`.
+///
+/// Both set and naming the SAME digest is honoured — a sha256 is hex, so case and surrounding
+/// whitespace are not a difference. Both set and naming DIFFERENT digests is refused, because
+/// resolving that by precedence would verify the transferred bytes against a digest the caller did
+/// not choose and report success. A blank flat field is not a value, so it is not a conflict.
+fn reconcile_expected_sha256(
+    from_source: Option<String>,
+    from_flat: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let blank_is_absent = |value: Option<String>| value.filter(|digest| !digest.trim().is_empty());
+    match (blank_is_absent(from_source), blank_is_absent(from_flat)) {
+        (Some(source_digest), Some(flat_digest)) => {
+            let normalize = |digest: &str| digest.trim().to_ascii_lowercase();
+            if normalize(&source_digest) != normalize(&flat_digest) {
+                return Err(ApiError::bad_request(format!(
+                    "Provide either the discriminated `source` or the legacy `expectedSha256` field, not both: they name different digests ({} and {})",
+                    source_digest.trim(),
+                    flat_digest.trim()
+                )));
+            }
+            Ok(Some(source_digest))
+        }
+        (Some(digest), None) | (None, Some(digest)) => Ok(Some(digest)),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Collapse the discriminated `source` (when present) onto the flat `repo`/`sourceUrl`/`sourcePath`
@@ -2603,7 +2702,8 @@ pub(crate) fn normalize_model_import_source(
                 ..Default::default()
             };
             payload.source_url = Some(url);
-            payload.expected_sha256 = expected_sha256.or(payload.expected_sha256.take());
+            payload.expected_sha256 =
+                reconcile_expected_sha256(expected_sha256, payload.expected_sha256.take())?;
             provenance
         }
         ModelImportSourceV1::HuggingFace {
@@ -2650,7 +2750,8 @@ pub(crate) fn normalize_model_import_source(
             // host-keyed credential attachment, same size limits. Only the recorded identity
             // differs.
             payload.source_url = Some(url);
-            payload.expected_sha256 = expected_sha256.or(payload.expected_sha256.take());
+            payload.expected_sha256 =
+                reconcile_expected_sha256(expected_sha256, payload.expected_sha256.take())?;
             provenance
         }
     };
@@ -2740,6 +2841,17 @@ pub(crate) async fn queue_model_import_job(
         )));
     }
     let target_name = safe_download_dir(&model_id);
+    // The install id the WORKER will use is the SANITIZED `target_name`, not the raw model id, and
+    // it has to be a usable directory name before a job exists: the ingest resolves it through
+    // `CheckpointPlanStore::install_dir`, which validates. Without this a caller-supplied `modelId`
+    // that sanitizes to (say) a dot-leading name is answered 201 and then dies in the worker with
+    // an `InvalidInstallId` the caller never sees. Validated at the resolved value, because that is
+    // the string the worker will actually address a path with.
+    if let Err(error) = sceneworks_core::checkpoint_plan_store::validate_install_id(&target_name) {
+        return Err(ApiError::bad_request(format!(
+            "Model id '{model_id}' cannot be installed: {error}"
+        )));
+    }
     let target_dir = state
         .settings
         .data_dir
@@ -2785,8 +2897,9 @@ pub(crate) async fn queue_model_import_job(
         "type": model_type,
         "source": {
             // The provider the SOURCE normalisation resolved, so a Civitai import is recorded as
-            // "civitai" rather than as the generic "url" its transfer happens to share.
-            "provider": provenance.source,
+            // "civitai" rather than as the generic "url" its transfer happens to share. Coarser
+            // than provenance for the two non-remote shapes — see `manifest_provider`.
+            "provider": provenance.manifest_provider(),
             "repo": payload.repo.clone(),
             "path": source_path_rel,
         },
@@ -12339,6 +12452,81 @@ mod model_import_source_tests {
                 "{body} refused as {error:?}"
             );
         }
+    }
+
+    /// `expectedSha256` has the same two spellings as `repo`/`sourceUrl`/`sourcePath`, and it was
+    /// the only one resolved by PRECEDENCE (`expected_sha256.or(payload.expected_sha256)`). A caller
+    /// who sent two different digests got the transfer verified against whichever one won and a
+    /// success report — the exact silent resolution this function's contract refuses. Both set and
+    /// naming the same digest is fine: sha256 is hex, so case and surrounding whitespace are not a
+    /// difference.
+    #[test]
+    fn conflicting_expected_sha256_digests_are_refused_and_matching_ones_are_accepted() {
+        let alpha = "a".repeat(64);
+        let beta = "b".repeat(64);
+        for (label, body) in [
+            (
+                "url",
+                format!(
+                    r#"{{"expectedSha256":"{beta}","source":{{"kind":"url","url":"https://h.example/m","expectedSha256":"{alpha}"}}}}"#
+                ),
+            ),
+            (
+                "civitai",
+                format!(
+                    r#"{{"expectedSha256":"{beta}","source":{{"kind":"civitai","url":"https://civitai.com/api/download/models/1","expectedSha256":"{alpha}"}}}}"#
+                ),
+            ),
+        ] {
+            let mut payload = parse(&body);
+            let error = normalize_model_import_source(&mut payload)
+                .expect_err("two different digests must refuse");
+            let rendered = format!("{error:?}");
+            assert!(
+                rendered.contains("expectedSha256") && rendered.contains("not both"),
+                "{label} refusal must name the field: {rendered}"
+            );
+            assert!(
+                rendered.contains(&alpha) && rendered.contains(&beta),
+                "{label} refusal must show both digests: {rendered}"
+            );
+        }
+
+        // The SAME digest in both places, differing only in case and surrounding whitespace, is one
+        // digest spelled twice — accepted, and the value is preserved for the transfer to verify.
+        for (label, body) in [
+            (
+                "url",
+                format!(
+                    r#"{{"expectedSha256":"  {upper}  ","source":{{"kind":"url","url":"https://h.example/m","expectedSha256":"{alpha}"}}}}"#,
+                    upper = alpha.to_ascii_uppercase()
+                ),
+            ),
+            (
+                "civitai",
+                format!(
+                    r#"{{"expectedSha256":"  {upper}  ","source":{{"kind":"civitai","url":"https://civitai.com/api/download/models/1","expectedSha256":"{alpha}"}}}}"#,
+                    upper = alpha.to_ascii_uppercase()
+                ),
+            ),
+        ] {
+            let mut payload = parse(&body);
+            normalize_model_import_source(&mut payload).unwrap_or_else(|error| {
+                panic!("{label} must accept one digest spelled twice: {error:?}")
+            });
+            assert_eq!(
+                payload.expected_sha256.as_deref(),
+                Some(alpha.as_str()),
+                "{label} must keep the digest for the transfer to verify"
+            );
+        }
+
+        // Only one side set is not a conflict, in either direction.
+        let mut payload = parse(&format!(
+            r#"{{"expectedSha256":"{alpha}","source":{{"kind":"url","url":"https://h.example/m"}}}}"#
+        ));
+        normalize_model_import_source(&mut payload).expect("a flat-only digest is not a conflict");
+        assert_eq!(payload.expected_sha256.as_deref(), Some(alpha.as_str()));
     }
 
     /// E7: an ownership mode this route does not serve fails closed at deserialization rather than

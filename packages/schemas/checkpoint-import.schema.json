@@ -14,7 +14,11 @@
       "additionalProperties": false,
       "properties": {
         "source": { "$ref": "#/$defs/nonBlankText" },
-        "reference": { "oneOf": [{ "$ref": "#/$defs/nonBlankText" }, { "type": "null" }] }
+        "reference": { "oneOf": [{ "$ref": "#/$defs/nonBlankText" }, { "type": "null" }] },
+        "url": { "oneOf": [{ "$ref": "#/$defs/nonBlankText" }, { "type": "null" }] },
+        "versionId": { "oneOf": [{ "$ref": "#/$defs/nonBlankText" }, { "type": "null" }] },
+        "fileId": { "oneOf": [{ "$ref": "#/$defs/nonBlankText" }, { "type": "null" }] },
+        "credentialHost": { "oneOf": [{ "$ref": "#/$defs/nonBlankText" }, { "type": "null" }] }
       }
     },
     "sourceLocator": {

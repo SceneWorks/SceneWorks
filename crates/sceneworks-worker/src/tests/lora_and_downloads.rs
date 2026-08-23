@@ -2223,11 +2223,26 @@ impl ManagedImportFixture {
 #[tokio::test]
 async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
     let _env = isolate_hf_cache();
-    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture(base_url).await;
     let expected = sha256_hex(&fixture.source);
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
+
+    // A LINKED twin of the very bytes about to be imported, compiled before the import runs. The
+    // compile reports it as a duplicate; neither copy is ever deleted, because keeping both is a
+    // legitimate choice. Which makes it the user's decision — so it has to reach the user, and a
+    // `tracing::info!` never does (sc-20636 review).
+    let library = fixture.source.parent().expect("source has a parent");
+    let twin_store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+        &fixture.settings.data_dir,
+    );
+    let root = twin_store
+        .approve_root(library)
+        .expect("the incoming dir approves as a library root");
+    let twin = twin_store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .expect("a linked twin compiles");
 
     super::model_jobs::run_model_import_job(
         &api,
@@ -2237,6 +2252,24 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
     )
     .await
     .expect("a valid managed import succeeds");
+
+    // The duplicate is on the JOB RESULT, naming the checkpoint the user already has.
+    let completed = posts
+        .lock()
+        .expect("posts lock")
+        .iter()
+        .rev()
+        .find(|post| post.get("status").and_then(Value::as_str) == Some("completed"))
+        .cloned()
+        .expect("the import posts a completed update");
+    assert_eq!(
+        completed["result"]["duplicateCheckpointIds"],
+        json!([twin.checkpoint_id]),
+        "the import must report the checkpoint the user already has: {completed}"
+    );
+    // ...and both copies survive: reporting is never acting.
+    assert!(fixture.install_dir.join("kreamania.safetensors").is_file());
+    assert!(twin_store.resolve(&twin.checkpoint_id).is_ok());
 
     // Committed: the install is at the path imported models have always occupied.
     assert!(fixture.install_dir.join("kreamania.safetensors").is_file());

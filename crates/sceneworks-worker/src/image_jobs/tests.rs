@@ -20333,6 +20333,7 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
         .is_none());
     let prepared = prepare_checkpoint_plan_sources(&plan_backed, &fx.settings)
         .unwrap()
+        .into_sources()
         .expect("plan-backed entry prepares");
     assert_eq!(prepared.checkpoint_id, checkpoint_id);
     assert_eq!(prepared.descriptor.id, "krea_2_turbo");
@@ -20393,9 +20394,9 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
         "the legacy lane still serves `paths.model` installs beside the plan route"
     );
     assert!(
-        prepare_checkpoint_plan_sources(&legacy, &fx.settings)
+        !prepare_checkpoint_plan_sources(&legacy, &fx.settings)
             .unwrap()
-            .is_none(),
+            .is_available(),
         "the plan route never claims a legacy entry"
     );
 
@@ -20656,9 +20657,11 @@ fn checkpoint_plan_route_refuses_before_load_with_typed_diagnostics() {
         match prepare_checkpoint_plan_sources(request, settings) {
             Err(WorkerError::InvalidPayload(message)) => message,
             Err(other) => panic!("expected InvalidPayload, got {other:?}"),
-            Ok(prepared) => panic!(
+            Ok(selection) => panic!(
                 "expected a refusal, got {:?}",
-                prepared.map(|sources| sources.checkpoint_id)
+                selection
+                    .into_sources()
+                    .map(|sources| sources.checkpoint_id)
             ),
         }
     };
@@ -20688,7 +20691,7 @@ fn checkpoint_plan_route_refuses_before_load_with_typed_diagnostics() {
     std::fs::write(&file, &original).unwrap();
     assert!(prepare_checkpoint_plan_sources(&drifted, &fx.settings)
         .unwrap()
-        .is_some());
+        .is_available());
 
     // Missing source.
     std::fs::remove_file(&file).unwrap();
@@ -20740,9 +20743,11 @@ fn checkpoint_plan_route_refuses_when_the_family_base_tier_is_not_installed() {
     let message = match prepare_checkpoint_plan_sources(&bare_request, &bare.settings) {
         Err(WorkerError::InvalidPayload(message)) => message,
         Err(other) => panic!("expected InvalidPayload, got {other:?}"),
-        Ok(prepared) => panic!(
+        Ok(selection) => panic!(
             "a missing base tier must refuse, got {:?}",
-            prepared.map(|sources| sources.checkpoint_id)
+            selection
+                .into_sources()
+                .map(|sources| sources.checkpoint_id)
         ),
     };
     assert!(
@@ -21149,6 +21154,7 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
     // Prepare first so a refusal surfaces its typed diagnostic instead of an opaque route miss.
     let prepared = prepare_checkpoint_plan_sources(&plan_request, &settings)
         .unwrap_or_else(|error| panic!("plan route refused the compiled checkpoint: {error}"))
+        .into_sources()
         .expect("plan route prepares");
     assert_eq!(
         resolve_image_route(&plan_request, &settings),
@@ -21400,9 +21406,9 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
     // the capability the entry had before it was plan-backed survives.
     let edit = managed(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }));
     assert!(
-        prepare_checkpoint_plan_sources(&edit, &fx.settings)
+        !prepare_checkpoint_plan_sources(&edit, &fx.settings)
             .unwrap()
-            .is_none(),
+            .is_available(),
         "an edit on a managed entry must not be claimed by the plan route"
     );
     assert!(
@@ -21419,10 +21425,64 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
 
     // A LoRA on a managed entry: same rule.
     let with_lora = managed(json!({ "loras": [{ "id": "style", "weight": 0.8 }] }));
-    assert!(prepare_checkpoint_plan_sources(&with_lora, &fx.settings)
+    assert!(!prepare_checkpoint_plan_sources(&with_lora, &fx.settings)
         .unwrap()
-        .is_none());
+        .is_available());
     assert!(krea_imported_available(&with_lora, &fx.settings));
+
+    // A LINKED entry carrying a provenance-only `source.path` is STILL a linked entry: that field
+    // is a data-dir-relative breadcrumb an import writes, not bytes any lane can load. Reading it
+    // as an installed path (which `imported_entry_installed_path` does, for admission) made the
+    // route believe a bespoke lane existed, decline to it, and point it at a path it must not read
+    // (sc-20636 review). The decline predicate uses loadable paths only.
+    let linked_with_provenance_path = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "asset-1",
+            "modelManifestEntry": {
+                "id": "linked_kreamania",
+                "catalogScope": "user",
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "importPlan": { "checkpointId": checkpoint_id },
+                "source": { "provider": "local", "path": "models/imports/kreamania" }
+            }
+        }),
+    );
+    assert!(
+        sceneworks_core::jobs_store::imported_entry_installed_path(
+            &linked_with_provenance_path.model_manifest_entry
+        )
+        .is_some(),
+        "premise: the admission reading DOES see `source.path`; without that this is vacuous"
+    );
+    assert!(
+        sceneworks_core::jobs_store::imported_entry_loadable_path(
+            &linked_with_provenance_path.model_manifest_entry
+        )
+        .is_none(),
+        "a provenance breadcrumb is not a loadable path"
+    );
+    let message = match prepare_checkpoint_plan_sources(&linked_with_provenance_path, &fx.settings)
+    {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(selection) => panic!(
+            "a linked entry with only a provenance `source.path` must refuse, got {:?}",
+            selection
+                .into_sources()
+                .map(|sources| sources.checkpoint_id)
+        ),
+    };
+    assert!(
+        message.starts_with("[checkpoint-plan:unsupported-operation]"),
+        "{message}"
+    );
+    assert!(
+        !krea_imported_available(&linked_with_provenance_path, &fx.settings),
+        "premise: no bespoke lane exists for it, which is why the decline would have been a stub"
+    );
 
     // The same unsupported shape on a LINKED entry — no installed path, so no other lane — still
     // refuses loudly rather than silently falling through to the stub.
@@ -21433,9 +21493,11 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
     let message = match prepare_checkpoint_plan_sources(&linked_edit, &fx.settings) {
         Err(WorkerError::InvalidPayload(message)) => message,
         Err(other) => panic!("expected InvalidPayload, got {other:?}"),
-        Ok(prepared) => panic!(
+        Ok(selection) => panic!(
             "a linked entry with no bespoke lane must refuse, got {:?}",
-            prepared.map(|sources| sources.checkpoint_id)
+            selection
+                .into_sources()
+                .map(|sources| sources.checkpoint_id)
         ),
     };
     assert!(
@@ -21454,9 +21516,11 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
     let message = match prepare_checkpoint_plan_sources(&plain, &fx.settings) {
         Err(WorkerError::InvalidPayload(message)) => message,
         Err(other) => panic!("expected InvalidPayload, got {other:?}"),
-        Ok(prepared) => panic!(
+        Ok(selection) => panic!(
             "drifted bytes must refuse even with a bespoke lane present, got {:?}",
-            prepared.map(|sources| sources.checkpoint_id)
+            selection
+                .into_sources()
+                .map(|sources| sources.checkpoint_id)
         ),
     };
     assert!(
@@ -21488,9 +21552,40 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
         }
     }));
     assert!(
-        prepare_checkpoint_plan_sources(&zimage_managed, &fx.settings)
+        !prepare_checkpoint_plan_sources(&zimage_managed, &fx.settings)
             .unwrap()
-            .is_none(),
-        "an unbound family on a managed entry declines to its bespoke lane"
+            .is_available(),
+        "an unbound family is a route-capability refusal, so the plan route does not claim it"
+    );
+
+    // ...but `z-image` has NO bespoke imported lane, so nothing else claims it either. That zero-lane
+    // fall-through is the whole point of this block (sc-20636 review): `Ok(None)` out of
+    // `prepare_image_route` lands the job in `generate_stub_stream` and it COMPLETES with procedural
+    // stub output — a managed import silently producing fake pixels. Assert the premise (no lane) and
+    // then the terminal outcome (a typed refusal, never a stub).
+    assert!(
+        resolve_image_route(&zimage_managed, &fx.settings).is_none(),
+        "premise: no image lane claims an unbound managed family; without that this assertion is vacuous"
+    );
+    assert!(
+        !krea_imported_available(&zimage_managed, &fx.settings),
+        "premise: the krea lane must not claim a z-image entry"
+    );
+    let message = match prepare_image_route(&zimage_managed, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(None) => panic!(
+            "a plan-backed entry no lane claims must refuse; Ok(None) reaches generate_stub_stream \
+             and completes the job with procedural stub output"
+        ),
+        Ok(Some(route)) => panic!("no lane should claim this request, got {:?}", route.kind()),
+    };
+    assert!(
+        message.starts_with("[checkpoint-plan:no-adapter-binding]"),
+        "the zero-lane fall-through must surface the plan route's own typed refusal: {message}"
+    );
+    assert!(
+        message.contains(&zimage_id),
+        "the refusal must name the checkpoint that could not be routed: {message}"
     );
 }

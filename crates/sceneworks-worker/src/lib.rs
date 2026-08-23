@@ -1358,6 +1358,33 @@ async fn recheck_gpu_health(
     Ok(())
 }
 
+/// How long a managed-import staging tree must have gone untouched before a worker treats it as a
+/// crash orphan rather than another process's live transfer (sc-20636).
+///
+/// Generous on purpose: reclaiming late costs disk, reclaiming early destroys a running import.
+const IMPORT_STAGING_ORPHAN_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Reclaim managed-import staging trees left behind by a crash (sc-20636).
+///
+/// The crash is the one ingest failure no destructor covers: the commit rename never ran, so no
+/// install, plan, or catalog record exists — only the staging bytes, which nothing references and
+/// nothing else will ever remove. Age-gated via
+/// [`sceneworks_core::checkpoint_ingest::active_staging_ids`] because several worker processes share one data dir,
+/// so "in flight" is not knowable from this process's own state.
+///
+/// Separate from [`spawn_retention_checkpoint`]: that recovers the resolved-model cache, a
+/// different store with its own interval and its own maintenance slot. This one is startup-only —
+/// a crash is the only thing that produces an orphan.
+fn reclaim_import_staging(
+    data_dir: &Path,
+) -> Result<usize, sceneworks_core::checkpoint_ingest::ManagedIngestError> {
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir);
+    let active =
+        sceneworks_core::checkpoint_ingest::active_staging_ids(&store, IMPORT_STAGING_ORPHAN_AGE);
+    let in_flight: Vec<&str> = active.iter().map(String::as_str).collect();
+    sceneworks_core::checkpoint_ingest::sweep_staging(&store, &in_flight)
+}
+
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
@@ -1406,6 +1433,21 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // the first job claim must not queue behind a recover-plus-retention pass.
     let mut maintenance_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
     let mut next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
+    // sc-20636: the other startup reclamation. Spawned blocking and never awaited, for the same
+    // reason the retention checkpoint is not: removing an abandoned multi-gigabyte staging tree
+    // must not delay the first job claim.
+    {
+        let data_dir = settings.data_dir.clone();
+        tokio::task::spawn_blocking(move || match reclaim_import_staging(&data_dir) {
+            Ok(0) => {}
+            Ok(reclaimed) => tracing::info!(
+                event = "import_staging_reclaimed",
+                reclaimed,
+                "reclaimed abandoned model-import staging directories"
+            ),
+            Err(error) => tracing::warn!(error = %error, "model-import staging sweep failed"),
+        });
+    }
     loop {
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
             next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
