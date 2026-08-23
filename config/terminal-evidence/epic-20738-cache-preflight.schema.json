@@ -221,13 +221,74 @@
     "sidecarSnapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ordinal", "cellId", "providerExecution", "inventory"],
+      "required": ["ordinal", "cellId", "providerExecution", "requestMemoryStrategy", "derivedDisposition", "inventory"],
       "properties": {
         "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
         "cellId": { "$ref": "#/$defs/id" },
         "providerExecution": { "enum": ["failed", "completed"] },
+        "requestMemoryStrategy": { "$ref": "#/$defs/requestMemoryStrategy" },
+        "derivedDisposition": {
+          "enum": [
+            "not-applicable",
+            "resident-empty",
+            "bounded-transformer-sidecars",
+            "provider-failed-empty"
+          ]
+        },
         "inventory": { "$ref": "#/$defs/inventory" }
       }
+    },
+    "requestMemoryStrategy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "requestMemoryPresent", "stageResidency", "streamTransformerBlocks"],
+          "properties": {
+            "strategy": {
+              "enum": [
+                "not-applicable",
+                "default-resident",
+                "explicit-resident",
+                "staged-resident",
+                "bounded-transformer"
+              ]
+            },
+            "requestMemoryPresent": { "type": "boolean" },
+            "stageResidency": { "type": "boolean" },
+            "streamTransformerBlocks": { "type": "boolean" }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "streamTransformerBlocks": { "const": true } },
+                "required": ["streamTransformerBlocks"]
+              },
+              "then": {
+                "properties": {
+                  "strategy": { "const": "bounded-transformer" },
+                  "requestMemoryPresent": { "const": true },
+                  "stageResidency": { "const": true }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "strategy": { "const": "bounded-transformer" } },
+                "required": ["strategy"]
+              },
+              "then": {
+                "properties": {
+                  "requestMemoryPresent": { "const": true },
+                  "stageResidency": { "const": true },
+                  "streamTransformerBlocks": { "const": true }
+                }
+              }
+            }
+          ]
+        },
+        { "type": "null" }
+      ]
     },
     "physicalFile": {
       "type": "object",

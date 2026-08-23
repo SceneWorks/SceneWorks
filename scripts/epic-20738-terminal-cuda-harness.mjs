@@ -57,6 +57,13 @@ const NON_MODEL_DISK_RESERVE_BYTES = 40 * 1024 ** 3;
 const REVIEWED_FREE_FLOOR_BYTES = 99_106_288_594;
 const FLUX_Q4_SIDECAR_BYTES = 7_396_392_960 + 494 * 16_384;
 const FLUX_Q8_SIDECAR_BYTES = 12_573_868_032 + 494 * 16_384;
+const DERIVED_DISPOSITION_NOT_APPLICABLE = "not-applicable";
+const DERIVED_DISPOSITION_RESIDENT = "resident-empty";
+const DERIVED_DISPOSITION_BOUNDED = "bounded-transformer-sidecars";
+const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
+const REQUEST_MEMORY_STRATEGY_KEYS = [
+  "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
+];
 const REVIEWED_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 
 function fail(message) {
@@ -278,7 +285,47 @@ export function validateRuntimeResult(runtimeResult, cell) {
     || runtimeResult.loadSpecQuantBits !== expectedQuant) {
     fail(`${cell.id} runtime result did not prove family loadSpecQuantBits=${expectedQuant}`);
   }
+  validateRequestMemoryStrategy(runtimeResult.requestMemoryStrategy, cell);
   return runtimeResult;
+}
+
+function validateRequestMemoryStrategy(strategy, cell) {
+  object(strategy, `${cell.id} request memory strategy`);
+  if (JSON.stringify(Object.keys(strategy).sort()) !== JSON.stringify(REQUEST_MEMORY_STRATEGY_KEYS)) {
+    fail(`${cell.id} request memory strategy is not a closed exact record`);
+  }
+  const isFlux = cell.kind === "image"
+    && new Set(["flux1_dev", "flux1_schnell"]).has(cell.engineId);
+  const booleans = typeof strategy.requestMemoryPresent === "boolean"
+    && typeof strategy.stageResidency === "boolean"
+    && typeof strategy.streamTransformerBlocks === "boolean";
+  if (!booleans) fail(`${cell.id} request memory strategy booleans are missing or malformed`);
+  if (!isFlux) {
+    if (strategy.strategy !== "not-applicable" || strategy.requestMemoryPresent
+      || strategy.stageResidency || strategy.streamTransformerBlocks) {
+      fail(`${cell.id} non-FLUX request memory strategy is not exact not-applicable`);
+    }
+    return strategy;
+  }
+  const exact = (name, present, stage, stream) => strategy.strategy === name
+    && strategy.requestMemoryPresent === present
+    && strategy.stageResidency === stage
+    && strategy.streamTransformerBlocks === stream;
+  if (exact("default-resident", false, false, false)
+    || exact("explicit-resident", true, false, false)
+    || exact("staged-resident", true, true, false)
+    || exact("bounded-transformer", true, true, true)) {
+    return strategy;
+  }
+  fail(`${cell.id} FLUX request memory strategy is not an exact supported policy`);
+}
+
+function dispositionForMemoryStrategy(strategy) {
+  if (strategy.strategy === "not-applicable") return DERIVED_DISPOSITION_NOT_APPLICABLE;
+  if (strategy.strategy === "bounded-transformer") return DERIVED_DISPOSITION_BOUNDED;
+  if (new Set(["default-resident", "explicit-resident", "staged-resident"])
+    .has(strategy.strategy)) return DERIVED_DISPOSITION_RESIDENT;
+  fail(`unreviewed request memory strategy ${strategy.strategy}`);
 }
 
 export function loadProfile(profilePath = PROFILE_PATH) {
@@ -954,6 +1001,13 @@ function validateReceiptInternal(
       || (lifecycle.providerExecution === "failed" && receipt.status !== "failed")) {
       fail("receipt provider execution state drifted from its outcome evidence");
     }
+    let expectedSuccessDisposition = null;
+    if (lifecycle.providerExecution === "completed") {
+      validateRequestMemoryStrategy(lifecycle.requestMemoryStrategy, expectedCell);
+      expectedSuccessDisposition = dispositionForMemoryStrategy(lifecycle.requestMemoryStrategy);
+    } else if (lifecycle.requestMemoryStrategy !== null) {
+      fail("receipt without completed provider execution cannot claim a request memory strategy");
+    }
     for (const derived of lifecycle.derivedAfter) {
       const isFlux = derived.artifactId.startsWith("flux1-");
       const payloadFloor = derived.artifactId.endsWith("-q4")
@@ -971,12 +1025,22 @@ function validateReceiptInternal(
           && derived.files === 0 && derived.bytes === 0 && oneBoundNamespace
           && derived.inventories[0].files === 0 && derived.inventories[0].bytes === 0
           && derived.inventories[0].sha256 === createHash("sha256").digest("hex");
-        const exactComplete = derived.files === 494 && derived.bytes >= payloadFloor
+        const exactResident = lifecycle.providerExecution === "completed"
+          && expectedSuccessDisposition === DERIVED_DISPOSITION_RESIDENT
+          && derived.files === 0 && derived.bytes === 0 && derived.inventories.length === 0
+          && staged?.derivedNamespaces.length === 0;
+        const exactComplete = lifecycle.providerExecution === "completed"
+          && expectedSuccessDisposition === DERIVED_DISPOSITION_BOUNDED
+          && derived.files === 494 && derived.bytes >= payloadFloor
           && derived.bytes <= payloadCeiling && oneBoundNamespace;
-        if (!exactEmptyFailure && !exactComplete) {
-          fail("receipt FLUX derived lifecycle is not one exact bounded b646 namespace");
+        const expectedDisposition = exactResident ? DERIVED_DISPOSITION_RESIDENT
+          : exactEmptyFailure ? DERIVED_DISPOSITION_PROVIDER_FAILED
+            : exactComplete ? DERIVED_DISPOSITION_BOUNDED : null;
+        if (!expectedDisposition || derived.derivedDisposition !== expectedDisposition) {
+          fail("receipt FLUX derived lifecycle is neither exact resident-empty nor one exact bounded b646 namespace");
         }
-      } else if (derived.files !== 0 || derived.bytes !== 0 || derived.inventories.length !== 0) {
+      } else if (derived.derivedDisposition !== DERIVED_DISPOSITION_NOT_APPLICABLE
+        || derived.files !== 0 || derived.bytes !== 0 || derived.inventories.length !== 0) {
         fail("receipt non-FLUX derived lifecycle is not exactly empty");
       }
     }
@@ -1632,7 +1696,8 @@ export async function expectedB646DerivedNamespace(artifact, derivedSidecarRoot)
 }
 
 export async function inspectDerivedSidecarRoot(
-  derivedSidecarRoot, expectedNamespace = null, { materializeExactEmpty = false } = {},
+  derivedSidecarRoot, expectedNamespace = null,
+  { materializeExactEmpty = false, allowExactEmpty = false } = {},
 ) {
   let rootEntries = await readdir(derivedSidecarRoot, { withFileTypes: true });
   if (!expectedNamespace) {
@@ -1640,6 +1705,9 @@ export async function inspectDerivedSidecarRoot(
     return { rootInventory: await directoryInventory(derivedSidecarRoot), namespaces: [] };
   }
   const expectedVersionRoot = path.join(derivedSidecarRoot, "candle-device-format-v1");
+  if (allowExactEmpty && rootEntries.length === 0) {
+    return { rootInventory: await directoryInventory(derivedSidecarRoot), namespaces: [] };
+  }
   if (materializeExactEmpty && rootEntries.length === 0) {
     if (comparable(path.dirname(expectedNamespace)) !== comparable(expectedVersionRoot)
       || !/^[0-9a-f]{64}$/.test(path.basename(expectedNamespace))) {
@@ -1855,6 +1923,7 @@ function emptyAuthorityLifecycle(cell, index) {
     staged: [],
     activeArtifactIds: [...cell.artifactIds],
     providerExecution: "not-attempted",
+    requestMemoryStrategy: null,
     verifiedBefore: false,
     verifiedAfter: false,
     derivedAfter: [],
@@ -2199,11 +2268,30 @@ export function validateCachePreflightEvidence(document, {
     const emptyProviderFailure = snapshot.providerExecution === "failed"
       && snapshot.inventory.files === 0 && snapshot.inventory.bytes === 0
       && snapshot.inventory.sha256 === createHash("sha256").digest("hex");
-    if (flux ? (!emptyProviderFailure && (snapshot.inventory.files !== 494
-        || snapshot.inventory.bytes < payloadFloor
-        || snapshot.inventory.bytes > payloadCeiling))
-      : (snapshot.inventory.files !== 0 || snapshot.inventory.bytes !== 0
-        || snapshot.inventory.sha256 !== createHash("sha256").digest("hex"))) {
+    let expectedSuccessDisposition = null;
+    if (snapshot.providerExecution === "completed") {
+      validateRequestMemoryStrategy(snapshot.requestMemoryStrategy, expected);
+      expectedSuccessDisposition = dispositionForMemoryStrategy(snapshot.requestMemoryStrategy);
+    } else if (snapshot.requestMemoryStrategy !== null) {
+      fail("failed provider cache lifecycle cannot claim a request memory strategy");
+    }
+    const emptyResident = snapshot.providerExecution === "completed"
+      && expectedSuccessDisposition === (flux
+        ? DERIVED_DISPOSITION_RESIDENT : DERIVED_DISPOSITION_NOT_APPLICABLE)
+      && snapshot.inventory.files === 0 && snapshot.inventory.bytes === 0
+      && snapshot.inventory.sha256 === createHash("sha256").digest("hex");
+    const exactBounded = flux && snapshot.providerExecution === "completed"
+      && expectedSuccessDisposition === DERIVED_DISPOSITION_BOUNDED
+      && snapshot.inventory.files === 494
+      && snapshot.inventory.bytes >= payloadFloor
+      && snapshot.inventory.bytes <= payloadCeiling;
+    const expectedDisposition = !flux ? DERIVED_DISPOSITION_NOT_APPLICABLE
+      : emptyResident ? DERIVED_DISPOSITION_RESIDENT
+        : emptyProviderFailure ? DERIVED_DISPOSITION_PROVIDER_FAILED
+          : exactBounded ? DERIVED_DISPOSITION_BOUNDED : null;
+    if (!expectedDisposition || snapshot.derivedDisposition !== expectedDisposition
+      || (!flux && (snapshot.inventory.files !== 0 || snapshot.inventory.bytes !== 0
+        || snapshot.inventory.sha256 !== createHash("sha256").digest("hex")))) {
       fail("derived Candle sidecar lifecycle inventory drifted from the cell family contract");
     }
     previous = snapshot.ordinal;
@@ -2630,6 +2718,7 @@ export async function runCampaign(args, options = {}) {
       staged: [],
       activeArtifactIds: [...cell.artifactIds],
       providerExecution: "not-attempted",
+      requestMemoryStrategy: null,
       verifiedBefore: false,
       verifiedAfter: false,
       derivedAfter: [],
@@ -2805,6 +2894,36 @@ export async function runCampaign(args, options = {}) {
         campaignErrors.push(quarantineReason);
         throw error;
       }
+      if (runtimeFailure === null) {
+        try {
+          const runtimeResultPath = path.join(cellDir, "runtime-result.json");
+          await invokeFault(fault, "runtimeResultRead", index);
+          const linkMetadata = await lstat(runtimeResultPath);
+          if (!linkMetadata.isFile() || linkMetadata.isSymbolicLink()) {
+            fail(`runtime-result is not an ordinary non-reparse file for ${cell.id}`);
+          }
+          const before = await stat(runtimeResultPath);
+          const runtimeResultBytes = await readFile(runtimeResultPath);
+          await invokeFault(fault, "runtimeResultHash", index);
+          const rawSha256 = createHash("sha256").update(runtimeResultBytes).digest("hex");
+          const fileSha256 = await sha256File(runtimeResultPath);
+          const after = await stat(runtimeResultPath);
+          if (!before.isFile() || before.size !== runtimeResultBytes.length
+            || after.size !== before.size || rawSha256 !== fileSha256) {
+            fail(`runtime-result file/hash changed while validating ${cell.id}`);
+          }
+          await invokeFault(fault, "runtimeResultParse", index);
+          const runtimeResult = JSON.parse(runtimeResultBytes.toString("utf8"));
+          await invokeFault(fault, "runtimeResultSemantic", index);
+          validateRuntimeResult(runtimeResult, cell);
+          receipt.cell.loadSpecQuantBits = runtimeResult.loadSpecQuantBits;
+          lifecycle.requestMemoryStrategy = structuredClone(runtimeResult.requestMemoryStrategy);
+        } catch (error) {
+          quarantineReason = `runtime-result evidence failed after cell ${cell.id}: ${errorText(error)}`;
+          campaignErrors.push(quarantineReason);
+          throw error;
+        }
+      }
       try {
         const fluxArtifacts = cell.artifactIds.filter((artifactId) => artifactId.startsWith("flux1-"));
         if (fluxArtifacts.length > 1) fail(`cell ${cell.id} has multiple FLUX sidecar authorities`);
@@ -2814,7 +2933,10 @@ export async function runCampaign(args, options = {}) {
           ) : null;
         const derivedInspection = await operations.inspectDerivedSidecarRoot(
           derivedSidecarRoot, expectedNamespace,
-          { materializeExactEmpty: runtimeFailure !== null && expectedNamespace !== null },
+          {
+            materializeExactEmpty: runtimeFailure !== null && expectedNamespace !== null,
+            allowExactEmpty: runtimeFailure === null && expectedNamespace !== null,
+          },
         );
         if (fluxArtifacts.length === 1) {
           sharedArtifacts.get(fluxArtifacts[0]).derivedNamespaces.splice(
@@ -2835,21 +2957,44 @@ export async function runCampaign(args, options = {}) {
           const bytes = inventories.reduce((sum, inventory) => sum + inventory.bytes, 0);
           const exactEmptyProviderFailure = runtimeFailure !== null
             && files === 0 && bytes === 0 && inventories.length === 1;
-          if (artifactId.startsWith("flux1-") && !exactEmptyProviderFailure && (files !== 494
-              || bytes < (artifactId.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032)
-              || bytes > (artifactId.endsWith("-q4")
-                ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES))) {
+          const exactResident = runtimeFailure === null
+            && dispositionForMemoryStrategy(lifecycle.requestMemoryStrategy)
+              === DERIVED_DISPOSITION_RESIDENT
+            && files === 0 && bytes === 0 && inventories.length === 0;
+          const exactBounded = runtimeFailure === null
+            && dispositionForMemoryStrategy(lifecycle.requestMemoryStrategy)
+              === DERIVED_DISPOSITION_BOUNDED
+            && files === 494
+            && bytes >= (artifactId.endsWith("-q4") ? 7_396_392_960 : 12_573_868_032)
+            && bytes <= (artifactId.endsWith("-q4")
+              ? FLUX_Q4_SIDECAR_BYTES : FLUX_Q8_SIDECAR_BYTES)
+            && inventories.length === 1;
+          const derivedDisposition = artifactId.startsWith("flux1-")
+            ? exactResident ? DERIVED_DISPOSITION_RESIDENT
+              : exactEmptyProviderFailure ? DERIVED_DISPOSITION_PROVIDER_FAILED
+                : exactBounded ? DERIVED_DISPOSITION_BOUNDED : null
+            : DERIVED_DISPOSITION_NOT_APPLICABLE;
+          if (artifactId.startsWith("flux1-") && !derivedDisposition) {
             fail(`FLUX derived-sidecar contract drifted for ${artifactId}: ${files} files/${bytes} bytes`);
           }
-          if (!artifactId.startsWith("flux1-") && (files !== 0 || bytes !== 0)) {
+          if (!artifactId.startsWith("flux1-") && (files !== 0 || bytes !== 0
+              || inventories.length !== 0)) {
             fail(`non-FLUX authority unexpectedly created derived sidecars: ${artifactId}`);
           }
-          lifecycle.derivedAfter.push({ artifactId, files, bytes, inventories });
+          lifecycle.derivedAfter.push({
+            artifactId, derivedDisposition, files, bytes, inventories,
+          });
         }
+        const derivedDisposition = fluxArtifacts.length === 0
+          ? DERIVED_DISPOSITION_NOT_APPLICABLE
+          : lifecycle.derivedAfter.find((entry) => entry.artifactId === fluxArtifacts[0])
+            ?.derivedDisposition;
         derivedSidecarLifecycle.afterCells.push({
           ordinal: index + 1,
           cellId: cell.id,
           providerExecution: lifecycle.providerExecution,
+          requestMemoryStrategy: lifecycle.requestMemoryStrategy,
+          derivedDisposition,
           inventory: derivedInspection.rootInventory,
         });
       } catch (error) {
@@ -2859,34 +3004,7 @@ export async function runCampaign(args, options = {}) {
       }
       if (runtimeFailure) throw runtimeFailure;
       operations.sample(samples, errors, "post-execution VRAM sample failed");
-      try {
-        const runtimeResultPath = path.join(cellDir, "runtime-result.json");
-        await invokeFault(fault, "runtimeResultRead", index);
-        const linkMetadata = await lstat(runtimeResultPath);
-        if (!linkMetadata.isFile() || linkMetadata.isSymbolicLink()) {
-          fail(`runtime-result is not an ordinary non-reparse file for ${cell.id}`);
-        }
-        const before = await stat(runtimeResultPath);
-        const runtimeResultBytes = await readFile(runtimeResultPath);
-        await invokeFault(fault, "runtimeResultHash", index);
-        const rawSha256 = createHash("sha256").update(runtimeResultBytes).digest("hex");
-        const fileSha256 = await sha256File(runtimeResultPath);
-        const after = await stat(runtimeResultPath);
-        if (!before.isFile() || before.size !== runtimeResultBytes.length
-          || after.size !== before.size || rawSha256 !== fileSha256) {
-          fail(`runtime-result file/hash changed while validating ${cell.id}`);
-        }
-        await invokeFault(fault, "runtimeResultParse", index);
-        const runtimeResult = JSON.parse(runtimeResultBytes.toString("utf8"));
-        await invokeFault(fault, "runtimeResultSemantic", index);
-        validateRuntimeResult(runtimeResult, cell);
-        receipt.cell.loadSpecQuantBits = runtimeResult.loadSpecQuantBits;
-        executionPassed = true;
-      } catch (error) {
-        quarantineReason = `runtime-result evidence failed after cell ${cell.id}: ${errorText(error)}`;
-        campaignErrors.push(quarantineReason);
-        throw error;
-      }
+      executionPassed = true;
     } catch (error) {
       const message = recordError(errors, "cell lifecycle failed", error);
       if (!executionAttempted && !quarantineReason) {

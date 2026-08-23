@@ -86,6 +86,74 @@ fn family_load_spec_quant_bits(kind: &str, engine_id: &str, requested_tier: &str
     }
 }
 
+/// The reviewed terminal requests deliberately leave the production request-memory policy at its
+/// default. In particular, FLUX on an ample CUDA device is resident/non-streamed and therefore does
+/// not create bounded-transformer sidecars. This helper makes that absence reviewable and rejects a
+/// new family before it can silently inherit a different harness policy.
+fn family_generation_memory(kind: &str, engine_id: &str) -> Option<gen_core::GenerationMemory> {
+    match (kind, engine_id) {
+        ("image", "chroma1_base" | "chroma1_flash" | "chroma1_hd")
+        | ("image", "flux1_dev" | "flux1_schnell")
+        | ("ltx", "ltx_2_3_distilled")
+        | ("sdxlOpenPose", "sdxl")
+        | ("scail2", "scail2_14b") => None,
+        _ => panic!("unreviewed terminal request-memory family {kind}/{engine_id}"),
+    }
+}
+
+fn request_memory_strategy_value(
+    is_flux: bool,
+    memory: Option<&gen_core::GenerationMemory>,
+) -> Value {
+    if !is_flux {
+        assert!(
+            memory.is_none(),
+            "non-FLUX terminal memory policy needs an explicit reviewed evidence contract"
+        );
+        return json!({
+            "strategy": "not-applicable",
+            "requestMemoryPresent": false,
+            "stageResidency": false,
+            "streamTransformerBlocks": false,
+        });
+    }
+    match memory {
+        None => json!({
+            "strategy": "default-resident",
+            "requestMemoryPresent": false,
+            "stageResidency": false,
+            "streamTransformerBlocks": false,
+        }),
+        Some(memory) => {
+            let strategy = if memory.stream_transformer_blocks {
+                assert!(
+                    memory.stage_residency,
+                    "bounded-transformer terminal memory requires staged residency"
+                );
+                "bounded-transformer"
+            } else if memory.stage_residency {
+                "staged-resident"
+            } else {
+                "explicit-resident"
+            };
+            json!({
+                "strategy": strategy,
+                "requestMemoryPresent": true,
+                "stageResidency": memory.stage_residency,
+                "streamTransformerBlocks": memory.stream_transformer_blocks,
+            })
+        }
+    }
+}
+
+fn family_request_memory_strategy(kind: &str, engine_id: &str) -> Value {
+    let memory = family_generation_memory(kind, engine_id);
+    request_memory_strategy_value(
+        kind == "image" && matches!(engine_id, "flux1_dev" | "flux1_schnell"),
+        memory.as_ref(),
+    )
+}
+
 fn primary_load_spec(cell: &Cell, primary: &Artifact) -> LoadSpec {
     let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
         .with_resolved_route(cell.model_id.clone());
@@ -311,6 +379,7 @@ fn generate_image(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         guidance: cell.request.guidance,
         true_cfg: cell.request.true_cfg,
         sampler: cell.request.sampler.clone(),
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let image = image_output(
@@ -397,6 +466,7 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
             kind: ControlKind::Pose,
             scale: Some(1.0),
         }],
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let image = image_output(
@@ -508,6 +578,7 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         seed: Some(cell.request.seed),
         conditioning,
         video_mode: Some("animation".to_owned()),
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let output_value = generator
@@ -546,6 +617,7 @@ fn generate_ltx(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         fps: cell.request.fps,
         steps: Some(cell.request.steps),
         seed: Some(cell.request.seed),
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
     let generated = generator
@@ -619,6 +691,7 @@ fn epic_20738_terminal_cuda_cell() {
         other => panic!("unreviewed terminal cell kind {other}"),
     };
     let quant = family_load_spec_quant_bits(&cell.kind, &cell.engine_id, &cell.requested_tier);
+    let request_memory_strategy = family_request_memory_strategy(&cell.kind, &cell.engine_id);
     let result = json!({
         "schemaVersion": 1,
         "cell": cell.id,
@@ -626,6 +699,7 @@ fn epic_20738_terminal_cuda_cell() {
         "resolvedTier": primary.subdirectory,
         "denseFallback": false,
         "loadSpecQuantBits": quant,
+        "requestMemoryStrategy": request_memory_strategy,
         "metrics": metrics,
     });
     std::fs::write(
@@ -742,6 +816,98 @@ mod cpu_contract_tests {
                 "{id} load-quant policy"
             );
         }
+    }
+
+    #[test]
+    fn family_request_memory_policy_keeps_all_19_terminal_cells_at_default() {
+        let cases = [
+            ("chroma1-base-q4", "image", "chroma1_base"),
+            ("chroma1-base-q8", "image", "chroma1_base"),
+            ("chroma1-flash-q4", "image", "chroma1_flash"),
+            ("chroma1-flash-q8", "image", "chroma1_flash"),
+            ("chroma1-hd-q4", "image", "chroma1_hd"),
+            ("chroma1-hd-q8", "image", "chroma1_hd"),
+            ("flux1-dev-q4", "image", "flux1_dev"),
+            ("flux1-dev-q8", "image", "flux1_dev"),
+            ("flux1-schnell-q4", "image", "flux1_schnell"),
+            ("flux1-schnell-q8", "image", "flux1_schnell"),
+            ("scail2-q4", "scail2", "scail2_14b"),
+            ("scail2-multi-reference-q4", "scail2", "scail2_14b"),
+            ("scail2-q8", "scail2", "scail2_14b"),
+            ("ltx-2-3-q8", "ltx", "ltx_2_3_distilled"),
+            ("sdxl-openpose", "sdxlOpenPose", "sdxl"),
+            ("realvisxl-openpose", "sdxlOpenPose", "sdxl"),
+            ("realvisxl-lightning-openpose", "sdxlOpenPose", "sdxl"),
+            ("illustrious-v1-openpose", "sdxlOpenPose", "sdxl"),
+            ("illustrious-v2-openpose", "sdxlOpenPose", "sdxl"),
+        ];
+        assert_eq!(cases.len(), 19);
+        for (id, kind, engine_id) in cases {
+            assert!(
+                family_generation_memory(kind, engine_id).is_none(),
+                "{id} must keep GenerationRequest.memory at its reviewed default"
+            );
+            let expected_strategy = if engine_id.starts_with("flux1_") {
+                "default-resident"
+            } else {
+                "not-applicable"
+            };
+            assert_eq!(
+                family_request_memory_strategy(kind, engine_id),
+                json!({
+                    "strategy": expected_strategy,
+                    "requestMemoryPresent": false,
+                    "stageResidency": false,
+                    "streamTransformerBlocks": false,
+                }),
+                "{id} runtime evidence must describe the exact request used"
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| family_generation_memory("image", "unreviewed_engine"))
+                .is_err(),
+            "an unreviewed family must not silently inherit the default request-memory contract"
+        );
+
+        let staged = gen_core::GenerationMemory {
+            stage_residency: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            request_memory_strategy_value(true, Some(&staged)),
+            json!({
+                "strategy": "staged-resident",
+                "requestMemoryPresent": true,
+                "stageResidency": true,
+                "streamTransformerBlocks": false,
+            })
+        );
+        let bounded = gen_core::GenerationMemory {
+            stage_residency: true,
+            stream_transformer_blocks: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            request_memory_strategy_value(true, Some(&bounded)),
+            json!({
+                "strategy": "bounded-transformer",
+                "requestMemoryPresent": true,
+                "stageResidency": true,
+                "streamTransformerBlocks": true,
+            })
+        );
+        let streamed_without_staging = gen_core::GenerationMemory {
+            stage_residency: false,
+            stream_transformer_blocks: true,
+            ..Default::default()
+        };
+        assert!(
+            std::panic::catch_unwind(|| {
+                request_memory_strategy_value(true, Some(&streamed_without_staging))
+            })
+            .is_err(),
+            "bounded-transformer evidence must reject streaming without staged residency"
+        );
     }
 
     #[test]
