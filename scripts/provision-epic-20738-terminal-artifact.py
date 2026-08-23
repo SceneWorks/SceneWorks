@@ -389,8 +389,25 @@ def _mkdir_confined(root: Path, relative: Path, label: str) -> Path:
     return current
 
 
+def _without_windows_extended_prefix(path: Path, label: str) -> Path:
+    if os.name != "nt":
+        return path
+    value = str(path)
+    folded = value.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        return Path(f"\\\\{value[8:]}")
+    if folded.startswith("\\\\?\\"):
+        ordinary = value[4:]
+        if re.match(r"^[A-Za-z]:\\", ordinary):
+            return Path(ordinary)
+        raise RuntimeError(
+            f"{label} uses an unsupported Windows device namespace: {value!r}"
+        )
+    return path
+
+
 def _resolved_ordinary_download_file(path: Path, snapshot: Path, label: str) -> Path:
-    lexical = Path(os.path.abspath(path))
+    lexical = Path(os.path.abspath(_without_windows_extended_prefix(path, label)))
     for current in lexical.parents:
         try:
             metadata = current.lstat()
