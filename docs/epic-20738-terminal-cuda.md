@@ -91,11 +91,16 @@ Authorities are copied just in time into campaign-owned staging under `RUNNER_TE
 before their first selected consumer, and are retained only through their exact last selected
 consumer. The LTX q8/Gemma pair is staged together for cell 14. The four shared SDXL helpers live
 across sparse cells 18-19 while the two Illustrious primaries rotate after one cell. Existing valid
-files are never overwritten or downloaded. Because Schnell is outside this sparse scope, any missing
-file fails preflight; the campaign performs zero network downloads and forces offline mode before
-the first selected cell. LTX q8 and Gemma use the complete production-approved cached parent revision
-`254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. Network mode stays
-offline for every JIT stage and cell.
+files are never overwritten or downloaded. The exact current Illustrious v1/v2 q4 snapshots may be
+fully or partially absent: their frozen 19-file inventories are the only sparse authorities approved
+for hydration. Every present file must match its reviewed size and SHA-256, and every missing file is
+downloaded by exact repository, revision, path, size, and content SHA (plus LFS SHA where applicable)
+into the isolated campaign store.
+Unexpected entries, old revisions, file-list/evidence drift, corrupt bytes, and unsafe links fail the
+source census before transfer. LTX q8 and Gemma use the complete production-approved cached parent
+revision `254989c3ca7ee691187647f350b112c0c448789d`, not the absent current revision. Network mode
+stays offline after the reviewed fill, for every JIT stage and cell; the combined staged authority is
+audited again without weakening the post-download byte checks.
 
 The disk admission model binds exact source bytes, the conservative streamed-FLUX sidecar ceilings
 (494 files; q8 12,573,868,032 bytes and q4 7,396,392,960 bytes, each with at most 16 KiB per-file

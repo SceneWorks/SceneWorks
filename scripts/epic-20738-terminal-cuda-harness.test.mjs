@@ -28,6 +28,7 @@ import {
   loadProfile,
   parseNvidiaSmi,
   receiptSkeleton,
+  reviewedMissingDownloadPlan,
   runCampaign,
   safeRemoveTree,
   importSparseRecovery,
@@ -212,6 +213,56 @@ test("current and legacy Illustrious download selectors fail closed independentl
     () => expectedArtifactFilesFromEvidence(legacy, missingLegacy),
     /missing exact authority SceneWorks\/illustrious-xl-v1-mlx@c5a92a9/,
   );
+});
+
+test("current Illustrious hydration plans bind full and partial exact q4 censuses", async () => {
+  const checked = profile();
+  const current = expectedCurrentArtifactFilesFromEvidenceBytes(
+    checked, await readFile("config/download-pattern-evidence.json"),
+  );
+  const id = "illustrious-v1-q4";
+  const artifact = checked.artifacts[id];
+  const frozen = current.artifactExpectedFiles[id].map((file) => ({
+    artifactId: id,
+    repository: artifact.repository,
+    revision: artifact.revision,
+    file: `q4/${file}`,
+  }));
+  assert.deepEqual(reviewedMissingDownloadPlan({
+    frozenMissing: frozen,
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  }), [{ id, missingFiles: frozen.map(({ file }) => file) }]);
+  assert.deepEqual(reviewedMissingDownloadPlan({
+    frozenMissing: frozen.slice(3, 7),
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  })[0].missingFiles, frozen.slice(3, 7).map(({ file }) => file));
+
+  assert.throws(() => reviewedMissingDownloadPlan({
+    frozenMissing: frozen,
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b",
+  }), /exact current q4 authority/);
+  const driftedFiles = structuredClone(current.artifactExpectedFiles);
+  driftedFiles[id] = driftedFiles[id].slice(1);
+  assert.throws(() => reviewedMissingDownloadPlan({
+    frozenMissing: frozen,
+    profile: checked,
+    artifactExpectedFiles: driftedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  }), /exact current q4 authority/);
+  const unexpected = structuredClone(frozen);
+  unexpected[0].file = "q4/unexpected.bin";
+  assert.throws(() => reviewedMissingDownloadPlan({
+    frozenMissing: unexpected,
+    profile: checked,
+    artifactExpectedFiles: current.artifactExpectedFiles,
+    downloadEvidenceSha256: current.downloadEvidenceSha256,
+  }), /exact current q4 authority/);
 });
 
 test("download evidence freezes the exact 23-authority filename census", async () => {

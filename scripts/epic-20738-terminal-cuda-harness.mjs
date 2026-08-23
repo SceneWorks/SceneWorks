@@ -61,9 +61,16 @@ const ILLUSTRIOUS_CURRENT_AUTHORITIES = new Map([
   ["illustrious-v1-q4", "778c3f02b7703b0c2755d0c0447592897193c6b5"],
   ["illustrious-v2-q4", "672e9851ede4dc856fa945649b6691975c9d74a3"],
 ]);
+const REVIEWED_FLUX_MISSING = {
+  artifactId: "flux1-schnell-q8",
+  repository: "SceneWorks/flux1-schnell-mlx",
+  revision: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+  file: "q8/transformer/model.safetensors",
+};
 const ILLUSTRIOUS_Q4_MARKER = {
   bits: 4, groupSize: 64, components: ["text_encoder", "text_encoder_2", "unet"],
 };
+const ILLUSTRIOUS_Q4_FILE_LIST_SHA256 = "13ff6afbd67d66ae25a7e6eaa88f8f3313d9d1694ea482845c2995b0ffe44a59";
 const IMPORTED_PREFIX_CELLS = 7;
 const RECOVERY_IMPORTED_PREFIX_CELLS = 9;
 const PREFIX_ARTIFACT = `sc-20945-epic-20738-${LEGACY_SCENEWORKS_HEAD}-`;
@@ -126,6 +133,52 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "1fa06ef39a0e2c321a4fa15fa1128c0157ba8cf22fd868ac54c6cefaec13a5ee";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
+
+export function reviewedMissingDownloadPlan({
+  frozenMissing, profile, artifactExpectedFiles, downloadEvidenceSha256,
+}) {
+  const groups = new Map();
+  for (const row of frozenMissing) {
+    const group = groups.get(row.artifactId) ?? [];
+    group.push(row);
+    groups.set(row.artifactId, group);
+  }
+  const plan = [];
+  for (const [artifactId, rows] of groups) {
+    const artifact = profile.artifacts[artifactId];
+    if (!artifact) fail(`reviewed missing-file plan referenced unknown authority ${artifactId}`);
+    if (artifactId === REVIEWED_FLUX_MISSING.artifactId) {
+      if (rows.length !== 1 || JSON.stringify(rows[0]) !== JSON.stringify(REVIEWED_FLUX_MISSING)) {
+        fail("Flux hydration drifted from the sole reviewed missing file");
+      }
+    } else {
+      const revision = ILLUSTRIOUS_CURRENT_AUTHORITIES.get(artifactId);
+      const expected = artifactExpectedFiles[artifactId];
+      const prefix = "q4/";
+      const rowFiles = rows.map((row) => row.file);
+      const missingSet = new Set(rowFiles.map((file) => (
+        file.startsWith(prefix) ? file.slice(prefix.length) : file
+      )));
+      const canonicalMissing = expected?.filter((file) => missingSet.has(file)).map(
+        (file) => `${prefix}${file}`,
+      );
+      if (downloadEvidenceSha256 !== CURRENT_DOWNLOAD_EVIDENCE_SHA256
+        || artifact.revision !== revision || artifact.subdirectory !== "q4"
+        || JSON.stringify(artifact.allowPatterns) !== JSON.stringify(["q4/*"])
+        || !Array.isArray(expected)
+        || canonicalSha256(expected) !== ILLUSTRIOUS_Q4_FILE_LIST_SHA256
+        || missingSet.size !== rows.length
+        || JSON.stringify(rowFiles) !== JSON.stringify(canonicalMissing)
+        || rows.some((row) => row.repository !== artifact.repository
+          || row.revision !== revision || !row.file.startsWith(prefix)
+          || !expected.includes(row.file.slice(prefix.length)))) {
+        fail(`Illustrious hydration drifted from exact current q4 authority ${artifactId}`);
+      }
+    }
+    plan.push({ id: artifactId, missingFiles: rows.map((row) => row.file) });
+  }
+  return plan;
+}
 
 function fail(message) {
   throw new Error(message);
@@ -253,8 +306,8 @@ export function estimateJitDiskPlan(
       row.firstOrdinal <= ordinal && row.lastOrdinal >= ordinal
     ));
     const physical = new Map();
-    // The reviewed download is persistent across the preflight and earlier cells, but belongs to
-    // its authority's lifetime: it is deleted with Schnell q8 after cell 10, never charged forever.
+    // Reviewed downloads persist across preflight and earlier cells, then become their authority's
+    // stage root and are deleted at that authority's exact release boundary.
     for (const row of lifetimes) {
       if (ordinal > row.lastOrdinal) continue;
       for (const file of row.physicalFiles.filter((entry) => entry.persistent)) {
@@ -2389,9 +2442,17 @@ async function validateProvisionResult({
     `${phase} result for ${id}`,
   );
   const expected = cachedArtifactRoots(cacheRoot, artifact);
+  const exactRoot = async (candidate, wanted) => {
+    try {
+      return comparable(await realpath(candidate)) === comparable(wanted);
+    } catch (error) {
+      if (error?.code !== "ENOENT" || !allowIncomplete) throw error;
+      return comparable(path.resolve(candidate)) === comparable(wanted);
+    }
+  };
   if (result.id !== id || comparable(await realpath(result.cacheRoot)) !== comparable(cacheRoot)
-    || comparable(await realpath(result.snapshotRoot)) !== comparable(expected.snapshotRoot)
-    || comparable(await realpath(result.selectedRoot)) !== comparable(expected.selectedRoot)
+    || !await exactRoot(result.snapshotRoot, expected.snapshotRoot)
+    || !await exactRoot(result.selectedRoot, expected.selectedRoot)
     || (staged && typeof result.sourceCacheRoot !== "string")) {
     fail(`${phase} result drifted from exact authority ${id}`);
   }
@@ -2399,7 +2460,7 @@ async function validateProvisionResult({
     || result.missingFiles.some((file) => typeof file !== "string" || !file)
     || result.complete !== (result.missingFiles.length === 0)
     || (!allowIncomplete && !result.complete)
-    || !Array.isArray(result.matchedFiles) || result.matchedFiles.length === 0
+    || !Array.isArray(result.matchedFiles) || (!allowIncomplete && result.matchedFiles.length === 0)
     || result.matchedFiles.some((file) => typeof file !== "string" || !file)
     || !Array.isArray(result.selectedFiles)
     || result.selectedFiles.some((file) => typeof file !== "string" || !file)
@@ -2500,7 +2561,7 @@ async function stageArtifact({
 }
 
 async function downloadReviewedMissing({
-  id, artifact, expectedFiles, scratch, python, cacheRoot, missingStore,
+  id, artifact, expectedFiles, missingFiles, scratch, python, cacheRoot, missingStore,
 }) {
   const requestPath = await writeArtifactRequest({
     id, artifact, expectedFiles, scratch, phase: "download-missing",
@@ -2526,20 +2587,23 @@ async function downloadReviewedMissing({
   const result = parseProvisionerOutput(raw, id, "reviewed missing-file fill");
   exactKeys(result, ["id", "storeRoot", "downloadedFiles"], `missing-file fill for ${id}`);
   if (result.id !== id || comparable(await realpath(result.storeRoot)) !== comparable(missingStore)
-    || result.downloadedFiles.length !== 1) {
+    || result.downloadedFiles.length !== missingFiles.length) {
     fail(`reviewed missing-file fill identity drifted for ${id}`);
   }
-  const [file] = result.downloadedFiles;
-  exactKeys(
-    file,
-    ["path", "bytes", "sha256", "lfsSha256", "commitSha"],
-    `reviewed missing-file fill for ${id}`,
-  );
-  if (file.path !== "transformer/model.safetensors"
-    || file.commitSha !== "bba3ae01dfd94089f173c05edd4e1a4c551f2599"
-    || !Number.isSafeInteger(file.bytes) || file.bytes < 1
-    || !/^[0-9a-f]{64}$/.test(file.sha256) || file.sha256 !== file.lfsSha256) {
-    fail("reviewed missing-file fill did not prove exact commit/size/LFS identity");
+  const prefix = artifact.subdirectory === "." ? "" : `${artifact.subdirectory}/`;
+  for (const [index, file] of result.downloadedFiles.entries()) {
+    exactKeys(
+      file,
+      ["path", "bytes", "sha256", "lfsSha256", "commitSha"],
+      `reviewed missing-file fill for ${id}`,
+    );
+    const expectedPath = prefix && missingFiles[index].startsWith(prefix)
+      ? missingFiles[index].slice(prefix.length) : missingFiles[index];
+    if (file.path !== expectedPath || file.commitSha !== artifact.revision
+      || !Number.isSafeInteger(file.bytes) || file.bytes < 1
+      || !/^[0-9a-f]{64}$/.test(file.sha256) || file.sha256 !== file.lfsSha256) {
+      fail("reviewed missing-file fill did not prove exact commit/path/size/LFS identity");
+    }
   }
   return result;
 }
@@ -3009,7 +3073,7 @@ async function writeSummaryDurably({ output, summary, fault }) {
 function cachePreflightDocument({
   evidencePhase, status, error, downloadEvidenceSha256, remainingArtifactIds, guard, stagingRoot,
   derivedSidecarRoot, frozenMissing, sidecarObstructions, cacheProvisioning,
-  derivedSidecarLifecycle, missingStore, lifetimePlan, diskPlan, missingDownload,
+  derivedSidecarLifecycle, missingStore, lifetimePlan, diskPlan, missingDownloads,
   networkOfflineEstablished,
 }) {
   return {
@@ -3029,10 +3093,12 @@ function cachePreflightDocument({
     reusedFiles: cacheProvisioning.sourceCensus.flatMap((artifact) => artifact.reusedFiles.map(
       (file) => ({ artifactId: artifact.id, ...file }),
     )),
-    downloadedFiles: missingDownload?.downloadedFiles.map((file) => ({
-      artifactId: missingDownload.id, ...file,
-    })) ?? [],
-    networkDownloadCount: missingDownload ? 1 : 0,
+    downloadedFiles: missingDownloads.flatMap((download) => download.downloadedFiles.map((file) => ({
+      artifactId: download.id, ...file,
+    }))),
+    networkDownloadCount: missingDownloads.reduce(
+      (count, download) => count + download.downloadedFiles.length, 0,
+    ),
     phases: cacheProvisioning,
     lifetimePlan,
     diskPlan,
@@ -3121,13 +3187,26 @@ export function validateCachePreflightEvidence(document, {
   if (JSON.stringify(document.reusedFiles) !== JSON.stringify(sourceFiles)) {
     fail("cache preflight top-level hit/download partition drifted");
   }
-  if (document.downloadedFiles.length > 1 || document.downloadedFiles.some((file) => (
-    file.artifactId !== "flux1-schnell-q8"
-      || file.path !== "transformer/model.safetensors"
-      || file.commitSha !== "bba3ae01dfd94089f173c05edd4e1a4c551f2599"
+  const reviewedPlan = reviewedMissingDownloadPlan({
+    frozenMissing: frozen, profile, artifactExpectedFiles, downloadEvidenceSha256,
+  });
+  const expectedDownloads = reviewedPlan.flatMap(({ id, missingFiles }) => {
+    const artifact = profile.artifacts[id];
+    const prefix = artifact.subdirectory === "." ? "" : `${artifact.subdirectory}/`;
+    return missingFiles.map((file) => ({
+      artifactId: id,
+      path: prefix && file.startsWith(prefix) ? file.slice(prefix.length) : file,
+      commitSha: artifact.revision,
+    }));
+  });
+  if (document.downloadedFiles.length !== expectedDownloads.length
+    || document.downloadedFiles.some((file, index) => (
+      file.artifactId !== expectedDownloads[index].artifactId
+      || file.path !== expectedDownloads[index].path
+      || file.commitSha !== expectedDownloads[index].commitSha
       || file.sha256 !== file.lfsSha256
-  ))) fail("cache preflight contains an unreviewed model download");
-  if ((frozen.length === 1) !== (document.downloadedFiles.length === 1)) {
+    ))) fail("cache preflight contains an unreviewed model download");
+  if (frozen.length !== document.downloadedFiles.length) {
     fail("cache preflight missing/download partition is incomplete");
   }
   if (document.networkDownloadCount !== document.downloadedFiles.length
@@ -3515,8 +3594,8 @@ export async function runCampaign(args, options = {}) {
     }
   }
 
-  // The source census is frozen before transfer. A complete cache uses no network; the only
-  // incomplete census allowed is this one exact file, never a snapshot/glob/ref-main fallback.
+  // The source census is frozen before transfer. Only exact reviewed missing-file plans may use
+  // the network; present bytes never fall back to another snapshot, glob, or mutable ref.
   const frozenMissing = cacheProvisioning.sourceCensus.flatMap((artifact) => (
     artifact.missingFiles.map((file) => ({
       artifactId: artifact.id,
@@ -3525,23 +3604,22 @@ export async function runCampaign(args, options = {}) {
       file,
     }))
   ));
-  const reviewedMissing = [{
-    artifactId: "flux1-schnell-q8",
-    repository: "SceneWorks/flux1-schnell-mlx",
-    revision: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-    file: "q8/transformer/model.safetensors",
-  }];
+  let reviewedDownloadPlan = [];
   if (quarantineReason) {
     // Preserve the first fail-closed setup error.
   } else if (censusErrors.length) {
     quarantineReason = `source cache census failed before transfer: ${censusErrors.join(" | ")}`;
-  } else if (frozenMissing.length > 1
-    || (frozenMissing.length === 1
-      && JSON.stringify(frozenMissing) !== JSON.stringify(reviewedMissing))) {
-    quarantineReason = `source cache census found an unapproved missing-file set: ${JSON.stringify(frozenMissing)}`;
+  } else {
+    try {
+      reviewedDownloadPlan = reviewedMissingDownloadPlan({
+        frozenMissing, profile, artifactExpectedFiles, downloadEvidenceSha256,
+      });
+    } catch (error) {
+      quarantineReason = `source cache census found an unapproved missing-file set: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
-  let missingDownload = null;
+  const missingDownloads = [];
   let networkOfflineEstablished = false;
   let sidecarObstructions = [];
   const derivedSidecarLifecycle = { initial: null, afterCells: [] };
@@ -3549,34 +3627,39 @@ export async function runCampaign(args, options = {}) {
   let diskPlan = null;
   if (!quarantineReason) {
     try {
-      if (frozenMissing.length === 1) {
-        missingDownload = await operations.downloadReviewedMissing({
-          id: "flux1-schnell-q8",
-          artifact: profile.artifacts["flux1-schnell-q8"],
-          expectedFiles: artifactExpectedFiles["flux1-schnell-q8"],
+      for (const plan of reviewedDownloadPlan) {
+        const authorityMissingStore = path.join(missingStore, plan.id);
+        await mkdir(authorityMissingStore);
+        missingDownloads.push(await operations.downloadReviewedMissing({
+          id: plan.id,
+          artifact: profile.artifacts[plan.id],
+          expectedFiles: artifactExpectedFiles[plan.id],
+          missingFiles: plan.missingFiles,
           scratch: preflightScratch,
           python,
           cacheRoot: guard.cacheRoot,
-          missingStore,
-        });
+          missingStore: authorityMissingStore,
+        }));
       }
       for (const [artifactId, audit] of sourceAudits) {
         audit.expectedFiles = artifactExpectedFiles[artifactId];
-        audit.downloadedFiles = missingDownload?.id === artifactId
-          ? missingDownload.downloadedFiles : [];
+        audit.downloadedFiles = missingDownloads.find((download) => download.id === artifactId)
+          ?.downloadedFiles ?? [];
       }
       lifetimePlan = authorityLifetimePlan(profile, executionOrdinals, sourceAudits);
       const freeBytes = await operations.diskFreeBytes(scratch);
       diskPlan = estimateJitDiskPlan(
         lifetimePlan,
         freeBytes,
-        missingDownload?.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0) ?? 0,
+        missingDownloads.reduce((sum, download) => sum + download.downloadedFiles.reduce(
+          (subtotal, file) => subtotal + file.bytes, 0,
+        ), 0),
         expectedNonModelPaths,
       );
       if (!diskPlan.admitted) {
         fail(`JIT staging disk admission refused: requires ${diskPlan.peakRequiredAdditionalBytes} bytes at cell ${diskPlan.peakOrdinal}, only ${diskPlan.freeBytes} free`);
       }
-      if (!missingDownload) {
+      if (missingDownloads.length === 0) {
         await operations.cleanup(missingStore, guard, "unused missing-file store");
         await assertPathAbsent(missingStore, "unused missing-file store");
       }
@@ -3619,7 +3702,7 @@ export async function runCampaign(args, options = {}) {
     missingStore,
     lifetimePlan,
     diskPlan,
-    missingDownload,
+    missingDownloads,
     networkOfflineEstablished,
   });
   let initialWrite = await writeCachePreflightDurably({
@@ -3650,7 +3733,7 @@ export async function runCampaign(args, options = {}) {
       missingStore,
       lifetimePlan: [],
       diskPlan: null,
-      missingDownload: null,
+      missingDownloads: [],
       networkOfflineEstablished,
     });
     initialWrite = {
@@ -3771,10 +3854,10 @@ export async function runCampaign(args, options = {}) {
         await invokeFault(fault, "stage", index);
         await probeDisk(lifecycle, `before-stage:${artifactId}`, index + 1);
         const audit = sourceAudits.get(artifactId);
-        const artifactStageRoot = artifactId === "flux1-schnell-q8" && missingDownload
-          ? missingStore : path.join(stagingRoot, artifactId);
+        const artifactDownload = missingDownloads.find((download) => download.id === artifactId);
+        const artifactStageRoot = artifactDownload?.storeRoot ?? path.join(stagingRoot, artifactId);
         transitionRoots.set(artifactId, artifactStageRoot);
-        if (artifactStageRoot !== missingStore) await mkdir(artifactStageRoot);
+        if (!artifactDownload) await mkdir(artifactStageRoot);
         const staged = await operations.stageArtifact({
           id: artifactId,
           artifact: profile.artifacts[artifactId],
@@ -3783,13 +3866,12 @@ export async function runCampaign(args, options = {}) {
           python,
           cacheRoot: guard.cacheRoot,
           stagingRoot: artifactStageRoot,
-          missingStore: artifactId === "flux1-schnell-q8" && missingDownload ? missingStore : null,
+          missingStore: artifactDownload?.storeRoot ?? null,
         });
         if (JSON.stringify(staged.reusedFiles) !== JSON.stringify(audit.reusedFiles)) {
           fail(`trusted source cache changed after frozen census for ${artifactId}`);
         }
-        const expectedDownloaded = missingDownload?.id === artifactId
-          ? missingDownload.downloadedFiles : [];
+        const expectedDownloaded = artifactDownload?.downloadedFiles ?? [];
         assertExactDownloadedFilePartition(
           staged.downloadedFiles ?? [], expectedDownloaded,
           `offline JIT stage downloaded-file partition for ${artifactId}`,
@@ -4230,6 +4312,17 @@ export async function runCampaign(args, options = {}) {
     }
   }
 
+  if (missingDownloads.length) {
+    try {
+      await operations.cleanup(missingStore, guard, "reviewed missing-file store");
+      await assertPathAbsent(missingStore, "reviewed missing-file store");
+    } catch (error) {
+      const message = `reviewed missing-file store cleanup failed: ${errorText(error)}`;
+      campaignErrors.push(message);
+      if (!quarantineReason) quarantineReason = message;
+    }
+  }
+
   let finalLifecycle = null;
   try {
     const stage = await operations.directoryInventory(stagingRoot);
@@ -4269,7 +4362,7 @@ export async function runCampaign(args, options = {}) {
     missingStore,
     lifetimePlan,
     diskPlan,
-    missingDownload,
+    missingDownloads,
     networkOfflineEstablished,
   });
   let finalWrite = await writeCachePreflightDurably({
@@ -4295,7 +4388,7 @@ export async function runCampaign(args, options = {}) {
       missingStore,
       lifetimePlan: [],
       diskPlan: null,
-      missingDownload: null,
+      missingDownloads: [],
       networkOfflineEstablished,
     });
     finalWrite = {

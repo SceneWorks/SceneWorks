@@ -20,6 +20,8 @@ SPEC.loader.exec_module(MODULE)
 
 class CacheOnlyProvisionTests(unittest.TestCase):
     REVISION = "a" * 40
+    CURRENT_REPOSITORY = "SceneWorks/illustrious-xl-v1-mlx"
+    CURRENT_REVISION = "778c3f02b7703b0c2755d0c0447592897193c6b5"
 
     def request(self) -> dict:
         return {
@@ -67,6 +69,22 @@ class CacheOnlyProvisionTests(unittest.TestCase):
         (snapshot / "q8" / "transformer").mkdir(parents=True)
         (snapshot / "q8" / "model_index.json").write_bytes(b"{}")
         return snapshot
+
+    def current_request(self, inventory: dict) -> dict:
+        return {
+            "id": "illustrious-v1-q4",
+            "repository": self.CURRENT_REPOSITORY,
+            "revision": self.CURRENT_REVISION,
+            "subdirectory": "q4",
+            "allowPatterns": ["q4/*"],
+            "expectedFiles": sorted(inventory),
+        }
+
+    def current_selected(self, root: Path) -> Path:
+        return (
+            root / "models--SceneWorks--illustrious-xl-v1-mlx" / "snapshots"
+            / self.CURRENT_REVISION / "q4"
+        )
 
     def test_cache_hit_resolves_only_exact_allow_list_without_copy_or_network(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -301,9 +319,112 @@ class CacheOnlyProvisionTests(unittest.TestCase):
             snapshot = self.cache_snapshot(cache)
             (snapshot / "q4" / "weights.safetensors").write_bytes(b"weights")
             with self.assertRaisesRegex(
-                RuntimeError, "network fill requires exactly the sole reviewed missing filename"
+                RuntimeError, "network fill requires an exact reviewed missing-file plan"
             ):
                 MODULE.download_reviewed_missing(self.request(), cache, staging)
+
+    def test_reviewed_current_snapshot_can_be_fully_absent_or_partially_hydrated(self) -> None:
+        config = b"exact config"
+        weights = b"exact weights"
+        inventory = {
+            "config.json": (len(config), hashlib.sha256(config).hexdigest()),
+            "unet/model.safetensors": (len(weights), hashlib.sha256(weights).hexdigest()),
+        }
+        authority = {(self.CURRENT_REPOSITORY, self.CURRENT_REVISION): inventory}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            MODULE.REVIEWED_HYDRATION_AUTHORITIES, authority, clear=True
+        ):
+            cache = Path(directory).resolve()
+            absent = MODULE.audit_cached_artifact(self.current_request(inventory), cache)
+            self.assertFalse(absent["complete"])
+            self.assertEqual(absent["reusedFiles"], [])
+            self.assertEqual(absent["missingFiles"], ["q4/config.json", "q4/unet/model.safetensors"])
+
+            selected = self.current_selected(cache)
+            selected.mkdir(parents=True)
+            (selected / "config.json").write_bytes(config)
+            partial = MODULE.audit_cached_artifact(self.current_request(inventory), cache)
+            self.assertEqual([row["path"] for row in partial["reusedFiles"]], ["config.json"])
+            self.assertEqual(partial["missingFiles"], ["q4/unet/model.safetensors"])
+
+    def test_reviewed_current_snapshot_rejects_corrupt_unexpected_and_unsafe_entries(self) -> None:
+        payload = b"exact"
+        inventory = {"weights.safetensors": (len(payload), hashlib.sha256(payload).hexdigest())}
+        authority = {(self.CURRENT_REPOSITORY, self.CURRENT_REVISION): inventory}
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside_directory, mock.patch.dict(
+            MODULE.REVIEWED_HYDRATION_AUTHORITIES, authority, clear=True
+        ):
+            cache = Path(directory).resolve()
+            selected = self.current_selected(cache)
+            selected.mkdir(parents=True)
+            target = selected / "weights.safetensors"
+            target.write_bytes(b"drift")
+            with self.assertRaisesRegex(RuntimeError, "source byte identity drifted"):
+                MODULE.audit_cached_artifact(self.current_request(inventory), cache)
+            target.write_bytes(payload)
+            unexpected = selected / "unexpected.bin"
+            unexpected.write_bytes(b"unreviewed")
+            with self.assertRaisesRegex(RuntimeError, "unexpected file"):
+                MODULE.audit_cached_artifact(self.current_request(inventory), cache)
+            unexpected.unlink()
+            target.unlink()
+            outside = Path(outside_directory).resolve() / "outside.bin"
+            outside.write_bytes(payload)
+            try:
+                os.symlink(outside, target)
+            except OSError as error:
+                self.skipTest(f"symlink/reparse fixture unavailable: {error}")
+            with self.assertRaisesRegex(RuntimeError, "escaped trusted cache root"):
+                MODULE.audit_cached_artifact(self.current_request(inventory), cache)
+
+    def test_reviewed_current_partial_snapshot_downloads_only_missing_bytes_then_audits_stage(self) -> None:
+        first, second = b"cached exact", b"download exact"
+        inventory = {
+            "config.json": (len(second), hashlib.sha256(second).hexdigest()),
+            "unet/model.safetensors": (len(first), hashlib.sha256(first).hexdigest()),
+        }
+        authority = {(self.CURRENT_REPOSITORY, self.CURRENT_REVISION): inventory}
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as stored, tempfile.TemporaryDirectory() as staged, mock.patch.dict(
+            MODULE.REVIEWED_HYDRATION_AUTHORITIES, authority, clear=True
+        ):
+            cache = Path(directory).resolve()
+            missing_store = Path(stored).resolve()
+            staging = Path(staged).resolve()
+            selected = self.current_selected(cache)
+            (selected / "unet").mkdir(parents=True)
+            (selected / "unet" / "model.safetensors").write_bytes(first)
+
+            def url(**kwargs):
+                return f"https://huggingface.invalid/{kwargs['filename']}"
+
+            def metadata(_url, token):
+                self.assertFalse(token)
+                return types.SimpleNamespace(
+                    commit_hash=self.CURRENT_REVISION,
+                    etag="c" * 40,
+                    size=len(second),
+                )
+
+            def download(**kwargs):
+                self.assertEqual(kwargs["filename"], "q4/config.json")
+                target = Path(kwargs["local_dir"]) / kwargs["filename"]
+                target.write_bytes(second)
+                return str(target)
+
+            fake_hf = types.SimpleNamespace(
+                __version__="0.36.0", hf_hub_url=url,
+                get_hf_file_metadata=metadata, hf_hub_download=download,
+            )
+            with mock.patch.dict(sys.modules, {"huggingface_hub": fake_hf}):
+                downloaded = MODULE.download_reviewed_missing(
+                    self.current_request(inventory), cache, missing_store
+                )
+            self.assertEqual([row["path"] for row in downloaded["downloadedFiles"]], ["config.json"])
+            staged_result = MODULE.stage_artifact(
+                self.current_request(inventory), cache, staging, missing_store
+            )
+            self.assertTrue(staged_result["complete"])
+            self.assertEqual(staged_result["matchedFiles"], sorted(inventory))
 
     def test_request_rejects_unreviewed_floating_or_escaping_fields(self) -> None:
         self.assertEqual(self.parse(self.request())["allowPatterns"], ["q4/*"])
