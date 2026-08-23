@@ -390,7 +390,12 @@ fn resolve_image_route_with_imported_availability(
 /// (`Ok(Some(_))`), and a typed refusal (`Err`). Only the first is "this route is unavailable"; a
 /// refusal means the route OWNS the entry and declined it. Folding the third into `false` made
 /// every plan refusal indistinguishable from a missing route in the probes.
-#[cfg(test)]
+///
+/// Gated per lane rather than a bare `#[cfg(test)]`: this helper only exists where a route probe
+/// does, and `tests/test_builtin_manifest_audit.py` treats the first line-initial `#[cfg(test)]`
+/// as the start of this file's test module — a bare one here would truncate the audited region to
+/// the first 400 lines and silently drop base.rs's `repo` / `modelPath` lanes from the inventory.
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 fn checkpoint_plan_available_or_panic(request: &ImageRequest, settings: &Settings) -> bool {
     match prepare_checkpoint_plan_sources(request, settings) {
         Ok(prepared) => prepared.is_some(),
