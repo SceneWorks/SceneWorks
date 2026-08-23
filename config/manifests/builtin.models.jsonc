@@ -12216,6 +12216,9 @@
           // Model License LICENSE.txt. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
+          "revision": "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
+          "variant": "bf16",
+          "subdir": "",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 25830116527,
@@ -12267,6 +12270,24 @@
         "minMemoryGb": 24,
         "quantize": 4,
         "repo": "SceneWorks/Sana_1600M_1024px_mlx"
+      },
+      "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }, "overlays": ["none"] },
+          "bounded_attention": { "parameters": { "attentionChunkSize": 1048576 }, "overlays": ["none"] },
+          "bounded_transformer_residency": { "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" }, "overlays": ["none"] }
+        },
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "sana_1600m", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "sana-candle-dense-base-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-base-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "bounded_decode", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-base-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency", "bounded_decode"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }, "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128] }, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "bounded_attention", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-base-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 1048576 }, "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [4194304, 2097152, 1048576] }, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-base-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 1048576, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" }, "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [4194304, 2097152, 1048576], "transformerWindowSizes": [1, 2, 4, 5, 10], "transformerWindowComponents": ["Dit"] }, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" }
+          ]
+        }
       },
       "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_1600M_1024px",
       "ui": {
@@ -12385,6 +12406,9 @@
           // base repo the Sprint diffusers tree ships no fp16/fp32 duplication, so it is the smaller ~9.7GB).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+          "revision": "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
+          "variant": "bf16",
+          "subdir": "",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 9736976627,
@@ -12429,6 +12453,24 @@
         "minMemoryGb": 24,
         "quantize": 4,
         "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx"
+      },
+      "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": { "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }, "overlays": ["none"] },
+          "bounded_attention": { "parameters": { "attentionChunkSize": 1048576 }, "overlays": ["none"] },
+          "bounded_transformer_residency": { "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" }, "overlays": ["none"] }
+        },
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "sana_sprint_1600m", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "sana-candle-dense-sprint-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-sprint-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "bounded_decode", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-sprint-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency", "bounded_decode"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }, "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128] }, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "bounded_attention", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-sprint-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 1048576 }, "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [4194304, 2097152, 1048576] }, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" },
+            { "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "sana-candle-dense-sprint-full-ladder-v1", "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 1048576, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" }, "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [4194304, 2097152, 1048576], "transformerWindowSizes": [1, 2, 4, 5, 10], "transformerWindowComponents": ["Dit"] }, "source": "inference:crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs" }
+          ]
+        }
       },
       "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_Sprint_1.6B_1024px",
       "ui": {

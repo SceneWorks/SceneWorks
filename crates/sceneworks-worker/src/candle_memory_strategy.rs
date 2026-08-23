@@ -47,7 +47,9 @@ const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additiv
 const IDEOGRAM_TURBO_ADAPTER_PREFIX: &str = "ideogram.turbo-time.sha256:";
 const IDEOGRAM_PID_PREFIX: &str = "ideogram.pid.flux2.sha256:";
 const IDEOGRAM_PHYSICAL_RECEIPT_PREFIX: &str = "ideogram.physical.sha256:";
+const SANA_PHYSICAL_RECEIPT_PREFIX: &str = "sana.candle.dense.physical.sha256:";
 pub(crate) const KOLORS_REQUEST_EVIDENCE_REVISION: &str = "kolors-candle-request-contract-v1";
+const SANA_REQUEST_EVIDENCE_REVISION: &str = "sana-candle-dense-request-contract-v1";
 const KOLORS_PHYSICAL_RECEIPT_PREFIX: &str = "kolors.physical.sha256:";
 const KOLORS_ADAPTER_RECEIPT_PREFIX: &str = "kolors.adapters.ordered.sha256:";
 const KOLORS_IP_RECEIPT_PREFIX: &str = "kolors.ip.sha256:";
@@ -62,6 +64,10 @@ fn is_ideogram(engine_id: &str) -> bool {
     matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
 }
 
+fn is_sana(engine_id: &str) -> bool {
+    matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
+}
+
 fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
     matches!(
         engine_id,
@@ -72,6 +78,7 @@ fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
 fn is_receipt_priced(engine_id: &str) -> bool {
     is_chroma(engine_id)
         || is_ideogram(engine_id)
+        || is_sana(engine_id)
         || engine_id == "kolors"
         || is_sealed_kolors_bespoke(engine_id)
 }
@@ -245,6 +252,66 @@ fn validate_ideogram_asset_facts(
         ));
     }
     Ok(())
+}
+
+fn validate_sana_asset_facts(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+) -> WorkerResult<String> {
+    let expected_fingerprint = match engine_id {
+        "sana_1600m" => "sana-candle-dense-base-full-ladder-v1",
+        "sana_sprint_1600m" => "sana-candle-dense-sprint-full-ladder-v1",
+        _ => {
+            return Err(WorkerError::InvalidPayload(
+                "unknown SANA receipt-priced provider identity".to_owned(),
+            ))
+        }
+    };
+    let facts = contract.asset_facts;
+    let physical = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.id.starts_with(SANA_PHYSICAL_RECEIPT_PREFIX))
+        .collect::<Vec<_>>();
+    let complete = contract.provider_id == engine_id
+        && contract
+            .calibration
+            .as_ref()
+            .is_some_and(|calibration| calibration.fingerprint == expected_fingerprint)
+        && facts.conditioning_bytes > 0
+        && facts.transformer_bytes > 0
+        && facts.decoder_bytes > 0
+        && facts.base_bytes
+            == facts
+                .conditioning_bytes
+                .saturating_add(facts.transformer_bytes)
+                .saturating_add(facts.decoder_bytes)
+        && facts.overlay_bytes == 0
+        && contract.auxiliary_resident_bytes() == 0
+        && matches!(physical.as_slice(), [component]
+            if component.id.len() == SANA_PHYSICAL_RECEIPT_PREFIX.len() + 64
+                && component.id[SANA_PHYSICAL_RECEIPT_PREFIX.len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                && component.kind == gen_core::MemoryComponentKind::TransformerSubStack(
+                    gen_core::TransformerComponent::Dit
+                )
+                && component.resident_bytes == facts.transformer_bytes
+                && component.bounded_by == Some(MemoryStrategy::StagedResidency)
+                && component.residency == gen_core::MemoryComponentResidency::WholeRender);
+    if !complete {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} provider returned incomplete or crossed SANA physical facts"
+        )));
+    }
+    Ok(physical[0].id.clone())
+}
+
+pub(crate) fn sana_physical_receipt_identity(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+) -> WorkerResult<String> {
+    validate_sana_asset_facts(engine_id, contract)
 }
 
 fn validate_kolors_asset_facts(
@@ -936,6 +1003,17 @@ fn estimate_floor_parameters(
             .min()
             .map(Some)
     };
+    let transformer_window_component =
+        if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
+            contract
+                .capability(MemoryStrategy::BoundedTransformerResidency)?
+                .parameters
+                .transformer_window_components
+                .first()
+                .copied()
+        } else {
+            None
+        };
     Some(gen_core::MemoryStrategyParameters {
         decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
             &ranges.decode_tile_edges
@@ -949,7 +1027,7 @@ fn estimate_floor_parameters(
         transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
             &ranges.transformer_window_sizes
         })?,
-        transformer_window_component: None,
+        transformer_window_component,
     })
 }
 
@@ -1340,12 +1418,13 @@ fn evaluate_shared_image_inner(
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => CHROMA_REQUEST_EVIDENCE_REVISION,
         "ideogram_4" | "ideogram_4_turbo" => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
         "kolors" => KOLORS_REQUEST_EVIDENCE_REVISION,
+        "sana_1600m" | "sana_sprint_1600m" => SANA_REQUEST_EVIDENCE_REVISION,
         _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
     // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
     // Keep that surface on its established path until it mints one scope per pass.
-    if worker_multipass && !is_ideogram(engine_id) {
+    if worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id) {
         return Ok(None);
     }
     let mode =
@@ -1357,13 +1436,19 @@ fn evaluate_shared_image_inner(
         return Ok(None);
     };
     let receipt_priced = is_receipt_priced(engine_id);
-    let Some(resident_peak_gb) = predicted_peak_gb else {
-        if receipt_priced && artifact_is_certified {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{engine_id}/{tier_key} is missing its structural resident peak row"
-            )));
+    let resident_peak_gb = match predicted_peak_gb {
+        Some(peak) => peak,
+        // SANA's certified provider receipt prices the selected dense snapshot from its real
+        // safetensor headers. It deliberately has no per-story measured manifest curve.
+        None if is_sana(engine_id) && artifact_is_certified => 0.0,
+        None => {
+            if receipt_priced && artifact_is_certified {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{engine_id}/{tier_key} is missing its structural resident peak row"
+                )));
+            }
+            return Ok(None);
         }
-        return Ok(None);
     };
     if receipt_priced && !artifact_is_certified {
         // Receipt-priced optimized contracts are tied to the immutable turnkey revision and physical tier.
@@ -1390,6 +1475,14 @@ fn evaluate_shared_image_inner(
     } else if is_ideogram(engine_id) {
         validate_ideogram_asset_facts(engine_id, &contract, use_pid, &mode.mode)?;
         ideogram_provider_overlay_identity(engine_id, &contract, provider_overlay)?
+    } else if is_sana(engine_id) {
+        validate_sana_asset_facts(engine_id, &contract)?;
+        if provider_overlay.is_some() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{engine_id} does not accept an adapter overlay"
+            )));
+        }
+        None
     } else if engine_id == "kolors" {
         let exact = kolors_overlay_receipt_identity(engine_id, &contract, use_pid)?;
         let has_declared_adapters = provider_overlay.is_some();
@@ -2006,6 +2099,89 @@ mod tests {
             decoder_bytes: gib(2),
             base_bytes: gib(18),
             overlay_bytes: adapter_bytes.saturating_add(pid_bytes),
+        };
+        contract
+    }
+
+    fn sana_probe_contract(provider: &str) -> gen_core::MemoryProviderContract {
+        let mut contract = chroma_probe_contract(None, 0, 0);
+        contract.provider_id = provider.to_owned();
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| gen_core::MemoryStrategyCapability {
+                strategy,
+                support: gen_core::MemoryStrategySupport::Implemented,
+                parameters: match strategy {
+                    MemoryStrategy::BoundedDecode => gen_core::MemoryParameterRanges {
+                        decode_tile_edges: vec![512],
+                        decode_overlaps: vec![128],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedAttention => gen_core::MemoryParameterRanges {
+                        attention_chunk_sizes: vec![1_048_576],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedTransformerResidency => {
+                        gen_core::MemoryParameterRanges {
+                            transformer_window_sizes: vec![1],
+                            transformer_window_components: vec![
+                                gen_core::TransformerComponent::Dit,
+                            ],
+                            ..Default::default()
+                        }
+                    }
+                    _ => Default::default(),
+                },
+            })
+            .collect();
+        contract.additional_prerequisites = [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ]
+        .into_iter()
+        .map(|strategy| {
+            (
+                strategy,
+                gen_core::MemoryStrategyPrerequisite::Rung {
+                    rung: MemoryStrategy::StagedResidency,
+                    scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                },
+            )
+        })
+        .collect();
+        contract.lifecycle.decode_tiling = true;
+        contract.lifecycle.attention_chunking = true;
+        contract.lifecycle.transformer_window_materialization = true;
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            if provider == "sana_1600m" {
+                "sana-candle-dense-base-full-ladder-v1"
+            } else {
+                "sana-candle-dense-sprint-full-ladder-v1"
+            },
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+        contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![
+                gen_core::MemoryFormulaVariable::AssetBytes,
+                gen_core::MemoryFormulaVariable::PixelCount,
+                gen_core::MemoryFormulaVariable::BatchCount,
+                gen_core::MemoryFormulaVariable::ConditioningTokenCount,
+                gen_core::MemoryFormulaVariable::DecodeTileArea,
+                gen_core::MemoryFormulaVariable::AttentionChunkSize,
+                gen_core::MemoryFormulaVariable::TransformerWindowSize,
+            ],
+            resident_components: vec![gen_core::MemoryResidentComponent {
+                id: format!("{SANA_PHYSICAL_RECEIPT_PREFIX}{}", "a".repeat(64)),
+                kind: gen_core::MemoryComponentKind::TransformerSubStack(
+                    gen_core::TransformerComponent::Dit,
+                ),
+                resident_bytes: gib(10),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            }],
         };
         contract
     }
@@ -2713,6 +2889,99 @@ mod tests {
             .err()
             .expect("typed adapter/PiD bytes must equal the aggregate footprint");
         assert!(crossed.to_string().contains("materialized asset facts"));
+    }
+
+    #[test]
+    fn sana_dense_receipts_admit_t2i_i2i_and_hires_but_refuse_crossed_or_no_fit() {
+        let manifest = json!({ "candle": {} })
+            .as_object()
+            .expect("SANA structural manifest")
+            .clone();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        for provider in ["sana_1600m", "sana_sprint_1600m"] {
+            let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-sana-dense")))
+                .with_resolved_route(provider);
+            let evaluate =
+                |mode: &str, reference_count: u32, multipass: bool, free_gb: f64, contract| {
+                    evaluate_shared_image_inner(
+                        provider,
+                        provider,
+                        &spec,
+                        true,
+                        &manifest,
+                        "bf16",
+                        mode,
+                        None,
+                        None,
+                        MemoryGeometry {
+                            reference_count,
+                            ..geometry
+                        },
+                        reference_count == 1,
+                        false,
+                        multipass,
+                        false,
+                        Some(VramBudget {
+                            free_gb,
+                            total_gb: 48.0,
+                        }),
+                        None,
+                        0,
+                        MemoryCacheState::Cold,
+                        None,
+                        Some(contract),
+                        Some(SANA_REQUEST_EVIDENCE_REVISION),
+                    )
+                };
+
+            for (mode, references, multipass) in [
+                ("text_to_image", 0, false),
+                ("image_to_image", 1, false),
+                ("image_to_image", 1, true),
+            ] {
+                let evaluation = evaluate(
+                    mode,
+                    references,
+                    multipass,
+                    15.0,
+                    sana_probe_contract(provider),
+                )
+                .expect("exact SANA receipt evaluation")
+                .expect("staged phase floor fits");
+                assert_eq!(
+                    evaluation.context.selection.strategy,
+                    MemoryStrategy::StagedResidency
+                );
+                assert_eq!(evaluation.context.geometry.reference_count, references);
+                assert_eq!(
+                    evaluation.context.evidence_revision,
+                    SANA_REQUEST_EVIDENCE_REVISION
+                );
+            }
+
+            let no_fit = evaluate(
+                "text_to_image",
+                0,
+                false,
+                14.0,
+                sana_probe_contract(provider),
+            )
+            .expect_err("a budget below the receipt-derived staged floor must refuse");
+            assert!(no_fit.to_string().contains("no exact resident or staged"));
+
+            let mut crossed = sana_probe_contract(provider);
+            crossed.calibration.as_mut().unwrap().fingerprint =
+                "sana-candle-dense-crossed-full-ladder-v1".to_owned();
+            let crossed = evaluate("text_to_image", 0, false, 15.0, crossed)
+                .expect_err("crossed Base/Sprint identity must refuse before selection");
+            assert!(crossed.to_string().contains("crossed SANA physical facts"));
+        }
     }
 
     #[test]

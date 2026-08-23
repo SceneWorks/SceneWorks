@@ -16782,6 +16782,69 @@ fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
     }
 }
 
+#[test]
+fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
+    let source = include_str!("base.rs");
+    let selector = include_str!("../candle_memory_strategy.rs");
+    for required in [
+        "SANA_CANDLE_DIFFUSERS_REVISION",
+        "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
+        "SANA_SPRINT_CANDLE_DIFFUSERS_REVISION",
+        "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
+        "huggingface_pinned_snapshot_dir(",
+        "\"sana_1600m\" | \"sana_sprint_1600m\"",
+        "hires_first_pass_generation_memory",
+        "hires_first_pass_memory_context",
+        "sana_selector_authoritative",
+        "requires an exact receipt-priced pre-load memory selection for every render pass",
+        "if is_ideogram || is_sana",
+        "sana_physical_receipt_identity",
+        "passIdentity",
+    ] {
+        assert!(
+            source.contains(required),
+            "SANA production route omitted {required}"
+        );
+    }
+    let force_dense = source
+        .split_once("fn candle_quant_for_resolved_tier(")
+        .expect("Candle tier resolver")
+        .1
+        .split_once("let resolved_bits")
+        .expect("SANA dense guard precedes generic tier mapping")
+        .0;
+    assert!(force_dense.contains("sana_1600m") && force_dense.contains("return (None, None)"));
+    let final_mode = source
+        .split_once("let shared_admission_mode = if hires_fix.is_some()")
+        .expect("final-pass admission")
+        .1
+        .split_once("let first_pass_reference_count")
+        .expect("end final-pass admission")
+        .0;
+    assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
+    let first_mode = source
+        .split_once("let mut first_pass_shared_memory = if hires_fix.is_some()")
+        .expect("first-pass admission")
+        .1
+        .split_once("if let Some(evaluation) = shared_memory")
+        .expect("end first-pass admission")
+        .0;
+    assert!(first_mode.contains("sana_1600m") && first_mode.contains("shared_request_mode"));
+    for marker in [
+        "fn is_sana(",
+        "|| is_sana(engine_id)",
+        "worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id)",
+        "validate_sana_asset_facts(engine_id, &contract)",
+        "SANA_PHYSICAL_RECEIPT_PREFIX",
+        "sana_dense_receipts_admit_t2i_i2i_and_hires_but_refuse_crossed_or_no_fit",
+    ] {
+        assert!(
+            selector.contains(marker),
+            "SANA shared selector omitted {marker}"
+        );
+    }
+}
+
 /// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed
 /// `SceneWorks/krea-2-turbo-mlx` turnkey const on-demand; the repo is non-overridable here, so it must
 /// pin an exact commit rather than the mutable `main` branch (sc-9879, F-077 follow-up).

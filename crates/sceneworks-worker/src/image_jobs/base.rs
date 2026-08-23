@@ -1564,6 +1564,8 @@ fn pinned_turnkey_snapshot_for_request(
 /// manifest's windows/linux whole-repo download entry.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_CANDLE_DIFFUSERS_REVISION: &str = "ac0da2ff55fbe434795be0dce883042e4d49e2fc";
 
 /// The whole-repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF snapshot the candle
 /// SANA-Sprint lane loads (sc-11781, epic 8485). The `candle-gen-sana` Sprint pipeline reads the same
@@ -1575,6 +1577,9 @@ const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024p
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SANA_SPRINT_CANDLE_DIFFUSERS_REPO: &str =
     "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_SPRINT_CANDLE_DIFFUSERS_REVISION: &str =
+    "19683c58b7ea290e55cedd8950ae1d86ada7ef96";
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 // Keep the explicit optional branch: the manifest audit recognizes this shape and proves every
@@ -1876,9 +1881,10 @@ pub(crate) fn resolve_weights_dir(
     // error above. macOS never compiles this branch (it keeps the MLX turnkey path).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if request.model == "sana_1600m" {
-        return Ok(huggingface_snapshot_dir(
+        return Ok(huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             SANA_CANDLE_DIFFUSERS_REPO,
+            SANA_CANDLE_DIFFUSERS_REVISION,
         ));
     }
     // SANA-Sprint 1.6B off-Mac (candle, sc-11781, epic 8485): identical treatment to base SANA above —
@@ -1890,9 +1896,10 @@ pub(crate) fn resolve_weights_dir(
     // nonexistent `q4/`). macOS never compiles this branch (it keeps the MLX turnkey path).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if request.model == "sana_sprint_1600m" {
-        return Ok(huggingface_snapshot_dir(
+        return Ok(huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             SANA_SPRINT_CANDLE_DIFFUSERS_REPO,
+            SANA_SPRINT_CANDLE_DIFFUSERS_REVISION,
         ));
     }
     // SenseNova-U1 needs NO bespoke branch (sc-14249). It had one from sc-13817 to sc-14249:
@@ -3910,7 +3917,10 @@ fn optimized_shared_memory_context(
     context: gen_core::MemoryRunContext,
 ) -> Option<gen_core::MemoryRunContext> {
     (context.selection.strategy.is_optimized()
-        || matches!(engine_id, "ideogram_4" | "ideogram_4_turbo"))
+        || matches!(
+            engine_id,
+            "ideogram_4" | "ideogram_4_turbo" | "sana_1600m" | "sana_sprint_1600m"
+        ))
     .then_some(context)
 }
 
@@ -3928,6 +3938,8 @@ fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -
         || (matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
             && matches!(request_mode, "image_generation" | "text_to_image"))
         || (matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
             && matches!(request_mode, "image_generation" | "text_to_image"))
     {
         "text_to_image"
@@ -9581,6 +9593,9 @@ fn candle_quant_for_resolved_tier(
     supports_quant: bool,
     force_dense: bool,
 ) -> (Option<Quant>, Option<i64>) {
+    if matches!(request.model.as_str(), "sana_1600m" | "sana_sprint_1600m") {
+        return (None, None);
+    }
     let resolved_bits = match tier {
         "bf16" => None,
         "q4" => Some(4),
@@ -9940,6 +9955,7 @@ async fn generate_candle_stream(
         model.backend()
     };
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
+    let is_sana = matches!(engine_id, "sana_1600m" | "sana_sprint_1600m");
     // Standard-tier weight resolution, SHARED with the MLX lane (sc-9092, epic 9083 gap #3). Every
     // candle image family — Ideogram / Boogu / Krea / Lens included — now packed-loads the SAME
     // SceneWorks MLX-packed per-tier turnkey the macOS path uses: as of the candle-gen rollout all 11
@@ -10246,6 +10262,9 @@ async fn generate_candle_stream(
     // The comment above already knew "its footprint is neither the bf16 nor the q8 tier"; now the gate
     // acts on it. Extracted so that mapping has a unit test; this fn cannot be exercised from one.
     let mut tier = candle_resolved_tier_key(request, &weights_dir, convrot.is_some());
+    if matches!(engine_id, "sana_1600m" | "sana_sprint_1600m") {
+        tier = "bf16";
+    }
     validate_candle_tier_memory_evidence(&request.model, &request.model_manifest_entry, tier)?;
     let requested_tier = tier;
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
@@ -10507,6 +10526,8 @@ async fn generate_candle_stream(
             | "chroma1_flash"
             | "ideogram_4"
             | "ideogram_4_turbo"
+            | "sana_1600m"
+            | "sana_sprint_1600m"
     );
     let shared_predicted_peak_gb = if provider_receipt_priced {
         crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
@@ -10572,7 +10593,10 @@ async fn generate_candle_stream(
     // the caller's first pass was Edit or Inpaint. Admit that final-pass identity independently;
     // the original mode/reference/geometry is admitted below for the first pass.
     let shared_admission_mode = if hires_fix.is_some()
-        && matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+        && matches!(
+            engine_id,
+            "ideogram_4" | "ideogram_4_turbo" | "sana_1600m" | "sana_sprint_1600m"
+        )
     {
         "image_to_image"
     } else {
@@ -10636,7 +10660,10 @@ async fn generate_candle_stream(
         },
     )?;
     let mut first_pass_shared_memory = if hires_fix.is_some()
-        && matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+        && matches!(
+            engine_id,
+            "ideogram_4" | "ideogram_4_turbo" | "sana_1600m" | "sana_sprint_1600m"
+        )
     {
         crate::candle_memory_strategy::evaluate_shared_image(
             engine_id,
@@ -10687,6 +10714,15 @@ async fn generate_candle_stream(
         hires_first_pass_memory_context =
             optimized_shared_memory_context(engine_id, evaluation.context);
     }
+    if is_sana
+        && (selected_memory_strategy_context.is_none()
+            || (hires_fix.is_some() && hires_first_pass_memory_context.is_none()))
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} requires an exact receipt-priced pre-load memory selection for every render pass",
+            request.model
+        )));
+    }
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
     // unverified path; only then may the established gate remain as provider-safe fallback.
@@ -10731,8 +10767,11 @@ async fn generate_candle_stream(
             _ => {}
         }
     }
+    let sana_selector_authoritative = is_sana && selected_memory_strategy_context.is_some();
     let use_sequential =
-        if let Some(crate::vram_gate::KreaTurboFit::Resident {
+        if sana_selector_authoritative {
+            generation_memory.is_some_and(|memory| memory.stage_residency)
+        } else if let Some(crate::vram_gate::KreaTurboFit::Resident {
             peak_gb,
             needed_gb,
             selection,
@@ -11113,7 +11152,9 @@ async fn generate_candle_stream(
             evidence_revision: krea_evidence_revision(),
         })
     }));
-    apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
+    if !sana_selector_authoritative {
+        apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
+    }
     // Reuse the exact selector spec, including Mage's split text-encoder/VAE component paths. Only
     // the post-selection residency policy and optional ConvRot substitution may differ below.
     let mut spec = shared_contract_spec;
@@ -11194,34 +11235,58 @@ async fn generate_candle_stream(
               external_committed_bytes,
               tx,
               cancel| {
-            if is_ideogram {
-                // The cold selector above remains terminal: no provider/cache load occurs when no
-                // exact strategy fits. Once the exact key resolves, bind the run to the cache's
-                // ACTUAL state. If the resident instance was loaded under Sequential, keep that
-                // tighter already-materialized policy using the staged sibling selected by the same
-                // pre-load evidence pass; never promote a warm staged instance back to Resident.
+            if is_ideogram || is_sana {
+                // Receipt-priced providers require the exact pre-load selector result to reach the
+                // cached generator. Ideogram may preserve a tighter pre-admitted staged sibling;
+                // SANA's cache key must exactly retain the selector's own resident/staged policy.
                 let context = memory_strategy_context.as_mut().ok_or_else(|| {
                     WorkerError::InvalidPayload(
-                        "Ideogram cache access is missing its exact pre-load memory context".to_owned(),
+                        format!(
+                            "{engine_id} cache access is missing its exact pre-load memory context"
+                        ),
                     )
                 })?;
-                crate::candle_memory_strategy::bind_ideogram_cache_execution(
-                    context,
-                    &mut generation_memory,
-                    &mut ideogram_warm_staged,
-                    cache_state,
-                    loaded_policy.offload_policy,
-                )?;
-                if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                if is_ideogram {
                     crate::candle_memory_strategy::bind_ideogram_cache_execution(
-                        first_pass,
-                        &mut hires_first_pass_generation_memory,
-                        &mut ideogram_hires_first_warm_staged,
+                        context,
+                        &mut generation_memory,
+                        &mut ideogram_warm_staged,
                         cache_state,
                         loaded_policy.offload_policy,
                     )?;
+                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                        crate::candle_memory_strategy::bind_ideogram_cache_execution(
+                            first_pass,
+                            &mut hires_first_pass_generation_memory,
+                            &mut ideogram_hires_first_warm_staged,
+                            cache_state,
+                            loaded_policy.offload_policy,
+                        )?;
+                    }
+                } else {
+                    let selected_staged =
+                        context.selection.strategy == gen_core::MemoryStrategy::StagedResidency
+                            || generator
+                                .memory_strategy_contract()
+                                .is_some_and(|contract| {
+                                    contract.engages(
+                                        context.selection.strategy,
+                                        gen_core::MemoryStrategy::StagedResidency,
+                                    )
+                                });
+                    let loaded_staged =
+                        loaded_policy.offload_policy == gen_core::OffloadPolicy::Sequential;
+                    if selected_staged != loaded_staged {
+                        return Err(WorkerError::InvalidPayload(format!(
+                            "{engine_id} warm cache policy crossed its exact pre-load selection"
+                        )));
+                    }
+                    context.cache_state = cache_state;
+                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                        first_pass.cache_state = cache_state;
+                    }
                 }
-                let stages = context.selection.strategy == gen_core::MemoryStrategy::StagedResidency;
+                let stages = generation_memory.is_some_and(|memory| memory.stage_residency);
                 warm_policy.settle_with_selection(if stages {
                     crate::execution_planner::GrantOutcome::AlreadyStaged
                 } else {
@@ -11232,13 +11297,18 @@ async fn generate_candle_stream(
                     gen_core::MemoryCacheState::Warm => "warm",
                 };
                 let contract = generator.memory_strategy_contract().ok_or_else(|| {
-                        WorkerError::InvalidPayload(
-                            "Ideogram loaded provider omitted its sealed memory contract".to_owned(),
-                        )
-                    })?;
+                    WorkerError::InvalidPayload(format!(
+                        "{engine_id} loaded provider omitted its sealed memory contract"
+                    ))
+                })?;
                 let facts = contract.asset_facts;
-                let physical_receipt =
-                    crate::candle_memory_strategy::ideogram_physical_receipt_identity(contract)?;
+                let physical_receipt = if is_sana {
+                    crate::candle_memory_strategy::sana_physical_receipt_identity(
+                        engine_id, contract,
+                    )?
+                } else {
+                    crate::candle_memory_strategy::ideogram_physical_receipt_identity(contract)?
+                };
                 let passes = match hires_first_pass_memory_context.as_ref() {
                     Some(first) => vec![("hires_first", first), ("hires_final", &*context)],
                     None => vec![("single", &*context)],
@@ -11288,7 +11358,7 @@ async fn generate_candle_stream(
                         overlay_bytes = facts.overlay_bytes,
                         external_committed_bytes,
                         evidence_revision = %pass_context.evidence_revision,
-                        "Ideogram exact receipt-backed memory strategy selected"
+                        "exact receipt-backed image memory strategy selected"
                     );
                     emit_event(
                         "image_memory_strategy_selected",

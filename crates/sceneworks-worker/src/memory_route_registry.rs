@@ -429,6 +429,8 @@ const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
     MemoryRouteMode::StyleVariations,
 ];
 const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
+const SANA_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage];
 const IDEOGRAM_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::TextToImage,
     MemoryRouteMode::ImageToImage,
@@ -853,6 +855,24 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: ALL_TIERS,
         modes: TEXT_AND_STYLE,
         load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "sana_1600m",
+        tiers: BF16_ONLY,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "sana_sprint_1600m",
+        tiers: BF16_ONLY,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -2852,6 +2872,67 @@ mod tests {
                 MemoryStrategySupport::Missing
             };
         }
+        contract
+    }
+
+    fn sana_contract(provider: &str) -> gen_core::MemoryProviderContract {
+        let mut contract = staged_contract(provider);
+        contract.load_shape = LoadShape::DeferredMaterialization;
+        for capability in &mut contract.strategies {
+            capability.support = MemoryStrategySupport::Implemented;
+            capability.parameters = match capability.strategy {
+                MemoryStrategy::BoundedDecode => gen_core::MemoryParameterRanges {
+                    decode_tile_edges: vec![512],
+                    decode_overlaps: vec![128],
+                    ..Default::default()
+                },
+                MemoryStrategy::BoundedAttention => gen_core::MemoryParameterRanges {
+                    attention_chunk_sizes: vec![4_194_304, 2_097_152, 1_048_576],
+                    ..Default::default()
+                },
+                MemoryStrategy::BoundedTransformerResidency => gen_core::MemoryParameterRanges {
+                    transformer_window_sizes: vec![1, 2, 4, 5, 10],
+                    transformer_window_components: vec![gen_core::TransformerComponent::Dit],
+                    ..Default::default()
+                },
+                _ => Default::default(),
+            };
+        }
+        contract.additional_prerequisites = [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ]
+        .into_iter()
+        .map(|strategy| {
+            (
+                strategy,
+                gen_core::MemoryStrategyPrerequisite::Rung {
+                    rung: MemoryStrategy::StagedResidency,
+                    scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                },
+            )
+        })
+        .collect();
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            decode_tiling: true,
+            attention_chunking: true,
+            transformer_window_materialization: true,
+        };
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            if provider == "sana_1600m" {
+                "sana-candle-dense-base-full-ladder-v1"
+            } else {
+                "sana-candle-dense-sprint-full-ladder-v1"
+            },
+            LoadShape::DeferredMaterialization,
+        ));
         contract
     }
 
@@ -7161,10 +7242,12 @@ mod tests {
                 "krea_2_raw",
                 "krea_2_turbo_edit",
                 "qwen_image_edit",
+                "sana_1600m",
+                "sana_sprint_1600m",
             ]
             .into()
         );
-        assert_eq!(witnesses.len(), 168);
+        assert_eq!(witnesses.len(), 172);
         assert!(witnesses.iter().all(|witness| {
             matches!(
                 witness.tier,
@@ -7180,6 +7263,114 @@ mod tests {
                     | MemoryRouteLoadProfile::Pid
             )
         }));
+    }
+
+    #[test]
+    fn shipped_sana_candle_declarations_are_dense_route_exact_and_complete() {
+        for (provider, revision, fingerprint) in [
+            (
+                "sana_1600m",
+                "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
+                "sana-candle-dense-base-full-ladder-v1",
+            ),
+            (
+                "sana_sprint_1600m",
+                "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
+                "sana-candle-dense-sprint-full-ladder-v1",
+            ),
+        ] {
+            let manifest = shipped_model(provider);
+            let candle = &manifest["candle"]["memoryStrategyContract"];
+            assert_eq!(candle["provider"], provider);
+            assert_eq!(candle["exhaustive"], true);
+            let rows = candle["implementations"].as_array().unwrap();
+            assert_eq!(rows.len(), 5);
+            assert!(rows
+                .iter()
+                .all(|row| row["tiers"] == serde_json::json!(["bf16"])
+                    && row["fingerprint"] == fingerprint));
+            let off_mac = manifest["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|download| {
+                    download["platforms"].as_array().is_some_and(|platforms| {
+                        platforms.iter().any(|platform| platform == "windows")
+                    })
+                })
+                .unwrap();
+            assert_eq!(off_mac["revision"], revision);
+            assert_eq!(off_mac["variant"], "bf16");
+            assert_eq!(off_mac["subdir"], "");
+
+            let plain = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+                "immutable-dense",
+            )))
+            .with_resolved_route(provider);
+            for (mode, references) in [
+                (MemoryRouteMode::TextToImage, 0),
+                (MemoryRouteMode::ImageToImage, 1),
+            ] {
+                let result = declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("bf16"),
+                    &manifest,
+                    &plain,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count: references,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |_| Some(sana_contract(provider)),
+                );
+                assert!(
+                    matches!(&result, DeclaredCandleStrategyContract::Applied { .. }),
+                    "{provider} {mode:?}"
+                );
+            }
+            assert!(matches!(
+                declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("q4"),
+                    &manifest,
+                    &plain,
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::TextToImage,
+                        reference_count: 0,
+                        use_pid: false,
+                        has_phases: false
+                    },
+                    |_| Some(staged_contract(provider)),
+                ),
+                DeclaredCandleStrategyContract::Refused
+            ));
+            let adapter = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+                "immutable-dense",
+            )))
+            .with_resolved_route(provider)
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                std::path::PathBuf::from("crossed.safetensors"),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )]);
+            assert!(matches!(
+                declared_candle_request_strategy_contract_with(
+                    provider,
+                    Some("bf16"),
+                    &manifest,
+                    &adapter,
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::TextToImage,
+                        reference_count: 0,
+                        use_pid: false,
+                        has_phases: false
+                    },
+                    |_| Some(staged_contract(provider)),
+                ),
+                DeclaredCandleStrategyContract::Refused
+            ));
+        }
     }
 
     #[test]
