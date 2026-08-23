@@ -264,10 +264,10 @@ guard.
 | 16 | RealVisXL q4 + OpenPose | 9,649 | q4 9.423 / 12 GiB floor |
 | 17 | RealVisXL Lightning q4 + OpenPose | 6,915 | q4 6.753 / 9 GiB floor |
 
-Promotion deletes only the twelve proven precision exception paths: six Chroma, four FLUX.1, and
-two SCAIL-2 q4/q8 cells. The three accepted SDXL OpenPose compositions had no exception paths to
+The initial promotion deleted twelve proven precision exception paths: six Chroma, four FLUX.1,
+and two SCAIL-2 q4/q8 cells. The accepted SDXL OpenPose compositions had no exception paths to
 delete; their catalog, routing, install companion, and q4-only worker validation are narrowed to
-those exact models and tier.
+the exact accepted models and tier.
 
 The Chroma and OpenPose rows are deliberately not written as partial generic `candle` blocks. That
 block is both the base-route VRAM gate and the complete advertised tier axis. Chroma's previously
@@ -278,7 +278,7 @@ base-route admission behavior, while the bespoke OpenPose route validates q4 bef
 and performs its existing load-exact base-plus-overlay admission. The table records the measured
 composition rows without turning them into dense or cross-tier authority.
 
-Cells 14, 18, and 19 are not promotion authority:
+In artifact `9492288293`, cells 14, 18, and 19 were not promotion authority:
 
 - Cell 14 requested four LTX-2.3 q8 steps, but the immutable package has a baked fixed eight-step
   recipe. LTX q8 returns to the epic-9083 precision exception and remains fail-closed; q4 is
@@ -295,5 +295,26 @@ stand on their own. The safest recovery is one later sparse terminal campaign co
 with its fixed eight-step request and the two Illustrious q4 cells after republished packed-marker
 authorities; it must import these sixteen PASS cells rather than rerun them.
 
-This promotion closes only SC-20741, SC-20744, and SC-20748. SC-20742 remains blocked on the
-separate FLUX.2 TrueV2 authority and is not implied complete by this terminal campaign.
+That partial promotion closed only SC-20741, SC-20744, and SC-20748. SC-20742 remains blocked on
+the separate FLUX.2 TrueV2 authority and is not implied complete by this terminal campaign.
+
+## Final sparse recovery
+
+Run [`32664618999`](https://github.com/SceneWorks/SceneWorks/actions/runs/32664618999) at SceneWorks
+head `7d7a3efa3088204311e3be01330f35702774feb6` and inference pin
+`31e02510ad6e9e1a3c3d205058576329d724c60d` completed the campaign at 19/19 PASS. Artifact
+`9500244306` (`sc-20945-epic-20738-7d7a3efa3088204311e3be01330f35702774feb6-32664618999-1`,
+17,134,718 bytes, SHA-256 `9af191547befc7833f82f4d9057fff8abfe09b21eada2be2b4f252d73ae30818`)
+imports the exact PASS ordinals `[1-13,15-19]` and executes only ordinal `[14]`.
+
+Cell 14 completed the immutable LTX-2.3 q8 fixed eight-step schedule with 33 frames, exact q8
+resolution, no dense fallback, a 61,766 MiB (60.318 GiB) measured peak, and a 63 GiB admission
+floor including the 2 GiB reserve. The previous artifact's independently valid cells 18-19 remain
+the imported authority for Illustrious XL v1/v2 q4 plus OpenPose: each peaked at 5,830 MiB
+(5.693 GiB), giving an 8 GiB admission floor. Both used the republished packed q4/group64
+authorities, exact q4 resolution, no cross-tier fallback, and nondegenerate 512x512 outputs.
+
+The final promotion therefore removes the LTX-2.3 q8 exception, admits its q8 product routes, and
+expands the exact q4-only SDXL OpenPose product set to SDXL, RealVisXL, RealVisXL Lightning,
+Illustrious XL v1, and Illustrious XL v2. Final cleanup reports zero staged and derived files and an
+absent temporary missing store.

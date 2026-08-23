@@ -478,6 +478,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -494,6 +498,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {

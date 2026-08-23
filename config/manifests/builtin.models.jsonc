@@ -13061,7 +13061,7 @@
           "footprint": { "diskSizeBytes": 167335590 }
         },
         // Generic SDXL OpenPose ControlNet (sc-20747): an OPTIONAL on-demand component shared by
-        // the exact three accepted SDXL-family pose-control backbones. Soft means a
+        // the exact five accepted SDXL-family pose-control backbones. Soft means a
         // missing control checkpoint never makes ordinary text/image generation look uninstalled;
         // Model Manager still provisions or repairs it alongside this base. Every base repeats this
         // identical repo/revision/file authority, while the shared HF cache stores the bytes once.
@@ -16047,6 +16047,21 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Terminal cells 18-19 prove the shared q4 SDXL OpenPose composition on the current packed
+        // Illustrious authorities. The component is soft and cross-platform: ordinary base-model
+        // generation stays installed when it is absent, while pose requests resolve it exactly.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -16877,6 +16892,10 @@
       },
       "ui": {
         "label": "Illustrious-XL v1.0 (anime)",
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
         "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
@@ -16973,6 +16992,19 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same immutable OpenPose component and q4-only provider contract as Illustrious v1.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -17805,6 +17837,10 @@
       },
       "ui": {
         "label": "Illustrious-XL v2.0 (anime)",
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
         "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
