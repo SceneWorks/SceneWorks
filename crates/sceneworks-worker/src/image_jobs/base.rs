@@ -617,6 +617,10 @@ enum CandleImageRoute {
     QwenControl,
     /// Kolors strict-pose ControlNet (sc-5489).
     KolorsControl,
+    /// Kolors' bespoke IP and ControlNet providers have no shared composition.  This explicit
+    /// reject prevents routing precedence from silently dropping either identity reference, pose,
+    /// or an unsupported IP+PiD request.
+    KolorsCompositeReject,
     /// Kolors source-image img2img/edit through the registered generator.
     KolorsEdit,
     /// Z-Image strict-pose Fun-ControlNet (sc-5489).
@@ -947,7 +951,9 @@ impl CandleImageRoute {
                 flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE
             }
             CandleImageRoute::KreaControl => krea_control_candle::KREA_CONTROL_ENGINE,
-            CandleImageRoute::PoseReject | CandleImageRoute::PoseControlBaseMissing => STUB_ADAPTER,
+            CandleImageRoute::PoseReject
+            | CandleImageRoute::PoseControlBaseMissing
+            | CandleImageRoute::KolorsCompositeReject => STUB_ADAPTER,
             CandleImageRoute::ZimageComfyui => {
                 zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE
             }
@@ -1053,6 +1059,15 @@ fn resolve_candle_image_route_with_prepared_availability(
             .is_some_and(|id| !id.trim().is_empty())
     {
         Some(CandleImageRoute::MageEdit)
+    } else if request.model == "kolors"
+        && ((non_empty(&request.reference_asset_id) && !pose_entries(request).is_empty())
+            || (non_empty(&request.reference_asset_id)
+                && advanced::flag(&request.advanced, "usePid")))
+    {
+        // Kolors IP-Adapter is its own provider (not a base overlay), and ControlNet owns a
+        // separate pose provider. Neither implementation composes IP+Control or IP+PiD, so this
+        // must fail before either precedence arm can discard an input.
+        Some(CandleImageRoute::KolorsCompositeReject)
     } else if zimage_identity_candle_available(request, settings) {
         // The registered Z-Image Turbo generator owns both Reference conditioning and adapters.
         Some(CandleImageRoute::CandleTxt2Img)

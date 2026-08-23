@@ -450,6 +450,17 @@ const KOLORS_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::EditImage,
     MemoryRouteMode::CharacterImage,
 ];
+// SC-20790: Candle Kolors has three distinct provider identities.  Do not collapse the base
+// registered generator, IP-Adapter character route, and pose-ControlNet route into an MLX-shaped
+// "kolors" row: their artifacts and residency receipts are not interchangeable.
+const KOLORS_CANDLE_BASE_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::TextToImage, MemoryRouteMode::EditImage];
+const KOLORS_CANDLE_IP_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::CharacterImage];
+const KOLORS_CANDLE_CONTROL_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::StyleVariations,
+    MemoryRouteMode::CharacterImage,
+];
 const PLAIN_IP: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Plain,
     MemoryRouteLoadProfile::IpAdapter,
@@ -458,6 +469,14 @@ const PLAIN_LORA_IP: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Plain,
     MemoryRouteLoadProfile::Lora,
     MemoryRouteLoadProfile::IpAdapter,
+];
+const KOLORS_CANDLE_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::IpAdapter,
+    MemoryRouteLoadProfile::LoraIpAdapter,
+];
+const KOLORS_CANDLE_CONTROL_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::SingleControl,
+    MemoryRouteLoadProfile::LoraSingleControl,
 ];
 const Q4_Q8: &[MemoryRouteTier] = &[MemoryRouteTier::Q4, MemoryRouteTier::Q8];
 const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
@@ -850,6 +869,36 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: BF16_Q4_Q8,
         modes: TEXT_ONLY,
         load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    // SC-20790: the Candle base/edit, IP character, and pose-ControlNet routes remain separate
+    // receipt/evidence domains.  In particular this leaves impossible IP+control and IP+PiD shapes
+    // without a matching rule instead of granting them through the base profile.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "kolors",
+        tiers: BF16_Q4_Q8,
+        modes: KOLORS_CANDLE_BASE_MODES,
+        load_profiles: PLAIN_LORA_PID,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "candle_kolors_ipadapter",
+        tiers: BF16_Q4_Q8,
+        modes: KOLORS_CANDLE_IP_MODES,
+        load_profiles: KOLORS_CANDLE_IP_PROFILES,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "candle_kolors_control",
+        tiers: BF16_Q4_Q8,
+        modes: KOLORS_CANDLE_CONTROL_MODES,
+        load_profiles: KOLORS_CANDLE_CONTROL_PROFILES,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },

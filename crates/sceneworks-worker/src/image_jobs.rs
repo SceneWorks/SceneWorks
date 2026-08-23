@@ -1231,6 +1231,11 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::KolorsCompositeReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "Kolors Candle does not compose IP-Adapter identity with pose ControlNet or PiD; refusing the crossed request before model load".to_owned(),
+                    ));
+                }
                 // Z-Image strict-pose Fun-ControlNet (sc-5489).
                 CandleImageRoute::ZimageControl => {
                     generate_candle_zimage_control_stream(
