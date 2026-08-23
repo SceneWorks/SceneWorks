@@ -60,6 +60,13 @@ const RECOVERY_RUN_ATTEMPT = "1";
 const RECOVERY_SCENEWORKS_HEAD = "62be42127e2b4ff07321e2c369de92fc6edef526";
 const RECOVERY_REMAINING_AUTHORITIES = 14;
 const RECOVERY_REMAINING_FILES = 160;
+const RECOVERY_REMAINING_SOURCE_BYTES = 151_407_075_690;
+const RECOVERY_REMAINING_ARTIFACT_IDS = [
+  "flux1-schnell-q8", "scail2-q4", "scail2-q8", "ltx23-q8", "ltx23-gemma",
+  "sdxl-base-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg",
+  "sdxl-vae-fix", "realvisxl-q4", "realvisxl-lightning-q4", "illustrious-v1-q4",
+  "illustrious-v2-q4",
+];
 const RECOVERY_ORIGINAL_ARTIFACT_ID = "9477529627";
 const RECOVERY_ORIGINAL_ARTIFACT_NAME = "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1";
 const RECOVERY_ORIGINAL_ARTIFACT_DIGEST = "sha256:f3164a32a485fdedd671f4e11f30038213d30a7eb2b541bda90bef30e63188f3";
@@ -2732,14 +2739,31 @@ export function validateCachePreflightEvidence(document, {
       || document.diskPlan.freeBytes < document.diskPlan.peakRequiredAdditionalBytes) {
       fail("passed cache preflight did not prove sufficient JIT disk capacity");
     }
-    if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256
-      && (document.diskPlan.logicalSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
-        || document.diskPlan.allAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
-        || document.diskPlan.peakRequiredAdditionalBytes !== REVIEWED_FREE_FLOOR_BYTES
-        || (frozen.length === 1
-          ? document.diskPlan.peakModelAndSidecarBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
-          : document.diskPlan.peakModelAndSidecarBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES))) {
-      fail("passed cache preflight drifted from reviewed target-byte totals and JIT floor");
+    if (downloadEvidenceSha256 === REVIEWED_DOWNLOAD_EVIDENCE_SHA256) {
+      const startIndex = profile.cells.length - document.diskPlan.cells.length;
+      const expectedRemainingIds = [...new Set(profile.cells.slice(startIndex).flatMap(
+        (cell) => cell.artifactIds,
+      ))];
+      const expectedFileCount = expectedRemainingIds.reduce(
+        (sum, id) => sum + artifactExpectedFiles[id].length, 0,
+      );
+      const startTen = startIndex === RECOVERY_IMPORTED_PREFIX_CELLS;
+      if (JSON.stringify(remainingArtifactIds) !== JSON.stringify(expectedRemainingIds)
+        || (startTen && (JSON.stringify(expectedRemainingIds)
+          !== JSON.stringify(RECOVERY_REMAINING_ARTIFACT_IDS)
+          || expectedFileCount !== RECOVERY_REMAINING_FILES))) {
+        fail("passed cache preflight continuation start/census drifted from the reviewed profile");
+      }
+      const expectedSourceBytes = startTen
+        ? RECOVERY_REMAINING_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES;
+      if (document.diskPlan.reviewedAllAtOnceSourceBytes !== REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+        || document.diskPlan.reviewedJitSourcePeakBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
+        || document.diskPlan.logicalSourceBytes !== expectedSourceBytes
+        || document.diskPlan.allAtOnceSourceBytes !== expectedSourceBytes
+        || document.diskPlan.peakModelAndSidecarBytes !== REVIEWED_JIT_SOURCE_PEAK_BYTES
+        || document.diskPlan.peakRequiredAdditionalBytes !== REVIEWED_FREE_FLOOR_BYTES) {
+        fail("passed cache preflight drifted from reviewed target-byte totals and JIT floor");
+      }
     }
     if (document.evidencePhase === "initial") {
       if (document.phases.staging.length || document.phases.finalOffline.length
