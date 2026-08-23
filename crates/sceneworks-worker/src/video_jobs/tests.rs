@@ -118,6 +118,108 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         Some("enhancer:uncensored"),
         "a multi-reference request must not mint the single-reference receipt"
     );
+
+    input.conditioning = vec![
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: -1,
+            strength: 1.0,
+        },
+    ];
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some(
+            "enhancer:uncensored+keyframe:first:image:768x512:frame:0:strength:3f800000+keyframe:last:image:768x512:frame:-1:strength:3f800000"
+        ),
+        "the ordered first/last carrier, shape, latent anchors, and independent strengths must reach the evidence identity"
+    );
+
+    input.conditioning.swap(0, 1);
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored"),
+        "reordered keyframes must not mint the ordered first/last receipt"
+    );
+
+    input.conditioning = vec![Conditioning::VideoClip {
+        frames: vec![
+            gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new()
+            };
+            153
+        ],
+        frame_idx: 0,
+        strength: 1.0,
+    }];
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000"),
+        "the one IC-LoRA clip's source-frame count, image shape, appended-token anchor, and strength must be sealed"
+    );
+
+    input.conditioning = vec![
+        Conditioning::VideoClip {
+            frames: vec![
+                gen_core::Image {
+                    width: 768,
+                    height: 512,
+                    pixels: Vec::new(),
+                };
+                153
+            ],
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        Conditioning::VideoClip {
+            frames: vec![
+                gen_core::Image {
+                    width: 768,
+                    height: 512,
+                    pixels: Vec::new(),
+                };
+                153
+            ],
+            frame_idx: -1,
+            strength: 1.0,
+        },
+    ];
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000+clip:append:frames:153:image:768x512:frame:-1:strength:3f800000"),
+        "the bridge must preserve both ordered endpoint clips, source-frame domains, latent anchors, and strengths"
+    );
+
+    input.conditioning.swap(0, 1);
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored"),
+        "reordered bridge clips must not mint the ordered endpoint receipt"
+    );
+    assert_eq!(
+        video_admission_reference_count("ltx_2_3", "video_bridge", &input.conditioning),
+        0,
+        "IC-LoRA clip endpoints are temporal carriers, never image-reference count evidence"
+    );
+    assert_eq!(
+        video_admission_reference_shape("ltx_2_3", "video_bridge", &input.conditioning),
+        "none",
+        "bridge must retain its temporal receipt identity after cumulative Bernini integration"
+    );
 }
 
 #[cfg(any(

@@ -1568,6 +1568,92 @@ pub(super) fn video_admission_overlay(
                 strength.to_bits()
             ));
         }
+        let keyframes = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::Keyframe {
+                    image,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((image, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(first, 0, first_strength), (last, -1, last_strength)] = keyframes.as_slice() {
+            overlays.push(format!(
+                "keyframe:first:image:{}x{}:frame:0:strength:{:08x}",
+                first.width,
+                first.height,
+                first_strength.to_bits()
+            ));
+            overlays.push(format!(
+                "keyframe:last:image:{}x{}:frame:-1:strength:{:08x}",
+                last.width,
+                last.height,
+                last_strength.to_bits()
+            ));
+        }
+        let clips = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::VideoClip {
+                    frames,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((frames, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(frames, 0, strength)] = clips.as_slice() {
+            if let Some(image) = frames.first() {
+                if frames
+                    .iter()
+                    .all(|frame| frame.width == image.width && frame.height == image.height)
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        frames.len(),
+                        image.width,
+                        image.height,
+                        strength.to_bits()
+                    ));
+                }
+            }
+        }
+        if let [(left, 0, left_strength), (right, -1, right_strength)] = clips.as_slice() {
+            if let (Some(first), Some(last)) = (left.first(), right.first()) {
+                if left
+                    .iter()
+                    .chain(right.iter())
+                    .all(|frame| frame.width == first.width && frame.height == first.height)
+                    && first.width == last.width
+                    && first.height == last.height
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        left.len(),
+                        first.width,
+                        first.height,
+                        left_strength.to_bits()
+                    ));
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:-1:strength:{:08x}",
+                        right.len(),
+                        last.width,
+                        last.height,
+                        right_strength.to_bits()
+                    ));
+                }
+            }
+        }
     }
     Ok((!overlays.is_empty()).then(|| overlays.join("+")))
 }
@@ -1629,6 +1715,15 @@ pub(super) fn video_admission_reference_shape(
     {
         return "ads2v";
     }
+    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+        return match mode {
+            "image_to_video" => "image",
+            "first_last_frame" => "keyframe",
+            // The LTX IC-LoRA clips are temporal carriers, not image references.
+            "extend_clip" | "video_bridge" => "none",
+            _ => "other",
+        };
+    }
     match mode {
         "image_to_video" => "image",
         "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
@@ -1641,6 +1736,20 @@ pub(super) fn video_admission_reference_count(
     mode: &str,
     conditioning: &[Conditioning],
 ) -> u32 {
+    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+        return u32::try_from(
+            conditioning
+                .iter()
+                .filter(|conditioning| {
+                    matches!(
+                        conditioning,
+                        Conditioning::Reference { .. } | Conditioning::Keyframe { .. }
+                    )
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+    }
     if model_id == "bernini" && mode == "reference_to_video" {
         if let [Conditioning::MultiReference { images }] = conditioning {
             return u32::try_from(images.len()).unwrap_or(u32::MAX);
