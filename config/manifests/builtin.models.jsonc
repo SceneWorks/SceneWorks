@@ -5062,6 +5062,9 @@
             "overlays": ["none"]
           }
         },
+        // Terminal artifact 9492288293 cells 9-10 independently proved q4=14.388 GiB and
+        // q8=21.746 GiB at 512x512. Keep the older, larger 1024x1024 admission envelope below;
+        // the terminal receipt promotes the exact tiers without weakening that conservative guard.
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
@@ -5318,6 +5321,9 @@
             "overlays": ["none", "control", "identity"]
           }
         },
+        // Terminal artifact 9492288293 cells 7-8 independently proved q4=11.285 GiB and
+        // q8=23.195 GiB at 512x512. The existing measured 1024x1024 envelope remains the safer
+        // admission authority and therefore intentionally dominates these lower terminal peaks.
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
@@ -16041,20 +16047,6 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
-        },
-        // Same soft, untiered OpenPose component as `sdxl`; its immutable HF snapshot is shared
-        // across every SDXL backbone and consumed only by a pose-control request.
-        {
-          "provider": "huggingface",
-          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
-          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
-          "coRequisite": true,
-          "required": "soft",
-          "componentId": "controlnet_openpose",
-          "files": ["diffusion_pytorch_model.safetensors"],
-          "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 2500000000,
-          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -16885,10 +16877,6 @@
       },
       "ui": {
         "label": "Illustrious-XL v1.0 (anime)",
-        "poseLibrary": true,
-        "poseControlScale": true,
-        "controlModes": ["pose"],
-        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
         "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
@@ -16985,20 +16973,6 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
-        },
-        // Same soft, untiered OpenPose component as `sdxl`; its immutable HF snapshot is shared
-        // across every SDXL backbone and consumed only by a pose-control request.
-        {
-          "provider": "huggingface",
-          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
-          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
-          "coRequisite": true,
-          "required": "soft",
-          "componentId": "controlnet_openpose",
-          "files": ["diffusion_pytorch_model.safetensors"],
-          "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 2500000000,
-          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -17831,10 +17805,6 @@
       },
       "ui": {
         "label": "Illustrious-XL v2.0 (anime)",
-        "poseLibrary": true,
-        "poseControlScale": true,
-        "controlModes": ["pose"],
-        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
         "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
@@ -20100,25 +20070,26 @@
           "schedulers": ["default"]
         }
       },
-      // Exact shared-package Candle/CUDA evidence (sc-18473): inference
+      // Exact shared-package Candle/CUDA evidence. The bf16 row is the sc-18473 production capture;
+      // epic 20738 terminal artifact 9492288293 adds q4/q8 at the identical 832x480 output geometry.
+      // q4 uses the larger of its ordinary and six-reference cells (62,730 MiB); q8 peaked at
+      // 66,486 MiB. The default q4 blanket is ceil(61.260 + the shared 2 GiB reserve) = 64.
+      // The earlier bf16 evidence used inference
       // 3174984b20334bb029170e367be234de0b3f8753 loaded the Model Manager bf16 directory from
       // SceneWorks/scail2-mlx@ce88cfdb1008f395e9c820e525e6db7b6695f7b3 through the production
       // candle_gen_scail2 provider and rendered 832x480 / 81 frames / 1 step. GitHub Actions run
       // 31455292141, job 93667700921, artifact 9089420126 (uploaded zip SHA-256
       // de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9) emitted the validated
-      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. minMemoryGb is
-      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower *measured*
-      // Candle tier or sequential-offload path in this current catalog, so both worker modes fail
-      // closed below that live free-VRAM floor.
+      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline.
       "candle": {
-        "minMemoryGb": 105,
-        "vramGbByTier": { "bf16": 102.115 },
+        "minMemoryGb": 64,
+        "vramGbByTier": { "q4": 61.260, "q8": 64.928, "bf16": 102.115 },
         "vramMeasuredPixels": 399360,
         "measured": true
       },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give ordered reference character images and a driving video, and SCAIL-2 animates the supplied characters with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux admit the same installable q4, q8, and bf16 package variants when installed. The currently calibrated bf16 tier needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve). Runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give ordered reference character images and a driving video, and SCAIL-2 animates the supplied characters with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux admit the same installable q4, q8, and bf16 package variants when installed. Measured Candle floors are 64 GB for q4, 67 GB for q8, and 105 GB for bf16. Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {

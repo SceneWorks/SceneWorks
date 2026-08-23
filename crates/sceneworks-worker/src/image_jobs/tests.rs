@@ -9874,7 +9874,7 @@ fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
     }
 }
 
-// sc-20747: all five shipped SDXL-family model ids use the backend-neutral generic SDXL OpenPose
+// sc-20747: the three independently accepted SDXL-family model ids use the backend-neutral OpenPose
 // provider. The route is weight-blind so a missing base/control artifact fails in the handler instead
 // of falling through to plain MLX generation, and it wins over edit/reference routes so conflicts fail
 // closed in that handler.

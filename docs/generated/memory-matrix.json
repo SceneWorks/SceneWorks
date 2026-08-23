@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b3233188d00d9f5607de98bf6e281cc68f2f7eef71d6f06f82f8c5513b8fae51",
+    "sceneWorksRevision": "source-tree:923654e2980fd3280b1e3fd607d5093a32279fd6298a06e199ceff33ee073d30",
     "inferenceRevision": "b646a6f89ba9f6b07efe53dd583d8a42e21e9871",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "40c04495a92137e44dcdfbd4084d6a6ee211ee5814fe4c89135a278506005920"
+        "sha256": "2b52256eaf097479c768dc2a72f9a56b9c5ae9b452a9d5bc07f44b74c7ba1b5e"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -14,7 +14,7 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "b5eb194ca007ed868be5459831a21213e6f4b51405cac851edd0d1ff9374b5cc"
+        "sha256": "dfb54ddb19c6a862317814be604341b91fe9c8673d13626f77db9e26d4e23601"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -172,12 +172,12 @@
       "image": 53,
       "video": 10
     },
-    "cells": 8785,
+    "cells": 8825,
     "publishedCells": 163,
-    "elidedCells": 8622,
+    "elidedCells": 8662,
     "elidedByState": {
-      "Implemented/unverified": 2778,
-      "Missing": 5844
+      "Implemented/unverified": 2786,
+      "Missing": 5876
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -3349,7 +3349,9 @@
         },
         "candle": {
           "tiers": [
-            "bf16"
+            "bf16",
+            "q4",
+            "q8"
           ],
           "modes": [
             "animate_character",
@@ -13051,60 +13053,60 @@
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
-      "implemented": 4,
+      "elided": 12,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 4
+        "Implemented/unverified": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {

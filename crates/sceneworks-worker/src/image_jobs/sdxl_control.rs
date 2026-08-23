@@ -25,15 +25,13 @@ const SDXL_CONTROL_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
     "realvisxl_lightning",
-    "illustrious_xl_v1",
-    "illustrious_xl_v2",
 ];
 
 fn is_sdxl_control_model(model: &str) -> bool {
     SDXL_CONTROL_MODELS.contains(&model)
 }
 
-/// A material pose carrier on one of the exact five supported models. This deliberately does not
+/// A material pose carrier on one of the exact three supported models. This deliberately does not
 /// validate or weight-gate: it wins routing first, then [`validate_sdxl_control_request`] reports a
 /// typed error for conflicts/malformed/count violations and the stream reports missing weights.
 fn sdxl_control_candidate(request: &ImageRequest) -> bool {
@@ -73,6 +71,31 @@ fn validate_sdxl_control_backend(model: &str, backend: &str) -> WorkerResult<()>
         ));
     }
     Ok(())
+}
+
+/// The terminal CUDA campaign proved only the q4 composition. Missing selectors resolve to each
+/// accepted model's default q4 package; explicit selectors must name q4 exactly so q8/bf16 cannot
+/// borrow the q4 receipt or fall through to a dense/on-the-fly load.
+fn validate_sdxl_control_candle_tier(request: &ImageRequest) -> WorkerResult<()> {
+    let quant_tier_is_q4 = match request.advanced.get("quantTier") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(tier)) => tier.trim().eq_ignore_ascii_case("q4"),
+        Some(_) => false,
+    };
+    let quant_bits_are_q4 = match request.advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => true,
+        Some(value) => value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+            == Some(4),
+    };
+    if quant_tier_is_q4 && quant_bits_are_q4 {
+        return Ok(());
+    }
+    Err(WorkerError::InvalidPayload(
+        "SDXL pose control on Candle is proven only for the exact q4 package; advanced.quantTier and advanced.mlxQuantize must resolve to q4"
+            .to_owned(),
+    ))
 }
 
 fn sdxl_control_native_backend() -> &'static str {
@@ -545,6 +568,9 @@ async fn generate_sdxl_control_stream(
     // Select the native provider from the compiled bundle so the MLX Lightning refusal cannot be
     // bypassed by a device-specific label.
     validate_sdxl_control_backend(&request.model, sdxl_control_native_backend())?;
+    if sdxl_control_native_backend() == "candle" {
+        validate_sdxl_control_candle_tier(request)?;
+    }
     let weights_dir = resolve_weights_dir(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "{} weights not found for SDXL pose control",
@@ -734,16 +760,10 @@ mod sdxl_control_tests {
     }
 
     #[test]
-    fn exact_five_model_family_and_material_candidate_are_pinned() {
+    fn exact_three_model_family_and_material_candidate_are_pinned() {
         assert_eq!(
             SDXL_CONTROL_MODELS,
-            [
-                "sdxl",
-                "realvisxl",
-                "realvisxl_lightning",
-                "illustrious_xl_v1",
-                "illustrious_xl_v2",
-            ]
+            ["sdxl", "realvisxl", "realvisxl_lightning"]
         );
         for model in SDXL_CONTROL_MODELS {
             assert!(sdxl_control_candidate(&request(json!({
@@ -755,6 +775,12 @@ mod sdxl_control_tests {
             "model": "instantid_realvisxl",
             "advanced": { "poses": [{ "keypoints": [] }] }
         }))));
+        for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
+            assert!(!sdxl_control_candidate(&request(json!({
+                "model": model,
+                "advanced": { "poses": [{ "keypoints": [] }] }
+            }))));
+        }
         assert!(!sdxl_control_candidate(&request(json!({
             "model": "sdxl",
             "advanced": { "poses": [] }
@@ -1028,6 +1054,28 @@ mod sdxl_control_tests {
     }
 
     #[test]
+    fn candle_control_accepts_only_the_receipt_backed_q4_tier() {
+        for advanced in [
+            json!({ "poses": [{}] }),
+            json!({ "poses": [{}], "mlxQuantize": 4 }),
+            json!({ "poses": [{}], "mlxQuantize": "4", "quantTier": "q4" }),
+        ] {
+            let request = request(json!({ "model": "sdxl", "advanced": advanced }));
+            assert!(validate_sdxl_control_candle_tier(&request).is_ok());
+        }
+        for advanced in [
+            json!({ "poses": [{}], "mlxQuantize": 8 }),
+            json!({ "poses": [{}], "mlxQuantize": 0 }),
+            json!({ "poses": [{}], "quantTier": "q8" }),
+            json!({ "poses": [{}], "quantTier": "bf16" }),
+            json!({ "poses": [{}], "mlxQuantize": 4, "quantTier": "q8" }),
+        ] {
+            let request = request(json!({ "model": "sdxl", "advanced": advanced }));
+            assert!(validate_sdxl_control_candle_tier(&request).is_err());
+        }
+    }
+
+    #[test]
     fn lightning_recipe_defaults_and_rejections_are_exact() {
         let default = request(json!({
             "model": "realvisxl_lightning",
@@ -1073,12 +1121,7 @@ mod sdxl_control_tests {
         } else {
             assert_eq!(sdxl_control_native_backend(), "candle");
         }
-        for model in [
-            "sdxl",
-            "realvisxl",
-            "illustrious_xl_v1",
-            "illustrious_xl_v2",
-        ] {
+        for model in ["sdxl", "realvisxl"] {
             assert!(validate_sdxl_control_backend(model, "mlx").is_ok());
         }
     }

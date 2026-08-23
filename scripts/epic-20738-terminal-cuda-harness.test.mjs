@@ -290,7 +290,7 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   ));
   assert.throws(
     () => validateManifestAuthorities(profile(), duplicateControlAuthority),
-    /exact five approved consumers/,
+    /exact three promoted consumers/,
   );
 
   const extraControlConsumer = structuredClone(manifest);
@@ -299,7 +299,7 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   extraControlConsumer.models.find((model) => model.id === "flux_dev").downloads.push(extra);
   assert.throws(
     () => validateManifestAuthorities(profile(), extraControlConsumer),
-    /exact five approved consumers/,
+    /exact three promoted consumers/,
   );
 
   const artifactDefinitionDrift = profile();

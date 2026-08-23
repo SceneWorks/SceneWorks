@@ -87,7 +87,7 @@ describe("modelLicenseRows", () => {
     expect(decoderRow?.license).toBe("Apache-2.0");
   });
 
-  it("keeps Tile primary while composing OpenPose terms with the exact five SDXL backbones", () => {
+  it("keeps Tile primary while composing OpenPose terms with the exact three accepted backbones", () => {
     const controlnet = bundledLicenses.find(
       (component) => component.id === "controlnet-tile-sdxl",
     );
@@ -96,8 +96,6 @@ describe("modelLicenseRows", () => {
       "sdxl",
       "realvisxl",
       "realvisxl_lightning",
-      "illustrious_xl_v1",
-      "illustrious_xl_v2",
     ]);
 
     const controlnetRow = modelLicenseRows(bundledLicenses).find(

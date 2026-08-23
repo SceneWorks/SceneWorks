@@ -180,7 +180,7 @@ enum ImageRoute {
     /// conditioning and the fine-tuned entrypoint refuses adapters.
     MageFinetuned,
     InstantId,
-    /// Generic SDXL OpenPose ControlNet, shared by the five shipped SDXL-family model ids.
+    /// Generic SDXL OpenPose ControlNet, shared by the three independently accepted model ids.
     SdxlControl,
     PulidFlux,
     SdxlAdvanced,
