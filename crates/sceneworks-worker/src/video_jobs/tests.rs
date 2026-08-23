@@ -199,6 +199,59 @@ fn bernini_r2v_admission_flattens_the_single_multi_reference_carrier() {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
+fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
+    let image = Image {
+        width: 2,
+        height: 2,
+        pixels: vec![1; 12],
+    };
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![2; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let one_clip_one_image = vec![
+        clip,
+        Conditioning::MultiReference {
+            images: vec![image.clone()],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &one_clip_one_image),
+        "video+multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_video_to_video", &one_clip_one_image),
+        2
+    );
+
+    let two_images = vec![Conditioning::MultiReference {
+        images: vec![image.clone(), image],
+    }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &two_images),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &two_images),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &two_images),
+        "other",
+        "zero clips plus two images must not borrow the clip-plus-image surface"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
 fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
     for reference_asset_ids in [
         Vec::<&str>::new(),

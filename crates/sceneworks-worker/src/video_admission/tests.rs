@@ -810,6 +810,27 @@ fn r2v_conditioning() -> Vec<gen_core::Conditioning> {
     }]
 }
 
+fn rv2v_conditioning() -> Vec<gen_core::Conditioning> {
+    let mut conditioning = r2v_conditioning();
+    let [gen_core::Conditioning::MultiReference { images }] = conditioning.as_mut_slice() else {
+        unreachable!()
+    };
+    let images = std::mem::take(images);
+    let frame = gen_core::Image {
+        width: 848,
+        height: 480,
+        pixels: vec![7; 848 * 480 * 3],
+    };
+    vec![
+        gen_core::Conditioning::VideoClip {
+            frames: vec![frame; 45],
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        gen_core::Conditioning::MultiReference { images },
+    ]
+}
+
 #[test]
 fn bernini_r2v_worker_receipts_bind_backend_specific_effective_shapes() {
     let conditioning = r2v_conditioning();
@@ -906,6 +927,76 @@ fn bernini_r2v_exact_surface_reaches_the_shared_selector_with_flattened_count() 
             &crossed,
             generator.memory_strategy_contract()
         ));
+    }
+}
+
+#[test]
+fn bernini_rv2v_seals_the_combined_source_tokens_and_distinguishes_clip_plus_image() {
+    let contract = {
+        let mut contract = fixture_contract(20, 4, &[MemoryStrategy::BoundedDecode]);
+        contract.provider_id = "bernini".to_owned();
+        contract
+    };
+    let conditioning = rv2v_conditioning();
+    for (lane, packed_tokens, image_tokens) in [
+        (VideoLane::Mlx, 20_796_u64, 858_u64),
+        (VideoLane::Candle, 22_260_u64, 1_590_u64),
+    ] {
+        let receipt = bernini_r2v_reference_receipt(lane, 848, 480, &conditioning).unwrap();
+        assert!(receipt.contains(&format!("count-2:packed-source-tokens-{packed_tokens}:")));
+        assert!(receipt.contains("video-1:frames-45;native-848x480;vae-12x106x60;tokens-19080"));
+        assert!(receipt.contains(&format!(";tokens-{image_tokens}")));
+
+        let overlay = format!("provider_video_mode:rv2v+{receipt}");
+        let exact = || {
+            let mut request = bernini_inputs(Some(&overlay));
+            request.lane = lane;
+            request.mode = "reference_video_to_video";
+            request.reference_count = 3;
+            request.reference_shape = "video+multi_image";
+            request
+        };
+        assert!(bernini_surface_is_exact(&exact(), Some(&contract)));
+
+        let mut crossed = exact();
+        crossed.reference_count = 2;
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        crossed.width = 1280;
+        crossed.height = 720;
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        crossed.reference_shape = "multi_image";
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        crossed.mode = "reference_to_video";
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+    }
+
+    let r2v_receipt =
+        bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &r2v_conditioning()).unwrap();
+    assert!(!r2v_receipt.contains("video-1"));
+    assert!(!r2v_receipt.contains("packed-source-tokens"));
+
+    let receipt = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &conditioning).unwrap();
+    let overlay = format!("provider_video_mode:rv2v+{receipt}");
+    let mut selector_contract = fixture_contract(20, 4, &[MemoryStrategy::BoundedDecode]);
+    selector_contract.provider_id = "bernini".to_owned();
+    let generator = fixture_generator(Some(selector_contract));
+    for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+        let mut request = bernini_inputs(Some(&overlay));
+        request.mode = "reference_video_to_video";
+        request.reference_count = 3;
+        request.reference_shape = "video+multi_image";
+        request.runtime.as_mut().unwrap().cache_state = cache_state;
+        let outcome = admit_video_generation_with_curves(&generator, request, None);
+        assert!(outcome.refusal.is_none(), "{outcome:?}");
+        let context = outcome.context.expect("exact RV2V selector context");
+        assert_eq!(context.mode.as_key(), "reference_video_to_video");
+        assert_eq!(context.geometry.reference_count, 3);
+        assert_eq!(context.overlay.as_deref(), Some(overlay.as_str()));
+        assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+        assert_eq!(context.cache_state, cache_state);
     }
 }
 
