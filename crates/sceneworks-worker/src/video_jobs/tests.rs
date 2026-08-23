@@ -60,14 +60,301 @@ fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
 #[test]
 fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     let mut input = VideoGenInput::default();
-    assert_eq!(video_admission_overlay(&input), None);
+    assert_eq!(video_admission_overlay(&input, None).unwrap(), None);
 
     input.video_mode = Some("no_audio".to_owned());
     assert_eq!(
-        video_admission_overlay(&input).as_deref(),
+        video_admission_overlay(&input, None).unwrap().as_deref(),
         Some("provider_video_mode:no_audio"),
         "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
     );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_adapter_overlay_records_exact_artifact_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter_path = root.path().join("style.safetensors");
+    std::fs::write(&adapter_path, b"weights-free-adapter").unwrap();
+    let input = VideoGenInput {
+        engine_id: "bernini",
+        adapters: vec![AdapterSpec::new(
+            adapter_path.clone(),
+            0.75,
+            gen_core::AdapterKind::Lora,
+        )],
+        ..Default::default()
+    };
+
+    const RECEIPT: &str = "adapters:[artifact=safetensors;path_hex=2f746d702f7374796c652e7361666574656e736f7273;digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;kind=Lora;scale_bits=3f400000;pass_scale_bits=none;expert=None;verified_bytes=20;stable=true]";
+    let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+        "bernini",
+        gen_core::MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: false,
+            block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+        phases: vec![gen_core::MemoryPhase::Denoise],
+        variables: vec![gen_core::MemoryFormulaVariable::OverlayBytes],
+        resident_components: vec![gen_core::MemoryResidentComponent {
+            id: RECEIPT.to_owned(),
+            kind: gen_core::MemoryComponentKind::AdapterStack,
+            resident_bytes: 20,
+            bounded_by: None,
+            residency: gen_core::MemoryComponentResidency::WholeRender,
+        }],
+    };
+
+    assert_eq!(
+        video_admission_overlay(&input, Some(&contract))
+            .unwrap()
+            .as_deref(),
+        Some(crate::video_admission::bernini_adapter_receipt_axis(RECEIPT).as_str()),
+        "the worker must bind the opaque request axis to the provider's load-exact receipt"
+    );
+    assert_eq!(
+        video_admission_overlay(&input, None).unwrap().as_deref(),
+        Some("bernini-adapter-unverified"),
+        "missing provider receipt must fail closed, never trigger a second filesystem reconstruction"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[clip]),
+        "video"
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[]),
+        "none"
+    );
+    assert_eq!(
+        video_admission_reference_shape(
+            "bernini",
+            "video_to_video",
+            &[Conditioning::Reference {
+                image: Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0; 12],
+                },
+                strength: Some(1.0),
+            }],
+        ),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_admission_flattens_the_single_multi_reference_carrier() {
+    let images = vec![
+        Image {
+            width: 640,
+            height: 360,
+            pixels: vec![11; 640 * 360 * 3],
+        },
+        Image {
+            width: 360,
+            height: 640,
+            pixels: vec![29; 360 * 640 * 3],
+        },
+    ];
+    let conditioning = vec![Conditioning::MultiReference { images }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &conditioning),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &conditioning),
+        2
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
+    let image = Image {
+        width: 2,
+        height: 2,
+        pixels: vec![1; 12],
+    };
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![2; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let one_clip_one_image = vec![
+        clip,
+        Conditioning::MultiReference {
+            images: vec![image.clone()],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &one_clip_one_image),
+        "video+multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_video_to_video", &one_clip_one_image),
+        2
+    );
+
+    let two_images = vec![Conditioning::MultiReference {
+        images: vec![image.clone(), image],
+    }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &two_images),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &two_images),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &two_images),
+        "other",
+        "zero clips plus two images must not borrow the clip-plus-image surface"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let clips = vec![clip(1), clip(2)];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &clips),
+        "multi_video"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "multi_video_to_video", &clips),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &[clip(1)]),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_ads2v_admission_keeps_two_clip_roles_and_flattened_images() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let conditioning = vec![
+        clip(1),
+        clip(2),
+        Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![3; 12],
+                },
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![4; 12],
+                },
+            ],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &conditioning),
+        "ads2v"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "ads2v", &conditioning),
+        4
+    );
+    let mut crossed = conditioning.clone();
+    crossed.swap(1, 2);
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &crossed),
+        "other"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
+    for reference_asset_ids in [
+        Vec::<&str>::new(),
+        vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        vec!["same", "same"],
+    ] {
+        let request = request(serde_json::json!({
+            "projectId": "p",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "ordered subjects",
+            "referenceAssetIds": reference_asset_ids,
+        }));
+        assert!(validate_r2v_reference_ids(&request).is_err());
+    }
+
+    let exact = request(serde_json::json!({
+        "projectId": "p",
+        "model": "bernini",
+        "mode": "reference_to_video",
+        "prompt": "ordered subjects",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"],
+    }));
+    validate_r2v_reference_ids(&exact).expect("one ordered wrapper may contain eight distinct ids");
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan

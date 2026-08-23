@@ -4159,16 +4159,16 @@ pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumer
 /// Resolve the numeric tier that the loaded video checkpoint actually carries.
 ///
 /// Provider-owned resolution runs first for video loaders that carry their tier outside
-/// `LoadSpec.quantize` (currently Wan TI2V-5B). LTX then resolves its immutable `split_model.json`.
+/// `LoadSpec.quantize` (Wan TI2V-5B and Bernini). LTX then resolves its immutable `split_model.json`.
 /// An explicit assertion that disagrees with the checkpoint fails closed before selection.
 pub(crate) fn resolved_video_numeric_tier(
     engine_id: &str,
     spec: &LoadSpec,
 ) -> WorkerResult<MemoryNumericTier> {
-    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. MLX Wan
-    // TI2V-5B reads its immutable packed config/header surface and also carries the Q4 text-encoder
-    // Q8 floor; deriving from `LoadSpec.quantize` here would misprice the normal prepacked load,
-    // whose request-side quant hint is deliberately `None`.
+    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. Wan and
+    // Bernini read immutable packed config/header surfaces (Wan also carries the Q4 text-encoder Q8
+    // floor); deriving from `LoadSpec.quantize` would misprice their normal prepacked loads, whose
+    // request-side quant hint is deliberately `None`.
     #[cfg(target_os = "macos")]
     if let Some(tier) =
         runtime_macos::resolved_video_memory_numeric_tier(engine_id, spec).map_err(|error| {
