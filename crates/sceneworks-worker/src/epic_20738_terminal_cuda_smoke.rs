@@ -659,7 +659,7 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
     assert!(motion > 0.01, "{} first/last frames do not move", cell.id);
     save_video_witnesses(&output_frames, output);
     let reference_counterfactuals = if pair_count == 6 {
-        (0..6)
+        let counterfactuals = (0..6)
             .map(|omitted| {
                 let counterfactual_request =
                     scail2_request(cell, &references, &driving, &masks, Some(omitted));
@@ -709,7 +709,7 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
                 })
             })
             .collect::<Vec<_>>();
-        Some(reference_counterfactuals)
+        Some(counterfactuals)
     } else {
         None
     };
