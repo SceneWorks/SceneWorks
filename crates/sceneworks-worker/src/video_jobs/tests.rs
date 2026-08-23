@@ -68,6 +68,56 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         Some("provider_video_mode:no_audio"),
         "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
     );
+
+    input.enhance_prompt = true;
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:standard+provider_video_mode:no_audio"),
+        "standard prompt enhancement and provider mode remain exact identity axes"
+    );
+
+    input.use_uncensored_enhancer = true;
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored+provider_video_mode:no_audio"),
+        "uncensored enhancement must not borrow standard prompt-enhancement evidence"
+    );
+
+    input.video_mode = None;
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored"),
+        "removing the request-only mode must not erase the loaded enhancer axis"
+    );
+
+    input.engine_id = "ltx_2_3";
+    input.conditioning = vec![Conditioning::Reference {
+        image: gen_core::Image {
+            width: 768,
+            height: 512,
+            pixels: Vec::new(),
+        },
+        strength: Some(1.0),
+    }];
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored+reference:image:768x512:strength:3f800000"),
+        "the fitted LTX image and exact strength bits must reach the evidence identity"
+    );
+
+    input.conditioning.push(Conditioning::Reference {
+        image: gen_core::Image {
+            width: 768,
+            height: 512,
+            pixels: Vec::new(),
+        },
+        strength: Some(1.0),
+    });
+    assert_eq!(
+        video_admission_overlay(&input).as_deref(),
+        Some("enhancer:uncensored"),
+        "a multi-reference request must not mint the single-reference receipt"
+    );
 }
 
 #[cfg(any(
@@ -11981,6 +12031,36 @@ fn advanced_numeric_helpers_parse_flf_keyframe_knobs() {
         1.0
     );
     assert_eq!(advanced::i32(&bare.advanced, "imageFrameIndex", 0), 0);
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ltx_i2v_strength_is_fixed_to_the_calibrated_identity() {
+    let defaulted = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+        "mode": "image_to_video"
+    }));
+    assert_eq!(ltx_i2v_conditioning_strength(&defaulted).unwrap(), 1.0);
+
+    let explicit = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+        "mode": "image_to_video", "advanced": { "imageConditioningStrength": 1.0 }
+    }));
+    assert_eq!(ltx_i2v_conditioning_strength(&explicit).unwrap(), 1.0);
+
+    for value in [json!(0.8), json!("0.8"), json!(0.0)] {
+        let crossed = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "mode": "image_to_video", "advanced": { "imageConditioningStrength": value }
+        }));
+        let error = ltx_i2v_conditioning_strength(&crossed)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires imageConditioningStrength 1.0"));
+    }
 }
 
 /// `resolve_keyframe_conditioning` fails clearly when an FLF source/last-frame asset id is

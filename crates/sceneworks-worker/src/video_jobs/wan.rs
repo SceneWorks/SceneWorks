@@ -1512,11 +1512,10 @@ pub(super) fn video_admission_overlay(
             overlays.push(format!("adapters:{}", input.adapters.len()));
         }
     }
-    if input.enhance_prompt
-        || input.use_uncensored_enhancer
-        || input.uncensored_enhancer_dir.is_some()
-    {
-        overlays.push("enhancer".to_owned());
+    if input.use_uncensored_enhancer || input.uncensored_enhancer_dir.is_some() {
+        overlays.push("enhancer:uncensored".to_owned());
+    } else if input.enhance_prompt {
+        overlays.push("enhancer:standard".to_owned());
     }
     if let Some(video_mode) = input.video_mode.as_deref() {
         overlays.push(format!("provider_video_mode:{video_mode}"));
@@ -1553,6 +1552,22 @@ pub(super) fn video_admission_overlay(
             )
             .map_err(WorkerError::InvalidPayload)?,
         );
+    }
+    if matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled") {
+        let mut references = input.conditioning.iter().filter_map(|conditioning| {
+            let Conditioning::Reference { image, strength } = conditioning else {
+                return None;
+            };
+            Some((image, strength.unwrap_or(1.0)))
+        });
+        if let (Some((image, strength)), None) = (references.next(), references.next()) {
+            overlays.push(format!(
+                "reference:image:{}x{}:strength:{:08x}",
+                image.width,
+                image.height,
+                strength.to_bits()
+            ));
+        }
     }
     Ok((!overlays.is_empty()).then(|| overlays.join("+")))
 }
