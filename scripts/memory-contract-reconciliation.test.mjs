@@ -408,10 +408,16 @@ test("survey and engine scope mismatches carry exact coordinates in both directi
   );
 });
 
-test("pin and duplicate-provider failures are mutation-proven", () => {
+test("independent valid revision labels do not invalidate capability content", () => {
+  const input = fixture();
+  input.engineFacts[0].generatedFrom.inferenceRevision = "f".repeat(40);
+  assert.equal(reconcileMemoryContracts(input).mismatches, 0);
+});
+
+test("malformed revisions and duplicate-provider failures are mutation-proven", () => {
   rejectsStructurally(
-    (input) => input.engineFacts[0].generatedFrom.inferenceRevision = "f".repeat(40),
-    /Cargo pins/,
+    (input) => input.engineFacts[0].generatedFrom.inferenceRevision = "not-a-sha",
+    /no valid inference revision/,
   );
   rejectsStructurally(
     (input) => input.engineFacts[0].memoryContracts.push(structuredClone(input.engineFacts[0].memoryContracts[0])),

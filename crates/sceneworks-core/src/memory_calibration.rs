@@ -3089,21 +3089,141 @@ mod tests {
                 ("bf16", StrategyRung::BoundedTransformerResidency),
             ),
         ]);
-        let actual_session_ids = bundle
-            .source_sessions
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect::<BTreeSet<_>>();
-        let expected_session_ids = preserved_session_ids
+        // Beyond the frozen history above sits the CURRENT re-capture set (first populated by
+        // sc-19721 at inference 75d66db5, after the pin bump staled every Qwen cell). That set is
+        // deliberately NOT pinned by id/tier/rung: its ids change at every legitimate re-capture,
+        // so an exact map here is a frozen-corpus gate on the one corpus that is SUPPOSED to move
+        // (it was hand-bumped five times on this epic alone). The frozen sets stay pinned — they
+        // are history and may never change — while the re-capture set is held to its SHAPE below:
+        // physical sessions, receipts named by id under one story directory of their own, a
+        // well-formed target on the shipped tier ladder, and the capture host's identity.
+        let frozen_session_ids = preserved_session_ids
             .iter()
             .copied()
             .chain(flux2_sessions.keys().copied())
             .chain(qwen_sessions.keys().copied())
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual_session_ids, expected_session_ids);
+        let actual_session_ids = bundle
+            .source_sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<BTreeSet<_>>();
+        // A re-capture ADDS evidence; the frozen history is retained verbatim, never rewritten.
+        for id in &frozen_session_ids {
+            assert!(
+                actual_session_ids.contains(id),
+                "frozen session {id} is missing"
+            );
+        }
         assert_eq!(
             bundle.source_sessions.len(),
-            preserved_session_ids.len() + flux2_sessions.len() + qwen_sessions.len()
+            actual_session_ids.len(),
+            "duplicate source-session ids"
+        );
+        let recapture_sessions = bundle
+            .source_sessions
+            .iter()
+            .filter(|session| !frozen_session_ids.contains(session.id.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            !recapture_sessions.is_empty(),
+            "the bundle must carry current-pin re-capture evidence beyond the frozen history"
+        );
+        // One campaign lands under ONE story directory of its own, and each receipt is the
+        // session's own log. The story id is PARSED, not pinned: the next campaign (a new story)
+        // passes unchanged, while a receipt filed under the frozen sc-18353 directory, named after
+        // a different session, or shaped like anything but a physical capture still fails.
+        let mut recapture_stories = BTreeSet::new();
+        let mut recapture_tiers = BTreeSet::new();
+        let mut recapture_rungs = BTreeSet::new();
+        for session in &recapture_sessions {
+            let id = session.id.as_str();
+            let suffix = id
+                .strip_prefix("ims-")
+                .unwrap_or_else(|| panic!("{id}: session id is not ims-prefixed"));
+            assert!(
+                suffix.len() == 20 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{id}: session id is not a 20-hex-digit ims id"
+            );
+            assert!(
+                matches!(
+                    session.kind,
+                    SourceSessionKind::PhysicalCuda | SourceSessionKind::PhysicalMlx
+                ),
+                "{id}: a re-capture session must be a physical capture, got {:?}",
+                session.kind
+            );
+            let (story, file) = session
+                .source_path
+                .strip_prefix("docs/calibration/")
+                .and_then(|rest| rest.split_once('/'))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id}: receipt outside docs/calibration/<story>/: {}",
+                        session.source_path
+                    )
+                });
+            assert!(
+                story
+                    .strip_prefix("sc-")
+                    .is_some_and(|digits| !digits.is_empty()
+                        && digits.bytes().all(|byte| byte.is_ascii_digit())),
+                "{id}: receipt directory {story} is not a story directory"
+            );
+            assert_ne!(
+                story, "sc-18353",
+                "{id}: a re-capture receipt may not be filed under the frozen sc-18353 set"
+            );
+            assert_eq!(
+                file,
+                format!("{id}.log"),
+                "{id}: receipt is not the session's own log"
+            );
+            recapture_stories.insert(story);
+            let target = session
+                .target
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id}: re-capture session has no target receipt"));
+            assert!(
+                ["bf16", "q8", "q4"].contains(&target.tier.as_str()),
+                "{id}: tier {} is off the shipped ladder",
+                target.tier
+            );
+            assert_eq!(target.mode, "text_to_image", "{id}");
+            assert_eq!(target.overlay, "none", "{id}");
+            recapture_tiers.insert(target.tier.as_str());
+            recapture_rungs.insert(target.rung);
+            if session.kind == SourceSessionKind::PhysicalMlx {
+                let chip = session
+                    .hardware
+                    .extensions
+                    .get("chip")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                assert!(
+                    !chip.is_empty(),
+                    "{id}: MLX capture without a chip identity"
+                );
+            }
+            assert!(
+                session.hardware.memory_bytes > 0,
+                "{id}: capture host reports no memory"
+            );
+        }
+        assert_eq!(
+            recapture_stories.len(),
+            1,
+            "one re-capture campaign = one story directory, got {recapture_stories:?}"
+        );
+        // Coverage SHAPE, not population: to re-verify what a pin bump stales the campaign must
+        // span the tier ladder (bf16 plus at least one quantized tier) and more than one rung.
+        assert!(
+            recapture_tiers.contains("bf16") && recapture_tiers.len() >= 2,
+            "re-capture must cover bf16 plus a quantized tier, got {recapture_tiers:?}"
+        );
+        assert!(
+            recapture_rungs.len() >= 2,
+            "re-capture must cover more than one strategy rung, got {recapture_rungs:?}"
         );
         for session in &bundle.source_sessions {
             let Some((path, rung, mode, overlay)) = flux2_sessions.get(session.id.as_str()) else {
@@ -3118,6 +3238,8 @@ mod tests {
             assert_eq!(target.overlay, *overlay);
         }
         for session in &bundle.source_sessions {
+            // The frozen sc-18353 set, pinned exactly — it is history and may never change. The
+            // current re-capture set is shape-asserted above instead.
             let Some((tier, rung)) = qwen_sessions.get(session.id.as_str()) else {
                 continue;
             };
@@ -3156,7 +3278,11 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 70);
+        // Statuses are asserted as a PARTITION rather than as pinned totals: the totals grow at
+        // every re-capture (a re-capture retains superseded history and adds new records), so an
+        // exact count is the same frozen-corpus gate as a pinned id set. What must hold at any
+        // corpus size is that both populations exist and that together they are the whole bundle.
+        assert!(complete_count > 0, "the bundle must carry complete records");
         let runtime_keys = bundle
             .records
             .iter()
@@ -3177,27 +3303,28 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::RuntimeComplete)
             .count();
-        assert_eq!(runtime_complete_count, 19);
+        assert!(
+            runtime_complete_count > 0,
+            "the bundle must carry runtime-complete records"
+        );
         assert_eq!(
             bundle.records.len(),
             complete_count + runtime_complete_count
         );
-        assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
-                .count(),
-            58
-        );
-        assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
-                .count(),
-            31
-        );
+        // Same partition posture for the load shapes: both exist, and together they are the whole
+        // bundle — a record with any third shape (or none) breaks the identity.
+        let eager_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
+            .count();
+        let deferred_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
+            .count();
+        assert!(eager_count > 0 && deferred_count > 0);
+        assert_eq!(bundle.records.len(), eager_count + deferred_count);
     }
 
     #[test]

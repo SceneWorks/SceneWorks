@@ -15,9 +15,9 @@ use sceneworks_core::workflow_mp4::{
 };
 use sceneworks_core::workflow_share::{
     build_video_workflow_share_from, embeddable_video_workflow_share, parse_workflow_share_json,
-    WorkflowAssetFacts, WorkflowShareError, INPUT_KIND_REFERENCE, INPUT_KIND_REFERENCE_CLIP,
-    INPUT_KIND_SOURCE, INPUT_KIND_SOURCE_CLIP, WORKFLOW_KIND_IMAGE, WORKFLOW_KIND_VIDEO,
-    WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
+    WorkflowAssetFacts, WorkflowShareError, INPUT_KIND_REFERENCE, INPUT_KIND_REFERENCE_AUDIO,
+    INPUT_KIND_REFERENCE_CLIP, INPUT_KIND_SOURCE, INPUT_KIND_SOURCE_CLIP, WORKFLOW_KIND_IMAGE,
+    WORKFLOW_KIND_VIDEO, WORKFLOW_SHARE_MARKER_KEY, WORKFLOW_SHARE_MAX_BYTES,
 };
 
 // ---------------------------------------------------------------------------
@@ -653,6 +653,7 @@ fn clip_ids_become_shape_descriptors() {
             "sourceClipAssetIds": ["clip_a_1", "clip_b_2"],
             "referenceClipAssetId": "refclip_5566",
             "referenceAssetIds": ["ref_img_1", "ref_img_2", "ref_img_3"],
+            "referenceAudioAssetIds": ["ref_aud_1", "ref_aud_2"],
             "lastFrameAssetId": "still_4321",
         })),
     );
@@ -668,6 +669,10 @@ fn clip_ids_become_shape_descriptors() {
     assert_eq!(by_kind(INPUT_KIND_SOURCE_CLIP), Some(4));
     assert_eq!(by_kind(INPUT_KIND_REFERENCE_CLIP), Some(1));
     assert_eq!(by_kind(INPUT_KIND_REFERENCE), Some(3));
+    // sc-17160: the audio references get their OWN kind rather than folding into `reference`.
+    // Folded in, a recipient reading "5 reference images" would supply five stills and reproduce
+    // an under-conditioned render, with nothing in the envelope to tell them otherwise.
+    assert_eq!(by_kind(INPUT_KIND_REFERENCE_AUDIO), Some(2));
     // `lastFrameAssetId` is a STILL, so it counts as a source rather than a clip.
     assert_eq!(by_kind(INPUT_KIND_SOURCE), Some(1));
 
@@ -679,6 +684,7 @@ fn clip_ids_become_shape_descriptors() {
         "clip_b_2",
         "refclip_5566",
         "ref_img_1",
+        "ref_aud_1",
         "still_4321",
     ] {
         assert!(

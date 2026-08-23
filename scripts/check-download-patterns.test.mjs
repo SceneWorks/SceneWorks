@@ -160,16 +160,21 @@ test("the committed evidence grades the real catalog clean", async () => {
 // (`SceneWorks/instantid-mlx`, the SCRFD + ArcFace pair), which landed on the epic branch while
 // this gate landed on main, so neither PR could see the other. The census is a shape assertion —
 // it moves whenever the catalog gains or loses a repo@revision key, together with a re-record.
-test("all 96 real download keys are pinned to immutable lowercase commit SHAs", async () => {
+//
+// 96 -> 99 on the sc-17137 main sync: the MiniMax-H3 pair (sc-17158/sc-19558/sc-20267) contributes
+// three keys — the `SceneWorks/minimax-h3-mlx` tier re-host, the upstream `MiniMaxAI/MiniMax-H3`
+// shared-component co-requisite, and the raw off-Mac snapshot row — which landed on the epic
+// branch while this gate landed on main; same one-sided-census shape as the 95 -> 96 note above.
+test("all 99 real download keys are pinned to immutable lowercase commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 96, "update the 96/96 disclosure when the real key census changes");
+  assert.equal(keys.size, 99, "update the 99/99 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    96,
-    "the evidence census must stay aligned with the 96/96 disclosure",
+    99,
+    "the evidence census must stay aligned with the 99/99 disclosure",
   );
   for (const claim of claims) {
     assert.match(
