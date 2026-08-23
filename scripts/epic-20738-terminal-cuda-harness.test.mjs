@@ -1299,6 +1299,19 @@ async function writeSparseRecoveryCandidate(root) {
     sourceInitial.diskPlan.nonModelPaths,
     179_028_698_264,
   );
+  delete diskPlan.preHydrationJitSourcePeakBytes;
+  diskPlan.reviewedJitSourcePeakBytes = 56_156_615_634;
+  for (const cell of diskPlan.cells) {
+    cell.requiredAdditionalBytes = Math.max(
+      cell.modelAndSidecarBytes + 40 * 1024 ** 3,
+      99_106_288_594,
+    );
+  }
+  diskPlan.peakRequiredAdditionalBytes = Math.max(
+    diskPlan.peakModelAndSidecarBytes + 40 * 1024 ** 3,
+    99_106_288_594,
+  );
+  diskPlan.admitted = diskPlan.freeBytes >= diskPlan.peakRequiredAdditionalBytes;
   const emptyInventory = {
     root: sourceInitial.derivedSidecarRoot,
     files: 0,
@@ -1515,6 +1528,24 @@ test("sparse recovery imports only per-cell-compatible PASS receipts and quarant
         value.importedOrdinals.pop();
         await writeFile(file, JSON.stringify(value));
       }, /archived lineage/],
+      ["legacy-new-field", async (candidate) => {
+        const file = path.join(candidate, "evidence", "cache-preflight.json");
+        const value = JSON.parse(await readFile(file));
+        value.diskPlan.preHydrationJitSourcePeakBytes = 56_156_615_634;
+        await writeFile(file, JSON.stringify(value));
+      }, /exact archived legacy disk-plan shape/],
+      ["legacy-peak", async (candidate) => {
+        const file = path.join(candidate, "evidence", "cache-preflight.json");
+        const value = JSON.parse(await readFile(file));
+        value.diskPlan.reviewedJitSourcePeakBytes += 1;
+        await writeFile(file, JSON.stringify(value));
+      }, /archived legacy disk plan drifted/],
+      ["legacy-floor", async (candidate) => {
+        const file = path.join(candidate, "evidence", "cache-preflight.json");
+        const value = JSON.parse(await readFile(file));
+        value.diskPlan.peakRequiredAdditionalBytes += 1;
+        await writeFile(file, JSON.stringify(value));
+      }, /archived legacy disk plan drifted/],
     ]) {
       const root = path.join(temporary, label);
       await mkdir(root);
@@ -1672,6 +1703,12 @@ test("start-10 cache preflight binds the reviewed remaining census without weake
       ["total", (value) => { value.diskPlan.logicalSourceBytes += 1; }, /disk plan|target-byte totals/],
       ["peak", (value) => { value.diskPlan.peakModelAndSidecarBytes -= 1; }, /disk plan|target-byte totals/],
       ["floor", (value) => { value.diskPlan.peakRequiredAdditionalBytes -= 1; }, /disk plan|target-byte totals/],
+      ["missing-pre-hydration-peak", (value) => {
+        delete value.diskPlan.preHydrationJitSourcePeakBytes;
+      }, /disk plan|target-byte totals/],
+      ["wrong-pre-hydration-peak", (value) => {
+        value.diskPlan.preHydrationJitSourcePeakBytes += 1;
+      }, /disk plan|target-byte totals/],
     ]) {
       const drifted = structuredClone(startTen);
       mutate(drifted);
@@ -2131,6 +2168,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
     runtimeResultMode = "valid", providerRuntimeFailureAt = null,
     providerFailureDerivedMode = "empty", successfulFluxDerivedMode = "resident",
     runtimeMemoryMode = "current", sparse = false, illustriousHydration = null,
+    prefixCandidates = null,
   } = {}) {
     const temporary = await mkdtemp(path.join(tmpdir(), "sc-20974-preflight-"));
     const runnerTemp = path.join(temporary, "runner-temp");
@@ -2468,12 +2506,12 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           }],
           systemMemory: { totalBytes: 128 * 1024 ** 3, availableBytesAtStart: 100 * 1024 ** 3 },
           sceneworksRoot: sceneworks,
+          prefixCandidates,
           python: "python",
           artifactExpectedFiles,
           downloadEvidenceSha256,
         },
-        prefixSelection: {},
-        importedPrefix,
+        ...(prefixCandidates ? {} : { prefixSelection: {}, importedPrefix }),
         operations,
         fault: preflightFault || cellFault ? async (stage, index) => {
           if (stage === preflightFault) throw new Error(`injected ${stage}`);
@@ -2842,6 +2880,23 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
       "sdxl-tokenizer-bigg", "sdxl-vae-fix",
     ],
   );
+
+  const archivedCandidates = await mkdtemp(path.join(tmpdir(), "sc-21306-run-campaign-legacy-"));
+  try {
+    await writeSparseRecoveryCandidate(archivedCandidates);
+    const archived = await scenario({ sparse: true, prefixCandidates: archivedCandidates });
+    assert.deepEqual(archived.runtimeCells.map(({ id }) => id), [
+      "ltx-2-3-q8", "illustrious-v1-openpose", "illustrious-v2-openpose",
+    ], archived.result.summary.campaignErrors.join("\n"));
+    assert.equal(archived.result.summary.receipts.length, 19);
+    assert.deepEqual(
+      archived.result.summary.receipts.filter(({ source }) => source === "continuation")
+        .map(({ id }) => id),
+      ["ltx-2-3-q8", "illustrious-v1-openpose", "illustrious-v2-openpose"],
+    );
+  } finally {
+    await rm(archivedCandidates, { recursive: true, force: true });
+  }
 
   for (const [mode, expectedPersistentBytes, expectedPeak, expectedDownloads] of [
     ["full", 7_823_313_648, 63_979_929_282, 38],
