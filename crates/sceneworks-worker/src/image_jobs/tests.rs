@@ -19610,11 +19610,16 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             include_str!("mage_finetuned.rs"),
             "admit_candle_load_spec_floor(",
         ),
+        // The plan route pairs a plan-resolved primary File with the family's resident base
+        // snapshot, exactly like `KreaImported` — so it must use the SAME prepared-pin floor over
+        // explicit companion dirs. `admit_candle_load_spec_floor` prices every `spec.components`
+        // value recursively, which for a base snapshot would charge the replaced `transformer/`
+        // (i.e. the plan's own DiT) a second time and over-refuse (sc-20634 review).
         (
             "CheckpointPlan",
             "checkpoint_plan.rs",
             include_str!("checkpoint_plan.rs"),
-            "admit_candle_load_spec_floor(",
+            "prepare_cached_candle_base_floor(",
         ),
         (
             "ZimageComfyui",
@@ -19641,6 +19646,32 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "admit_candle_base_floor_with_resident_overlay(",
         ),
     ];
+    // A pure substring grep says nothing about what a route does NOT call. Both routes that pair
+    // an imported primary File with a resident base snapshot must be free of the recursive
+    // component floor, or the marker above would keep passing beside a live double-claim.
+    for (route, file, source) in [
+        (
+            "CheckpointPlan",
+            "checkpoint_plan.rs",
+            include_str!("checkpoint_plan.rs"),
+        ),
+        (
+            "KreaImported",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+        ),
+    ] {
+        assert!(
+            !source
+                .lines()
+                .any(|line| line.contains("admit_candle_load_spec_floor(")
+                    && !line.trim_start().starts_with("//")),
+            "{route} ({file}) must NOT price its base snapshot through \
+             `admit_candle_load_spec_floor`: that prices every component value recursively, so the \
+             snapshot's replaced `transformer/` — the imported DiT itself — would be charged twice"
+        );
+    }
+
     for (route, file, source, marker) in BASE_ADMITTED {
         let gate = source
             .lines()
@@ -20389,6 +20420,229 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
     assert!(prepare_krea_imported_control_sources(&both, &fx.settings)
         .unwrap()
         .is_none());
+
+    // The OTHER imported lanes decline a plan-backed entry too (sc-20634 review). Each is handed an
+    // entry carrying ITS OWN markers plus `importPlan.checkpointId`, so a lane that relied on the
+    // resolver's arm order rather than an explicit guard would claim it here. Arm ordering is not a
+    // claim: it silently makes whichever lane happens to be checked first the owner.
+    let marked = |family: &str, shape: &str, extra: Value| -> ImageRequest {
+        let mut entry = json!({
+            "id": "linked_marked",
+            "catalogScope": "user",
+            "family": family,
+            "importSourceShape": shape,
+            "importPlan": { "checkpointId": checkpoint_id },
+            "paths": { "model": install.to_str().unwrap() }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                entry[key] = value.clone();
+            }
+        }
+        request(json!({
+            "projectId": "p",
+            "model": "external_base_marked",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": entry,
+        }))
+    };
+
+    let sdxl = marked("sdxl", "fused_checkpoint", json!({}));
+    assert!(
+        prepare_sdxl_imported_sources(&sdxl, &fx.settings)
+            .unwrap()
+            .is_none(),
+        "imported SDXL must decline a plan-backed entry rather than rely on arm ordering"
+    );
+    assert!(!sdxl_imported_available(&sdxl, &fx.settings));
+
+    // Mage needs a COMPLETE fine-tuned transformer dir to be claimable at all, so build the exact
+    // fixture its own lane test uses and only then add the plan marker: an entry that this lane
+    // would otherwise claim is the only fixture that can prove the guard, rather than proving the
+    // fixture was unclaimable for some unrelated reason.
+    let mage_dir = tempfile::tempdir().unwrap();
+    let (mage_settings, mage_checkpoint) = mage_finetuned_settings_with_checkpoint(mage_dir.path());
+    let mage_path = mage_checkpoint.to_str().unwrap().to_owned();
+    let mage_entry = |plan_backed: bool| {
+        let mut entry = json!({ "family": "mage-flow", "paths": { "model": mage_path } });
+        if plan_backed {
+            entry["importPlan"] = json!({ "checkpointId": checkpoint_id });
+        }
+        request(json!({
+            "projectId": "p",
+            "model": "finetune_9f3c0a11",
+            "mode": "text_to_image",
+            "modelManifestEntry": entry,
+        }))
+    };
+    assert!(
+        mage_finetuned_available(&mage_entry(false), &mage_settings),
+        "fixture check: without the plan marker this entry IS claimed by the Mage lane"
+    );
+    let mage = mage_entry(true);
+    assert!(
+        prepare_mage_finetuned_transformer(&mage, &mage_settings)
+            .unwrap()
+            .is_none(),
+        "the Mage fine-tuned lane must decline a plan-backed entry"
+    );
+    assert!(!mage_finetuned_available(&mage, &mage_settings));
+
+    // `zimage_comfyui_available` is candle-only; its guard sits in the shared
+    // `prepare_zimage_comfyui_sources`, pinned here as source text so the macOS lane still proves
+    // the guard is live code rather than a comment (`cargo test` cannot link the candle cfg here).
+    let zimage_source = include_str!("zimage_comfyui_candle.rs");
+    let start = zimage_source
+        .find("pub(super) fn prepare_zimage_comfyui_sources(")
+        .expect("the shared ComfyUI Z-Image source preparation must exist");
+    let prepare = &zimage_source[start..start + 1200.min(zimage_source.len() - start)];
+    assert!(
+        prepare.contains("request_is_checkpoint_plan_backed(request)"),
+        "the ComfyUI Z-Image lane must explicitly decline a plan-backed entry:\n{prepare}"
+    );
+    let guard_at = prepare
+        .find("request_is_checkpoint_plan_backed(request)")
+        .expect("guard present");
+    let first_claim = prepare
+        .find("imported_generate_request_supported(")
+        .expect("the lane resolves its descriptor");
+    assert!(
+        guard_at < first_claim,
+        "the plan-backed decline must precede any source resolution in the ComfyUI Z-Image lane"
+    );
+}
+
+/// The plan route runs the SAME MLX admission as the legacy Krea imported lane (sc-20634 review).
+///
+/// It previously ran `apply_residency_policy` plus the bare `start_cached_gen_stream`, which
+/// `stream.rs` implements by DECLINING the warm policy — i.e. no manifest/geometry-aware fit gate
+/// and no request-scoped memory at all — for exactly the same weights the bespoke lane admits
+/// through `MlxRequestPlan` + the request-state seam. Two halves are pinned here:
+///
+///   * behavioural — the geometry the plan route prices is byte-for-byte the identity the legacy
+///     lane prices for the same request (no conditioning, no hires, no adapters);
+///   * structural — the handler actually reaches the request-state seam and the request plan, and
+///     no longer reaches the bare seam. `evaluate_request` needs a loaded generator, so the seam
+///     itself is source-text pinned rather than executed.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
+    let request = request(json!({
+        "projectId": "p",
+        "model": "linked_kreamania",
+        "prompt": "a fox",
+        "width": 768, "height": 1024, "count": 3,
+        "modelManifestEntry": { "catalogScope": "user", "family": "krea_2" }
+    }));
+
+    // The legacy lane's inputs for a plain txt2img job: no conditioning, no hires, no adapters —
+    // which is the only shape `prepare_checkpoint_plan_sources` lets onto this route.
+    let legacy = krea_imported_memory_inputs(&request, &[], None, 0);
+    let plan = checkpoint_plan_memory_inputs(&request);
+    assert_eq!((plan.width, plan.height), (legacy.width, legacy.height));
+    assert_eq!(plan.count, legacy.count);
+    assert_eq!(plan.mode, legacy.mode);
+    assert_eq!(plan.overlay, legacy.overlay);
+    assert_eq!(plan.adapter_count, legacy.adapter_count);
+    assert_eq!(plan.has_reference, legacy.has_reference);
+    assert_eq!(plan.reference_count, legacy.reference_count);
+    assert_eq!(plan.use_pid, legacy.use_pid);
+    assert_eq!(plan.has_phases, legacy.has_phases);
+    // Not vacuous: the geometry priced is the request's, not a default.
+    assert_eq!((plan.width, plan.height, plan.count), (768, 1024, 3));
+
+    let source = include_str!("checkpoint_plan.rs");
+    let live = |needle: &str| {
+        source
+            .lines()
+            .any(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
+    };
+    for marker in [
+        "MlxRequestPlan::try_for_spec_and_manifest(",
+        "start_cached_gen_stream_with_request_state(",
+        "crate::mlx_fit_gate::evaluate_request(",
+        "WarmPolicyOnce::new(warm_policy)",
+    ] {
+        assert!(
+            live(marker),
+            "the plan route's MLX arm must reach `{marker}` — the seam the legacy Krea imported \
+             lane uses for the same weights"
+        );
+    }
+    // `start_cached_gen_stream(` is the bare seam, which declines the warm policy outright. The
+    // candle arm uses `start_cached_gen_stream_after_cold_admission`, so neither name may appear
+    // bare — check for the exact call, not the prefix.
+    assert!(
+        !source.lines().any(|line| {
+            line.contains("start_cached_gen_stream(") && !line.trim_start().starts_with("//")
+        }),
+        "the plan route must NOT use the bare cached seam: it settles the warm policy with \
+         `RouteHasNoRequestScopedMemory`, i.e. no MLX request admission at all"
+    );
+    assert!(
+        !source.lines().any(|line| {
+            line.contains("apply_residency_policy(") && !line.trim_start().starts_with("//")
+        }),
+        "the generator cache runs `apply_residency_policy` inside its own cold loader; the legacy \
+         Krea imported lane leaves it there, and so must this route"
+    );
+}
+
+/// The test-only route probes must not turn a typed plan refusal into "route unavailable"
+/// (sc-20634 review). `prepare_checkpoint_plan_sources` has three outcomes and only `Ok(None)`
+/// means "not this route"; folding `Err` into `false` made every refusal read as a missing route,
+/// which is exactly how a live refusal could hide behind a green probe assertion.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_route_probe_surfaces_a_plan_refusal_instead_of_reporting_no_route() {
+    let fx = CheckpointPlanFixture::new("probe", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(&checkpoint_id, json!({}));
+    assert_eq!(
+        resolve_image_route(&request, &fx.settings),
+        Some(ImageRoute::CheckpointPlan),
+        "a servable plan-backed entry still probes as the plan route"
+    );
+
+    // Drift the source so the plan resolves to a typed refusal.
+    let file = fx.library_dir.join("kreamania.safetensors");
+    let original = std::fs::read(&file).unwrap();
+    let mut mutated = original.clone();
+    let last = mutated.len() - 1;
+    mutated[last] ^= 0xff;
+    std::fs::write(&file, &mutated).unwrap();
+    assert!(
+        prepare_checkpoint_plan_sources(&request, &fx.settings).is_err(),
+        "fixture check: the drifted source must refuse"
+    );
+
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        resolve_image_route(&request, &fx.settings)
+    }));
+    std::panic::set_hook(previous_hook);
+
+    let payload = probed.expect_err(
+        "a refusing plan-backed entry must surface loudly from the probe, not resolve to a route",
+    );
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("the plan-driven route refused") && message.contains("source-drifted"),
+        "the probe must carry the typed refusal it saw: {message}"
+    );
+
+    std::fs::write(&file, &original).unwrap();
+    assert_eq!(
+        resolve_image_route(&request, &fx.settings),
+        Some(ImageRoute::CheckpointPlan),
+        "restoring the bytes restores the route: the panic was the refusal, not the fixture"
+    );
 }
 
 /// Every plan-route refusal is typed and raised before any loader is constructed (sc-20634):
@@ -20580,6 +20834,172 @@ fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
     );
 }
 
+/// Candle floor parity for the plan-driven route (sc-20634 review): for the same imported file and
+/// the same resident base tier, the plan route and the legacy Krea imported lane must be admitted
+/// on the IDENTICAL floor. The base snapshot is a companion whose `transformer/` the imported file
+/// replaces, so pricing the snapshot recursively — which is what `admit_candle_load_spec_floor`
+/// does to every `spec.components` value — charges the DiT twice and over-refuses.
+///
+/// The floor is `prepared File pins + distinct weight bytes of the companion dirs`. The companion
+/// construction is now shared by both lanes, so this asserts the shared construction excludes the
+/// replaced transformer and that the resulting byte totals agree. It runs on every lane rather
+/// than only the candle one: `cargo test` cannot link the candle cfg on a Mac, so a candle-gated
+/// assertion here would first execute on CI (see `scripts/check-candle-build.mjs`).
+#[test]
+fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("plan-floor-{}-", std::process::id()))
+        .tempdir()
+        .unwrap();
+    let imported = temp.path().join("kreamania.safetensors");
+    let base = temp.path().join("base");
+    std::fs::write(&imported, vec![0_u8; 1100]).unwrap();
+    for (sub, bytes) in [
+        ("text_encoder", 130_usize),
+        ("vae", 170),
+        // The snapshot's OWN transformer — replaced by `imported`, and the thing that must not be
+        // priced. Deliberately the largest, the way a 26 GB DiT dwarfs its companions.
+        ("transformer", 9000),
+    ] {
+        std::fs::create_dir_all(base.join(sub)).unwrap();
+        std::fs::write(base.join(sub).join("model.safetensors"), vec![0_u8; bytes]).unwrap();
+    }
+
+    let companion_bytes = |dirs: &[PathBuf]| -> u64 {
+        dirs.iter()
+            .map(|dir| crate::mlx_fit_gate::sum_safetensors_bytes(dir))
+            .sum()
+    };
+
+    // Both lanes build their companions through the one shared construction.
+    let plan_companions = imported_base_snapshot_companions(&base, false);
+    let legacy_companions = imported_base_snapshot_companions(&base, false);
+    assert_eq!(
+        plan_companions, legacy_companions,
+        "the plan route and the legacy lane must build the same companion set"
+    );
+    assert_eq!(
+        plan_companions,
+        vec![base.join("vae"), base.join("text_encoder")]
+    );
+    assert!(
+        !plan_companions.contains(&base.join("transformer")),
+        "the snapshot transformer the imported file replaces must stay out of the floor"
+    );
+
+    // The floor: the imported file's prepared pin size plus the companion dirs' weight bytes.
+    let imported_bytes = gen_core::PinnedWeightsFile::pin(&imported)
+        .expect("primary pins")
+        .target_fingerprint()
+        .size;
+    let plan_floor = imported_bytes + companion_bytes(&plan_companions);
+    let legacy_floor = imported_bytes + companion_bytes(&legacy_companions);
+    assert_eq!(
+        plan_floor, legacy_floor,
+        "plan-route floor {plan_floor} must equal the legacy lane's {legacy_floor}"
+    );
+    assert_eq!(plan_floor, 1100 + 170 + 130);
+
+    // And it must be strictly cheaper than pricing the whole snapshot dir, which is what the
+    // component-recursive floor would have done: exactly the replaced transformer's bytes cheaper.
+    let recursive_floor = imported_bytes + crate::mlx_fit_gate::sum_safetensors_bytes(&base);
+    assert_eq!(
+        recursive_floor - plan_floor,
+        9000,
+        "the difference between the two floors is precisely the replaced snapshot transformer"
+    );
+
+    // A spec that selected its own encoder drops the bundled one (already covered by its receipt).
+    let selected = imported_base_snapshot_companions(&base, true);
+    assert_eq!(selected, vec![base.join("vae")]);
+}
+
+/// The plan is consumed everywhere or refused (sc-20634 review). The inspector emits multi-layer
+/// plans — a linked directory Krea checkpoint compiles to `transformer` + `vae` + `text_encoder` —
+/// and this route sources only the primary layer, taking the rest from the resident base tier.
+/// Loading the plan's transformer while silently substituting the base tier's VAE for the plan's
+/// own is a silent substitution, so a plan with any unconsumed layer refuses instead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_plan_with_a_layer_this_route_cannot_source_refuses_instead_of_substituting() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+    };
+    use sceneworks_core::checkpoint_plan_store::{ResolvedCheckpointV1, ResolvedLayerV1};
+
+    let resolved = |roles: &[&str]| -> ResolvedCheckpointV1 {
+        let layers: Vec<ImportLayerV1> = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| ImportLayerV1 {
+                layer_id: format!("artifact:{index}-{role}.safetensors"),
+                role: (*role).to_owned(),
+                target_path: format!("{index}-{role}.safetensors"),
+                source: SourceLocatorV1::linked(
+                    "root-test",
+                    format!("{index}-{role}.safetensors"),
+                    "0".repeat(64),
+                )
+                .unwrap(),
+            })
+            .collect();
+        let plan = ImportPlanV1::new("plan-test", "krea_2", layers).unwrap();
+        let record = CheckpointCatalogRecordV1::from_plan("linked/root-test/x", &plan).unwrap();
+        ResolvedCheckpointV1 {
+            checkpoint_id: "linked/root-test/x".to_owned(),
+            record,
+            layers: plan
+                .layers
+                .iter()
+                .cloned()
+                .map(|layer| ResolvedLayerV1 {
+                    path: PathBuf::from("/library").join(&layer.target_path),
+                    layer,
+                    rehashed: false,
+                })
+                .collect(),
+            plan,
+        }
+    };
+
+    // The single-layer plan the skeleton serves: nothing is left unconsumed.
+    let single = resolved(&["transformer"]);
+    let (_, primary) = checkpoint_plan_primary_layer(&single).unwrap();
+    checkpoint_plan_unconsumed_layers(&single, primary).expect("a lone primary consumes the plan");
+
+    // The two-layer plan the inspector emits for a linked DIRECTORY checkpoint.
+    let two_layer = resolved(&["transformer", "vae"]);
+    let (_, primary) = checkpoint_plan_primary_layer(&two_layer).unwrap();
+    let error = checkpoint_plan_unconsumed_layers(&two_layer, primary)
+        .expect_err("an unsourced vae layer must refuse");
+    let message = error.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:unconsumed-layer]"),
+        "{message}"
+    );
+    assert!(
+        message.contains("vae") && message.contains("\"transformer\""),
+        "the refusal must name the unsourced role and the primary it kept: {message}"
+    );
+    assert!(
+        matches!(error, WorkerError::InvalidPayload(_)),
+        "the refusal is a typed payload diagnostic, not an engine error"
+    );
+
+    // Every additional role the inspector can emit is covered, not just `vae`.
+    let full = resolved(&["transformer", "vae", "text_encoder", "descriptor"]);
+    let (_, primary) = checkpoint_plan_primary_layer(&full).unwrap();
+    let message = checkpoint_plan_unconsumed_layers(&full, primary)
+        .expect_err("three unsourced layers must refuse")
+        .to_string();
+    for role in ["vae", "text_encoder", "descriptor"] {
+        assert!(message.contains(role), "{role} missing from: {message}");
+    }
+}
+
 /// Real-weight fixed-seed parity for the universal-import walking skeleton (sc-20634): the SAME
 /// community Krea 2 dense DiT (`kreamania_variant5`), the SAME seed/size/steps, rendered once
 /// through today's `KreaImported` lane (an app-managed install dir) and once through the
@@ -20587,6 +21007,15 @@ fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
 /// registry-bound `krea_2_turbo` provider). The two images must be byte-identical. The plan
 /// compile is the real full-content inspection of the 26 GB file, and the route's resolve
 /// re-verifies the source before the load.
+///
+/// Both sides render through the PRODUCTION admission seam
+/// (`generator_cache::with_cached_generator_for_request`, which is exactly what
+/// `start_cached_gen_stream_with_request_state` wraps) plus `mlx_fit_gate::evaluate_request` and
+/// `memory_strategy::generate_with_scope` — not a raw `LoadSpec` handed to `inference_runtime::load`.
+/// So the byte-identical claim covers the residency policy the cache selects, the warm/loaded-policy
+/// settlement, and the per-request memory strategy, not just the spec. Only the job/asset plumbing
+/// (`generate_checkpoint_plan_stream`'s API client, `JobSnapshot`, and asset writes) is omitted;
+/// none of it can influence pixels.
 ///
 /// ```text
 /// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
@@ -20597,9 +21026,9 @@ fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
 /// cargo test -p sceneworks-worker --release checkpoint_plan_route_mlx_gpu_parity -- --ignored --nocapture
 /// ```
 #[cfg(target_os = "macos")]
-#[test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "real-weight MLX parity; needs the ~26 GB community Krea 2 DiT + the SceneWorks/krea-2-turbo-mlx bf16 base cached + an Apple-Silicon Mac"]
-fn checkpoint_plan_route_mlx_gpu_parity() {
+async fn checkpoint_plan_route_mlx_gpu_parity() {
     use crate::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
     use sha2::{Digest, Sha256};
 
@@ -20760,10 +21189,18 @@ fn checkpoint_plan_route_mlx_gpu_parity() {
         )],
         "both routes pair the DiT with the same resident base tier"
     );
-    let legacy_spec = LoadSpec::new(WeightsSource::File(legacy_dit.clone())).with_component(
+    let mut legacy_spec = LoadSpec::new(WeightsSource::File(legacy_dit.clone())).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(base.clone()),
     );
+    // The legacy lane finalizes its pins before planning; match it so both sides present the same
+    // prepared spec to `try_for_spec_and_manifest`.
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut legacy_spec,
+        [gen_core::PinnedWeightsFile::pin(&legacy_dit).expect("legacy DiT pins")],
+        "Krea 2 imported source preparation failed",
+    )
+    .expect("legacy spec prepares");
 
     let make_req = || GenerationRequest {
         prompt: prompt.clone(),
@@ -20775,41 +21212,106 @@ fn checkpoint_plan_route_mlx_gpu_parity() {
         guidance: None,
         ..Default::default()
     };
-    let render = |label: &str, spec: &LoadSpec| -> (Image, String) {
-        mlx_rs::memory::clear_cache();
-        let started = std::time::Instant::now();
-        let generator = crate::inference_runtime::load("krea_2_turbo", spec)
-            .unwrap_or_else(|error| panic!("[{label}] load: {error}"));
-        let load_seconds = started.elapsed().as_secs_f64();
-        let output = generator
-            .generate(&make_req(), &mut |_| {})
-            .unwrap_or_else(|error| panic!("[{label}] generate: {error}"));
-        let image = match output {
-            GenerationOutput::Images(mut images) => images.pop().expect("one image"),
-            other => panic!("expected Images, got {other:?}"),
-        };
-        assert_eq!((image.width, image.height), (w, h));
-        let std = image_std(&image);
-        assert!(
-            std > DEGENERATE_STD_FLOOR_DEFAULT,
-            "[{label}] degenerate render"
-        );
-        let sha = format!("{:x}", Sha256::digest(&image.pixels));
-        let png = out_dir.join(format!("{label}.png"));
-        save_png(&image, &png);
-        eprintln!(
-            "RESULT label={label} geometry={w}x{h} steps={steps} seed={seed} pixel_sha256={sha} \
-             std={std:.3} load_seconds={load_seconds:.2} total_seconds={:.2} output={}",
-            started.elapsed().as_secs_f64(),
-            png.display()
-        );
-        drop(generator);
-        mlx_rs::memory::clear_cache();
-        (image, sha)
+    // The production admission both lanes run: the manifest/geometry-aware request plan, the cached
+    // generator seam (which is where `apply_residency_policy` and the warm/loaded policy live), the
+    // per-request memory evaluation, and the memory-scoped generate. `render` differs between the
+    // two sides ONLY in which request/spec it is handed.
+    let render = |label: &'static str,
+                  spec: LoadSpec,
+                  route_request: ImageRequest,
+                  memory_inputs: crate::mlx_fit_gate::MlxRequestInputs|
+     -> std::pin::Pin<Box<dyn std::future::Future<Output = (Image, String)>>> {
+        let prompt_request = make_req();
+        let out_dir = out_dir.clone();
+        Box::pin(async move {
+            mlx_rs::memory::clear_cache();
+            let started = std::time::Instant::now();
+            let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
+                "krea_2_turbo",
+                &route_request.model,
+                &spec,
+                Some(&route_request.model_manifest_entry),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("[{label}] request plan: {error}"));
+            let image = crate::generator_cache::with_cached_generator_for_request(
+                "krea_2_turbo",
+                spec,
+                format!("[{label}] load failed"),
+                move |generator,
+                      cache_state,
+                      loaded_policy,
+                      warm_policy,
+                      external_committed_bytes,
+                      _provider_resident_bytes| {
+                    let evaluation = crate::mlx_fit_gate::evaluate_request(
+                        generator,
+                        &memory_plan,
+                        &memory_inputs,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy,
+                        external_committed_bytes,
+                    )?;
+                    let _request_memory_limit = evaluation
+                        .process_limit_bytes
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    let mut request = prompt_request;
+                    request.memory = Some(evaluation.memory);
+                    let output = crate::memory_strategy::generate_with_scope(
+                        generator,
+                        &mut request,
+                        Some(&evaluation.context),
+                        &mut |_| {},
+                    )
+                    .map_err(|error| WorkerError::Engine(error.to_string()))?;
+                    match output {
+                        GenerationOutput::Images(mut images) => {
+                            Ok(images.pop().expect("one image"))
+                        }
+                        other => panic!("expected Images, got {other:?}"),
+                    }
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("[{label}] production admission: {error}"));
+            let load_seconds = started.elapsed().as_secs_f64();
+            assert_eq!((image.width, image.height), (w, h));
+            let std = image_std(&image);
+            assert!(
+                std > DEGENERATE_STD_FLOOR_DEFAULT,
+                "[{label}] degenerate render"
+            );
+            let sha = format!("{:x}", Sha256::digest(&image.pixels));
+            let png = out_dir.join(format!("{label}.png"));
+            save_png(&image, &png);
+            eprintln!(
+                "RESULT label={label} geometry={w}x{h} steps={steps} seed={seed} \
+                 pixel_sha256={sha} std={std:.3} admission_seconds={load_seconds:.2} \
+                 total_seconds={:.2} output={} entry=production_admission",
+                started.elapsed().as_secs_f64(),
+                png.display()
+            );
+            mlx_rs::memory::clear_cache();
+            (image, sha)
+        })
     };
 
-    let (legacy_image, legacy_sha) = render("legacy_krea_imported", &legacy_spec);
-    let (plan_image, plan_sha) = render("plan_driven_route", &plan_spec);
+    // Each lane's own memory-inputs builder, not one shared call: two independent admissions.
+    let (legacy_image, legacy_sha) = render(
+        "legacy_krea_imported",
+        legacy_spec,
+        legacy_request.clone(),
+        krea_imported_memory_inputs(&legacy_request, &[], None, 0),
+    )
+    .await;
+    let (plan_image, plan_sha) = render(
+        "plan_driven_route",
+        plan_spec,
+        plan_request.clone(),
+        checkpoint_plan_memory_inputs(&plan_request),
+    )
+    .await;
     let byte_delta = legacy_image
         .pixels
         .iter()

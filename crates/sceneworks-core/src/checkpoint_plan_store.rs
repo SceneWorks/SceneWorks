@@ -39,6 +39,8 @@ pub const CHECKPOINTS_DIR: &str = "checkpoints";
 pub const APPROVED_ROOTS_FILE: &str = "approved-roots.json";
 pub const INVENTORY_FILE: &str = "inventory.json";
 pub const PLANS_DIR: &str = "plans";
+/// The prefix every inspector-emitted `plan_id` carries; see [`validate_plan_id`].
+pub const PLAN_ID_PREFIX: &str = "checkpoint-plan-";
 pub const BINDINGS_DIR: &str = "bindings";
 
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
@@ -272,6 +274,30 @@ pub enum CheckpointPlanError {
         layer_id: String,
         kind: &'static str,
     },
+    /// A layer's path is confined-relative but its resolved target lands outside the approved root
+    /// (a symlink inside the library pointing elsewhere). The inspector refuses the same shape
+    /// (`CheckpointDiagnosticCodeV1::PathEscapesRoot`); the store refuses it again at resolve time
+    /// because the link can be planted after the plan was compiled.
+    PathEscapesRoot {
+        checkpoint_id: String,
+        relative_path: String,
+        root_path: PathBuf,
+        resolved_path: PathBuf,
+    },
+    /// A persisted `plan_id` is not the shape the inspector emits, so it may not be used as a
+    /// filename component. Read back from `inventory.json`, it would otherwise let a crafted
+    /// record read or delete a document outside the store.
+    InvalidPlanId {
+        plan_id: String,
+        reason: &'static str,
+    },
+    /// The approved-root catalog binds this root id to a different directory than the one being
+    /// approved: two directories collided on the truncated root id.
+    RootIdCollision {
+        root_id: String,
+        existing_path: PathBuf,
+        path: PathBuf,
+    },
     /// A contract-level validation failure on a persisted document.
     Contract(CheckpointImportContractError),
     /// A persisted document is unreadable or malformed.
@@ -300,6 +326,9 @@ impl CheckpointPlanError {
             Self::SourceMissing { .. } => "source-missing",
             Self::SourceDrifted { .. } => "source-drifted",
             Self::UnsupportedLocator { .. } => "unsupported-locator",
+            Self::PathEscapesRoot { .. } => "path-escapes-root",
+            Self::InvalidPlanId { .. } => "invalid-plan-id",
+            Self::RootIdCollision { .. } => "root-id-collision",
             Self::Contract(_) => "contract",
             Self::Corrupt { .. } => "corrupt",
             Self::Io { .. } => "io",
@@ -391,6 +420,31 @@ impl fmt::Display for CheckpointPlanError {
                 f,
                 "checkpoint {checkpoint_id:?} layer {layer_id:?} uses a {kind} locator this store does not resolve"
             ),
+            Self::PathEscapesRoot {
+                checkpoint_id,
+                relative_path,
+                root_path,
+                resolved_path,
+            } => write!(
+                f,
+                "checkpoint {checkpoint_id:?} layer {relative_path:?} resolves to {}, which is outside its approved root {}",
+                resolved_path.display(),
+                root_path.display()
+            ),
+            Self::InvalidPlanId { plan_id, reason } => write!(
+                f,
+                "plan id {plan_id:?} is not a usable document name: {reason}"
+            ),
+            Self::RootIdCollision {
+                root_id,
+                existing_path,
+                path,
+            } => write!(
+                f,
+                "root id {root_id:?} is already bound to {}, not {}",
+                existing_path.display(),
+                path.display()
+            ),
             Self::Contract(error) => write!(f, "{error}"),
             Self::Corrupt { what, message } => write!(f, "{what} is corrupt: {message}"),
             Self::Io { path, message } => write!(f, "{}: {message}", path.display()),
@@ -456,6 +510,62 @@ fn validate_portable_relative_path(relative_path: &str) -> Result<PathBuf, Check
     Ok(out)
 }
 
+/// The `plan_id` shape the inspector emits (`checkpoint_inspector.rs`, `checkpoint-plan-{sha256:x}`).
+/// Every persisted plan id becomes a filename component, and it is read back from a user-writable
+/// `inventory.json`, so it is validated before it can address a path.
+fn validate_plan_id(plan_id: &str) -> Result<(), CheckpointPlanError> {
+    let invalid = |reason: &'static str| CheckpointPlanError::InvalidPlanId {
+        plan_id: plan_id.to_owned(),
+        reason,
+    };
+    let Some(digest) = plan_id.strip_prefix(PLAN_ID_PREFIX) else {
+        return Err(invalid("must start with 'checkpoint-plan-'"));
+    };
+    if digest.is_empty() || digest.len() > 64 {
+        return Err(invalid("digest must be 1..=64 characters"));
+    }
+    if !digest
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid("digest must be lowercase hex"));
+    }
+    Ok(())
+}
+
+/// Join a validated relative path under an approved root and confine the result to that root.
+///
+/// `validate_portable_relative_path` only rejects lexical escapes (`..`, absolute, `\`); a symlink
+/// *inside* the library pointing outside it is still a lexically clean relative path. So the joined
+/// path is canonicalized and required to stay under the canonical root — the same confinement the
+/// inspector applies at discovery time (`checkpoint_inspector.rs`), re-applied at resolve time
+/// because a link can be planted after the plan was compiled.
+///
+/// A path that does not exist is returned as the plain join: existence is the caller's refusal to
+/// type (`SourceMissing`), not this function's.
+fn confined_root_join(
+    checkpoint_id: &str,
+    root_path: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, CheckpointPlanError> {
+    let joined = root_path.join(validate_portable_relative_path(relative_path)?);
+    let canonical_target = match fs::canonicalize(&joined) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(joined),
+        Err(error) => return Err(io_error(&joined, error)),
+    };
+    let canonical_root = fs::canonicalize(root_path).map_err(|error| io_error(root_path, error))?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(CheckpointPlanError::PathEscapesRoot {
+            checkpoint_id: checkpoint_id.to_owned(),
+            relative_path: relative_path.to_owned(),
+            root_path: canonical_root,
+            resolved_path: canonical_target,
+        });
+    }
+    Ok(canonical_target)
+}
+
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -495,12 +605,17 @@ impl CheckpointPlanStore {
         self.root.join(INVENTORY_FILE)
     }
 
-    fn plan_path(&self, plan_id: &str) -> PathBuf {
-        self.root.join(PLANS_DIR).join(format!("{plan_id}.json"))
+    /// The plan document path for `plan_id`. Validating here rather than at the call sites makes
+    /// this the choke point: no read, write, or delete can address a document without the id
+    /// having passed [`validate_plan_id`] first.
+    fn plan_path(&self, plan_id: &str) -> Result<PathBuf, CheckpointPlanError> {
+        validate_plan_id(plan_id)?;
+        Ok(self.root.join(PLANS_DIR).join(format!("{plan_id}.json")))
     }
 
-    fn bindings_path(&self, plan_id: &str) -> PathBuf {
-        self.root.join(BINDINGS_DIR).join(format!("{plan_id}.json"))
+    fn bindings_path(&self, plan_id: &str) -> Result<PathBuf, CheckpointPlanError> {
+        validate_plan_id(plan_id)?;
+        Ok(self.root.join(BINDINGS_DIR).join(format!("{plan_id}.json")))
     }
 
     fn write_atomic(&self, path: &Path, payload: &[u8]) -> Result<(), CheckpointPlanError> {
@@ -572,6 +687,17 @@ impl CheckpointPlanStore {
         let mut roots = self.approved_roots()?;
         let root_id = derive_root_id(&canonical);
         if let Some(existing) = roots.get(&root_id) {
+            // Idempotent only for the SAME directory. `derive_root_id` truncates the digest, so a
+            // matching id is not by itself proof of a matching path — without this check, approving
+            // directory B could hand back directory A's binding and every plan compiled against it
+            // would silently read A's files.
+            if existing.path != canonical {
+                return Err(CheckpointPlanError::RootIdCollision {
+                    root_id,
+                    existing_path: existing.path.clone(),
+                    path: canonical,
+                });
+            }
             return Ok(existing.clone());
         }
         let root = ApprovedRootV1 {
@@ -703,13 +829,13 @@ impl CheckpointPlanStore {
                 })
             }
         };
-        Ok(root_path.join(validate_portable_relative_path(relative)?))
+        confined_root_join(checkpoint_id, root_path, relative)
     }
 
     fn persist_plan(&self, plan: &ImportPlanV1) -> Result<(), CheckpointPlanError> {
         let mut payload = plan.canonical_json()?.into_bytes();
         payload.push(b'\n');
-        self.write_atomic(&self.plan_path(&plan.plan_id), &payload)
+        self.write_atomic(&self.plan_path(&plan.plan_id)?, &payload)
     }
 
     fn persist_bindings(&self, bindings: &SourceBindingsV1) -> Result<(), CheckpointPlanError> {
@@ -719,7 +845,7 @@ impl CheckpointPlanStore {
                 message: error.to_string(),
             })?;
         payload.push(b'\n');
-        self.write_atomic(&self.bindings_path(&bindings.plan_id), &payload)
+        self.write_atomic(&self.bindings_path(&bindings.plan_id)?, &payload)
     }
 
     pub fn inventory(&self) -> Result<CheckpointInventoryV1, CheckpointPlanError> {
@@ -759,7 +885,7 @@ impl CheckpointPlanStore {
     }
 
     fn remove_plan_documents(&self, plan_id: &str) -> Result<(), CheckpointPlanError> {
-        for path in [self.plan_path(plan_id), self.bindings_path(plan_id)] {
+        for path in [self.plan_path(plan_id)?, self.bindings_path(plan_id)?] {
             match fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -810,7 +936,7 @@ impl CheckpointPlanStore {
         checkpoint_id: &str,
         plan_id: &str,
     ) -> Result<ImportPlanV1, CheckpointPlanError> {
-        self.read_json::<ImportPlanV1>(&self.plan_path(plan_id), "import plan")?
+        self.read_json::<ImportPlanV1>(&self.plan_path(plan_id)?, "import plan")?
             .ok_or_else(|| CheckpointPlanError::MissingPlan {
                 checkpoint_id: checkpoint_id.to_owned(),
                 plan_id: plan_id.to_owned(),
@@ -832,7 +958,7 @@ impl CheckpointPlanStore {
                 reason: error.to_string(),
             })?;
         let mut bindings = self
-            .read_json::<SourceBindingsV1>(&self.bindings_path(&plan.plan_id), "source bindings")?
+            .read_json::<SourceBindingsV1>(&self.bindings_path(&plan.plan_id)?, "source bindings")?
             .unwrap_or_else(|| SourceBindingsV1 {
                 schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
                 plan_id: plan.plan_id.clone(),
@@ -867,7 +993,7 @@ impl CheckpointPlanStore {
                 }
             };
             let root_path = self.resolve_root(root_id)?;
-            let path = root_path.join(validate_portable_relative_path(relative_path)?);
+            let path = confined_root_join(checkpoint_id, &root_path, relative_path)?;
             let current = match SourceStampV1::of(&path) {
                 Ok(stamp) => stamp,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

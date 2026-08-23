@@ -216,6 +216,12 @@ fn prepare_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven
+    // route; this bespoke lane never also claims it, so one entry has exactly one owner. Explicit
+    // rather than left to arm ordering in the resolver (sc-20634 review): ordering is not a claim.
+    if request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
     let Some(descriptor) = imported_generate_request_supported(
         request,
         "mage-flow",

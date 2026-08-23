@@ -384,6 +384,51 @@ fn resolve_image_route_with_imported_availability(
     }
 }
 
+/// Plan-route availability for the test-only route probes, with refusals made loud.
+///
+/// `prepare_checkpoint_plan_sources` has three outcomes: not plan-backed (`Ok(None)`), servable
+/// (`Ok(Some(_))`), and a typed refusal (`Err`). Only the first is "this route is unavailable"; a
+/// refusal means the route OWNS the entry and declined it. Folding the third into `false` made
+/// every plan refusal indistinguishable from a missing route in the probes.
+#[cfg(test)]
+fn checkpoint_plan_available_or_panic(request: &ImageRequest, settings: &Settings) -> bool {
+    match prepare_checkpoint_plan_sources(request, settings) {
+        Ok(prepared) => prepared.is_some(),
+        Err(error) => panic!(
+            "the plan-driven route refused {:?} while probing which route claims it; probe with \
+             `prepare_checkpoint_plan_sources` directly to assert on a refusal: {error}",
+            request.model
+        ),
+    }
+}
+
+/// The companion directories a candle floor prices for an imported single-file load that pairs a
+/// user checkpoint with a resident family base snapshot.
+///
+/// The base snapshot is a COMPANION, never the weights: the imported file REPLACES the snapshot's
+/// `transformer/`, so pricing the snapshot directory recursively charges the DiT twice — the exact
+/// double-claim `base_admission::imported_file_floor_excludes_the_replaced_snapshot_transformer`
+/// exists to forbid. A selected encoder is already represented by the spec's prepared contract
+/// receipt, so the bundled `text_encoder/` is priced only when the spec has none of its own.
+///
+/// Shared rather than duplicated: the legacy Krea imported lane and the plan-driven checkpoint
+/// route must be admitted on an identical floor for the same file + base, and equality by
+/// construction is the only version of that which cannot drift.
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(super) fn imported_base_snapshot_companions(
+    base_dir: &Path,
+    spec_has_selected_text_encoder: bool,
+) -> Vec<PathBuf> {
+    let mut companions = vec![base_dir.join("vae")];
+    if !spec_has_selected_text_encoder {
+        companions.push(base_dir.join("text_encoder"));
+    }
+    companions
+}
+
 /// Test-facing pure route probe. Production uses [`prepare_image_route`] so payload-selected File
 /// sources stay pinned from selection through dispatch instead of being resolved a second time after
 /// the async preamble.
@@ -392,10 +437,11 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
     resolve_image_route_with_imported_availability(
         request,
         settings,
-        matches!(
-            prepare_checkpoint_plan_sources(request, settings),
-            Ok(Some(_))
-        ),
+        // Loud, not `matches!`: a plan-backed entry that REFUSES is a typed diagnostic, and
+        // collapsing it into "route unavailable" would make every refusal look like a missing
+        // route in the probes (sc-20634 review). Callers that want to observe a refusal call
+        // `prepare_checkpoint_plan_sources` directly.
+        checkpoint_plan_available_or_panic(request, settings),
         krea_imported_control_available(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
@@ -1251,10 +1297,8 @@ fn resolve_candle_image_route(
     resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
-        matches!(
-            prepare_checkpoint_plan_sources(request, settings),
-            Ok(Some(_))
-        ),
+        // See the macOS twin: a typed refusal must surface, not read as "route unavailable".
+        checkpoint_plan_available_or_panic(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),

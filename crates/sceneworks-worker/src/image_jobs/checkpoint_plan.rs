@@ -110,6 +110,41 @@ fn checkpoint_plan_primary_layer(
     }
 }
 
+/// Every plan layer this route does not source, as a typed refusal.
+///
+/// The inspector emits multi-layer plans — a linked directory Krea checkpoint compiles to
+/// `transformer` + `vae` + `text_encoder`, and descriptor/artifact roles appear too. This skeleton
+/// sources only the primary layer; the provider's remaining components come from the resident
+/// family base tier. Loading the plan's transformer while quietly substituting the base tier's VAE
+/// and encoder for the plan's OWN would be a silent substitution, and would mean the plan is not
+/// consumed everywhere it is claimed to be. Refuse instead, naming the roles this route cannot
+/// source, until sc-20644 maps each remaining role onto a provider component.
+fn checkpoint_plan_unconsumed_layers(
+    resolved: &ResolvedCheckpointV1,
+    primary: &sceneworks_core::checkpoint_plan_store::ResolvedLayerV1,
+) -> WorkerResult<()> {
+    let unconsumed: Vec<&str> = resolved
+        .layers
+        .iter()
+        .filter(|layer| layer.layer.layer_id != primary.layer.layer_id)
+        .map(|layer| layer.layer.role.as_str())
+        .collect();
+    if unconsumed.is_empty() {
+        return Ok(());
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "[checkpoint-plan:unconsumed-layer] checkpoint {:?} ({} family) compiles to {} layers, but \
+         the plan-driven route sources only its primary {:?} layer; layer role(s) [{}] would be \
+         silently replaced by the resident base tier's own components, so this checkpoint is not \
+         servable on this route yet",
+        resolved.checkpoint_id,
+        resolved.family(),
+        resolved.plan.layers.len(),
+        primary.layer.role,
+        unconsumed.join(", ")
+    )))
+}
+
 /// Resolve one provider-declared required component to a local source. `base_snapshot` is the
 /// resident family base tier that supplies the shared encoder / VAE / tokenizer / architecture
 /// config a bare transformer file omits. Family base resolution stays with each family's resident
@@ -129,6 +164,41 @@ fn resolve_checkpoint_plan_component(
              requires component '{component}', which this runtime cannot supply for that family"
         ))),
     }
+}
+
+/// The companion directories the candle floor prices for this plan's declared components.
+///
+/// Mirrors [`resolve_checkpoint_plan_component`], which is the function that PRODUCED these
+/// components: a `base_snapshot` is a resident family tier whose own `transformer/` is replaced by
+/// the plan's primary file, so it is priced through the shared
+/// [`imported_base_snapshot_companions`] construction (the legacy Krea imported lane's, exactly)
+/// rather than recursively. Pricing the whole snapshot — which is what `admit_candle_load_spec_floor`
+/// does to every `spec.components` value — would charge the plan's DiT twice and over-refuse.
+///
+/// Any component shape this floor cannot account for refuses rather than going unpriced.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn checkpoint_plan_candle_companion_dirs(
+    sources: &PreparedCheckpointPlanSources,
+    spec: &LoadSpec,
+) -> WorkerResult<Vec<PathBuf>> {
+    let mut companions = Vec::new();
+    for (component, source) in &sources.components {
+        match (*component, source) {
+            (gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(base_dir)) => companions.extend(
+                imported_base_snapshot_companions(base_dir, spec.text_encoder.is_some()),
+            ),
+            _ => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "[checkpoint-plan:unpriceable-component] checkpoint {:?} ({} family) declares \
+                     component {component:?} as {source:?}, which this route's candle floor cannot \
+                     account for; admitting it would leave those bytes unpriced",
+                    sources.checkpoint_id,
+                    sources.resolved.family()
+                )))
+            }
+        }
+    }
+    Ok(companions)
 }
 
 /// Select the plan-driven route for a plan-backed manifest entry. `Ok(None)` only when the entry
@@ -156,6 +226,7 @@ fn prepare_checkpoint_plan_sources(
     let resolved = store.resolve(checkpoint_id).map_err(checkpoint_plan_refusal)?;
     let family = resolved.family().to_owned();
     let (source, primary_layer) = checkpoint_plan_primary_layer(&resolved)?;
+    checkpoint_plan_unconsumed_layers(&resolved, primary_layer)?;
     let descriptor = crate::inference_runtime::imported_model_descriptor(
         &family,
         source,
@@ -296,6 +367,26 @@ fn checkpoint_plan_raw_settings(
     raw
 }
 
+/// The plan route's MLX request inputs. This skeleton serves plain text-to-image only — no
+/// references, adapters, PiD, or phases reach it (`prepare_checkpoint_plan_sources` refuses those
+/// shapes) — so this is the identity `krea_imported_memory_inputs(request, &[], None, 0)` produces
+/// for the same request, and the two lanes price the same geometry.
+#[cfg(target_os = "macos")]
+fn checkpoint_plan_memory_inputs(request: &ImageRequest) -> crate::mlx_fit_gate::MlxRequestInputs {
+    crate::mlx_fit_gate::MlxRequestInputs {
+        width: request.width,
+        height: request.height,
+        count: request.count,
+        mode: request.mode.clone(),
+        overlay: None,
+        adapter_count: 0,
+        has_reference: false,
+        reference_count: 0,
+        use_pid: false,
+        has_phases: false,
+    }
+}
+
 /// Plan-driven text-to-image: `count` renders, each its own seed, through the provider the
 /// registry bound for the plan's family and source shape.
 #[allow(clippy::too_many_arguments)]
@@ -324,59 +415,181 @@ async fn generate_checkpoint_plan_stream(
     let total = work.len();
 
     let spec = checkpoint_plan_load_spec(&sources, quant)?;
-    #[cfg(target_os = "macos")]
-    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, sources.descriptor.id)?;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    admit_candle_load_spec_floor(&request.model, "Checkpoint plan", settings, &spec).await?;
-
     let engine_id = sources.descriptor.id;
+
+    // Admission is the legacy Krea imported lane's, not a weaker twin (sc-20634 review).
+    //
+    // macOS: the manifest/geometry-aware request plan plus the request-state seam, so the same
+    // weights get the same residency policy, the same warm/loaded-policy settlement, and the same
+    // per-request refusal boundary they get on the bespoke lane. `apply_residency_policy` is NOT
+    // called here: the generator cache runs it inside its own cold loader, and the bespoke Krea
+    // lane leaves it to the cache for exactly that reason.
+    //
+    // candle: the base snapshot is a companion whose `transformer/` the plan's file replaces, so
+    // the floor is the prepared-pin floor over the shared companion construction — never
+    // `admit_candle_load_spec_floor`, which prices every component value recursively and would
+    // charge the DiT twice.
+    #[cfg(target_os = "macos")]
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
+        engine_id,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    )?;
+    #[cfg(target_os = "macos")]
+    let memory_inputs = checkpoint_plan_memory_inputs(request);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let cold_admission = {
+        let companions = checkpoint_plan_candle_companion_dirs(&sources, &spec)?;
+        let companion_refs = companions.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        prepare_cached_candle_base_floor(
+            &request.model,
+            "Checkpoint plan",
+            settings,
+            &spec,
+            &companion_refs,
+        )?
+    };
+
     let checkpoint_id = sources.checkpoint_id.clone();
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let generate_one = move |model: &dyn gen_core::Generator,
+                             seed: i64,
+                             prompt: String,
+                             memory: Option<gen_core::GenerationMemory>,
+                             context: Option<&gen_core::MemoryRunContext>,
+                             preview: gen_core::PreviewSink,
+                             cancel: &CancelFlag,
+                             on_progress: &mut dyn FnMut(Progress),
+                             negative_prompt: Option<String>,
+                             checkpoint_id: &str|
+          -> WorkerResult<Option<GeneratedImage>> {
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let mut generation = GenerationRequest {
+            prompt,
+            negative_prompt,
+            width,
+            height,
+            count: 1,
+            seed: Some(seed as u64),
+            steps,
+            guidance,
+            preview,
+            cancel: cancel.clone(),
+            memory,
+            ..Default::default()
+        };
+        // The same seam every request-scoped MLX lane generates through: the selected memory
+        // strategy plus its run context. On candle both are `None` and this is the plain call.
+        let output = match crate::memory_strategy::generate_with_scope(
+            model,
+            &mut generation,
+            context,
+            on_progress,
+        ) {
+            Ok(output) => output,
+            Err(_) if cancel.is_cancelled() => return Ok(None),
+            Err(error) => {
+                return Err(WorkerError::Engine(format!(
+                    "Checkpoint plan {checkpoint_id:?} generation failed: {error}"
+                )));
+            }
+        };
+        match output {
+            GenerationOutput::Images(mut images) => {
+                let image = images.pop().ok_or_else(|| {
+                    WorkerError::Engine(format!(
+                        "Checkpoint plan {checkpoint_id:?} produced no image"
+                    ))
+                })?;
+                Ok(Some((seed, image.width, image.height, image.pixels)))
+            }
+            _ => Err(WorkerError::Engine(format!(
+                "Checkpoint plan {checkpoint_id:?} returned non-image output"
+            ))),
+        }
+    };
+
+    #[cfg(target_os = "macos")]
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         0,
         spec,
         format!("Checkpoint plan {checkpoint_id:?} load failed"),
-        move |model, tx, cancel| {
+        move |model,
+              initial_cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            let mut request_cache_state = initial_cache_state;
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
-                let generation = GenerationRequest {
+                let evaluation = crate::mlx_fit_gate::evaluate_request(
+                    model,
+                    &memory_plan,
+                    &memory_inputs,
+                    request_cache_state,
+                    loaded_policy.offload_policy,
+                    warm_policy.take(),
+                    external_committed_bytes,
+                )?;
+                request_cache_state = gen_core::MemoryCacheState::Warm;
+                let _request_memory_limit = evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                generate_one(
+                    model,
+                    seed,
                     prompt,
-                    negative_prompt: negative_prompt.clone(),
-                    width,
-                    height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps,
-                    guidance,
+                    Some(evaluation.memory),
+                    Some(&evaluation.context),
                     preview,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let output = match model.generate(&generation, &mut *on_progress) {
-                    Ok(output) => output,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Checkpoint plan {checkpoint_id:?} generation failed: {error}"
-                        )));
-                    }
-                };
-                match output {
-                    GenerationOutput::Images(mut images) => {
-                        let image = images.pop().ok_or_else(|| {
-                            WorkerError::Engine(format!(
-                                "Checkpoint plan {checkpoint_id:?} produced no image"
-                            ))
-                        })?;
-                        Ok(Some((seed, image.width, image.height, image.pixels)))
-                    }
-                    _ => Err(WorkerError::Engine(format!(
-                        "Checkpoint plan {checkpoint_id:?} returned non-image output"
-                    ))),
-                }
+                    &cancel,
+                    on_progress,
+                    negative_prompt.clone(),
+                    &checkpoint_id,
+                )
+            })
+        },
+    );
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
+        job.id.clone(),
+        engine_id,
+        0,
+        spec,
+        format!("Checkpoint plan {checkpoint_id:?} load failed"),
+        ColdLoadAdmission::new(
+            incoming_reclaimable_weight_bytes,
+            move |resident_reclaimable_weight_bytes| {
+                cold_admission.admit(resident_reclaimable_weight_bytes)
+            },
+        ),
+        move |model, tx, cancel| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
+                generate_one(
+                    model,
+                    seed,
+                    prompt,
+                    None,
+                    None,
+                    preview,
+                    &cancel,
+                    on_progress,
+                    negative_prompt.clone(),
+                    &checkpoint_id,
+                )
             })
         },
     );
