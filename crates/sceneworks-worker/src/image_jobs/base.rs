@@ -155,8 +155,11 @@ enum ImageRoute {
     /// A user model bound to a persisted checkpoint import plan (epic 20398, sc-20634): its manifest
     /// entry carries `importPlan.checkpointId`, the plan store resolves and re-verifies the plan, and
     /// the provider is selected by family + source shape + operation through the registry. Claimed
-    /// BEFORE every bespoke imported lane; those lanes decline a plan-backed entry, so an entry is
-    /// claimed by exactly one lane.
+    /// BEFORE every bespoke imported lane, but PER REQUEST, not per entry (sc-20636): this skeleton
+    /// serves plain text-to-image only, so a managed entry's family lane keeps the edit / pose /
+    /// reference / LoRA / Hires.fix shapes it had before the import. Exactly one lane owns each
+    /// REQUEST; the entry itself may be served by two. A request no lane claims at all is a typed
+    /// refusal, never the stub.
     CheckpointPlan,
     /// An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
     /// `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
@@ -386,10 +389,11 @@ fn resolve_image_route_with_imported_availability(
 
 /// Plan-route availability for the test-only route probes, with refusals made loud.
 ///
-/// `prepare_checkpoint_plan_sources` has three outcomes: not plan-backed (`Ok(None)`), servable
-/// (`Ok(Some(_))`), and a typed refusal (`Err`). Only the first is "this route is unavailable"; a
-/// refusal means the route OWNS the entry and declined it. Folding the third into `false` made
-/// every plan refusal indistinguishable from a missing route in the probes.
+/// `prepare_checkpoint_plan_sources` has four outcomes: not plan-backed (an empty selection),
+/// servable (`is_available()`), a typed refusal (`Err`), and a DECLINE that retains the refusal for
+/// the router's zero-lane fall-through. Only the first is "this route is unavailable"; the other
+/// three mean the route OWNS the entry. Folding the refusal into `false` made every plan refusal
+/// indistinguishable from a missing route in the probes.
 ///
 /// Gated per lane rather than a bare `#[cfg(test)]`: this helper only exists where a route probe
 /// does, and `tests/test_builtin_manifest_audit.py` treats the first line-initial `#[cfg(test)]`
@@ -398,7 +402,7 @@ fn resolve_image_route_with_imported_availability(
 #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 fn checkpoint_plan_available_or_panic(request: &ImageRequest, settings: &Settings) -> bool {
     match prepare_checkpoint_plan_sources(request, settings) {
-        Ok(prepared) => prepared.is_some(),
+        Ok(selection) => selection.is_available(),
         Err(error) => panic!(
             "the plan-driven route refused {:?} while probing which route claims it; probe with \
              `prepare_checkpoint_plan_sources` directly to assert on a refusal: {error}",
@@ -486,8 +490,10 @@ fn prepare_image_route(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedImageRoute>> {
-    // The plan-driven route is selected first: a plan-backed entry is its own claim, and a
-    // plan-backed entry it cannot serve is a refusal (never a fall-through to a bespoke lane).
+    // The plan-driven route is offered the request first. It claims the shapes it serves; a shape
+    // it does not serve declines to the entry's own bespoke family lane when the entry has loadable
+    // bytes, and refuses outright when it does not. The decline RETAINS its refusal, re-raised
+    // below if no lane claims the request at all (sc-20636).
     let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
     let imported_control = prepare_krea_imported_control_sources(request, settings)?;
     let imported = if imported_control.is_none() {
@@ -500,17 +506,25 @@ fn prepare_image_route(
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         settings,
-        checkpoint_plan.is_some(),
+        checkpoint_plan.is_available(),
         imported_control.is_some(),
         imported.is_some(),
         sdxl.is_some(),
         mage_finetuned.is_some(),
     ) else {
+        // Zero lanes claimed the request. For a plan-backed entry that is never "no route": the
+        // plan route declined only because the entry has SceneWorks-owned bytes some bespoke lane
+        // could load, and here that lane did not materialize. Falling out with `Ok(None)` lands the
+        // job in `generate_stub_stream`, which COMPLETES it with procedural stub output — so
+        // re-raise the retained typed refusal instead (sc-20636 review).
+        checkpoint_plan.into_unclaimed_refusal(request)?;
         return Ok(None);
     };
     Ok(Some(match kind {
         ImageRoute::CheckpointPlan => PreparedImageRoute::CheckpointPlan(Box::new(
-            checkpoint_plan.expect("prepared checkpoint plan route lost its sources"),
+            checkpoint_plan
+                .into_sources()
+                .expect("prepared checkpoint plan route lost its sources"),
         )),
         ImageRoute::KreaImportedControl => PreparedImageRoute::KreaImportedControl(
             Box::new(imported_control.expect("prepared imported-control route lost its sources")),
@@ -1323,8 +1337,9 @@ fn prepare_candle_image_route(
     if !settings.backend_candle_enabled {
         return Ok(None);
     }
-    // The plan-driven route is selected first (sc-20634): a plan-backed entry is its own claim, and
-    // one it cannot serve is a refusal, never a fall-through to a bespoke lane.
+    // The plan-driven route is offered the request first (sc-20634). Per-request claim, exactly as
+    // in the macOS twin: it takes the shapes it serves, the family's bespoke lane keeps the rest,
+    // and the decline's retained refusal is re-raised below when no lane claims it (sc-20636).
     let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
     // A pose-bearing imported checkpoint is claimed by the `KreaImportedControl` arm, which resolves
     // its own sources; skip pinning a second File token for the plain imported bundle in that case
@@ -1342,7 +1357,7 @@ fn prepare_candle_image_route(
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
-        checkpoint_plan.is_some(),
+        checkpoint_plan.is_available(),
         imported.is_some(),
         sdxl.is_some(),
         zimage.is_some(),
@@ -1350,11 +1365,17 @@ fn prepare_candle_image_route(
         flux2.is_some(),
         mage_finetuned.is_some(),
     ) else {
+        // See the macOS twin: zero lanes claimed a plan-backed entry means the bespoke lane the
+        // plan route deferred to does not exist for this shape. Raise the retained typed refusal
+        // rather than dropping through to `generate_stub_stream`'s procedural output (sc-20636).
+        checkpoint_plan.into_unclaimed_refusal(request)?;
         return Ok(None);
     };
     Ok(Some(match kind {
         CandleImageRoute::CheckpointPlan => PreparedCandleImageRoute::CheckpointPlan(Box::new(
-            checkpoint_plan.expect("prepared checkpoint plan route lost its sources"),
+            checkpoint_plan
+                .into_sources()
+                .expect("prepared checkpoint plan route lost its sources"),
         )),
         CandleImageRoute::KreaImported => PreparedCandleImageRoute::KreaImported(
             Box::new(imported.expect("prepared imported route lost its sources")),

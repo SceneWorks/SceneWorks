@@ -17,10 +17,12 @@
 //      file through the mapped logical-weight reader and the registered codec table.
 //
 // Scope: `Generate` (text-to-image) for a single-file transformer plan. Edit / pose / multi-phase
-// / reference shapes are refused loudly here — they keep their family lanes until sc-20644 moves
-// each family's full surface onto this route. The legacy `KreaImported` lane coexists: it claims
-// `paths.model` installs and explicitly declines an entry that carries `importPlan`, and this
-// route never reads `paths.model`, so one entry is claimed by exactly one lane.
+// / reference shapes are not served here — they keep their family lanes until sc-20644 moves each
+// family's full surface onto this route. The claim is therefore PER REQUEST, not per entry: this
+// route takes the shapes it serves, and a managed entry's bespoke family lane keeps the rest, so
+// importing a model under managed ownership never REMOVES a capability it had. Exactly one lane
+// owns each REQUEST. A plan-backed request no lane claims at all is a typed refusal, never the
+// procedural stub (see `CheckpointPlanSelection::into_unclaimed_refusal`).
 
 use sceneworks_core::checkpoint_plan_store::{
     CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1,
@@ -43,10 +45,110 @@ pub(crate) fn checkpoint_plan_checkpoint_id(entry: &JsonObject) -> Option<&str> 
     sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
 }
 
-/// Whether the request's manifest entry is plan-backed (the single-claim discriminator the bespoke
-/// imported lanes consult so they never also claim a plan-backed entry).
+/// The request shapes this skeleton serves: plain text-to-image, no adapters, no reference, no
+/// Hires.fix. sc-20644 moves each family's remaining surface onto the route.
+fn checkpoint_plan_serves_request_shape(request: &ImageRequest) -> bool {
+    !imported_generate_request_has_unsupported_shape(request)
+        && request.loras.is_empty()
+        && request.reference_asset_id.is_none()
+        && !request.hires_fix.enabled
+}
+
+/// A SceneWorks-owned install path on the entry, if it has one. A MANAGED install (sc-20636) keeps
+/// `paths.model` alongside `importPlan.checkpointId`, so its family's bespoke lane is still there
+/// for the shapes this route does not serve. A LINKED checkpoint has no installed path — the plan
+/// is its only route.
+///
+/// LOADABLE paths only (`modelPath` / `paths.model` / `installedPath`), never
+/// `imported_entry_installed_path`'s provenance-only `source.path` fallback: that one is a
+/// data-dir-relative breadcrumb an import writes, and a linked entry carrying one would claim a
+/// bespoke lane it does not have and hand that lane a path it must not read (sc-20636 review). The
+/// admission side keeps the wider reading — "does this entry describe bytes anywhere" is a
+/// different question from "can a lane load it".
+fn checkpoint_plan_entry_has_bespoke_lane(request: &ImageRequest) -> bool {
+    sceneworks_core::jobs_store::imported_entry_loadable_path(&request.model_manifest_entry)
+        .is_some()
+}
+
+/// Whether the plan-driven route claims this request (the single-claim discriminator the bespoke
+/// imported lanes consult so exactly one lane owns each request).
+///
+/// Plan-backed alone is not the discriminator: this skeleton serves plain text-to-image only, and a
+/// managed install reached that state by being imported — it had a full family lane a moment
+/// earlier. Handing the route every request and refusing most of them would mean importing a model
+/// through the managed path REMOVED its edit, pose, reference, LoRA, and Hires.fix support until
+/// sc-20644. So the claim is per-request: this route takes the shapes it serves, and the family's
+/// bespoke lane keeps the rest.
 pub(crate) fn request_is_checkpoint_plan_backed(request: &ImageRequest) -> bool {
     checkpoint_plan_checkpoint_id(&request.model_manifest_entry).is_some()
+        && checkpoint_plan_serves_request_shape(request)
+}
+
+/// How this route answers "I cannot serve this request": decline so the entry's own bespoke family
+/// lane claims it, or — when there is no such lane — refuse.
+///
+/// The distinction is exactly whether the entry has SceneWorks-owned bytes another lane can load.
+/// It applies ONLY to route-capability refusals (an unsupported shape, a layer this skeleton cannot
+/// source, no adapter bound). Integrity refusals — drift, a missing source, a tampered plan — stay
+/// fatal for every entry: falling back to a bespoke lane that would load the very bytes the plan
+/// just rejected is the silent substitution E7/E8 forbid.
+/// The outcome of offering a request to the plan-driven route.
+///
+/// A decline is not the same as "no opinion": the route declined because the entry LOOKED like it
+/// had a bespoke family lane, and that lane may not exist for this shape. So the refusal it would
+/// otherwise have raised is retained here and re-raised by the router if every lane declines —
+/// without that, a plan-backed entry with no claiming lane reaches `generate_stub_stream` and the
+/// job COMPLETES with procedural stub output instead of the typed refusal (sc-20636 review).
+#[derive(Default)]
+pub(crate) struct CheckpointPlanSelection {
+    prepared: Option<PreparedCheckpointPlanSources>,
+    declined: Option<String>,
+}
+
+impl CheckpointPlanSelection {
+    fn served(sources: PreparedCheckpointPlanSources) -> Self {
+        Self {
+            prepared: Some(sources),
+            declined: None,
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        self.prepared.is_some()
+    }
+
+    fn into_sources(self) -> Option<PreparedCheckpointPlanSources> {
+        self.prepared
+    }
+
+    /// The refusal to raise when NO lane claimed the request. `Ok(())` only for an entry that is
+    /// not plan-backed at all; everything else is a typed refusal, never a stub render.
+    fn into_unclaimed_refusal(self, request: &ImageRequest) -> WorkerResult<()> {
+        if let Some(message) = self.declined {
+            return Err(WorkerError::InvalidPayload(message));
+        }
+        match checkpoint_plan_checkpoint_id(&request.model_manifest_entry) {
+            Some(checkpoint_id) => Err(WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: no image lane \
+                 on this backend serves this request, and a plan-backed entry never renders \
+                 procedural stub output"
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+fn checkpoint_plan_unservable(
+    request: &ImageRequest,
+    message: String,
+) -> WorkerResult<CheckpointPlanSelection> {
+    if checkpoint_plan_entry_has_bespoke_lane(request) {
+        return Ok(CheckpointPlanSelection {
+            prepared: None,
+            declined: Some(message),
+        });
+    }
+    Err(WorkerError::InvalidPayload(message))
 }
 
 fn checkpoint_plan_refusal(error: CheckpointPlanError) -> WorkerError {
@@ -201,44 +303,53 @@ fn checkpoint_plan_candle_companion_dirs(
     Ok(companions)
 }
 
-/// Select the plan-driven route for a plan-backed manifest entry. `Ok(None)` only when the entry
-/// is not plan-backed; a plan-backed entry that cannot be served is a refusal, never a fall-through
-/// to a bespoke lane or the stub.
+/// Select the plan-driven route for a plan-backed manifest entry. An empty selection with no
+/// retained refusal happens only when the entry is not plan-backed; a plan-backed entry that cannot
+/// be served either refuses here or retains its refusal for the router's fall-through, never a
+/// silent fall-through to the stub.
 fn prepare_checkpoint_plan_sources(
     request: &ImageRequest,
     settings: &Settings,
-) -> WorkerResult<Option<PreparedCheckpointPlanSources>> {
+) -> WorkerResult<CheckpointPlanSelection> {
     let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
-        return Ok(None);
+        return Ok(CheckpointPlanSelection::default());
     };
-    if imported_generate_request_has_unsupported_shape(request)
-        || !request.loras.is_empty()
-        || request.reference_asset_id.is_some()
-        || request.hires_fix.enabled
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?} is served through \
-             the plan-driven route for text-to-image generation only; edit, reference, pose, \
-             multi-phase, LoRA, and Hires.fix requests are not on this route yet"
-        )));
+    if !checkpoint_plan_serves_request_shape(request) {
+        return checkpoint_plan_unservable(
+            request,
+            format!(
+                "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?} is served \
+                 through the plan-driven route for text-to-image generation only; edit, reference, \
+                 pose, multi-phase, LoRA, and Hires.fix requests are not on this route yet"
+            ),
+        );
     }
     let store = CheckpointPlanStore::open(&settings.data_dir);
+    // Integrity: never declined, always fatal. A drifted, missing, or tampered plan must not fall
+    // through to a lane that would load the same bytes unverified.
     let resolved = store.resolve(checkpoint_id).map_err(checkpoint_plan_refusal)?;
     let family = resolved.family().to_owned();
-    let (source, primary_layer) = checkpoint_plan_primary_layer(&resolved)?;
-    checkpoint_plan_unconsumed_layers(&resolved, primary_layer)?;
-    let descriptor = crate::inference_runtime::imported_model_descriptor(
+    let (source, primary_layer) = match checkpoint_plan_primary_layer(&resolved) {
+        Ok(primary) => primary,
+        Err(error) => return checkpoint_plan_unservable(request, error.to_string()),
+    };
+    if let Err(error) = checkpoint_plan_unconsumed_layers(&resolved, primary_layer) {
+        return checkpoint_plan_unservable(request, error.to_string());
+    }
+    let Some(descriptor) = crate::inference_runtime::imported_model_descriptor(
         &family,
         source,
         gen_core::ImportedModelOperation::Generate,
-    )
-    .ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: this runtime's \
-             provider registry has no {family:?} adapter bound for {source:?} Generate on this \
-             backend"
-        ))
-    })?;
+    ) else {
+        return checkpoint_plan_unservable(
+            request,
+            format!(
+                "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: this runtime's \
+                 provider registry has no {family:?} adapter bound for {source:?} Generate on this \
+                 backend"
+            ),
+        );
+    };
     let primary = gen_core::PinnedWeightsFile::pin(&primary_layer.path).map_err(|error| {
         crate::classify_engine_error("Checkpoint plan source preparation failed", error)
     })?;
@@ -249,14 +360,16 @@ fn prepare_checkpoint_plan_sources(
             resolve_checkpoint_plan_component(component, &family, checkpoint_id, settings)?,
         ));
     }
-    Ok(Some(PreparedCheckpointPlanSources {
-        checkpoint_id: checkpoint_id.to_owned(),
-        resolved,
-        descriptor,
-        source,
-        primary,
-        components,
-    }))
+    Ok(CheckpointPlanSelection::served(
+        PreparedCheckpointPlanSources {
+            checkpoint_id: checkpoint_id.to_owned(),
+            resolved,
+            descriptor,
+            source,
+            primary,
+            components,
+        },
+    ))
 }
 
 /// Optional per-request override of a u32 knob: `advanced[key]`, else the manifest entry's

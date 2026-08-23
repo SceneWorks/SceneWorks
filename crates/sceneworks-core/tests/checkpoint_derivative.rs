@@ -214,14 +214,19 @@ fn the_derivative_key_covers_content_plan_adapter_codec_and_backend() {
     let other_key = other.store.cache_key(&resolve(&other), &request()).unwrap();
     assert_ne!(base, other_key, "the checkpoint's CONTENT is key material");
 
-    // The SAME bytes in a second LIBRARY key differently, and this pins the reason so the next
-    // reader is not misled. `ImportPlanV1::semantic_digest` folds in `plan_id`, which the inspector
-    // derives from the checkpoint id — and a checkpoint id names its root. E1's locator
-    // independence is about OWNERSHIP MODE (the same checkpoint id compiled linked or managed
-    // digests identically, pinned by `semantic_digest_is_locator_independent_but_source_binding_is_not`
-    // in `checkpoint_plan_store.rs`); it does not make two different roots over identical bytes one
-    // checkpoint. Nothing in AC3 needs that: a per-checkpoint key only ever costs a duplicate
-    // library its own production, never correctness.
+    // The SAME bytes in a second LIBRARY key IDENTICALLY — full E1 locator independence.
+    //
+    // This assertion was `assert_ne!` when sc-20635 landed, because `semantic_digest` then folded
+    // in `plan_id`, which the inspector derives from the checkpoint id, and a checkpoint id names
+    // its root. sc-20636 removed `plan_id` from `ImportPlanV1::semantic_form`, so the digest is now
+    // content-and-routing only, and two approved roots holding byte-identical checkpoints resolve
+    // to ONE derivative entry instead of producing the same bytes twice. That is what E1 asks for
+    // and what a content-addressed cache is for, so the test follows the contract rather than
+    // pinning the behaviour it used to have.
+    //
+    // Sharing is safe in both directions: `derived_from` records only which checkpoint's producer
+    // created the bundle, so forgetting one of the twins can cost the other a re-production but
+    // can never lose data — a derivative is reproducible from its input by definition.
     let twin = fixture_with_fill("key-twin", 7);
     let twin_resolved = resolve(&twin);
     assert_ne!(fx.library_dir, twin.library_dir);
@@ -238,11 +243,11 @@ fn the_derivative_key_covers_content_plan_adapter_codec_and_backend() {
         fingerprint(&twin_resolved),
         "SANITY: the two libraries hold byte-identical checkpoints at the same relative path"
     );
-    assert_ne!(
+    assert_eq!(
         base,
         twin.store.cache_key(&twin_resolved, &request()).unwrap(),
-        "identical bytes under a DIFFERENT approved root are a different checkpoint, so they key \
-         to their own derivative entry"
+        "identical bytes reached through a DIFFERENT approved root are the same content, so they \
+         share one derivative entry (E1)"
     );
 }
 

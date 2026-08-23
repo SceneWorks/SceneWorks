@@ -16,8 +16,9 @@ use sceneworks_core::checkpoint_inspector::{
     inspect_checkpoint, CheckpointDiagnosticCodeV1, CheckpointInspectionRequestV1,
 };
 use sceneworks_core::checkpoint_plan_store::{
-    linked_checkpoint_id, CheckpointPlanError, CheckpointPlanStore, APPROVED_ROOTS_FILE,
-    BINDINGS_DIR, CHECKPOINTS_DIR, INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX, STORE_LOCK_FILE,
+    linked_checkpoint_id, managed_checkpoint_id, CheckpointPlanError, CheckpointPlanStore,
+    APPROVED_ROOTS_FILE, BINDINGS_DIR, CHECKPOINTS_DIR, INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX,
+    STORE_LOCK_FILE,
 };
 
 fn fixture_dir(label: &str) -> TempDir {
@@ -270,18 +271,23 @@ fn semantic_digest_is_locator_independent_but_source_binding_is_not() {
         .compile_linked(&root.root_id, "kreamania.safetensors")
         .unwrap();
 
-    // The managed twin: identical bytes under an app-owned install, same checkpoint identity.
+    // The managed twin: identical bytes under an app-owned install, under its OWN managed
+    // checkpoint identity. Compiling it under the LINKED checkpoint id (as this test first did)
+    // held constant the very thing the two ownership modes disagree about, and the inspector
+    // derives its plan id from the checkpoint id — so the assertion below passed without the
+    // digest actually being locator-independent (sc-20636).
     let install = fixture_dir("digest-managed");
     write_krea_native_file(&install.path().join("kreamania.safetensors"), 0x5a);
     let managed = inspect_checkpoint(
         &CheckpointInspectionRequestV1::managed(
-            linked.checkpoint_id.clone(),
+            managed_checkpoint_id("install-7"),
             install.path(),
             "kreamania.safetensors",
             "install-7",
             ManagedProvenanceV1 {
                 source: "civitai".to_owned(),
                 reference: Some("model-version-1".to_owned()),
+                ..ManagedProvenanceV1::default()
             },
         )
         .unwrap(),
@@ -820,7 +826,11 @@ fn a_retargeted_root_managed_locator_and_foreign_bindings_each_refuse_typed() {
     fs::write(&roots_path, serde_json::to_vec(&roots).unwrap()).unwrap();
     assert!(fx.store.resolve(&compiled.checkpoint_id).is_ok());
 
-    // ---- Managed locator: a fully self-consistent managed checkpoint is not resolvable yet ----
+    // ---- Managed locator filed under a LINKED identity: refused, never resolved ----
+    // Managed locators became resolvable in sc-20636, but only under their OWN
+    // `managed/<installId>` identity: the install a layer names must be the install the checkpoint
+    // id names. A managed layer swapped into a linked checkpoint's record names no reachable
+    // install, so it refuses rather than reading some other install's bytes.
     let install = fixture_dir("retarget-managed");
     write_krea_native_file(&install.path().join("kreamania.safetensors"), 0x5a);
     let managed = inspect_checkpoint(
@@ -832,6 +842,7 @@ fn a_retargeted_root_managed_locator_and_foreign_bindings_each_refuse_typed() {
             ManagedProvenanceV1 {
                 source: "civitai".to_owned(),
                 reference: None,
+                ..ManagedProvenanceV1::default()
             },
         )
         .unwrap(),
@@ -867,9 +878,11 @@ fn a_retargeted_root_managed_locator_and_foreign_bindings_each_refuse_typed() {
             ..
         }) => {
             assert_eq!(checkpoint_id, &compiled.checkpoint_id);
-            assert_eq!(kind, "managed");
+            assert_eq!(kind, "foreign-install managed");
         }
-        other => panic!("a managed locator must refuse as unsupported, got {other:?}"),
+        other => panic!(
+            "a managed locator under a linked identity must refuse as unsupported, got {other:?}"
+        ),
     }
 
     // ---- foreign bindings: a bindings document naming another plan is tampering ----

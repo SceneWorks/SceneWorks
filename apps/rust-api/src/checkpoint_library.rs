@@ -342,6 +342,12 @@ fn plan_error_to_api_error(error: CheckpointPlanError) -> ApiError {
         | CheckpointPlanError::InvalidRootLabel { .. }
         | CheckpointPlanError::InvalidPlanId { .. }
         | CheckpointPlanError::UnsupportedLocator { .. }
+        // sc-20636's managed refusals. This surface is linked-only, so none of them is reachable
+        // through these routes today; they are mapped rather than lumped into a 500 so that
+        // adding a managed route later does not silently report a malformed install id as a
+        // server fault.
+        | CheckpointPlanError::InvalidInstallId { .. }
+        | CheckpointPlanError::LocatorOwnershipMismatch { .. }
         | CheckpointPlanError::Contract(_) => StatusCode::BAD_REQUEST,
         CheckpointPlanError::RootUnavailable { .. }
         | CheckpointPlanError::RootAlreadyApproved { .. }
@@ -351,6 +357,8 @@ fn plan_error_to_api_error(error: CheckpointPlanError) -> ApiError {
         | CheckpointPlanError::PlanTampered { .. }
         | CheckpointPlanError::SourceMissing { .. }
         | CheckpointPlanError::SourceDrifted { .. }
+        | CheckpointPlanError::InstallUnavailable { .. }
+        | CheckpointPlanError::InstallIdTaken { .. }
         | CheckpointPlanError::PathEscapesRoot { .. } => StatusCode::CONFLICT,
         CheckpointPlanError::Corrupt { .. } | CheckpointPlanError::Io { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR

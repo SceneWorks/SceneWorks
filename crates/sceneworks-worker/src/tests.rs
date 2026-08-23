@@ -241,3 +241,83 @@ async fn a_retention_checkpoint_never_blocks_the_caller_that_starts_it() {
         "the poll loop must spawn the promotion drain, not merely test for pending work"
     );
 }
+
+/// sc-20636 review: `checkpoint_ingest::sweep_staging` existed with NO production caller while the
+/// module doc promised startup reclamation, so a crashed import's staging tree — potentially tens
+/// of gigabytes — was never reclaimed by anything.
+///
+/// Two halves: the behaviour (an aged orphan is reclaimed, a live tree is not) and the call site
+/// (`run_worker_loop` actually runs it at startup, off the claim path). The behavioural half alone
+/// would stay green with the call deleted, which is exactly how this shipped.
+#[tokio::test]
+async fn worker_startup_reclaims_abandoned_import_staging_without_blocking_the_claim_path() {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("sweep-startup-{}-", std::process::id()))
+        .tempdir()
+        .expect("tempdir");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let staging_root = store.staging_root().to_path_buf();
+    std::fs::create_dir_all(&staging_root).expect("staging root creates");
+
+    // Nothing staged at all: reclaiming is a no-op, not an error.
+    assert_eq!(
+        crate::reclaim_import_staging(&data_dir).expect("empty sweep succeeds"),
+        0
+    );
+
+    let orphan = staging_root.join("install-crashed");
+    std::fs::create_dir_all(&orphan).expect("orphan creates");
+    std::fs::write(orphan.join("model.safetensors"), b"half a download").expect("orphan bytes");
+    let live = staging_root.join("install-running");
+    std::fs::create_dir_all(&live).expect("live creates");
+    std::fs::write(live.join("model.safetensors"), b"still downloading").expect("live bytes");
+
+    // Only the orphan is aged past the in-flight window; the live tree was written just now.
+    #[cfg(unix)]
+    {
+        let when = std::time::SystemTime::now() - crate::IMPORT_STAGING_ORPHAN_AGE * 6;
+        for path in [orphan.join("model.safetensors"), orphan.clone()] {
+            let handle = std::fs::File::open(&path).expect("open for utimes");
+            handle
+                .set_times(std::fs::FileTimes::new().set_modified(when))
+                .expect("backdate");
+        }
+    }
+
+    assert_eq!(
+        crate::reclaim_import_staging(&data_dir).expect("sweep succeeds"),
+        1,
+        "the crash orphan is reclaimed and the live transfer is not"
+    );
+    assert!(!orphan.exists(), "the crash orphan must be gone");
+    assert!(
+        live.is_dir(),
+        "another worker process's in-flight staging tree must survive a startup sweep"
+    );
+
+    // The call site. `sweep_staging` shipped with no caller at all, so the rule is BOTH that
+    // startup runs it and that it does not sit on the claim path.
+    let source = include_str!("lib.rs");
+    let startup = source
+        .split_once("let mut next_retention_checkpoint =")
+        .expect("the poll loop seeds its retention deadline")
+        .1;
+    let (startup, _) = startup
+        .split_once("    loop {")
+        .expect("the poll loop follows the startup block");
+    assert!(
+        startup.contains("reclaim_import_staging(&data_dir)"),
+        "worker startup must reclaim abandoned import staging; without a caller the sweep is dead          code and a crashed import's bytes are never freed"
+    );
+    assert!(
+        startup.contains("spawn_blocking"),
+        "the staging sweep removes whole directory trees and must not run inline on the runtime"
+    );
+    assert!(
+        !startup.contains("reclaim_import_staging(&data_dir).await")
+            && !startup.contains("reclaim_import_staging(&settings.data_dir).await"),
+        "the staging sweep must not be awaited before the first job claim"
+    );
+}
