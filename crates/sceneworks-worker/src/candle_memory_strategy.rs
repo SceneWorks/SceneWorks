@@ -70,7 +70,10 @@ fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
 }
 
 fn is_receipt_priced(engine_id: &str) -> bool {
-    is_chroma(engine_id) || is_ideogram(engine_id) || is_sealed_kolors_bespoke(engine_id)
+    is_chroma(engine_id)
+        || is_ideogram(engine_id)
+        || engine_id == "kolors"
+        || is_sealed_kolors_bespoke(engine_id)
 }
 
 /// Resolve the public `lora` cell to the exact ordered adapter load identity sealed by the
@@ -272,7 +275,7 @@ fn validate_kolors_asset_facts(
                 .all(|byte| byte.is_ascii_hexdigit())
     };
     let exact_route = match engine_id {
-        "kolors" => ip.is_empty() && control.is_empty(),
+        "kolors" => ip.is_empty() && control.is_empty() && pid.len() == usize::from(use_pid),
         "candle_kolors_ipadapter" => ip.len() == 1 && control.is_empty() && pid.is_empty(),
         "candle_kolors_control" => {
             control.len() == 1 && ip.is_empty() && pid.len() == usize::from(use_pid)
@@ -296,24 +299,43 @@ fn validate_kolors_asset_facts(
                 .saturating_add(facts.decoder_bytes)
         && facts.overlay_bytes == overlay_sum
         && exact_route
+        && adapters.len() <= 1
         && matches!(receipt.as_slice(), [component]
             if valid_id(&component.id, KOLORS_PHYSICAL_RECEIPT_PREFIX)
                 && component.kind == gen_core::MemoryComponentKind::TransformerSubStack(
                     gen_core::TransformerComponent::Dit
                 )
-                && component.resident_bytes == facts.transformer_bytes)
-        && adapters
-            .iter()
-            .all(|component| valid_id(&component.id, KOLORS_ADAPTER_RECEIPT_PREFIX))
-        && ip
-            .iter()
-            .all(|component| valid_id(&component.id, KOLORS_IP_RECEIPT_PREFIX))
-        && control
-            .iter()
-            .all(|component| valid_id(&component.id, KOLORS_CONTROL_RECEIPT_PREFIX))
-        && pid
-            .iter()
-            .all(|component| valid_id(&component.id, KOLORS_PID_RECEIPT_PREFIX));
+                && component.resident_bytes == facts.transformer_bytes
+                && component.bounded_by == Some(MemoryStrategy::StagedResidency)
+                && component.residency == gen_core::MemoryComponentResidency::WholeRender)
+        && adapters.iter().all(|component| {
+            valid_id(&component.id, KOLORS_ADAPTER_RECEIPT_PREFIX)
+                && component.kind == gen_core::MemoryComponentKind::AdapterStack
+                && component.resident_bytes > 0
+                && component.bounded_by == Some(MemoryStrategy::StagedResidency)
+                && component.residency == gen_core::MemoryComponentResidency::WholeRender
+        })
+        && ip.iter().all(|component| {
+            valid_id(&component.id, KOLORS_IP_RECEIPT_PREFIX)
+                && component.kind == gen_core::MemoryComponentKind::IpAdapter
+                && component.resident_bytes > 0
+                && component.bounded_by == Some(MemoryStrategy::StagedResidency)
+                && component.residency == gen_core::MemoryComponentResidency::WholeRender
+        })
+        && control.iter().all(|component| {
+            valid_id(&component.id, KOLORS_CONTROL_RECEIPT_PREFIX)
+                && component.kind == gen_core::MemoryComponentKind::ControlBranch
+                && component.resident_bytes > 0
+                && component.bounded_by == Some(MemoryStrategy::StagedResidency)
+                && component.residency == gen_core::MemoryComponentResidency::WholeRender
+        })
+        && pid.iter().all(|component| {
+            valid_id(&component.id, KOLORS_PID_RECEIPT_PREFIX)
+                && component.kind == gen_core::MemoryComponentKind::AdapterStack
+                && component.resident_bytes > 0
+                && component.bounded_by == Some(MemoryStrategy::StagedResidency)
+                && component.residency == gen_core::MemoryComponentResidency::WholeRender
+        });
     if !valid {
         return Err(WorkerError::InvalidPayload(format!(
             "{engine_id} provider returned incomplete or crossed Kolors physical receipts"
@@ -329,11 +351,20 @@ pub(crate) fn kolors_overlay_receipt_identity(
 ) -> WorkerResult<Option<String>> {
     validate_kolors_asset_facts(engine_id, contract, use_pid)?;
     let accepted: Vec<&str> = match engine_id {
-        "kolors" => vec![KOLORS_ADAPTER_RECEIPT_PREFIX, KOLORS_PID_RECEIPT_PREFIX],
+        "kolors" => vec![
+            KOLORS_PHYSICAL_RECEIPT_PREFIX,
+            KOLORS_ADAPTER_RECEIPT_PREFIX,
+            KOLORS_PID_RECEIPT_PREFIX,
+        ],
         "candle_kolors_ipadapter" => {
-            vec![KOLORS_IP_RECEIPT_PREFIX, KOLORS_ADAPTER_RECEIPT_PREFIX]
+            vec![
+                KOLORS_PHYSICAL_RECEIPT_PREFIX,
+                KOLORS_IP_RECEIPT_PREFIX,
+                KOLORS_ADAPTER_RECEIPT_PREFIX,
+            ]
         }
         "candle_kolors_control" => vec![
+            KOLORS_PHYSICAL_RECEIPT_PREFIX,
             KOLORS_CONTROL_RECEIPT_PREFIX,
             KOLORS_ADAPTER_RECEIPT_PREFIX,
             KOLORS_PID_RECEIPT_PREFIX,
@@ -1308,6 +1339,7 @@ fn evaluate_shared_image_inner(
         | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => CHROMA_REQUEST_EVIDENCE_REVISION,
         "ideogram_4" | "ideogram_4_turbo" => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
+        "kolors" => KOLORS_REQUEST_EVIDENCE_REVISION,
         _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -1358,6 +1390,20 @@ fn evaluate_shared_image_inner(
     } else if is_ideogram(engine_id) {
         validate_ideogram_asset_facts(engine_id, &contract, use_pid, &mode.mode)?;
         ideogram_provider_overlay_identity(engine_id, &contract, provider_overlay)?
+    } else if engine_id == "kolors" {
+        let exact = kolors_overlay_receipt_identity(engine_id, &contract, use_pid)?;
+        let has_declared_adapters = provider_overlay.is_some();
+        let has_receipted_adapters = contract
+            .resident_components()
+            .iter()
+            .any(|component| component.id.starts_with(KOLORS_ADAPTER_RECEIPT_PREFIX));
+        if has_declared_adapters != has_receipted_adapters {
+            return Err(WorkerError::InvalidPayload(
+                "kolors public ordered-adapter identity crossed its exact provider receipt"
+                    .to_owned(),
+            ));
+        }
+        exact
     } else if is_sealed_kolors_bespoke(engine_id) {
         let exact = kolors_overlay_receipt_identity(engine_id, &contract, use_pid)?;
         match (provider_overlay, exact) {
@@ -2045,6 +2091,164 @@ mod tests {
         contract
     }
 
+    fn kolors_registered_probe_contract(
+        with_adapter: bool,
+        use_pid: bool,
+    ) -> gen_core::MemoryProviderContract {
+        let mut contract = kolors_bespoke_probe_contract("candle_kolors_control", use_pid);
+        contract.provider_id = "kolors".to_owned();
+        let mut components = contract.resident_components().to_vec();
+        components.retain(|component| !component.id.starts_with(KOLORS_CONTROL_RECEIPT_PREFIX));
+        if with_adapter {
+            components.push(gen_core::MemoryResidentComponent {
+                id: format!("{KOLORS_ADAPTER_RECEIPT_PREFIX}{}", "d".repeat(64)),
+                kind: gen_core::MemoryComponentKind::AdapterStack,
+                resident_bytes: gib(1),
+                bounded_by: Some(MemoryStrategy::StagedResidency),
+                residency: gen_core::MemoryComponentResidency::WholeRender,
+            });
+        }
+        contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![
+                gen_core::MemoryFormulaVariable::AssetBytes,
+                gen_core::MemoryFormulaVariable::PixelCount,
+                gen_core::MemoryFormulaVariable::BatchCount,
+                gen_core::MemoryFormulaVariable::ConditioningTokenCount,
+                gen_core::MemoryFormulaVariable::OverlayBytes,
+            ],
+            resident_components: components,
+        };
+        contract.asset_facts.overlay_bytes = gib(u64::from(with_adapter) + 3 * u64::from(use_pid));
+        contract
+    }
+
+    #[test]
+    fn registered_kolors_is_receipt_priced_and_binds_exact_assembly_identity() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 30.0 },
+                "sequentialPeakGb": { "q4": 15.0 },
+                "measured": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")));
+        let contract = kolors_registered_probe_contract(true, true);
+        let evaluation = evaluate_shared_image_inner(
+            "kolors",
+            "kolors",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "image_generation",
+            Some("lora"),
+            Some("lora"),
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            true,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 22.0,
+                total_gb: 48.0,
+            }),
+            Some(30.0),
+            0,
+            MemoryCacheState::Cold,
+            None,
+            Some(contract.clone()),
+            None,
+        )
+        .unwrap()
+        .expect("registered Kolors staged selection");
+        assert_eq!(
+            evaluation.context.evidence_revision,
+            KOLORS_REQUEST_EVIDENCE_REVISION
+        );
+        let assembly = evaluation.context.overlay.unwrap();
+        assert!(assembly.contains(KOLORS_PHYSICAL_RECEIPT_PREFIX));
+        assert!(assembly.contains(KOLORS_ADAPTER_RECEIPT_PREFIX));
+        assert!(assembly.contains(KOLORS_PID_RECEIPT_PREFIX));
+
+        let crossed_pid = evaluate_shared_image_inner(
+            "kolors",
+            "kolors",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "image_generation",
+            None,
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            true,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 22.0,
+                total_gb: 48.0,
+            }),
+            Some(30.0),
+            0,
+            MemoryCacheState::Cold,
+            None,
+            Some(kolors_registered_probe_contract(false, false)),
+            None,
+        );
+        assert!(crossed_pid.is_err());
+
+        let crossed_adapters = evaluate_shared_image_inner(
+            "kolors",
+            "kolors",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "image_generation",
+            Some("lora"),
+            Some("lora"),
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 22.0,
+                total_gb: 48.0,
+            }),
+            Some(30.0),
+            0,
+            MemoryCacheState::Cold,
+            None,
+            Some(kolors_registered_probe_contract(false, false)),
+            None,
+        );
+        assert!(crossed_adapters.is_err());
+    }
+
     #[test]
     fn kolors_bespoke_selector_is_request_authoritative_and_route_exact() {
         let manifest = json!({
@@ -2100,7 +2304,7 @@ mod tests {
             .overlay
             .as_deref()
             .unwrap()
-            .starts_with(KOLORS_IP_RECEIPT_PREFIX));
+            .contains(KOLORS_IP_RECEIPT_PREFIX));
 
         let control_spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")))
             .with_control(WeightsSource::File(PathBuf::from(
