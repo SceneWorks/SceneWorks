@@ -12480,6 +12480,40 @@ mod kolors_edit_worker_contract_tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn kolors_ip_composites_refuse_before_provider_precedence() {
+        let data = tempfile::tempdir().expect("data dir");
+        let settings = settings(data.path());
+        let weights = data.path().join("models/kolors-test");
+        std::fs::create_dir_all(&weights).expect("model path");
+        let request = |advanced: Value| {
+            ImageRequest::from_payload(
+                json!({
+                    "projectId": "project",
+                    "model": "kolors",
+                    "mode": "character_image",
+                    "referenceAssetId": "identity-reference",
+                    "advanced": advanced,
+                })
+                .as_object()
+                .expect("request object"),
+            )
+        };
+        let ip_and_pid = request(json!({"modelPath": weights, "usePid": true}));
+        assert_eq!(
+            resolve_candle_image_route(&ip_and_pid, &settings),
+            Some(CandleImageRoute::KolorsCompositeReject)
+        );
+        let ip_and_pose = request(json!({
+            "modelPath": weights,
+            "poses": [{"keypoints": []}],
+        }));
+        assert_eq!(
+            resolve_candle_image_route(&ip_and_pose, &settings),
+            Some(CandleImageRoute::KolorsCompositeReject)
+        );
+    }
 }
 
 #[cfg(test)]
