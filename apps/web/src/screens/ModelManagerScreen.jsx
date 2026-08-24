@@ -673,7 +673,9 @@ export function ModelManagerScreen() {
   const [pendingUpdate, setPendingUpdate] = useState({});
   // Gated-model credential presence (sc-1898): only fetched when the catalog has a
   // gated model, so non-gated deployments make no extra credential request.
-  const [credentials, setCredentials] = useState([]);
+  // `null` until the keychain is actually read: the import panel distinguishes "no credential" from
+  // "never looked", and starting at `[]` would flash "no credential is stored" before the answer.
+  const [credentials, setCredentials] = useState(null);
   // Per-model license acknowledgments (sc-7872), seeded from localStorage so a
   // returning user keeps prior accepts. Keyed by model id; toggling the gated
   // notice checkbox both updates this map and persists to localStorage.
@@ -752,8 +754,12 @@ export function ModelManagerScreen() {
     );
   }, [importForm.family]);
 
+  // The import panel's managed pane offers civitai.com and Hugging Face sources on EVERY catalog,
+  // gated or not, and it has to say whether a credential for the chosen host is stored. Keying this
+  // read on `hasGatedModel` alone made the panel report "no credential is stored" on an ordinary
+  // catalog even when one was — so the read also runs whenever the panel is mounted.
   useEffect(() => {
-    if (!hasGatedModel) {
+    if (!hasGatedModel && !MODEL_IMPORT_ENABLED) {
       return undefined;
     }
     let cancelled = false;
@@ -2007,6 +2013,11 @@ export function ModelManagerScreen() {
           onCancelJob={onCancelJob}
           onImportModel={onImportModel}
           onOpenQueue={onOpenQueue}
+          // Relink / forget / rescan from inside the panel change the SAME linked statuses the
+          // catalog cards render; without this the cards keep saying "Needs relink" after the
+          // panel has already fixed it.
+          onOpenSettings={() => setActiveView("Settings")}
+          onRefreshCatalog={refreshLinkedStatuses}
           onRetryJob={(job, payload) => onResumeDownloadJob(job, payload)}
           pendingJobs={pendingModelImportJobs}
           token={token}

@@ -35,6 +35,12 @@ vi.mock("../checkpointLibrary.js", async (importOriginal) => {
 const appConfirm = vi.fn(async () => true);
 vi.mock("../appConfirm.jsx", () => ({ appConfirm: (...args) => appConfirm(...args) }));
 
+const loadCredentials = vi.fn(async () => []);
+vi.mock("../credentials.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, loadCredentials: (...args) => loadCredentials(...args) };
+});
+
 const LINKED_MODEL = {
   id: "my_sdxl",
   name: "My SDXL",
@@ -81,6 +87,8 @@ describe("ModelManagerScreen linked state and ownership-aware removal (sc-20650)
     update.mockResolvedValue({ rootId: "root-a" });
     scanResult.mockReset();
     scanResult.mockReturnValue({ root: { rootId: "root-a" }, available: true, candidates: [], unmatched: [], diagnostics: [] });
+    loadCredentials.mockReset();
+    loadCredentials.mockResolvedValue([]);
     deleteModel = vi.fn(async () => ({ removedManifestEntry: true }));
     window.__TAURI__ = { core: { invoke: vi.fn(async () => "/Volumes/Moved") } };
     vi.resetModules();
@@ -219,6 +227,48 @@ describe("ModelManagerScreen linked state and ownership-aware removal (sc-20650)
     expect(copy.confirmLabel).toBe("Delete");
     expect(copy.message).toMatch(/removes those files from this machine/);
     expect(copy.message).not.toMatch(/never opened, moved or deleted/);
+  });
+
+  // The panel and the catalog cards read the SAME linked statuses. A relink performed inside the
+  // panel therefore has to re-read them for the cards too, or the card keeps saying "Needs relink"
+  // about a library that is attached again.
+  it("refreshes the catalog cards after a relink performed inside the import panel", async () => {
+    scanResult.mockReturnValue({
+      root: { rootId: "root-a" },
+      available: false,
+      candidates: [],
+      unmatched: [statusFor("needs_relink", "[checkpoint-plan:root-unavailable] not there")],
+      diagnostics: [],
+    });
+    await render([LINKED_MODEL]);
+    expect(card("My SDXL").querySelector('[role="group"][aria-label="My SDXL Needs relink"]')).toBeTruthy();
+
+    const panel = container.querySelector(".checkpoint-import");
+    await click(buttonIn(panel, "Add a model"));
+    await act(async () => {});
+    // The relink succeeds and the library comes back attached.
+    scanResult.mockReturnValue({ root: { rootId: "root-a" }, available: true, candidates: [], unmatched: [], diagnostics: [] });
+    await click(buttonIn(container.querySelector(".checkpoint-import"), "Relink library"));
+    await act(async () => {});
+
+    expect(update).toHaveBeenCalledWith("tok", "root-a", { path: "/Volumes/Moved" });
+    expect(card("My SDXL").querySelector('[role="group"][aria-label="My SDXL Needs relink"]')).toBeNull();
+  });
+
+  // The panel's managed pane offers civitai.com / Hugging Face on EVERY catalog, so the credential
+  // read cannot be keyed on the catalog happening to contain a gated model.
+  it("reads credentials on an ungated catalog so the panel does not misreport them", async () => {
+    loadCredentials.mockResolvedValue([{ host: "civitai.com", present: true }]);
+    // No `gated` model anywhere: pre-fix this catalog never made the keychain call at all.
+    await render([LINKED_MODEL]);
+    const panel = container.querySelector(".checkpoint-import");
+    await click(buttonIn(panel, "Add a model"));
+    await act(async () => {});
+    await click([...container.querySelectorAll('[role="radio"]')].find((node) => node.textContent.startsWith("Add to SceneWorks")));
+    await click(buttonIn(container.querySelector(".checkpoint-import"), "Civitai"));
+    expect(loadCredentials).toHaveBeenCalled();
+    const notice = container.querySelector(".checkpoint-credential-notice");
+    expect(notice.textContent).toMatch(/A civitai\.com credential is stored/);
   });
 
   it("leaves a row with no import plan on the pre-epic confirmation", async () => {

@@ -123,8 +123,19 @@ describe("CheckpointImportPanel", () => {
       ?.querySelector("input, select");
   }
 
+  // The panel has TWO status regions — the library-lifecycle track and the import track — because
+  // the two run concurrently and neither may overwrite the other. Assertions that only care that a
+  // sentence reached the user read both.
   function status() {
-    return container.querySelector('[role="status"]')?.textContent ?? "";
+    return [...container.querySelectorAll('[role="status"]')].map((node) => node.textContent).join(" ");
+  }
+
+  function importStatus() {
+    return container.querySelector(".checkpoint-import-status")?.textContent ?? "";
+  }
+
+  function libraryStatus() {
+    return container.querySelector(".checkpoint-library-status")?.textContent ?? "";
   }
 
   // ------------------------------------------------------------------- AC1: the two choices
@@ -407,11 +418,221 @@ describe("CheckpointImportPanel", () => {
     expect(container.querySelector(".checkpoint-credential-notice").textContent).toContain("huggingface.co");
   });
 
-  it("drops the credential notice once the credential is stored", async () => {
+  it("reports the stored credential positively rather than dropping the notice", async () => {
     await render({ credentials: [{ host: "civitai.com", present: true }] });
     await click(byRole("radio", "Add to SceneWorks"));
     await click(buttonNamed("Civitai"));
+    const notice = container.querySelector(".checkpoint-credential-notice");
+    expect(notice.textContent).toMatch(/A civitai\.com credential is stored/);
+    expect(notice.textContent).not.toMatch(/No civitai\.com credential/);
+  });
+
+  // The notice must distinguish "looked and found none" from "never looked". A caller that does
+  // not read the keychain gets silence — the old `credentials = []` default made every such screen
+  // claim a credential was missing.
+  it("says nothing about credentials when the caller never read them", async () => {
+    await render({});
+    await click(byRole("radio", "Add to SceneWorks"));
+    await click(buttonNamed("Civitai"));
     expect(container.querySelector(".checkpoint-credential-notice")).toBeNull();
+  });
+
+  it("offers a way to reach Settings from the missing-credential notice", async () => {
+    const onOpenSettings = vi.fn();
+    await render({ credentials: [], onOpenSettings });
+    await click(byRole("radio", "Add to SceneWorks"));
+    await click(buttonNamed("Civitai"));
+    await click(buttonNamed("Add token in Settings"));
+    expect(onOpenSettings).toHaveBeenCalled();
+  });
+
+  // --------------------------------------------- AC3 (cont.): the two tracks never speak for each other
+
+  it("keeps the import guard closed when a library scan resolves mid-import", async () => {
+    let releaseScan;
+    let releaseImport;
+    const library = libraryStub({
+      scan: vi.fn(async () => {
+        // First scan (the mount auto-scan) resolves immediately; the second is held open so it can
+        // be made to resolve DURING the import.
+        if (library.scan.mock.calls.length > 1) {
+          await new Promise((resolve) => {
+            releaseScan = resolve;
+          });
+        }
+        return readyScan();
+      }),
+    });
+    const onImportModel = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          releaseImport = () => resolve({ payload: { modelId: "m" } });
+        }),
+    );
+    await render({ library, onImportModel });
+
+    await click(buttonNamed("Use this checkpoint"));
+    // A second root scan starts while the import is still in flight, then finishes first.
+    await click(buttonNamed("Rescan library"));
+    await act(async () => {
+      releaseScan?.();
+    });
+
+    // The import is still running, so its button is still disabled: a scan's `finally` no longer
+    // clears the import guard, which is what allowed a double submit.
+    const reuse = buttonNamed("Use this checkpoint");
+    expect(reuse.disabled).toBe(true);
+    await click(reuse);
+    expect(onImportModel).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseImport?.();
+    });
+    expect(importStatus()).toContain("Import queued");
+  });
+
+  it("keeps an import error and its Try again through a later successful scan", async () => {
+    const library = libraryStub();
+    const onImportModel = vi.fn(async () => {
+      throw apiError("[checkpoint-plan:unrunnable-source] no loader", {
+        code: "checkpoint_library_rejected",
+        reason: "unrunnable-source",
+      });
+    });
+    await render({ library, onImportModel });
+    await click(buttonNamed("Use this checkpoint"));
+    expect(importStatus()).toContain("[checkpoint-plan:unrunnable-source]");
+
+    await click(buttonNamed("Rescan library"));
+    // The scan succeeded and said so on its OWN track; the import's failure is still on screen and
+    // still actionable.
+    expect(importStatus()).toContain("[checkpoint-plan:unrunnable-source]");
+    expect(buttonNamed("Try again")).toBeTruthy();
+  });
+
+  // "Try again" re-POSTs `lastAttempt`. Gating it on any error tone meant a LIBRARY failure that
+  // happened after a perfectly successful import offered to re-send that import.
+  it("does not offer Try again beside a library failure after a successful import", async () => {
+    const library = libraryStub({
+      update: vi.fn(async () => {
+        throw apiError("[checkpoint-plan:root-unavailable] /gone is not there", {
+          code: "checkpoint_library_rejected",
+          reason: "root-unavailable",
+        });
+      }),
+    });
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "m" } }));
+    await render({ library, onImportModel, pickFolder: null });
+
+    await click(buttonNamed("Use this checkpoint"));
+    expect(importStatus()).toContain("Import queued");
+    expect(buttonNamed("Try again")).toBeFalsy();
+
+    await type(labelled("Library folder"), "/gone");
+    await click(buttonNamed("Relink library"));
+    expect(libraryStatus()).toContain("[checkpoint-plan:root-unavailable]");
+    // The import track still reads "queued", so there is nothing to retry.
+    expect(importStatus()).toContain("Import queued");
+    expect(buttonNamed("Try again")).toBeFalsy();
+  });
+
+  it("still offers Try again on the import's own error while a library message is showing", async () => {
+    const onImportModel = vi.fn(async () => {
+      throw apiError("[checkpoint-plan:unrunnable-source] no loader", {
+        code: "checkpoint_library_rejected",
+        reason: "unrunnable-source",
+      });
+    });
+    await render({ onImportModel });
+    await click(buttonNamed("Use this checkpoint"));
+    await click(buttonNamed("Remove library"));
+    expect(libraryStatus()).toMatch(/Your files were not touched/);
+    expect(buttonNamed("Try again")).toBeTruthy();
+  });
+
+  it("imports the RENDERED root, not one whose scan is still in flight", async () => {
+    const SECOND = { rootId: "root-b", path: "/Volumes/Other", label: "", displayLabel: "Other" };
+    let releaseSecond;
+    const library = libraryStub({
+      fetchRoots: vi.fn(async () => ({ roots: [ROOT, SECOND] })),
+      scan: vi.fn(async (_token, rootId) => {
+        if (rootId === "root-b") {
+          await new Promise((resolve) => {
+            releaseSecond = resolve;
+          });
+          return readyScan({ root: SECOND });
+        }
+        return readyScan();
+      }),
+    });
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "m" } }));
+    await render({ library, onImportModel });
+
+    // Start root-b's scan; `activeRootId` moves to root-b immediately while root-b's answer is
+    // still pending.
+    const rescanButtons = [...container.querySelectorAll("button")].filter((node) => node.textContent === "Rescan library");
+    await click(rescanButtons[1]);
+    // Nothing from the stale root is rendered any more, so there is no wrong-root candidate to
+    // click at all.
+    expect(buttonNamed("Use this checkpoint")).toBeFalsy();
+
+    await act(async () => {
+      releaseSecond?.();
+    });
+    await click(buttonNamed("Use this checkpoint"));
+    expect(onImportModel.mock.calls[0][0].linkedRootId).toBe("root-b");
+  });
+
+  // The candidate actions act on the root the RENDERED scan names, not on whatever id the panel
+  // last asked about. The scan is the authority on which root its candidates belong to.
+  it("acts on the root the rendered scan names, not the id the panel last requested", async () => {
+    const canonical = { rootId: "root-a-canonical", path: "/Volumes/Models", displayLabel: "Models" };
+    const library = libraryStub({
+      scan: vi.fn(async () =>
+        readyScan({
+          root: canonical,
+          candidates: [
+            {
+              checkpointId: "linked/root-a/drifted.safetensors",
+              candidate: { relativePath: "drifted.safetensors" },
+              status: { checkpointId: "linked/root-a/drifted.safetensors", rootId: "root-a-canonical", relativePath: "drifted.safetensors", state: "needs_rescan", detail: "[checkpoint-plan:source-drifted] digests differ" },
+              selectable: false,
+            },
+            {
+              checkpointId: "linked/root-a/sdxl.safetensors",
+              candidate: { relativePath: "sdxl.safetensors" },
+              status: { checkpointId: "linked/root-a/sdxl.safetensors", rootId: "root-a-canonical", relativePath: "sdxl.safetensors", state: "ready", detail: null },
+              selectable: true,
+            },
+          ],
+        }),
+      ),
+    });
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "m" } }));
+    await render({ library, onImportModel });
+
+    await click(buttonNamed("Rescan checkpoint"));
+    expect(library.rescan).toHaveBeenCalledWith("tok", "root-a-canonical", "drifted.safetensors");
+
+    await click(buttonNamed("Use this checkpoint"));
+    expect(onImportModel.mock.calls[0][0].linkedRootId).toBe("root-a-canonical");
+  });
+
+  // The panel's lifecycle actions change the same records the host screen's catalog renders, so
+  // each one tells the host to re-read them.
+  it("asks the host to refresh its catalog after relink, forget and rescan", async () => {
+    const onRefreshCatalog = vi.fn();
+    const library = libraryStub({
+      scan: vi.fn(async () => readyScan({ unmatched: [{ checkpointId: "c", rootId: "root-a", relativePath: "gone.safetensors", state: "needs_rescan", detail: null }] })),
+    });
+    await render({ library, onRefreshCatalog, pickFolder: null });
+    await type(labelled("Library folder"), "/Volumes/Moved");
+    await click(buttonNamed("Relink library"));
+    expect(onRefreshCatalog).toHaveBeenCalledTimes(1);
+    await click(buttonNamed("Rescan checkpoint"));
+    expect(onRefreshCatalog).toHaveBeenCalledTimes(2);
+    await click(buttonNamed("Remove library"));
+    expect(onRefreshCatalog).toHaveBeenCalledTimes(3);
   });
 
   it("labels every region and announces outcomes in a live region", async () => {

@@ -215,7 +215,11 @@ export function checkpointLibraryRefusal(error) {
   }
   const reason = error?.context?.reason;
   if (typeof reason !== "string" || reason === "") return null;
-  return { code, reason, message: String(error.message ?? ""), action: REFUSAL_ACTION[reason] ?? null };
+  // A typed refusal that carried no sentence still has to SAY something: this message is rendered
+  // straight into the panel's `role="status"` region, and an empty string there is a refusal the
+  // user never learns about. The reason code is the least the store already told us.
+  const message = String(error.message ?? "").trim() || `[checkpoint-plan:${reason}]`;
+  return { code, reason, message, action: REFUSAL_ACTION[reason] ?? null };
 }
 
 // Everything the UI needs to render ANY failure of this seam, typed or not.

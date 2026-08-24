@@ -197,6 +197,17 @@ describe("refusals", () => {
     expect(described.reason).toBe("source-drifted");
   });
 
+  // The message is rendered straight into the panel's `role="status"` region. A typed refusal that
+  // arrived with no sentence used to put an EMPTY string there — a refusal the user never learns
+  // about at all.
+  it("never renders a typed refusal as an empty sentence", () => {
+    for (const message of [undefined, "", "   "]) {
+      const refusal = checkpointLibraryRefusal({ ...rejected, message });
+      expect(refusal.message).toBe("[checkpoint-plan:source-drifted]");
+      expect(describeRefusal({ ...rejected, message }).message).toBe("[checkpoint-plan:source-drifted]");
+    }
+  });
+
   it("keeps an untyped failure's own message", () => {
     expect(describeRefusal(new Error("network down")).message).toBe("network down");
     expect(describeRefusal(null).message).toBe("The request could not be completed.");

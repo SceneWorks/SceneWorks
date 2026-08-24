@@ -19,6 +19,7 @@ describe("SimpleModelManager checkpoint import (sc-20650)", () => {
   let createModelImportJob;
 
   beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
     ({ container, root } = mountRoot());
     createModelImportJob = vi.fn(async () => ({ payload: { modelId: "imported" } }));
   });
@@ -116,6 +117,36 @@ describe("SimpleModelManager checkpoint import (sc-20650)", () => {
     const cancel = [...container.querySelectorAll("button")].find((node) => /cancel/i.test(node.textContent));
     await click(cancel);
     expect(jobAction).toHaveBeenCalledWith(expect.objectContaining({ id: "job-1" }), "cancel");
+  });
+
+  // Simple mounts the SAME panel, so it has to feed it the same inputs. Without a `families` list
+  // the Family select is permanently disabled and reads "No known families" — a reduced copy of the
+  // panel, which is exactly what mounting the shared component is supposed to prevent.
+  it("offers the real family list in the managed pane", async () => {
+    await render({
+      models: [
+        { id: "z", name: "Z-Image", type: "image", installState: "installed", loraCompatibility: { families: ["sdxl"] } },
+        { id: "f", name: "Flux", type: "image", installState: "installed", loraCompatibility: { families: ["flux2"] } },
+      ],
+    });
+    await click(section().querySelector(".checkpoint-import-toggle"));
+    await click([...container.querySelectorAll('[role="radio"]')].find((node) => node.textContent.startsWith("Add to SceneWorks")));
+    const family = [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith("Family"))
+      .querySelector("select");
+    expect(family.disabled).toBe(false);
+    expect([...family.options].map((option) => option.value)).toEqual(["", "flux2", "sdxl"]);
+  });
+
+  // Simple never reads the keychain, so the panel must not claim a credential is missing on its
+  // behalf. (Simple renders no linked-status badge of its own; its catalog refresh is wired to the
+  // context's `refreshData`, asserted through the panel's own onRefreshCatalog contract.)
+  it("makes no credential claim it never checked", async () => {
+    await render();
+    await click(section().querySelector(".checkpoint-import-toggle"));
+    await click([...container.querySelectorAll('[role="radio"]')].find((node) => node.textContent.startsWith("Add to SceneWorks")));
+    await click(buttonNamed("Civitai"));
+    expect(container.querySelector(".checkpoint-credential-notice")).toBeNull();
   });
 
   it("surfaces a duplicate-checkpoint warning from a completed import", async () => {

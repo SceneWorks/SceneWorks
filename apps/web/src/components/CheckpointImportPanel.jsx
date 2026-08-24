@@ -84,7 +84,10 @@ export function CheckpointImportPanel({
   token,
   families = [],
   models = [],
-  credentials = [],
+  // `null` means "not looked up", which is NOT the same as "looked up and none stored". The
+  // credential notice only speaks when the caller actually read the keychain, so a screen that
+  // never loads credentials cannot make the panel claim a credential is missing.
+  credentials = null,
   macCapabilities,
   pendingJobs = [],
   completedJobs = [],
@@ -93,6 +96,7 @@ export function CheckpointImportPanel({
   onRetryJob,
   onOpenQueue,
   onRefreshCatalog,
+  onOpenSettings,
   compact = false,
   defaultOpen = false,
   library = DEFAULT_LIBRARY,
@@ -101,8 +105,14 @@ export function CheckpointImportPanel({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [ownership, setOwnership] = useState(OWNERSHIP_LINKED);
-  const [message, setMessage] = useState(NEUTRAL);
-  const [busy, setBusy] = useState("");
+  // TWO independent operation tracks, because they run concurrently and neither may speak for the
+  // other. A library scan resolving mid-import used to clear `busy` (re-enabling the submit button
+  // under a running import) and overwrite the import's error with its own success — which took the
+  // "Try again" button away while `lastAttempt` was still the thing that failed.
+  const [message, setMessage] = useState(NEUTRAL); // library-lifecycle track
+  const [busy, setBusy] = useState(""); // library-lifecycle track
+  const [importMessage, setImportMessage] = useState(NEUTRAL); // import track
+  const [importBusy, setImportBusy] = useState(false); // import track
 
   // Linked state.
   const [roots, setRoots] = useState([]);
@@ -169,6 +179,11 @@ export function CheckpointImportPanel({
 
   const runScan = useCallback(
     async (rootId) => {
+      // Drop the previous root's result BEFORE the await: `activeRootId` moves synchronously, so
+      // leaving the old `scan` on screen would render one root's candidates under another root's
+      // id. Nothing rendered from `scan` reads `activeRootId` any more, and nothing is rendered at
+      // all until the new root's answer arrives.
+      setScan(null);
       setActiveRootId(rootId);
       setBusy(`scan:${rootId}`);
       try {
@@ -317,8 +332,8 @@ export function CheckpointImportPanel({
   async function submit(attempt) {
     if (!onImportModel) return;
     setLastAttempt(attempt);
-    setBusy("import");
-    setMessage({ ...NEUTRAL, tone: "neutral", text: attempt.file ? "Uploading the checkpoint before queueing." : "Validating and queueing." });
+    setImportBusy(true);
+    setImportMessage({ ...NEUTRAL, tone: "neutral", text: attempt.file ? "Uploading the checkpoint before queueing." : "Validating and queueing." });
     try {
       const job = await onImportModel(attempt.file ? { ...attempt.body, file: attempt.file } : attempt.body);
       const modelId = job?.payload?.modelId;
@@ -327,7 +342,7 @@ export function CheckpointImportPanel({
       // leaves the user unable to predict.
       const resolvedFamily = job?.payload?.manifestEntry?.family;
       const detected = !attempt.body.family && resolvedFamily ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.` : "";
-      setMessage({
+      setImportMessage({
         ...NEUTRAL,
         tone: "success",
         text: `${modelId ? `Import queued for ${modelId}.` : "Import queued."}${detected}`,
@@ -335,9 +350,9 @@ export function CheckpointImportPanel({
       if (attempt.file) setFileInputKey((current) => current + 1);
       setManaged((current) => ({ ...current, file: null, path: "", url: "", repo: "", name: "" }));
     } catch (error) {
-      setMessage(failureMessage(error));
+      setImportMessage(failureMessage(error));
     } finally {
-      setBusy("");
+      setImportBusy(false);
     }
   }
 
@@ -345,10 +360,14 @@ export function CheckpointImportPanel({
   // is not on screen here, so reading it would let a value the user cannot see decide how their
   // checkpoint is classified. The compile detects it from the bytes, which is the better answer
   // anyway.
+  //
+  // The root id comes from the RENDERED scan, never from `activeRootId`: starting a second root's
+  // scan moves `activeRootId` immediately, and a click landing in that window would otherwise post
+  // the candidate the user is looking at under the other root's id.
   function submitLinked(candidate) {
     return submit({
       body: linkedImportBody({
-        rootId: activeRootId,
+        rootId: scan?.root?.rootId ?? "",
         relativePath: candidate.candidate.relativePath,
         name: candidate.candidate.relativePath.split("/").pop(),
       }),
@@ -359,7 +378,7 @@ export function CheckpointImportPanel({
     event?.preventDefault?.();
     const problem = managedSourceProblem(managed);
     if (problem) {
-      setMessage({ ...NEUTRAL, tone: "error", text: problem });
+      setImportMessage({ ...NEUTRAL, tone: "error", text: problem });
       return;
     }
     return submit({ body: managedImportBody(managed), file: managed.kind === "upload" ? managed.file : null });
@@ -367,7 +386,8 @@ export function CheckpointImportPanel({
 
   const managedSource = MANAGED_SOURCES.find((source) => source.kind === managed.kind) ?? MANAGED_SOURCES[0];
   const credentialHost = MANAGED_SOURCE_CREDENTIAL_HOST[managed.kind] ?? null;
-  const credentialMissing = credentialHost ? !hasPresentCredential(credentials, credentialHost) : false;
+  const credentialsKnown = Array.isArray(credentials);
+  const credentialMissing = credentialHost && credentialsKnown ? !hasPresentCredential(credentials, credentialHost) : false;
 
   return (
     <section aria-labelledby={headingId} className={compact ? "checkpoint-import compact" : "checkpoint-import"}>
@@ -406,12 +426,19 @@ export function CheckpointImportPanel({
             ? renderLinked()
             : renderManaged()}
 
-          <p aria-live="polite" className={toneClass(message.tone)} role="status">
+          <p aria-live="polite" className={`${toneClass(message.tone)} checkpoint-library-status`} role="status">
             {message.text}
           </p>
           {message.detail ? <p className="checkpoint-import-detail">{message.detail}</p> : null}
-          {message.tone === "error" && lastAttempt ? (
-            <button disabled={busy === "import"} onClick={() => submit(lastAttempt)} type="button">
+          <p aria-live="polite" className={`${toneClass(importMessage.tone)} checkpoint-import-status`} role="status">
+            {importMessage.text}
+          </p>
+          {importMessage.detail ? <p className="checkpoint-import-detail">{importMessage.detail}</p> : null}
+          {/* Gated on the IMPORT track's tone: "Try again" re-POSTs `lastAttempt`, so offering it
+              beside a library failure (a relink that was refused, say) would re-send an unrelated
+              import the user has moved on from. */}
+          {importMessage.tone === "error" && lastAttempt ? (
+            <button disabled={importBusy} onClick={() => submit(lastAttempt)} type="button">
               Try again
             </button>
           ) : null}
@@ -592,6 +619,8 @@ export function CheckpointImportPanel({
   }
 
   function renderCandidate(entry) {
+    // Same rule as `submitLinked`: the correction acts on the root whose scan is ON SCREEN.
+    const renderedRootId = scan?.root?.rootId ?? "";
     const candidate = entry.candidate ?? {};
     const correction = linkedCorrection(entry.status);
     const model = entry.status ? modelsByCheckpoint.get(entry.status.checkpointId) : null;
@@ -629,11 +658,11 @@ export function CheckpointImportPanel({
             <p>{correction.summary}</p>
             {correction.detail ? <p className="checkpoint-import-detail">{correction.detail}</p> : null}
             <button
-              disabled={busy === `rescan:${candidate.relativePath}` || busy === `relink:${activeRootId}`}
+              disabled={busy === `rescan:${candidate.relativePath}` || busy === `relink:${renderedRootId}`}
               onClick={() =>
                 correction.action === "relink"
-                  ? relinkRoot(activeRootId)
-                  : rescanCheckpoint(activeRootId, candidate.relativePath)
+                  ? relinkRoot(renderedRootId)
+                  : rescanCheckpoint(renderedRootId, candidate.relativePath)
               }
               type="button"
             >
@@ -642,14 +671,14 @@ export function CheckpointImportPanel({
           </div>
         ) : null}
         {entry.selectable ? (
-          <button disabled={busy === "import"} onClick={() => submitLinked(entry)} type="button">
+          <button disabled={importBusy} onClick={() => submitLinked(entry)} type="button">
             Use this checkpoint
           </button>
         ) : correction ? null : (
           <p className="checkpoint-candidate-unselectable">
             SceneWorks has only read this file’s header. Selecting it reads the whole file first, which is what makes it
             safe to run.
-            <button disabled={busy === "import"} onClick={() => submitLinked(entry)} type="button">
+            <button disabled={importBusy} onClick={() => submitLinked(entry)} type="button">
               Validate and use
             </button>
           </p>
@@ -811,15 +840,29 @@ export function CheckpointImportPanel({
               value={managed.name}
             />
           </label>
-          <button disabled={busy === "import"} type="submit">
-            {busy === "import" ? "Queueing…" : "Queue Import"}
+          <button disabled={importBusy} type="submit">
+            {importBusy ? "Queueing…" : "Queue Import"}
           </button>
         </div>
-        {credentialHost && credentialMissing ? (
-          <p className="inline-note checkpoint-credential-notice">
-            No {credentialHost} credential is stored. A gated or paid download will be refused until you add one in
-            Settings.
-          </p>
+        {/* Only speaks when the caller actually read the keychain (`credentials` is an array).
+            With `null` — a screen that never looked — the panel says nothing rather than telling
+            the user a credential is missing it never went looking for. */}
+        {credentialHost && credentialsKnown ? (
+          credentialMissing ? (
+            <p className="inline-note checkpoint-credential-notice">
+              No {credentialHost} credential is stored. A gated or paid download will be refused until you add one in
+              Settings.
+              {onOpenSettings ? (
+                <button onClick={onOpenSettings} type="button">
+                  Add token in Settings
+                </button>
+              ) : null}
+            </p>
+          ) : (
+            <p className="inline-note checkpoint-credential-notice">
+              A {credentialHost} credential is stored. Gated and paid downloads will use it.
+            </p>
+          )
         ) : null}
       </form>
     );

@@ -8,6 +8,7 @@ import {
   borrowedLicenseAcknowledgmentBlocked,
   licenseAcknowledgmentBlocked,
 } from "../licenseAcknowledgment.js";
+import { modelLoraFamilies } from "../presetUtils.js";
 import { blanketFloorGb, declaredFloorHostGb, installedFloorHostGb } from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -48,6 +49,7 @@ export function SimpleModelManager() {
     createModelImportJob,
     jobAction,
     macCapabilities,
+    refreshData,
     visibleWorkers = [],
   } = useAppContext();
   const { toast, openInAdvanced } = useSimpleUi();
@@ -143,17 +145,33 @@ export function SimpleModelManager() {
 
   const modelImportJobs = useMemo(() => jobs.filter((job) => job.type === "model_import"), [jobs]);
 
+  // The SAME family list the advanced screen's import form offers, derived the same way: from each
+  // model's LoRA-compatibility set rather than its `family` identity, because that is what the
+  // import validator keys off. Without it Simple's Family select was permanently disabled — a
+  // reduced copy of the panel, which is exactly what mounting the shared component is meant to
+  // prevent.
+  const families = useMemo(
+    () => Array.from(new Set(models.flatMap((model) => modelLoraFamilies(model)).filter(Boolean))).sort(),
+    [models],
+  );
+
   return (
     <div className="su-screen su-screen--tight">
       <CheckpointImportPanel
         compact
         completedJobs={modelImportJobs.filter((job) => job.status === "completed")}
+        families={families}
         headingId="simple-checkpoint-import-heading"
         macCapabilities={macCapabilities}
         models={models}
         onCancelJob={jobAction ? (job) => jobAction(job, "cancel") : undefined}
         onImportModel={createModelImportJob}
         onOpenQueue={() => openInAdvanced("Queue")}
+        onOpenSettings={() => openInAdvanced("Settings")}
+        // Simple renders no linked-status badge of its own, but its rows ARE the catalog: a relink
+        // or forget inside the panel changes which models exist and whether they are usable, so the
+        // catalog has to be re-read rather than left showing the pre-relink answer.
+        onRefreshCatalog={refreshData}
         onRetryJob={jobAction ? (job, payload) => jobAction(job, "retry", { body: payload ?? {} }) : undefined}
         pendingJobs={modelImportJobs.filter((job) => !terminalStatuses.has(job.status))}
         token={token}
