@@ -3312,12 +3312,23 @@ pub(super) fn candle_certified_load_spec(
         )
     };
 
-    if !is_mage_engine(engine_id) && !declaration_owned {
+    // Component certification is descriptor-driven, and `media_descriptor` only ever resolves a
+    // registered GENERATOR. Several declaration-owned runtime providers are registered as encoder
+    // contract ROUTES over a sibling generator instead — `z_image_control`,
+    // `z_image_turbo_control`, `qwen_image_edit`, `qwen_image_control` — so no descriptor carries
+    // their id and no component contract exists to certify against. Those routes bind their
+    // co-requisites outside `spec.components`; the exact certification for them is the one this
+    // function has always applied: the primary matches its pinned download AND nothing else is
+    // bound. Reading a missing descriptor as `false` (as this did between the SDXL-derivative
+    // change and sc-20799) reports every such route uncertified, which silently strips its
+    // receipt-priced admission down to resident-only.
+    let descriptor = crate::inference_runtime::media_descriptor(engine_id);
+    if !is_mage_engine(engine_id) && descriptor.is_none() {
         return spec.components.is_empty()
             && (spec.text_encoder.is_none() || spec.validate_prepared_file_pins().is_ok())
             && certify(None, weights_dir);
     }
-    let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
+    let Some(descriptor) = descriptor else {
         return false;
     };
     let expected_component_count = descriptor.required_components.len()
@@ -4895,11 +4906,18 @@ mod candle_image_load_shape_tests {
         apply_candle_image_load_shape(engine_id, spec)
     }
 
+    /// `qwen_image_edit` is deliberately absent from this list. SC-20790 moved its Candle rule off
+    /// `legacy_shaping` onto the declaration-owned shaper, and `apply_candle_image_load_shape`
+    /// consults ONLY legacy rules — so the legacy shaper returning the spec untouched is now the
+    /// correct answer for that route, not a regression. The route is not left uncovered: the arm
+    /// below pins the two facts that make the removal accountable, so a route cannot fall off this
+    /// list by accident. The declaration-owned shape itself is exercised at the qwen edit call
+    /// site, which is the only place that assembles the exact tier/mode/source coordinate the
+    /// declared shaper requires.
     #[test]
     fn adopting_native_image_routes_use_deferred_materialization() {
         for engine_id in [
             "qwen_image",
-            "qwen_image_edit",
             "flux1_schnell",
             "flux1_dev",
             "flux2_dev",
@@ -4916,6 +4934,22 @@ mod candle_image_load_shape_tests {
                 gen_core::LoadShape::DeferredMaterialization
             );
         }
+        // Qwen edit's own accounting. Note that being declaration-owned is NOT what excludes it —
+        // several routes above (the Mage six, `flux2_dev`) carry a declared rule alongside their
+        // legacy one and still shape here. What excludes qwen edit is that its legacy Candle rule
+        // was REPLACED rather than supplemented, so the legacy shaper finds nothing and correctly
+        // returns the spec untouched; its production call site reaches the declared shaper instead.
+        assert!(
+            crate::memory_route_registry::candle_declaration_owns_load_shape("qwen_image_edit"),
+            "if qwen edit ever returns to legacy shaping it belongs back in the list above"
+        );
+        assert_eq!(
+            legacy_shape("qwen_image_edit", fixture_spec()).load_shape,
+            fixture_spec().load_shape,
+            "no legacy Candle rule remains for qwen edit, so the legacy shaper is a no-op for it"
+        );
+        assert!(include_str!("qwen_edit_candle.rs")
+            .contains("apply_candle_qwen_load_shape(\n            QWEN_EDIT_PROVIDER_ID,"));
     }
 
     #[test]

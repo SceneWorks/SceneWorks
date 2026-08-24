@@ -2622,6 +2622,15 @@ mod tests {
         .clone();
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")));
         let contract = kolors_registered_probe_contract("q4", true, true);
+        // The budget that separates the two rungs, recomputed from the fixture rather than typed.
+        // Staged floor: `sequentialPeakGb` 15 + 2 `HEADROOM_GB` = 17, plus the receipt's exact
+        // auxiliaries (adapter 1 + PiD 3) = 21 GiB, widened by the 4% candle estimate margin to
+        // 21.84. Resident: the declared 30 GiB peak plus the same 4 GiB of auxiliaries = 34 GiB,
+        // and it is CURRENT evidence, so it is never widened. The selector subtracts a 2 GiB
+        // reserve, so a 25 GiB card leaves 23 GiB effective — above the staged floor and below the
+        // resident peak. At the 22 GiB this test was written with, NEITHER rung fits and the
+        // evaluation fails closed, which is what made the staged assertions unreachable.
+        let free_gb = 25.0;
         let evaluation = evaluate_shared_image_inner(
             "kolors",
             "kolors",
@@ -2644,7 +2653,7 @@ mod tests {
             false,
             false,
             Some(VramBudget {
-                free_gb: 22.0,
+                free_gb,
                 total_gb: 48.0,
             }),
             Some(30.0),
@@ -2687,7 +2696,7 @@ mod tests {
             false,
             false,
             Some(VramBudget {
-                free_gb: 22.0,
+                free_gb,
                 total_gb: 48.0,
             }),
             Some(30.0),
@@ -2697,7 +2706,13 @@ mod tests {
             Some(kolors_registered_probe_contract("q4", false, false)),
             None,
         );
-        assert!(crossed_pid.is_err());
+        // Message-checked, not merely `is_err`: at a budget where nothing fits, EVERY arm of this
+        // test errors, and a bare `is_err` would pass without the crossing ever being detected.
+        assert!(crossed_pid
+            .err()
+            .expect("a PiD request against a PiD-free receipt must fail")
+            .to_string()
+            .contains("crossed Kolors physical receipts"));
 
         let crossed_adapters = evaluate_shared_image_inner(
             "kolors",
@@ -2721,7 +2736,7 @@ mod tests {
             false,
             false,
             Some(VramBudget {
-                free_gb: 22.0,
+                free_gb,
                 total_gb: 48.0,
             }),
             Some(30.0),
@@ -2731,7 +2746,11 @@ mod tests {
             Some(kolors_registered_probe_contract("q4", false, false)),
             None,
         );
-        assert!(crossed_adapters.is_err());
+        assert!(crossed_adapters
+            .err()
+            .expect("a declared public adapter overlay with no adapter receipt must fail")
+            .to_string()
+            .contains("public ordered-adapter identity crossed its exact provider receipt"));
     }
 
     #[test]
@@ -2865,16 +2884,60 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        let budget = Some(VramBudget {
-            free_gb: 40.0,
-            total_gb: 48.0,
-        });
         // The declared resident row and the provider receipt describe the SAME physical tier. Both
         // move together, so a tier is a real axis of this coverage rather than a label on one set
         // of bytes: see `kolors_tier_gib`.
         let tier_resident_gb = |tier: &str| {
             let (conditioning, transformer, decoder) = kolors_tier_gib(tier);
             (conditioning + transformer + decoder) as f64 + 4.0
+        };
+        // The budget that makes STAGED the selection, recomputed PER ARM from that arm's own
+        // receipt rather than fixed for the whole sweep. `select_strategy` walks
+        // `MemoryStrategy::ALL` in order and returns the FIRST rung whose admitted peak fits;
+        // Resident is first. A single roomy card (the 40 GiB this test was written with) clears
+        // every tier's resident peak, so every cell below selected Resident and no staged surface
+        // was covered at all.
+        //
+        // This manifest declares no `sequentialPeakGb`, so the staged floor is the receipt's
+        // largest single phase + `HEADROOM_GB`, plus the exact auxiliaries, widened by the 4%
+        // candle estimate margin (an estimate floor is never current evidence). The resident peak
+        // is the declared row — clamped up to the receipt's own base + headroom — plus the same
+        // auxiliaries, and IS current evidence, so it is never widened. The selector subtracts a
+        // 2 GiB reserve from the card before comparing. The assertion inside keeps the arm honest:
+        // if a fixture change ever lifts the staged floor past the resident peak, this fails loudly
+        // instead of quietly grading Resident.
+        let headroom_bytes = (crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64;
+        let staged_budget = |contract: &gen_core::MemoryProviderContract, tier: &str| {
+            let facts = contract.asset_facts;
+            let peak_gb = |base: u64| {
+                contract
+                    .predicted_peak_from_base(base)
+                    .predicted_peak_bytes() as f64
+                    / BYTES_PER_GIB
+            };
+            let staged_gb = peak_gb(
+                facts
+                    .conditioning_bytes
+                    .max(facts.transformer_bytes)
+                    .max(facts.decoder_bytes)
+                    .saturating_add(headroom_bytes),
+            );
+            let resident_gb = peak_gb(
+                ((tier_resident_gb(tier) * BYTES_PER_GIB).ceil() as u64)
+                    .max(facts.base_bytes.saturating_add(headroom_bytes)),
+            );
+            let free_gb = staged_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+                + crate::vram_gate::HEADROOM_GB
+                + 0.5;
+            assert!(
+                free_gb - crate::vram_gate::HEADROOM_GB < resident_gb,
+                "{tier}: a budget of {free_gb} also clears the resident peak {resident_gb}; the \
+                 staged assertion below would be vacuous"
+            );
+            Some(VramBudget {
+                free_gb,
+                total_gb: 96.0,
+            })
         };
         let geometries = [(768, 768), (1024, 1024), (1280, 768), (768, 1280)];
         let mut ip_peaks_by_tier: Vec<(&str, u64)> = Vec::new();
@@ -2895,6 +2958,8 @@ mod tests {
             );
             for (width, height) in geometries {
                 for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+                    let ip_contract =
+                        kolors_bespoke_probe_contract("candle_kolors_ipadapter", tier, false);
                     let ip = evaluate_shared_bespoke_image(
                         "candle_kolors_ipadapter",
                         "kolors",
@@ -2914,11 +2979,11 @@ mod tests {
                         true,
                         false,
                         false,
-                        budget,
+                        staged_budget(&ip_contract, tier),
                         Some(tier_resident_gb(tier)),
                         0,
                         cache_state,
-                        kolors_bespoke_probe_contract("candle_kolors_ipadapter", tier, false),
+                        ip_contract.clone(),
                         KOLORS_REQUEST_EVIDENCE_REVISION,
                     )
                     .unwrap()
@@ -2937,6 +3002,8 @@ mod tests {
                         ("character_image", false),
                         ("text_to_image", true),
                     ] {
+                        let control_contract =
+                            kolors_bespoke_probe_contract("candle_kolors_control", tier, use_pid);
                         let control = evaluate_shared_bespoke_image(
                             "candle_kolors_control",
                             "kolors",
@@ -2960,11 +3027,11 @@ mod tests {
                             false,
                             use_pid,
                             false,
-                            budget,
+                            staged_budget(&control_contract, tier),
                             Some(tier_resident_gb(tier)),
                             0,
                             cache_state,
-                            kolors_bespoke_probe_contract("candle_kolors_control", tier, use_pid),
+                            control_contract.clone(),
                             KOLORS_REQUEST_EVIDENCE_REVISION,
                         )
                         .unwrap()
@@ -2977,6 +3044,47 @@ mod tests {
                 }
             }
         }
+        // The control arm for every staged assertion above: the SAME cell on a roomy card selects
+        // Resident. Without it, a staged verdict could be an artifact of the fixture rather than
+        // of the budget, and a change that made staged unconditionally selectable would pass.
+        let roomy = evaluate_shared_bespoke_image(
+            "candle_kolors_ipadapter",
+            "kolors",
+            &LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")))
+                .with_ip_adapter(WeightsSource::Dir(PathBuf::from("kolors-ip"))),
+            true,
+            &manifest,
+            "q4",
+            "character_image",
+            Some("identity"),
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 96.0,
+                total_gb: 96.0,
+            }),
+            Some(tier_resident_gb("q4")),
+            0,
+            MemoryCacheState::Cold,
+            kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
+            KOLORS_REQUEST_EVIDENCE_REVISION,
+        )
+        .unwrap()
+        .expect("a roomy card still admits");
+        assert_eq!(
+            roomy.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the staged verdicts above must be the BUDGET's doing, not the fixture's"
+        );
+
         // The tier axis has to REACH the admitted number. Before sc-20799 the probe contract
         // returned identical bytes for q4, q8 and bf16 and the declared row was 63.7 for all
         // three, so every tier iteration above admitted the same peak and no tier-keyed mutation
@@ -3226,7 +3334,9 @@ mod tests {
         let crossed = evaluate(22.0, Some("lora"), crossed_facts)
             .err()
             .expect("typed adapter/PiD bytes must equal the aggregate footprint");
-        assert!(crossed.to_string().contains("materialized asset facts"));
+        assert!(crossed
+            .to_string()
+            .contains("materialized Chroma asset facts"));
     }
 
     #[test]
@@ -3727,7 +3837,19 @@ mod tests {
             hires.context.selection.strategy,
             MemoryStrategy::StagedResidency
         );
-        assert_eq!(hires.context.predicted_peak_bytes, gib(50));
+        // Derived, not pinned. The declared staged row is `sequentialPeakGb` 11 + the 2 GiB
+        // `HEADROOM_GB` that `predicted_sequential_peak_gb` already folds in = 13 GiB; the
+        // Hires envelope scales it by request pixels over `vramMeasuredPixels` (2048² / 1024² = 4)
+        // = 52 GiB; and the receipt's exact auxiliaries — user adapter 2 + TurboTime 1 + PiD 3 —
+        // add 6 GiB on top. Writing 50 here (the same sum with the headroom forgotten) is the slip
+        // this derivation exists to prevent.
+        let staged_row_gib = 11 + crate::vram_gate::HEADROOM_GB as u64;
+        let hires_scale = (2048 * 2048) / 1_048_576;
+        let auxiliaries_gib = 2 + 1 + 3;
+        assert_eq!(
+            hires.context.predicted_peak_bytes,
+            gib(staged_row_gib * hires_scale + auxiliaries_gib)
+        );
 
         assert!(evaluate(20.0, contract.clone()).is_err());
         assert!(evaluate(
@@ -5052,7 +5174,14 @@ mod tests {
             free_gb - crate::vram_gate::HEADROOM_GB < 8.0,
             "the budget must stay below the resident estimate to discriminate"
         );
-        let evaluation = evaluate_shared_bespoke_image(
+        // Driven through `evaluate_shared_image_inner`, which is the entry point `z_image_turbo`
+        // actually reaches in production and the one the sibling request-axis probe already uses.
+        // The bespoke wrapper is now an allowlist over the four registered bespoke authorities
+        // (`pulid_flux`, the two Kolors routes, `sdxl`); `z_image_turbo` is not one of them, so it
+        // refuses there before the ladder runs. The inner call preserves everything this arm
+        // grades: the same probe contract is injected, and the evidence revision resolves to
+        // Z-Image's own rather than being overridden.
+        let evaluation = evaluate_shared_image_inner(
             "z_image_turbo",
             "z_image_turbo",
             &spec,
@@ -5060,6 +5189,7 @@ mod tests {
             &manifest,
             "q4",
             "text_to_image",
+            None,
             None,
             MemoryGeometry {
                 width: 1024,
@@ -5071,6 +5201,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(VramBudget {
                 free_gb,
                 total_gb: 96.0,
@@ -5078,8 +5209,9 @@ mod tests {
             Some(8.0),
             0,
             MemoryCacheState::Cold,
-            composition_probe_contract(false, false),
-            DECLARATION_REQUEST_EVIDENCE_REVISION,
+            None,
+            Some(composition_probe_contract(false, false)),
+            None,
         )
         .expect("staging-free bespoke evaluation");
         assert!(
