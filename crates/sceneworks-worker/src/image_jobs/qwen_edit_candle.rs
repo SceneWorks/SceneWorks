@@ -519,7 +519,7 @@ async fn ensure_qwen_lightning_lora_cached(
     }
     let mut progress = crate::downloads::DownloadProgress::new(
         repo,
-        crate::directory_size(&repo_dir.join("blobs")).await,
+        0,
         snapshot.total_bytes(),
         crate::progress_report_interval(settings),
     );

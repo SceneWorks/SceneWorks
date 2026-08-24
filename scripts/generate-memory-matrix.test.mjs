@@ -3216,8 +3216,12 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // sc-19721 moved the pin onto the inference sc-17137 feature head; the 2026-08-19 main sync
   // re-stamped it to main's sc-20523 pin; sc-18650 (the epic-final bump) re-stamped it to the
   // inference-main merge of that head (f17c82544, tree-identical to 2881696cd); the true epic-final
-  // bump re-stamped it again to the #726 inference-main merge (4013049764); sc-20644 re-stamped it
-  // to the inference sc-20398 feature head (bdca0edf5), the epic's mid-epic tracking pin. The
+  // bump re-stamped it again to the #726 inference-main merge (4013049764), then epic 20738's
+  // final pin advanced it to the feature train's inference-main merge (b646a6f89), then the LTX
+  // GroupNorm broadcast correction advanced main to 31e02510a. sc-20644 re-stamped THIS branch to
+  // the inference sc-20398 feature head (bdca0edf5), the epic's mid-epic tracking pin, and the
+  // 2026-08-24 main sync deliberately kept it: a feature branch tracks its own inference feature
+  // head, and main's 31e02510a is adopted at the epic's terminal pin bump, not by a sync. The
   // literal is re-stamped rather than relaxed to a shape check: the assertion below only means
   // something while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists
   // to make.

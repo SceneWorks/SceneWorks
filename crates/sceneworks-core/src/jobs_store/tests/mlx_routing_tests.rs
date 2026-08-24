@@ -1,8 +1,9 @@
 use super::{
     flux2_mlx_eligible, flux_mlx_eligible, image_job_is_mlx_eligible, image_request_mlx_eligible,
     instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_mlx_eligible,
-    sdxl_mlx_eligible, video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
-    z_image_mlx_eligible, JobSnapshot, WorkerSnapshot, CANDLE_VIDEO_ROUTED_MODELS,
+    realvisxl_lightning_mlx_lane, sdxl_control_mlx_candidate, sdxl_mlx_eligible, sdxl_mlx_lane,
+    video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
+    z_image_mlx_eligible, JobSnapshot, MlxSdxlLane, WorkerSnapshot, CANDLE_VIDEO_ROUTED_MODELS,
     MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use serde_json::{json, Map, Value};
@@ -707,6 +708,68 @@ fn sdxl_eligible_for_txt2img_edit_reference_lokr_and_lycoris() {
         "mode": "edit_image",
         "loras": [{ "networkType": "lycoris" }]
     }))));
+
+    let pose = object(json!({ "advanced": { "poses": [{}] } }));
+    assert!(sdxl_control_mlx_candidate(&pose));
+    assert_eq!(sdxl_mlx_lane(&pose), Some(MlxSdxlLane::Control));
+    assert_eq!(
+        sdxl_mlx_lane(&object(json!({ "prompt": "plain" }))),
+        Some(MlxSdxlLane::Generic)
+    );
+    // Material malformed carriers still select the control lane so the worker can reject them
+    // instead of typed parsing erasing them into generic text-to-image.
+    assert_eq!(
+        sdxl_mlx_lane(&object(json!({ "advanced": { "poses": "bad" } }))),
+        Some(MlxSdxlLane::Control)
+    );
+    for advanced in [
+        json!({ "controlMode": "pose" }),
+        json!({ "controlMode": "canny" }),
+        json!({ "controlMode": false }),
+        json!({ "controlImage": "asset" }),
+        json!({ "controlWeights": {} }),
+    ] {
+        assert_eq!(
+            sdxl_mlx_lane(&object(json!({ "advanced": advanced }))),
+            Some(MlxSdxlLane::Control),
+            "explicit control intent must reach the rejecting control handler"
+        );
+    }
+    assert_eq!(
+        sdxl_mlx_lane(&object(json!({ "advanced": { "controlMode": "  " } }))),
+        Some(MlxSdxlLane::Generic)
+    );
+}
+
+#[test]
+fn realvisxl_lightning_pose_is_owned_by_the_named_fail_closed_control_lane() {
+    let pose = object(json!({ "advanced": { "poses": [{}] } }));
+    assert_eq!(
+        realvisxl_lightning_mlx_lane(&pose),
+        Some(MlxSdxlLane::Control)
+    );
+    assert!(image_request_mlx_eligible("realvisxl_lightning", &pose));
+
+    let conflict = object(json!({
+        "mode": "edit_image",
+        "sourceAssetId": "source",
+        "advanced": { "poses": [{}] }
+    }));
+    assert_eq!(
+        realvisxl_lightning_mlx_lane(&conflict),
+        Some(MlxSdxlLane::Control),
+        "the control handler must own and reject a pose/edit conflict"
+    );
+
+    assert_eq!(
+        realvisxl_lightning_mlx_lane(&object(json!({ "prompt": "plain" }))),
+        Some(MlxSdxlLane::Generic)
+    );
+    assert!(realvisxl_lightning_mlx_lane(&object(json!({
+        "mode": "edit_image",
+        "sourceAssetId": "source"
+    })))
+    .is_none());
 }
 
 #[test]

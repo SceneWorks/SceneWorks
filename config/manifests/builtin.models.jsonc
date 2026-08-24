@@ -5062,6 +5062,9 @@
             "overlays": ["none"]
           }
         },
+        // Terminal artifact 9492288293 cells 9-10 independently proved q4=14.388 GiB and
+        // q8=21.746 GiB at 512x512. Keep the older, larger 1024x1024 admission envelope below;
+        // the terminal receipt promotes the exact tiers without weakening that conservative guard.
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
@@ -5318,6 +5321,9 @@
             "overlays": ["none", "control", "identity"]
           }
         },
+        // Terminal artifact 9492288293 cells 7-8 independently proved q4=11.285 GiB and
+        // q8=23.195 GiB at 512x512. The existing measured 1024x1024 envelope remains the safer
+        // admission authority and therefore intentionally dominates these lower terminal peaks.
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
@@ -13053,6 +13059,24 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Generic SDXL OpenPose ControlNet (sc-20747): an OPTIONAL on-demand component shared by
+        // the exact five accepted SDXL-family pose-control backbones. Soft means a
+        // missing control checkpoint never makes ordinary text/image generation look uninstalled;
+        // Model Manager still provisions or repairs it alongside this base. Every base repeats this
+        // identical repo/revision/file authority, while the shared HF cache stores the bytes once.
+        // The pose route resolves only this immutable local snapshot and never downloads at render.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -13978,6 +14002,12 @@
       },
       "ui": {
         "label": "Stable Diffusion XL",
+        // Generic SDXL OpenPose ControlNet. Pose-only on both native backends; canny/depth remain
+        // hidden until a separately pinned and accepted checkpoint exists for those modes.
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "Stability AI Stable Diffusion XL base 1.0 — the widely-supported open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP text encoders; ~6.9GB fp16, real CFG + negative prompt. Recommended ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "pid": { "checkpointId": "pid_sdxl" },
@@ -14087,6 +14117,20 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same soft, untiered OpenPose component as `sdxl`. Model Manager provisions the exact
+        // shared snapshot with this base; normal generation stays installed when it is absent.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -14938,6 +14982,10 @@
       },
       "ui": {
         "label": "RealVisXL (photoreal SDXL)",
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL — the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable for general photoreal work. openrail++ (commercial use OK, ungated). Drop-in SDXL: same UNet, same dual-CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "pid": { "checkpointId": "pid_sdxl" },
@@ -14963,18 +15011,19 @@
       // renders photoreal images in ~5 steps with CFG off, ~6x faster than the 30-step
       // base. Same SDXL UNet / dual-CLIP / VAE, so it runs on the shared `sdxl` engine;
       // the worker pins the engine's `lightning` (Euler-trailing) few-step sampler — no
-      // acceleration LoRA, since the distillation lives in the checkpoint itself. txt2img
-      // ONLY: the few-step accel sampler is engine-incompatible with img2img / reference /
-      // mask conditioning, so edit / inpaint / reference / detail stay on the 30-step base
-      // `realvisxl`. openrail++ (commercial use OK, ungated), same license as the base.
+      // acceleration LoRA, since the distillation lives in the checkpoint itself. The regular
+      // edit / inpaint / reference / detail lanes stay on the 30-step `realvisxl`; the one
+      // accepted conditioned shape is text-to-image with the shared SDXL OpenPose ControlNet.
+      // openrail++ (commercial use OK, ungated), same license as the base.
       "capabilities": ["text_to_image"],
       // Cross-platform (sc-7176): the few-step `lightning` (Euler-trailing, CFG-off) sampler now runs on
       // BOTH the macOS mlx-gen `sdxl` engine (sc-6075) AND the Windows/CUDA candle `sdxl` engine
       // (candle-gen #121 / sc-6128). The worker forces `sampler="lightning"` for this id on both backends
       // (MLX `generate_stream` + candle `generate_candle_stream`), so the distilled checkpoint renders at
-      // its native ~5-step schedule everywhere — no wrong 30-step result. txt2img only on candle; its
-      // edit / reference / mask / pose shapes fall back to the Python torch worker. Was `macOnly: true`
-      // until the candle lightning lane landed + was GPU-validated (~5-step render) on the RTX PRO 6000.
+      // its native ~5-step schedule everywhere — no wrong 30-step result. Plain edit / reference / mask
+      // shapes remain unsupported, while the shared OpenPose ControlNet is accepted on both native
+      // providers. Was `macOnly: true` until the candle lightning lane landed + was GPU-validated
+      // (~5-step render) on the RTX PRO 6000.
       // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
       // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
       // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
@@ -15059,6 +15108,20 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same soft, untiered OpenPose component as `sdxl`. Both native providers accept the
+        // CFG-free Lightning ControlNet route at the pinned inference revision.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -15892,6 +15955,10 @@
       },
       "ui": {
         "label": "RealVisXL Lightning (fast photoreal SDXL)",
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. A standalone SDXL-Lightning checkpoint (openrail++, commercial-OK, ungated) tuned for the same photoreal look as RealVisXL_V5.0. Runs CFG-free by default (the negative prompt is inert unless you raise guidance toward 2.0). Text-to-image only; for edits, reference identity, masked inpaint, or detail-refine use the standard RealVisXL. Accepts sdxl-family LoRAs.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_sdxl" },
@@ -15925,26 +15992,26 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
-          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+          "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 3911461825,
-          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 3911462020,
+          "footprint": { "diskSizeBytes": 3911462020, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
-          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+          "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 5385646417,
-          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 5385646612,
+          "footprint": { "diskSizeBytes": 5385646612, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v1-mlx",
-          "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+          "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498305,
@@ -15985,6 +16052,21 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Terminal cells 18-19 prove the shared q4 SDXL OpenPose composition on the current packed
+        // Illustrious authorities. The component is soft and cross-platform: ordinary base-model
+        // generation stays installed when it is absent, while pose requests resolve it exactly.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -16044,9 +16126,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16105,7 +16187,7 @@
                         "observedError": 34
                       }
                     ],
-                    "productionEvidenceSha256": "6d8631e9e2245af8657763ecd06fec55ef42f3c39ae0b48652aed18073bf7b03",
+                    "productionEvidenceSha256": "3827893d470092ba2a2f4193485570d2463bf6441fe5a91bafa82c215816ccaf",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16119,9 +16201,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "13a01bf98edd98f8639e3a16f8e180d1eacf1bb808189fa28208a1d098fd9c19",
                     "mode": "text_to_image",
@@ -16180,7 +16262,7 @@
                         "observedError": 33
                       }
                     ],
-                    "productionEvidenceSha256": "6e124d945ee3f20410fc325c80529b93038cdc2310c8fe205ba43eec7307e680",
+                    "productionEvidenceSha256": "9151ad0a77c4d23efdf2c50a3f01cbbe3f15ec7c499389b57b29ab561a1c8f52",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16194,9 +16276,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16255,7 +16337,7 @@
                         "observedError": 16
                       }
                     ],
-                    "productionEvidenceSha256": "3b20cd8dfb59beb48e08dd331d6b636e9adaa174f73a883e90e14bb135f7e451",
+                    "productionEvidenceSha256": "04b591dae6c9a889bbf0e096f499dfa407f8aa34528eb152269825f8835c3220",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16269,9 +16351,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16330,7 +16412,7 @@
                         "observedError": 24
                       }
                     ],
-                    "productionEvidenceSha256": "c2b27a0b27fb2074355e212206685a6e5c4eaf2eea69b7dcd5f3b726e0411d9f",
+                    "productionEvidenceSha256": "c719fb49d8b99373d9359852d0a0804c5717f81a5667b29081aa48b2595b28c9",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16344,9 +16426,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16405,7 +16487,7 @@
                         "observedError": 20
                       }
                     ],
-                    "productionEvidenceSha256": "9a423dfbcfd801414e66bff26fbb7fe79f0629b73d319f1cf1a6af8556053709",
+                    "productionEvidenceSha256": "26bc412f7d94d7f3b10479806cf7ec0c8115d76a4001b82812e809f09434eb6b",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16419,9 +16501,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "13a01bf98edd98f8639e3a16f8e180d1eacf1bb808189fa28208a1d098fd9c19",
                     "mode": "text_to_image",
@@ -16480,7 +16562,7 @@
                         "observedError": 17
                       }
                     ],
-                    "productionEvidenceSha256": "4ec3b5dfb62fdf91574b42dc88cf93eb68c2083a93ea5cc1a038618835d14708",
+                    "productionEvidenceSha256": "4ef83282f936f3139b932a2522ed98f1cd8e04cf5fc48565524a3309c5b8e5ff",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16494,9 +16576,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16555,7 +16637,7 @@
                         "observedError": 21
                       }
                     ],
-                    "productionEvidenceSha256": "906484350620946d7ad552e9e6d14fde61b4d0700f9d9c725b2092098848eceb",
+                    "productionEvidenceSha256": "22cb6a4569088f20b71c864b339ef83d94d1d67590a6a182f2cb3f31029b0e1f",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16569,9 +16651,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "49d6f9996d237a14412eab14ce0816f04f605fd3ca5963fb8a812e6c90309ef5",
                     "mode": "text_to_image",
@@ -16630,7 +16712,7 @@
                         "observedError": 33
                       }
                     ],
-                    "productionEvidenceSha256": "e4470042c6fc21e122ddc482da5dcda2befaa5b639a3a6c745169735a18534da",
+                    "productionEvidenceSha256": "a0541564cc9b434d38126e21e59af4bbbc8c514458287ddcea59926fd6c0b495",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16644,9 +16726,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -16705,7 +16787,7 @@
                         "observedError": 41
                       }
                     ],
-                    "productionEvidenceSha256": "035f377f1bac51ab5f1f55f3f2cee3f79ea0d394696a6cc0e050c7d0e318a93d",
+                    "productionEvidenceSha256": "49c5c1c0ed496b715652532f1a3c638d168e97828cd733aee84c18974c31dc15",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16719,9 +16801,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v1-mlx",
-                      "revision": "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+                      "revision": "778c3f02b7703b0c2755d0c0447592897193c6b5",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q4"
                     },
                     "implementationFingerprint": "45724d4d8dd1f64ba3292a3e35ea3c9de9dd4aa0db2e78761ad8419d87e66a1d",
                     "mode": "text_to_image",
@@ -16780,7 +16862,7 @@
                         "observedError": 42
                       }
                     ],
-                    "productionEvidenceSha256": "f95ee8374983026c33b17e0ba3def3183bf542fc1454a5565666ddbf33017c99",
+                    "productionEvidenceSha256": "7752b84d0fcebeb6eb53221b4a1a4a39792302f844975a1bf763410fc2ca3bca",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -16815,6 +16897,10 @@
       },
       "ui": {
         "label": "Illustrious-XL v1.0 (anime)",
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
         "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
@@ -16851,26 +16937,26 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
-          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+          "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 3911461501,
-          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 3911461696,
+          "footprint": { "diskSizeBytes": 3911461696, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
-          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+          "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 5385646137,
-          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968, "measuredPixels": 1048576 }
+          "estimatedSizeBytes": 5385646332,
+          "footprint": { "diskSizeBytes": 5385646332, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968, "measuredPixels": 1048576 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/illustrious-xl-v2-mlx",
-          "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+          "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498177,
@@ -16911,6 +16997,19 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same immutable OpenPose component and q4-only provider contract as Illustrious v1.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -16972,9 +17071,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17033,7 +17132,7 @@
                         "observedError": 42
                       }
                     ],
-                    "productionEvidenceSha256": "ed40ab4200122d84dff360e1d71c33f4dfc90011b54a2cc38aa1f03376fe907c",
+                    "productionEvidenceSha256": "c173ac7edc8b5a6b49c1c930d621d63376b8ac8fbc3740a6d9efc8b2c10c878d",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17047,9 +17146,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17108,7 +17207,7 @@
                         "observedError": 29
                       }
                     ],
-                    "productionEvidenceSha256": "87a54682cf20b06c49cc1cb91fca967ffeb7134a2ad3ffa2fdab641c6ca1a510",
+                    "productionEvidenceSha256": "0a4d102d08203f94ff84063cdc0474bbc50f29edb4add7ebecd5a7e7477014fa",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17122,9 +17221,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17183,7 +17282,7 @@
                         "observedError": 15
                       }
                     ],
-                    "productionEvidenceSha256": "d202d51c8ccbed6d36624d13ccf57ca41e5f5a4c5e9ac7fe0ac07003c94c127f",
+                    "productionEvidenceSha256": "0da0697e2cf9e9b1d80bff08dc83a75103100a21c6ca9f62ac7313c317253497",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17197,9 +17296,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17258,7 +17357,7 @@
                         "observedError": 32
                       }
                     ],
-                    "productionEvidenceSha256": "fd38620ca1441589f4c4fbcb869240b642206b7dd110dca0e404faae397a6220",
+                    "productionEvidenceSha256": "4bb51aab6b0c9a6a1c5256f2680253707496c2ed24c4a40ef8878d7aa3272367",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17272,9 +17371,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "4bb1345acfa410da3fed6601c0cdb9448a7cf88c4622175bcc39fac15d370fce",
                     "mode": "text_to_image",
@@ -17333,7 +17432,7 @@
                         "observedError": 20
                       }
                     ],
-                    "productionEvidenceSha256": "b71c340bb7d9c5b2ab59f86597643d79a9d0326b0f0d481c1955941559f9ac9e",
+                    "productionEvidenceSha256": "83bacd2dfa6062521e0cbe4b3b27caa534d3e55088d96c1c9a65b18a072d94c3",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17347,9 +17446,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17408,7 +17507,7 @@
                         "observedError": 41
                       }
                     ],
-                    "productionEvidenceSha256": "c3a9e49f67671d29e502574ef9d8b6046cf654fd890105a4f0a9ee7f35930fda",
+                    "productionEvidenceSha256": "a4a87241ad2f11ddf4d27a10a62371fd2d02792fd0a51b347b3dce8a51cd5db4",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17422,9 +17521,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17483,7 +17582,7 @@
                         "observedError": 26
                       }
                     ],
-                    "productionEvidenceSha256": "714f0d60515684d8d9dc783d850511d401e1ff4e0427e40e714af98723e623b9",
+                    "productionEvidenceSha256": "4ccdc0dddab3bde96d131f65d5adae80ee0115b24445ea7d5f21b689d8ecf338",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17497,9 +17596,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17558,7 +17657,7 @@
                         "observedError": 28
                       }
                     ],
-                    "productionEvidenceSha256": "475bc372440988b61f8f0dccfdea9601a8b00d6a9482db68e1845b0eb2892082",
+                    "productionEvidenceSha256": "e9cd4a61c300adf3f07036c08b71ef8a2426256f818a916d3c036b7ed2d9603e",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17572,9 +17671,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "46d56e6cc47cfdbfdc76d7b4fe07d3a72994f18a3dfd090ec58701259125ea4a",
                     "mode": "text_to_image",
@@ -17633,7 +17732,7 @@
                         "observedError": 34
                       }
                     ],
-                    "productionEvidenceSha256": "53db74509dc1c3b36087b9d9b64e15871951ebff8b9a0ef60312f4cd12e2b386",
+                    "productionEvidenceSha256": "8749c2190c3b4350eefc347154d69a631cd2bf8497b17298655c62a10a5db976",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17647,9 +17746,9 @@
                     "loadShape": "deferred_materialization",
                     "artifact": {
                       "repository": "SceneWorks/illustrious-xl-v2-mlx",
-                      "revision": "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+                      "revision": "672e9851ede4dc856fa945649b6691975c9d74a3",
                       "variant": "q4",
-                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q4"
+                      "fingerprint": "SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q4"
                     },
                     "implementationFingerprint": "0596c5e44c0c016d191ca721bd86b64f2b45562b65aae5c2668b120510a556ae",
                     "mode": "text_to_image",
@@ -17708,7 +17807,7 @@
                         "observedError": 29
                       }
                     ],
-                    "productionEvidenceSha256": "ba9340a5f5ac7cc17b32aa12e6f7c9569b42e4e118036d44fdb61f4431f79748",
+                    "productionEvidenceSha256": "8217f9f2fe6308eaaed43a6e63218e1aa64c52d935ff5de953819debda84aadf",
                     "disposition": {
                       "kind": "admitted"
                     }
@@ -17743,6 +17842,10 @@
       },
       "ui": {
         "label": "Illustrious-XL v2.0 (anime)",
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
         "recommendedFor": ["text_to_image"],
         // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
@@ -18280,7 +18383,7 @@
           "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 29728720716,
           "footprint": { "diskSizeBytes": 29728720716, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -19872,7 +19975,7 @@
     // ViT-H/14 image tower; packed-token conditioning with auto-generated color-coded
     // segmentation masks (the worker paints them from native SAM3 — no user masks).
     // Native MLX on macOS and native Candle on NVIDIA Windows/Linux (engine id "scail2_14b").
-    // Both backends share the dense bf16 tier; q4/q8 remain MLX-only. Distributed the
+    // The verified q4/q8/bf16 package tiers are shared by both native backends. Distributed the
     // SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
     // published as `SceneWorks/scail2-mlx` (sc-5445), downloaded on first use. This entry
     // covers the standalone `animate_character` mode (sc-5447 /
@@ -19896,9 +19999,10 @@
         // fully self-contained (the DiT `dit.safetensors` at the tier's precision + the shared dense
         // Wan2.1 z16 VAE + UMT5 T5 encoder + open-CLIP ViT-H/14 visual tower + tokenizer + config.json
         // with the quant baked in), so the dense VAE/T5/CLIP repeat per tier (epic decision #3: storage
-        // is a non-issue; keeps the load path a single self-contained dir with no engine change). The
-        // worker fetches a toggled-but-not-downloaded tier on demand (ensure_scail2_tier_present,
-        // video_jobs.rs), so advanced.mlxQuantize works without a pre-pick. The legacy flat root files
+        // is a non-issue; keeps the load path a single self-contained dir with no engine change). On
+        // macOS the worker fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_scail2_tier_present, video_jobs.rs); off-Mac Model Manager provisions the selected
+        // exact variant. The legacy flat root files
         // (the shipped Q4 snapshot + the DPO LoRA pickle) stay hosted for already-shipped workers that
         // resolve the repo root; a new worker only ever resolves the tier subdirs.
         // estimatedSizeBytes/footprint are the exact hosted subdir sizes measured post-build.
@@ -19909,7 +20013,7 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           // The dense T5 (~11.4 GB) + open-CLIP tower (~2.5 GB) are shared bf16 in every tier, so the
           // Q4 DiT (~9.6 GB) makes this only modestly smaller than q8/bf16 (same shape as SD3.5).
           "estimatedSizeBytes": 23993093306,
@@ -19921,7 +20025,7 @@
           "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 32067131269,
           "footprint": { "diskSizeBytes": 32067131269, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -20007,24 +20111,26 @@
           "schedulers": ["default"]
         }
       },
-      // Exact shared-package Candle/CUDA evidence (sc-18473): inference
+      // Exact shared-package Candle/CUDA evidence. The bf16 row is the sc-18473 production capture;
+      // epic 20738 terminal artifact 9492288293 adds q4/q8 at the identical 832x480 output geometry.
+      // q4 uses the larger of its ordinary and six-reference cells (62,730 MiB); q8 peaked at
+      // 66,486 MiB. The default q4 blanket is ceil(61.260 + the shared 2 GiB reserve) = 64.
+      // The earlier bf16 evidence used inference
       // 3174984b20334bb029170e367be234de0b3f8753 loaded the Model Manager bf16 directory from
       // SceneWorks/scail2-mlx@ce88cfdb1008f395e9c820e525e6db7b6695f7b3 through the production
       // candle_gen_scail2 provider and rendered 832x480 / 81 frames / 1 step. GitHub Actions run
       // 31455292141, job 93667700921, artifact 9089420126 (uploaded zip SHA-256
       // de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9) emitted the validated
-      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. minMemoryGb is
-      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower Candle tier
-      // or sequential-offload path, so both worker modes fail closed below that live free-VRAM floor.
+      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline.
       "candle": {
-        "minMemoryGb": 105,
-        "vramGbByTier": { "bf16": 102.115 },
+        "minMemoryGb": 64,
+        "vramGbByTier": { "q4": 61.260, "q8": 64.928, "bf16": 102.115 },
         "vramMeasuredPixels": 399360,
         "measured": true
       },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Candle needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve); lower-memory NVIDIA cards are rejected before load. Runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give ordered reference character images and a driving video, and SCAIL-2 animates the supplied characters with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux admit the same installable q4, q8, and bf16 package variants when installed. Measured Candle floors are 64 GB for q4, 67 GB for q8, and 105 GB for bf16. Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {
