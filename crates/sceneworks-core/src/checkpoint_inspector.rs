@@ -725,13 +725,20 @@ fn inspect_discovered_pass(
         {
             validated_role = Some("checkpoint".to_owned());
         }
-        let role = reconcile_role(
+        let role = refine_multi_expert_role(
+            reconcile_role(
+                &candidate.relative_path,
+                path_role,
+                validated_role.as_deref(),
+                &mut pass.diagnostics,
+            ),
+            family.as_deref(),
             &candidate.relative_path,
-            path_role,
-            validated_role.as_deref(),
-            &mut pass.diagnostics,
         );
-        if matches!(role.as_deref(), Some("transformer" | "checkpoint")) {
+        if matches!(
+            role.as_deref(),
+            Some("transformer" | "checkpoint" | TRANSFORMER_HIGH_ROLE | TRANSFORMER_LOW_ROLE)
+        ) {
             if let Some(family) = &family {
                 if !is_auxiliary_family(family) {
                     pass.backbone_families.insert(family.clone());
@@ -1885,6 +1892,96 @@ fn reconcile_role(
             ));
             None
         }
+    }
+}
+
+/// The two plan-layer roles a MULTI-EXPERT backbone compiles to (epic 20398, sc-20644).
+///
+/// Underscored, like every other layer role this module emits (`transformer`, `text_encoder`,
+/// `vae`, `checkpoint`) and like the `components[]` role spellings the catalog already uses for Wan.
+/// The checkpoint ADAPTER's `component_topology` spells the same two roles with hyphens
+/// (`transformer-high` / `transformer-low`), exactly as it spells `base-snapshot` for the
+/// underscored `base_snapshot` component id — that split is pre-existing convention, not drift.
+pub const TRANSFORMER_HIGH_ROLE: &str = "transformer_high";
+pub const TRANSFORMER_LOW_ROLE: &str = "transformer_low";
+
+/// Families whose backbone is TWO non-interchangeable experts rather than one transformer.
+///
+/// Checkpoint truth, and deliberately a closed list: Wan 2.2 is the only shipped family whose
+/// ComfyUI distribution carries a high-noise and a low-noise expert selected per denoise step. The
+/// list is what makes [`refine_multi_expert_role`] provably ADDITIVE — a checkpoint of any other
+/// family is never even considered for the refinement, so no existing family's compiled plan can
+/// change, whatever its files happen to be called.
+const MULTI_EXPERT_FAMILIES: &[&str] = &["wan-video"];
+
+/// Refine a `transformer` role into a specific EXPERT role, for a family that has more than one
+/// backbone.
+///
+/// Wan 2.2's two experts are not interchangeable — they are selected per denoise step — so a plan
+/// that recorded them as two `transformer` layers could not say which is which, and the routes that
+/// consume a plan can only refuse it as an ambiguous primary. This is the vocabulary that lets a
+/// plan name them.
+///
+/// **Additive by construction, in three independent ways.** The refinement applies only when (1) the
+/// artifact's detected family is in [`MULTI_EXPERT_FAMILIES`], (2) the reconciled role is already
+/// exactly `transformer`, and (3) the file name carries a delimited high/low-noise marker. A
+/// single-expert Wan checkpoint (2.1, or a merged 2.2) keeps the plain `transformer` role, and no
+/// other family reaches the marker test at all. The goldens prove the second half of that claim.
+fn refine_multi_expert_role(
+    role: Option<String>,
+    family: Option<&str>,
+    relative_path: &str,
+) -> Option<String> {
+    if role.as_deref() != Some("transformer") {
+        return role;
+    }
+    if !family.is_some_and(|family| MULTI_EXPERT_FAMILIES.contains(&family)) {
+        return role;
+    }
+    match expert_marker(relative_path) {
+        Some(expert) => Some(expert.to_owned()),
+        None => role,
+    }
+}
+
+/// The expert a ComfyUI Wan file name declares, or `None`.
+///
+/// The three spellings the shipped redistributions actually use, all of which must be recognized:
+///
+/// | publisher | example | normalized token |
+/// |---|---|---|
+/// | ComfyUI | `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors` | `_high_noise_` |
+/// | QuantStack GGUF | `Wan2.2-T2V-A14B-HighNoise-Q4_K_S.gguf` | `_highnoise_` |
+/// | Kijai scaled-fp8 | `Wan2_2_T2V_HIGH_14B_fp8_e4m3fn_scaled.safetensors` | `_high_` |
+///
+/// The first form alone was matched originally, so a QuantStack or Kijai pair kept the plain
+/// `transformer` role — two anonymous backbones, a missing-expert-role refusal, and (before the
+/// video router propagated) a procedural stub render (sc-20644 review major 5).
+///
+/// Matching stays DELIMITED rather than substring: `_high_` matches, `_highest_` does not, and
+/// `wan_highlights_14B` cannot be reclassified. A name carrying BOTH markers is still refused
+/// (`None`) rather than resolved to whichever appears first — an ambiguous name is not evidence,
+/// and a merged single-file `high_noise_and_low_noise` checkpoint is exactly that case.
+fn expert_marker(relative_path: &str) -> Option<&'static str> {
+    let name = Path::new(relative_path)
+        .file_name()
+        .and_then(|name| name.to_str())?
+        .to_ascii_lowercase();
+    // Normalize the separators these publishers use interchangeably, then match tokens bounded on
+    // both sides.
+    let normalized = format!("_{}_", name.replace(['-', '.', ' '], "_"));
+    let marks = |side: &str| {
+        // `_high_` / `_highnoise_` / `_high_noise_`, and the `low` equivalents. The optional
+        // `noise` suffix is what covers QuantStack's concatenation and Kijai's omission without
+        // loosening the boundary on either end.
+        normalized.contains(&format!("_{side}_"))
+            || normalized.contains(&format!("_{side}noise_"))
+            || normalized.contains(&format!("_{side}_noise_"))
+    };
+    match (marks("high"), marks("low")) {
+        (true, false) => Some(TRANSFORMER_HIGH_ROLE),
+        (false, true) => Some(TRANSFORMER_LOW_ROLE),
+        _ => None,
     }
 }
 

@@ -21184,6 +21184,147 @@ fn the_tree_source_helper_declines_another_familys_request() {
     );
 }
 
+/// sc-20644 Wan row — the video lane sources a plan-backed entry by NAMED EXPERT ROLE, claims it
+/// without an `external_base_` id, and its deletable surface is pinned.
+///
+/// Wan is the family that forced the checkpoint plan to grow a vocabulary. Its ComfyUI checkpoint has
+/// two backbones — a high-noise and a low-noise expert, selected per denoise step and not
+/// interchangeable — so it has no single primary to derive. Until `checkpoint_inspector` could tell
+/// the two apart, a compiled Wan plan carried two anonymous `transformer` layers and every consumer
+/// could only refuse it as an ambiguous primary. The inspector half of that is proven executably in
+/// `sceneworks-core`'s own suite (`a_comfyui_wan_tree_compiles_to_two_named_expert_layers`); this is
+/// the worker half.
+///
+/// The Wan lane is candle-only (`cfg(all(not(target_os = "macos"), feature = "backend-candle"))`),
+/// so `cargo test` cannot link it here and its behavioural test first RUNS on the windows-candle CI
+/// lane. What is checkable on every build config — and what this asserts — is that the guards are
+/// live code in the right ORDER, the same posture sc-20636 took for the Z-Image lane.
+///
+/// Failing mutations: delete the plan-source call from `resolve_wan_comfyui_paths`; move it after the
+/// `usable` / `components[]` catalog gates; drop the `plan_backed` disjunct from
+/// `wan_comfyui_available`.
+#[test]
+fn the_wan_video_lane_sources_a_plan_backed_entry_by_expert_role() {
+    let source = include_str!("../video_jobs/candle.rs");
+
+    // The plan source is reached BEFORE every gate that describes a scanned catalog row. A linked
+    // Wan checkpoint has no `usable` flag and no `components[]`, so any of them running first makes
+    // the plan source unreachable.
+    let plan_source_at = source
+        .find("resolve_plan_backed_wan_comfyui_paths(request, settings)?")
+        .expect("the Wan lane must source a plan-backed entry from the plan");
+    for (gate, what) in [
+        (
+            "entry.get(\"usable\").and_then(Value::as_bool)",
+            "the `usable` catalog flag",
+        ),
+        (
+            "entry.get(\"components\").and_then(Value::as_array)",
+            "the `components[]` assembly",
+        ),
+    ] {
+        let gate_at = source
+            .find(gate)
+            .unwrap_or_else(|| panic!("fixture check: {what} must still exist"));
+        assert!(
+            plan_source_at < gate_at,
+            "the plan source must precede {what}; a linked checkpoint has neither"
+        );
+    }
+
+    // Both experts are resolved BY NAME from the plan's own role vocabulary — never positionally,
+    // and never from the catalog's `components[]` role strings.
+    for role in ["TRANSFORMER_HIGH_ROLE", "TRANSFORMER_LOW_ROLE"] {
+        assert!(
+            source.contains(&format!("sceneworks_core::checkpoint_inspector::{role}")),
+            "the Wan lane must name the {role} plan layer explicitly"
+        );
+    }
+    // The two optional in-place artifacts stay optional on the plan route too (sc-10909), and the
+    // T2V-only channel gate is applied to the PLAN's own high expert rather than skipped.
+    assert!(
+        source.contains("&[\"text_encoder\", \"vae\"],"),
+        "the in-place UMT5 encoder and VAE stay OPTIONAL on the plan route"
+    );
+    // The T2V-only channel gate lives INSIDE the plan-sourced resolver and REFUSES by name.
+    //
+    // The previous form of this assertion was an `a || b` over two positions and was vacuous —
+    // worse, the branch it accepted pinned the very `Ok(None)` that sent a plan-backed I2V pair to
+    // `CandleVideoRoute::Stub` (review blocker 3 / minor 9). One fact is asserted now: the gate is
+    // inside the plan resolver, and it produces a typed refusal rather than a decline.
+    let resolver_at = source
+        .find("fn resolve_plan_backed_wan_comfyui_paths(")
+        .expect("the plan-sourced resolver must exist");
+    let resolver_end = source[resolver_at..]
+        .find("\n}\n")
+        .map(|offset| resolver_at + offset)
+        .expect("the resolver has an end");
+    let resolver = &source[resolver_at..resolver_end];
+    assert!(
+        resolver.contains("wan_expert_in_channels(&high)"),
+        "the T2V-only channel gate must be applied to the PLAN's own high expert"
+    );
+    assert!(
+        resolver.contains("[checkpoint-plan:unsupported-operation]")
+            && resolver.contains("WAN_I2V_IN_CHANNELS"),
+        "a plan-backed I2V pair must REFUSE by name, naming the channel count — declining sends it \
+         to the catalog gates a linked entry can never satisfy, and from there to Stub:\n{resolver}"
+    );
+
+    // The claim propagates a refusal instead of answering a bool, and no longer rests on the
+    // `external_base_` id prefix alone.
+    let claims_at = source
+        .find("pub(super) fn wan_comfyui_claims(")
+        .expect("the Wan claim predicate must exist and must be the fallible one");
+    let claims = &source[claims_at..claims_at + 900.min(source.len() - claims_at)];
+    assert!(
+        claims.contains("checkpoint_plan_checkpoint_id(&request.model_manifest_entry)"),
+        "a plan-backed Wan entry must be claimable without an `external_base_` id:\n{claims}"
+    );
+    assert!(
+        claims.contains("resolve_wan_comfyui_paths(request, settings)?"),
+        "the claim must PROPAGATE a refusal; answering a bool is how every Wan refusal became a \
+         successful stub render:\n{claims}"
+    );
+    assert!(
+        !source.contains("fn wan_comfyui_available("),
+        "the bool probe must be gone entirely — leaving it invites the router back onto it"
+    );
+    // And the router consults the fallible form with `?`.
+    let router = include_str!("../video_jobs/mod.rs");
+    assert!(
+        router.contains("wan_comfyui_claims(request, settings)?"),
+        "the candle video router must propagate the Wan lane's refusal rather than fall to Stub"
+    );
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME -------------------------------
+    for symbol in [
+        "fn resolve_wan_comfyui_paths(",
+        "entry.get(\"usable\").and_then(Value::as_bool)",
+        "entry.get(\"components\").and_then(Value::as_array)",
+        "WAN_COMFYUI_SNAPSHOT_TIERS",
+        // Must OUTLIVE the deletion above.
+        "fn resolve_plan_backed_wan_comfyui_paths(",
+        "fn wan_comfyui_snapshot_dir(",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Wan bespoke surface sc-20651 deletes must be live code: {symbol}"
+        );
+    }
+
+    // The expert roles are the inspector's, spelled once, so the plan writer and the plan reader
+    // cannot drift apart.
+    assert_eq!(
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+        "transformer_high"
+    );
+    assert_eq!(
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE,
+        "transformer_low"
+    );
+}
+
 /// sc-20644 ComfyUI-tree rows (Z-Image, Qwen-Image, FLUX.2) — single-claim conformance and the
 /// bespoke surface sc-20651 deletes, for the three families whose lanes are CANDLE-ONLY.
 ///

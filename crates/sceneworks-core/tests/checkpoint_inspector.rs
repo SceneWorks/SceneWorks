@@ -1429,3 +1429,214 @@ fn descriptor_family_fallback_and_indexed_hidden_shards_are_fail_closed() {
         .iter()
         .any(|item| item.message.contains("not byte-aligned")));
 }
+
+/// The tensor surface a Wan 2.x DiT expert is recognized by: `blocks.N.{self_attn,cross_attn,ffn}`
+/// plus the per-block `modulation`. The `.ffn.` + bare `modulation` pairing is what separates Wan
+/// from Anima (adaln modulation) and LTX (attn1/attn2, no ffn) in `detect_transformer_family`.
+fn wan_expert_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("blocks.0.self_attn.q.weight", "BF16"),
+        ("blocks.0.cross_attn.q.weight", "BF16"),
+        ("blocks.0.ffn.0.weight", "BF16"),
+        ("blocks.0.modulation", "BF16"),
+        ("patch_embedding.weight", "BF16"),
+    ]
+}
+
+/// sc-20644 — a ComfyUI Wan 2.2 tree compiles to TWO NAMED expert layers, not two anonymous
+/// `transformer` layers.
+///
+/// Wan 2.2's high-noise and low-noise experts are selected per denoise step and are not
+/// interchangeable. Before this vocabulary existed, both landed under the single role `transformer`
+/// (the path-role inference maps `unet/` and `diffusion_models/` onto it), so a compiled Wan plan
+/// said "two transformers" and every consumer could only refuse it as an ambiguous primary. Naming
+/// them is what makes the plan usable.
+///
+/// Failing mutations: return `role` unconditionally from `refine_multi_expert_role`; drop
+/// `"wan-video"` from `MULTI_EXPERT_FAMILIES`; match the marker as a bare substring.
+#[test]
+fn a_comfyui_wan_tree_compiles_to_two_named_expert_layers() {
+    // One fixture per SHIPPED spelling. Matching only ComfyUI's `high_noise` left QuantStack's
+    // GGUF (`HighNoise`) and Kijai's scaled-fp8 (`HIGH`) pairs as two anonymous `transformer`
+    // layers — a missing-expert-role refusal on a checkpoint that is perfectly loadable
+    // (sc-20644 review major 5). Each row is `(label, high file, low file, substring proving the
+    // layer resolved to its OWN file)`.
+    let spellings: [(&str, &str, &str, &str, &str); 4] = [
+        (
+            "comfyui",
+            "unet/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+            "unet/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+            "high_noise",
+            "low_noise",
+        ),
+        (
+            "quantstack-gguf",
+            "unet/Wan2.2-T2V-A14B-HighNoise-Q4_K_S.safetensors",
+            "unet/Wan2.2-T2V-A14B-LowNoise-Q4_K_S.safetensors",
+            "HighNoise",
+            "LowNoise",
+        ),
+        (
+            "kijai-scaled-fp8",
+            "unet/Wan2_2_T2V_HIGH_14B_fp8_e4m3fn_scaled.safetensors",
+            "unet/Wan2_2_T2V_LOW_14B_fp8_e4m3fn_scaled.safetensors",
+            "HIGH",
+            "LOW",
+        ),
+        // The marker at the START of the name, with nothing before it. This is what makes the
+        // `_{name}_` wrapper load-bearing: without it there is no leading separator for the
+        // bounded token to match against, and a re-hosted file named this way silently keeps the
+        // plain `transformer` role. Found by mutating the wrapper away and watching the three rows
+        // above stay green.
+        (
+            "leading-marker",
+            "unet/HighNoise_Wan2_2_T2V_A14B.safetensors",
+            "unet/LowNoise_Wan2_2_T2V_A14B.safetensors",
+            "HighNoise",
+            "LowNoise",
+        ),
+    ];
+
+    for (label, high_file, low_file, high_mark, low_mark) in spellings {
+        let temp = TempDir::new().unwrap();
+        let tree = temp.path().join("wan22");
+        write_safetensors(&tree.join(high_file), &wan_expert_entries(), None);
+        write_safetensors(&tree.join(low_file), &wan_expert_entries(), None);
+
+        let result = inspect_checkpoint(&linked_request(temp.path(), "wan22"));
+        assert!(result.is_runnable(), "{label}: {:?}", result.diagnostics);
+        assert_eq!(result.plans[0].family, "wan-video", "{label}");
+
+        let mut roles: Vec<&str> = result.plans[0]
+            .layers
+            .iter()
+            .map(|layer| layer.role.as_str())
+            .collect();
+        roles.sort_unstable();
+        assert_eq!(
+            roles,
+            ["transformer_high", "transformer_low"],
+            "{label}: the two experts must be NAMED; two `transformer` layers is the ambiguity \
+             this fixes"
+        );
+
+        // Each named role resolves to its own file — the point of naming them at all.
+        let layer_for = |role: &str| -> String {
+            result.plans[0]
+                .layers
+                .iter()
+                .find(|layer| layer.role == role)
+                .map(|layer| format!("{:?}", layer.source))
+                .unwrap_or_else(|| panic!("{label}: no {role} layer"))
+        };
+        assert!(
+            layer_for("transformer_high").contains(high_mark),
+            "{label}: the high expert must resolve to its own file"
+        );
+        assert!(
+            layer_for("transformer_low").contains(low_mark),
+            "{label}: the low expert must resolve to its own file"
+        );
+    }
+}
+
+/// sc-20644 — the expert vocabulary is ADDITIVE: it cannot reclassify any other family's artifact,
+/// whatever the file happens to be called, and it cannot reclassify a SINGLE-expert Wan checkpoint.
+///
+/// This is the half the shipped goldens cannot prove on their own. The goldens show that every
+/// existing fixture still compiles identically; they do not show that a hostile *name* leaves them
+/// alone, because none of them is named that way. Both guards are exercised here directly.
+///
+/// Failing mutations: drop the family test from `refine_multi_expert_role` (the Qwen row gets an
+/// expert role); drop the both-markers-is-ambiguous arm from `expert_marker` (the merged Wan file
+/// silently becomes an expert).
+#[test]
+fn the_expert_role_vocabulary_cannot_reclassify_another_family_or_a_single_expert_wan() {
+    let temp = TempDir::new().unwrap();
+
+    // A Qwen-Image transformer whose file name carries the marker: still a plain `transformer`.
+    write_safetensors(
+        &temp
+            .path()
+            .join("qwen/unet/qwen_image_high_noise_fp8_e4m3fn.safetensors"),
+        &qwen_transformer_entries(),
+        None,
+    );
+    let qwen = inspect_checkpoint(&linked_request(temp.path(), "qwen"));
+    assert!(qwen.is_runnable(), "{:?}", qwen.diagnostics);
+    assert_eq!(qwen.plans[0].family, "qwen-image");
+    assert_eq!(
+        qwen.plans[0]
+            .layers
+            .iter()
+            .map(|layer| layer.role.as_str())
+            .collect::<Vec<_>>(),
+        ["transformer"],
+        "a non-multi-expert family is never considered for the refinement"
+    );
+
+    // A Wan checkpoint whose name carries BOTH markers, one that carries neither, and two whose
+    // words merely CONTAIN the marker without being it: all stay plain `transformer`. The last two
+    // are what keep the widened `_high_` / `_highnoise_` matcher (review major 5) from being a
+    // substring match.
+    for name in [
+        "wan2.2_t2v_high_noise_and_low_noise_merged_14B.safetensors",
+        "wan2.2_t2v_14B_merged.safetensors",
+        "wan2.2_t2v_highest_quality_14B.safetensors",
+        "wan2.2_t2v_highlights_14B.safetensors",
+    ] {
+        let dir = temp.path().join("wan-single");
+        let _ = fs::remove_dir_all(&dir);
+        write_safetensors(&dir.join("unet").join(name), &wan_expert_entries(), None);
+        let result = inspect_checkpoint(&linked_request(temp.path(), "wan-single"));
+        assert!(result.is_runnable(), "{name}: {:?}", result.diagnostics);
+        assert_eq!(result.plans[0].family, "wan-video", "{name}");
+        assert_eq!(
+            result.plans[0]
+                .layers
+                .iter()
+                .map(|layer| layer.role.as_str())
+                .collect::<Vec<_>>(),
+            ["transformer"],
+            "{name}: an ambiguous or absent marker leaves the single-transformer role alone"
+        );
+    }
+}
+
+/// sc-20644 review minor 8 — the SceneWorks half of the cross-repo spelling tie.
+///
+/// The checkpoint ADAPTER (inference `WAN_CHECKPOINT_ADAPTER`) declares its component topology with
+/// HYPHENS — `transformer-high`, `transformer-low` — exactly as it declares `base-snapshot` for the
+/// underscored `base_snapshot` component id. The plan LAYER roles this crate emits use underscores.
+/// The two vocabularies are joined by one projection, and nothing structural enforces it, so it is
+/// pinned from both sides in the `mapping_id` posture: inference asserts the projection of its
+/// topology roles equals these literals, and this asserts the literals are what the inspector
+/// actually emits. Either side drifting alone turns a Wan plan into two unrecognized roles.
+///
+/// Failing mutation: rename either constant (e.g. to a hyphenated spelling).
+#[test]
+fn the_expert_layer_roles_are_the_spelling_the_adapter_topology_projects_onto() {
+    // The projection: an adapter `component_topology` role, lowercased with `-` → `_`.
+    let project = |topology_role: &str| topology_role.replace('-', "_");
+
+    assert_eq!(
+        project("transformer-high"),
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+        "inference's `transformer-high` topology role must project onto this crate's layer role"
+    );
+    assert_eq!(
+        project("transformer-low"),
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE,
+        "inference's `transformer-low` topology role must project onto this crate's layer role"
+    );
+    // The projection is not the identity, which is the whole reason it has to be pinned: a reader
+    // who assumes the two vocabularies already agree is wrong.
+    assert_ne!(
+        "transformer-high",
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+        "fixture check: the two spellings genuinely differ, so this assertion is not vacuous"
+    );
+    // And the same projection already holds for the component id the two repos share today, which
+    // is the precedent this follows rather than invents.
+    assert_eq!(project("base-snapshot"), "base_snapshot");
+}

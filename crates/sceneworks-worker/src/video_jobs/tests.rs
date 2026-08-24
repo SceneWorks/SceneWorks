@@ -6106,14 +6106,16 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
     }));
     assert_eq!(
-        resolve_candle_video_route(&scail2_replace, &settings),
+        resolve_candle_video_route(&scail2_replace, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::Stub,
     );
     let disabled_eros = request(json!({
         "projectId": "p", "model": "ltx_2_3_eros", "mode": "text_to_video",
     }));
     assert_eq!(
-        resolve_candle_video_route(&disabled_eros, &settings),
+        resolve_candle_video_route(&disabled_eros, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::UnsupportedEros,
     );
 
@@ -6133,7 +6135,8 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
             "projectId": "p", "model": "ltx_2_3_eros", "mode": mode,
         }));
         assert_eq!(
-            resolve_candle_video_route(&eros, &settings),
+            resolve_candle_video_route(&eros, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::UnsupportedEros,
             "Eros {mode} must fail loudly rather than reach a real or stub Candle route",
         );
@@ -6154,20 +6157,23 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
     }
     assert!(reject_unsupported_candle_video_route(CandleVideoRoute::Stub).is_ok());
     assert_eq!(
-        resolve_candle_video_route(&scail2_replace, &settings),
+        resolve_candle_video_route(&scail2_replace, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
     );
     let vace_fun = request(json!({
         "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
     }));
     assert_eq!(
-        resolve_candle_video_route(&vace_fun, &settings),
+        resolve_candle_video_route(&vace_fun, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::ReplacePersonWanVaceFun,
     );
     for mode in ["replace_person", "extend_clip", "video_bridge"] {
         let native = request(json!({ "projectId": "p", "model": "ltx_2_3", "mode": mode }));
         assert_eq!(
-            resolve_candle_video_route(&native, &settings),
+            resolve_candle_video_route(&native, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::CandleVideo,
             "base LTX {mode} must stay on the native LTX provider",
         );
@@ -6190,7 +6196,8 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
     }));
     assert_eq!(
-        resolve_candle_video_route(&extend, &settings),
+        resolve_candle_video_route(&extend, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::WanVaceExtendBridge,
     );
 }
@@ -6205,7 +6212,8 @@ fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
         "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
     }));
     assert_eq!(
-        resolve_candle_video_route(&replacement, &settings),
+        resolve_candle_video_route(&replacement, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::ReplacePersonWanVaceFun,
     );
     assert_eq!(
@@ -6223,7 +6231,8 @@ fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
             "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": mode,
         }));
         assert_eq!(
-            resolve_candle_video_route(&unsupported, &settings),
+            resolve_candle_video_route(&unsupported, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::Stub,
             "VACE-Fun {mode} must not cross-route to a base or single-expert VACE engine",
         );
@@ -6271,7 +6280,8 @@ fn candle_video_route_bernini_every_mode() {
     ] {
         let req = request(json!({ "projectId": "p", "model": "bernini", "mode": mode }));
         assert_eq!(
-            resolve_candle_video_route(&req, &settings),
+            resolve_candle_video_route(&req, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::Bernini(engine),
             "bernini {mode} must route to CandleVideoRoute::Bernini",
         );
@@ -6282,7 +6292,8 @@ fn candle_video_route_bernini_every_mode() {
         "projectId": "p", "model": "bernini", "mode": "text_to_video",
     }));
     assert_eq!(
-        resolve_candle_video_route(&off, &settings),
+        resolve_candle_video_route(&off, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::Stub,
     );
 }
@@ -13320,7 +13331,8 @@ mod candle_video_label_tests {
         });
         let req = VideoRequest::from_payload(payload.as_object().expect("object"));
         assert_eq!(
-            resolve_candle_video_route(&req, &settings),
+            resolve_candle_video_route(&req, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::CandleVideo,
             "a t2v mochi job must route to the candle video engine, NOT the stub"
         );
