@@ -580,9 +580,6 @@ AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
     "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
     "sensenova_jobs.rs": "default_repo_for(&request.model)",
     "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
-    # sc-20753: direct/replayed MiniMax-H3 Candle jobs use the raw snapshot that the model's
-    # off-Mac downloads install. It is executor-only, not a user-facing routed capability.
-    "video_jobs/minimax_h3.rs": "CANDLE_MINIMAX_H3_REPO",
 }
 
 
@@ -643,27 +640,57 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
     )
 
 
-def test_top_level_manifest_repo_audit_rejects_minimax_h3_inventory_and_fallback_mutations():
-    sources = _worker_sources()
-    missing_lane = dict(AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES)
-    del missing_lane["video_jobs/minimax_h3.rs"]
-    _must_fail_assertion(
-        lambda: _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
-            sources, missing_lane
-        ),
-        "removing MiniMax-H3's direct-Candle repo audit must fail the inventory guard",
+def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
+    production = source.split("\n#[cfg(test)]", maxsplit=1)[0]
+    assert '.model_manifest_entry.get("repo")' not in production, (
+        "MiniMax-H3 Candle must not accept a top-level manifest repo override; its q4/q8 and "
+        "bf16/shared components come from two separately pinned installed snapshots"
     )
+    for declaration, use in (
+        (
+            'const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";',
+            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?",
+        ),
+        (
+            'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)?",
+        ),
+    ):
+        assert declaration in production, f"missing exact MiniMax-H3 repo authority: {declaration}"
+        assert use in production, f"MiniMax-H3 resolver no longer consumes {use}"
 
-    mismatched_fallback = dict(sources)
-    mismatched_fallback["video_jobs/minimax_h3.rs"] = mismatched_fallback[
-        "video_jobs/minimax_h3.rs"
-    ].replace("CANDLE_MINIMAX_H3_REPO", "UNAUDITED_MINIMAX_H3_REPO")
-    _must_fail_assertion(
-        lambda: _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
-            mismatched_fallback, AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES
+
+def test_minimax_h3_candle_repo_audit_rejects_override_and_root_mutations():
+    source = _worker_sources()["video_jobs/minimax_h3.rs"]
+    _assert_minimax_h3_candle_uses_exact_installed_roots(source)
+
+    for label, mutated in (
+        (
+            "upstream root",
+            source.replace(
+                'const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";',
+                'const CANDLE_MINIMAX_H3_REPO: &str = "mutable/upstream";',
+            ),
         ),
-        "replacing MiniMax-H3's installed fallback marker must fail the audit",
-    )
+        (
+            "tier rehost root",
+            source.replace(
+                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "mutable/rehost";',
+            ),
+        ),
+        (
+            "manifest override",
+            source.replace(
+                "let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;",
+                'let root = request.model_manifest_entry.get("repo").unwrap();',
+            ),
+        ),
+    ):
+        _must_fail_assertion(
+            lambda mutated=mutated: _assert_minimax_h3_candle_uses_exact_installed_roots(mutated),
+            f"the MiniMax-H3 Candle audit must reject a {label} mutation",
+        )
 
 
 def test_manifest_model_path_is_only_an_optional_override():
