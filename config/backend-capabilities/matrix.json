@@ -22,12 +22,12 @@
     "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
     "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
     "exceptionRegister": "6645ec832bfe4a49f266f9475f70748af1a3deb99660d780dcdb74e195b15984",
-    "manifest": "080b46370f19784456318568258adb7b38125cd872dc1135ff297524080a7a34",
+    "manifest": "9cffb0d4762da659ecf12a02e2a92876b15dc9bb048ba6b62afbe6fe9225b13d",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
     "routerCandle": "d55ed85e9d208c42848f22c1e245caca1015d196e002e7bb891642b32b5c2bf6",
     "routerCatalog": "0a08189104df04729dddc8a94c210876e243afd0b03812ce6c072b3a9efe453c",
     "routerGaps": "885a73b08cd2d598d656adb15d69a2ea0a78faa0437fc3ba0e25d5f5245efcb2",
-    "routerMlx": "d9bc69db199a5efe378db62d558ab134a0ee1c82da8561dbb1d0d641bd0f57cb",
+    "routerMlx": "a9d4618464115f939befbdb052e1739b8ab6060c39820508ce9c2b4f32df677f",
     "scheduler": "7adf257c047f8fd15dff086add27a928d5e09ceed29c1371ab3058de254d0748",
     "trainingCatalog": "ba87e0cb93ab872fd2a430f2ac4aeaedf8c65d6869b37b7ff7df4071309289e0",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
@@ -53,7 +53,7 @@
     "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
     "workerImagePulidCandle": "e03c33082e5e8c1762a166769ada64cc4942abc5c06a8c6990a5a8914ea205c2",
-    "workerImageQwenEditCandle": "13d893e31e031ca1fadafa1b93f284ef669f7154d4d3fdf954838fb00884ae2c",
+    "workerImageQwenEditCandle": "68676c54a15f92e0d7e79343bd32cd3bf8e6f86613be1dec06c3cf568ab41142",
     "workerImageSdxlImported": "63e5f2891be1f3e8ea1dc77ef3837254ab188ccc63fdaf608de2d37499332efd",
     "workerTrainingDispatch": "479520bfabe44f79ff1e18617c442fadead941e2a8dac973b26ee1e54100c447",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
@@ -1762,8 +1762,8 @@
       "conditioningShape": [
         {
           "capability": "control",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "mask",
@@ -1876,8 +1876,8 @@
       "conditioningShape": [
         {
           "capability": "control",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "mask",
