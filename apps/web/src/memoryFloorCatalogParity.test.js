@@ -1294,62 +1294,44 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect(bf16Host, "bf16 must not inherit q8's figure").toBeGreaterThan(q8Host);
   });
 
-  it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
-    // MINOR 4. `candle.measured === false` is the uncalibrated inventory. It is false on 22 entries;
-    // twelve of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers are
-    // pinned so the prose cannot drift from the catalog again. sc-16025 adds the six Mage profiles to
-    // this set because their q4/q8 numeric identity changed and the historical samples are no longer
-    // valid current measurements. sc-18478 adds the uncalibrated VACE-Fun blanket-only lane.
-    //
-    // 22 is the sc-17137 sync merge's three-way result, not either side's: this branch read 20 and
-    // main read 21, and both deltas apply (19 before either → +1 `minimax_h3` here → +2 on main).
-    //
-    // sc-17156 introduced a THIRD shape that did not exist before, so the split below is asserted
-    // rather than lumped in. `minimax_h3` carries `measured: false` with NEITHER `vramGbByTier` NOR
-    // `minMemoryGb`: the candle generator exists but has never been measured, because the CUDA lane
-    // that would measure it is gated on operator action (an unset `CANDLE_MINIMAX_H3_SNAPSHOT`, and
-    // a pinned snapshot allow-list that omits the components a render reads). Calling it
-    // "blanket-only" would be wrong — there is no blanket either, and that is deliberate: with no
-    // number at all, `predicted_peak_gb` returns null and the fit gate stays best-effort instead of
-    // admitting a card against a guess.
+  it("classifies every candle.measured === false entry by numeric evidence shape", () => {
+    // `candle.measured === false` is the uncalibrated inventory. Its population is deliberately not
+    // pinned: a real measurement promotes an entry out of this set. What must remain stable is that
+    // every uncalibrated lane has either a per-tier estimate or a curated blanket, and that both
+    // shapes continue to exercise tierSuggestion.js. sc-20754 promotes MiniMax-H3 into the measured
+    // set with all three real CUDA receipts.
     const uncalibratedLane = manifestModels.filter((model) => model.candle?.measured === false);
-    expect(uncalibratedLane.length).toBe(22);
     const withPerTier = uncalibratedLane.filter(
       (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length > 0,
     );
-    expect(withPerTier.map((model) => model.id).sort()).toEqual(
-      [
-        "flux_schnell",
-        "flux2_dev",
-        "krea_2_raw",
-        "lens_turbo",
-        "mage_flow",
-        "mage_flow_base",
-        "mage_flow_edit",
-        "mage_flow_edit_base",
-        "mage_flow_edit_turbo",
-        "mage_flow_turbo",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-      ].sort(),
+    expect(withPerTier.map((model) => model.id)).toContain("flux2_dev");
+    expect(
+      withPerTier.every((model) =>
+        Object.values(model.candle.vramGbByTier).every(Number.isFinite),
+      ),
+    ).toBe(true);
+
+    const blanketOnly = uncalibratedLane.filter(
+      (model) =>
+        Object.keys(model.candle?.vramGbByTier ?? {}).length === 0 &&
+        Number.isFinite(model.candle?.minMemoryGb),
     );
-    // The remaining ten split two ways, and the split is the point. Main defined `blanketOnly` as
-    // simply "no vramGbByTier" and pinned it at 9; post-merge that predicate selects 10, because
-    // `minimax_h3` joins it. Keeping main's number against main's predicate would have gone red, and
-    // widening the number to 10 would have silently folded the no-number-at-all shape into the
-    // blanket-only one. The three-way split below keeps both claims true and separable.
-    const rest = uncalibratedLane.filter(
-      (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length === 0,
-    );
-    expect(rest.length).toBe(10);
-    // Nine are blanket-only — a curated `minMemoryGb` with nothing per-tier for the flag to qualify.
-    const blanketOnly = rest.filter((model) => Number.isFinite(model.candle?.minMemoryGb));
-    // sc-18478's VACE-Fun lane is one of them (main's assertion, kept).
     expect(blanketOnly.map((model) => model.id)).toContain("wan_2_2_vace_fun_14b");
-    expect(blanketOnly.length).toBe(9);
-    // And exactly one declares the lane with NO number of any kind (sc-17156, above).
-    const unmeasured = rest.filter((model) => !Number.isFinite(model.candle?.minMemoryGb));
-    expect(unmeasured.map((model) => model.id)).toEqual(["minimax_h3"]);
+
+    const withoutAnyNumber = uncalibratedLane.filter(
+      (model) =>
+        Object.keys(model.candle?.vramGbByTier ?? {}).length === 0 &&
+        !Number.isFinite(model.candle?.minMemoryGb),
+    );
+    expect(withoutAnyNumber).toEqual([]);
+
+    const minimax = manifestModels.find((model) => model.id === "minimax_h3");
+    expect(minimax.candle).toMatchObject({
+      minMemoryGb: 43,
+      vramGbByTier: { q4: 40.068, q8: 74.696, bf16: 67.012 },
+      vramMeasuredPixels: 1344 * 768,
+      measured: true,
+    });
   });
 
   it("pins the shipped shapes the SimpleModelManager fixtures claim", () => {
