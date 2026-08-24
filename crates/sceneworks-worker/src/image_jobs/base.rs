@@ -10150,6 +10150,11 @@ async fn generate_candle_stream(
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
     let is_sana = matches!(engine_id, "sana_1600m" | "sana_sprint_1600m");
     let is_sd35 = crate::candle_memory_strategy::is_sd35(engine_id);
+    // Chroma, Ideogram and Kolors are priced from the same exact provider receipts SANA and SD3.5
+    // are, so their executed load policy is bound by the same authority (sc-20799). Before this
+    // they fell through to `resolve_offload(fit_decision(..))`, a manifest estimate, and an
+    // admitted STAGED peak could be executed as a RESIDENT load that the receipt never bounded.
+    let receipt_priced_route = crate::candle_memory_strategy::is_receipt_priced(engine_id);
     // Standard-tier weight resolution, SHARED with the MLX lane (sc-9092, epic 9083 gap #3). Every
     // candle image family — Ideogram / Boogu / Krea / Lens included — now packed-loads the SAME
     // SceneWorks MLX-packed per-tier turnkey the macOS path uses: as of the candle-gen rollout all 11
@@ -10909,11 +10914,19 @@ async fn generate_candle_stream(
     } else {
         None
     };
+    // The receipt-priced selection, kept even when it is Resident. `optimized_shared_memory_context`
+    // below deliberately drops a Resident context for families outside its allowlist, so it cannot
+    // answer "did the receipt price this request?" — and that is exactly the question the executed
+    // load policy has to agree with.
+    let mut receipt_priced_selection: Option<gen_core::MemoryStrategy> = None;
     if let Some(evaluation) = shared_memory {
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
         ideogram_warm_staged = evaluation.warm_staged;
+        if receipt_priced_route {
+            receipt_priced_selection = Some(evaluation.context.selection.strategy);
+        }
         // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
         // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
         // Resident scope would then overwrite that request memory back to resident in configure_request.
@@ -10979,8 +10992,10 @@ async fn generate_candle_stream(
             _ => {}
         }
     }
-    let receipt_selector_authoritative =
-        (is_sana || is_sd35) && selected_memory_strategy_context.is_some();
+    // Every receipt-priced family, not just SANA/SD3.5 (sc-20799). `receipt_priced_selection` is
+    // Some exactly when the receipt produced a graded selection for this request, including a
+    // Resident one — which is a real decision the load must honor, not an absence of one.
+    let receipt_selector_authoritative = receipt_priced_selection.is_some();
     let use_sequential =
         if receipt_selector_authoritative {
             generation_memory.is_some_and(|memory| memory.stage_residency)
@@ -11448,18 +11463,22 @@ async fn generate_candle_stream(
               external_committed_bytes,
               tx,
               cancel| {
-            if is_ideogram || is_sana || is_sd35 {
+            if is_ideogram || is_sana || is_sd35 || receipt_selector_authoritative {
                 // Receipt-priced providers require the exact pre-load selector result to reach the
                 // cached generator. Ideogram may preserve a tighter pre-admitted staged sibling;
                 // SANA's cache key must exactly retain the selector's own resident/staged policy.
-                let context = memory_strategy_context.as_mut().ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        format!(
-                            "{engine_id} cache access is missing its exact pre-load memory context"
-                        ),
-                    )
-                })?;
+                //
+                // Ideogram/SANA/SD3.5 additionally REQUIRE a pre-load context: for them an absent
+                // one is a bug, not a fallback. Chroma and Kolors reach here only when the receipt
+                // actually priced the request (`receipt_selector_authoritative`); an uncertified
+                // import legitimately produced no receipt and keeps the historical resident path
+                // through the `else` arm below.
                 if is_ideogram {
+                    let context = memory_strategy_context.as_mut().ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "{engine_id} cache access is missing its exact pre-load memory context"
+                        ))
+                    })?;
                     crate::candle_memory_strategy::bind_ideogram_cache_execution(
                         context,
                         &mut generation_memory,
@@ -11476,27 +11495,52 @@ async fn generate_candle_stream(
                             loaded_policy.offload_policy,
                         )?;
                     }
+                } else if is_sana || is_sd35 {
+                    let context = memory_strategy_context.as_mut().ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "{engine_id} cache access is missing its exact pre-load memory context"
+                        ))
+                    })?;
+                    context.cache_state = cache_state;
+                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                        first_pass.cache_state = cache_state;
+                    }
                 } else {
-                    let selected_staged =
-                        context.selection.strategy == gen_core::MemoryStrategy::StagedResidency
-                            || generator
-                                .memory_strategy_contract()
-                                .is_some_and(|contract| {
-                                    contract.engages(
-                                        context.selection.strategy,
-                                        gen_core::MemoryStrategy::StagedResidency,
-                                    )
-                                });
+                    // Chroma/Kolors: `optimized_shared_memory_context` drops a Resident context,
+                    // so `None` here means the receipt selected Resident, not that it was silent.
+                    if let Some(context) = memory_strategy_context.as_mut() {
+                        context.cache_state = cache_state;
+                    }
+                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                        first_pass.cache_state = cache_state;
+                    }
+                }
+                // sc-20799: the policy the receipt admitted must EQUAL the policy that loaded, for
+                // every receipt-priced family — not only SANA and SD3.5. An admitted staged peak
+                // does not bound a resident load, and a warm cache entry can present either shape.
+                // Evaluated AFTER the Ideogram warm-staged rebinding above, so the comparison is
+                // against the strategy this request will actually execute.
+                if let Some(selected_strategy) = receipt_priced_selection {
+                    let effective_strategy = memory_strategy_context
+                        .as_ref()
+                        .map(|context| context.selection.strategy)
+                        .unwrap_or(selected_strategy);
+                    let selected_staged = effective_strategy
+                        == gen_core::MemoryStrategy::StagedResidency
+                        || generator
+                            .memory_strategy_contract()
+                            .is_some_and(|contract| {
+                                contract.engages(
+                                    effective_strategy,
+                                    gen_core::MemoryStrategy::StagedResidency,
+                                )
+                            });
                     let loaded_staged =
                         loaded_policy.offload_policy == gen_core::OffloadPolicy::Sequential;
                     if selected_staged != loaded_staged {
                         return Err(WorkerError::InvalidPayload(format!(
                             "{engine_id} warm cache policy crossed its exact pre-load selection"
                         )));
-                    }
-                    context.cache_state = cache_state;
-                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
-                        first_pass.cache_state = cache_state;
                     }
                 }
                 let stages = generation_memory.is_some_and(|memory| memory.stage_residency);
@@ -11515,6 +11559,11 @@ async fn generate_candle_stream(
                     ))
                 })?;
                 let facts = contract.asset_facts;
+                // Only these three families expose a singular canonical physical receipt to name in
+                // the disclosure. Chroma and Kolors seal their identity as an ordered overlay
+                // receipt instead, already bound into the selection above; they take the policy
+                // guard without minting a second, weaker receipt here.
+                if is_ideogram || is_sana || is_sd35 {
                 let physical_receipt = if is_sana {
                     crate::candle_memory_strategy::sana_physical_receipt_identity(
                         engine_id, contract,
@@ -11526,9 +11575,14 @@ async fn generate_candle_stream(
                 } else {
                     crate::candle_memory_strategy::ideogram_physical_receipt_identity(contract)?
                 };
+                let context = memory_strategy_context.as_ref().ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{engine_id} cache access is missing its exact pre-load memory context"
+                    ))
+                })?;
                 let passes = match hires_first_pass_memory_context.as_ref() {
-                    Some(first) => vec![("hires_first", first), ("hires_final", &*context)],
-                    None => vec![("single", &*context)],
+                    Some(first) => vec![("hires_first", first), ("hires_final", context)],
+                    None => vec![("single", context)],
                 };
                 for (pass_identity, pass_context) in passes {
                     let strategy_label = match pass_context.selection.strategy {
@@ -11610,6 +11664,7 @@ async fn generate_candle_stream(
                         "evidenceRevision": pass_context.evidence_revision.clone(),
                     }),
                     );
+                }
                 }
             } else {
                 warm_policy.decline(

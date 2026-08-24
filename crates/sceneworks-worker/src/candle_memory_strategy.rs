@@ -24,6 +24,7 @@ use sceneworks_core::memory_calibration::{
     Geometry as CalibrationGeometry, LoadShapeKey, QualityResult, RequiredNullable, StrategyRung,
 };
 use serde_json::{Map as JsonObject, Value};
+use sha2::Digest;
 
 use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 use crate::vram_gate::VramBudget;
@@ -59,6 +60,8 @@ const KOLORS_ADAPTER_RECEIPT_PREFIX: &str = "kolors.adapters.ordered.sha256:";
 const KOLORS_IP_RECEIPT_PREFIX: &str = "kolors.ip.sha256:";
 const KOLORS_CONTROL_RECEIPT_PREFIX: &str = "kolors.control.sha256:";
 const KOLORS_PID_RECEIPT_PREFIX: &str = "kolors.pid.sdxl.sha256:";
+const SDXL_OVERLAY_RECEIPT_DOMAIN: &str = "sdxl-candle-overlay-assembly-v1";
+const SDXL_OVERLAY_RECEIPT_PREFIX: &str = "sdxl.overlay.ordered.sha256:";
 
 fn is_chroma(engine_id: &str) -> bool {
     matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
@@ -86,7 +89,10 @@ fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
     )
 }
 
-fn is_receipt_priced(engine_id: &str) -> bool {
+/// Every family whose admitted peak is priced from an exact provider receipt rather than a
+/// manifest estimate. The executed load policy of such a family must equal the policy its receipt
+/// admitted — see `image_jobs::base`'s cache-execution guard.
+pub(crate) fn is_receipt_priced(engine_id: &str) -> bool {
     is_chroma(engine_id)
         || is_ideogram(engine_id)
         || is_sana(engine_id)
@@ -284,9 +290,18 @@ fn ideogram_provider_overlay_identity(
     }
 }
 
-fn validate_chroma_asset_facts(contract: &gen_core::MemoryProviderContract) -> WorkerResult<()> {
+fn validate_chroma_asset_facts(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+) -> WorkerResult<()> {
     let facts = contract.asset_facts;
-    let complete = facts.conditioning_bytes > 0
+    // Route identity is a conjunct of the receipt, exactly as in `validate_sana_asset_facts` and
+    // `validate_sd35_asset_facts`. Without it a contract minted by another Chroma variant (or by
+    // any provider at all) prices this request: the three Chroma turnkeys are different physical
+    // tensor sets under one family name, so `provider_id` is the only fact that separates them.
+    let complete = is_chroma(engine_id)
+        && contract.provider_id == engine_id
+        && facts.conditioning_bytes > 0
         && facts.transformer_bytes > 0
         && facts.decoder_bytes > 0
         && facts.base_bytes
@@ -296,9 +311,9 @@ fn validate_chroma_asset_facts(contract: &gen_core::MemoryProviderContract) -> W
                 .saturating_add(facts.decoder_bytes)
         && contract.auxiliary_resident_bytes() == facts.overlay_bytes;
     if !complete {
-        return Err(WorkerError::InvalidPayload(
-            "Chroma provider returned incomplete or crossed materialized asset facts".to_owned(),
-        ));
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} provider returned incomplete or crossed materialized Chroma asset facts"
+        )));
     }
     Ok(())
 }
@@ -308,6 +323,7 @@ fn validate_ideogram_asset_facts(
     contract: &gen_core::MemoryProviderContract,
     use_pid: bool,
     mode: &MemoryMode,
+    has_phases: bool,
 ) -> WorkerResult<()> {
     let facts = contract.asset_facts;
     let pid_receipts = contract
@@ -320,8 +336,15 @@ fn validate_ideogram_asset_facts(
         .iter()
         .filter(|component| component.id.starts_with(IDEOGRAM_PHYSICAL_RECEIPT_PREFIX))
         .collect::<Vec<_>>();
+    // The hires FINAL pass is the one request shape whose contract legitimately carries a PiD
+    // receipt it will not decode through: `evaluate_shared_image` is called for it with
+    // `use_pid && hires_fix.is_none()` (false) while the provider has already materialized the PiD
+    // stack for the FIRST pass. That pass is identified by `has_phases`, which base.rs sets from
+    // `hires_fix.is_some()`. Without the `has_phases` conjunct any single-pass image-to-image
+    // request — an edit, a style variation — accepts a PiD-charged contract and is admitted
+    // against a peak that includes bytes its own render never asked for.
     let pid_shape_matches = pid_receipts == usize::from(use_pid)
-        || (!use_pid && *mode == MemoryMode::ImageToImage && pid_receipts == 1);
+        || (!use_pid && has_phases && *mode == MemoryMode::ImageToImage && pid_receipts == 1);
     let complete = facts.conditioning_bytes > 0
         && facts.transformer_bytes > 0
         && facts.decoder_bytes > 0
@@ -1419,21 +1442,67 @@ pub(crate) fn evaluate_shared_image(
 }
 
 /// Exact ordered physical overlay identity shared by registered and bespoke SDXL admissions.
+///
+/// Every sibling receipt-priced family binds its overlay to the exact materialized artifact —
+/// Kolors through `KOLORS_CONTROL_RECEIPT_PREFIX`/`KOLORS_IP_RECEIPT_PREFIX`, SD3.5 and Chroma
+/// through their ordered additive-adapter receipts. SDXL cannot read those from its contract:
+/// `candle_gen_sdxl::memory_strategy::build_contract` emits no `resident_components`, and the
+/// physical digest `SdxlArtifactSeal::capture` computes is discarded before the contract is
+/// returned. So the worker seals its own ordered twin here, over the ROLE and the resolved SOURCE
+/// PATH of every overlay slot, at the same grade `gen_core::adapter_stack_identity` already
+/// applies to the adapter slot (path + kind + scale, sha256, domain-separated).
+///
+/// The identity this replaces was `control:{N}` / `ip-adapter` / `pid` — cardinality and kind
+/// only. Two different tile ControlNets, or two different IP-Adapter checkpoints, produced one
+/// identity and could therefore borrow each other's admitted peak. Ordering is the LoadSpec's own
+/// slot order (control, then `extra_controls` in order, then IP-Adapter, then the PiD checkpoint
+/// and its Gemma text encoder), never a sorted set, because the load order is what the provider
+/// materializes.
 pub(crate) fn sdxl_provider_overlay(spec: &LoadSpec) -> Option<String> {
-    let mut parts = Vec::new();
-    if spec.control.is_some() {
-        parts.push(format!("control:{}", 1 + spec.extra_controls.len()));
+    let mut slots: Vec<(&str, &gen_core::WeightsSource)> = Vec::new();
+    if let Some(control) = spec.control.as_ref() {
+        slots.push(("control", control));
     }
-    if spec.ip_adapter.is_some() {
-        parts.push("ip-adapter".to_owned());
+    for extra in &spec.extra_controls {
+        slots.push(("extra-control", extra));
     }
-    if spec.pid.is_some() {
-        parts.push("pid".to_owned());
+    if let Some(ip_adapter) = spec.ip_adapter.as_ref() {
+        slots.push(("ip-adapter", ip_adapter));
     }
-    if let Some(adapters) = gen_core::adapter_stack_identity(&spec.adapters) {
-        parts.push(adapters);
+    if let Some(pid) = spec.pid.as_ref() {
+        slots.push(("pid-checkpoint", &pid.checkpoint));
+        slots.push(("pid-gemma", &pid.gemma));
     }
-    (!parts.is_empty()).then(|| parts.join("+"))
+    let adapters = gen_core::adapter_stack_identity(&spec.adapters);
+    if slots.is_empty() && adapters.is_none() {
+        return None;
+    }
+    let mut digest = sha2::Sha256::new();
+    digest.update(SDXL_OVERLAY_RECEIPT_DOMAIN.as_bytes());
+    for (ordinal, (role, source)) in slots.iter().enumerate() {
+        // The source KIND is part of the seal: a directory snapshot and a single-file checkpoint
+        // are different physical loads even when one path is a prefix of the other.
+        let (kind, path) = match source {
+            gen_core::WeightsSource::Dir(path) => ("dir", path),
+            gen_core::WeightsSource::File(path) => ("file", path),
+        };
+        let path = format!("{:?}", path.as_os_str());
+        digest.update((ordinal as u64).to_le_bytes());
+        digest.update((role.len() as u64).to_le_bytes());
+        digest.update(role.as_bytes());
+        digest.update((kind.len() as u64).to_le_bytes());
+        digest.update(kind.as_bytes());
+        digest.update((path.len() as u64).to_le_bytes());
+        digest.update(path.as_bytes());
+    }
+    if let Some(adapters) = adapters.as_deref() {
+        digest.update((adapters.len() as u64).to_le_bytes());
+        digest.update(adapters.as_bytes());
+    }
+    Some(format!(
+        "{SDXL_OVERLAY_RECEIPT_PREFIX}{:x}",
+        digest.finalize()
+    ))
 }
 
 /// Shared-selector entry point for a bespoke Candle provider whose exact contract is built from
@@ -1619,10 +1688,10 @@ fn evaluate_shared_image_inner(
         }
     };
     let provider_overlay = if is_chroma(engine_id) {
-        validate_chroma_asset_facts(&contract)?;
+        validate_chroma_asset_facts(engine_id, &contract)?;
         chroma_provider_overlay_identity(&contract, provider_overlay)?
     } else if is_ideogram(engine_id) {
-        validate_ideogram_asset_facts(engine_id, &contract, use_pid, &mode.mode)?;
+        validate_ideogram_asset_facts(engine_id, &contract, use_pid, &mode.mode, worker_multipass)?;
         ideogram_provider_overlay_identity(engine_id, &contract, provider_overlay)?
     } else if is_sana(engine_id) {
         validate_sana_asset_facts(engine_id, &contract)?;
@@ -2419,10 +2488,29 @@ mod tests {
         .clone()
     }
 
+    /// Physical bytes of one Kolors turnkey tier, as (conditioning, unet/DiT, decoder) GiB.
+    ///
+    /// The three tiers are physically different tensor sets — a q4 UNet is not a bf16 UNet with a
+    /// smaller label — so a fixture that returns identical facts for all three makes the tier axis
+    /// of `kolors_bespoke_staged_surface_covers_tiers_geometries_modes_pid_and_cache_states`
+    /// inert: every tier iteration prices the same bytes and no tier-keyed mutation can be killed.
+    /// The ChatGLM text encoder is f32 in every tier (it is not quantized), so only the UNet and
+    /// the VAE move.
+    fn kolors_tier_gib(tier: &str) -> (u64, u64, u64) {
+        match tier {
+            "q4" => (6, 5, 1),
+            "q8" => (6, 10, 2),
+            "bf16" => (6, 20, 4),
+            other => unreachable!("Kolors probe fixture has no physical tier {other}"),
+        }
+    }
+
     fn kolors_bespoke_probe_contract(
         provider: &str,
+        tier: &str,
         use_pid: bool,
     ) -> gen_core::MemoryProviderContract {
+        let (conditioning_gib, transformer_gib, decoder_gib) = kolors_tier_gib(tier);
         let mut contract = chroma_probe_contract(None, 0, 0);
         contract.provider_id = provider.to_owned();
         contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
@@ -2445,7 +2533,7 @@ mod tests {
                 kind: gen_core::MemoryComponentKind::TransformerSubStack(
                     gen_core::TransformerComponent::Dit,
                 ),
-                resident_bytes: gib(10),
+                resident_bytes: gib(transformer_gib),
                 bounded_by: Some(MemoryStrategy::StagedResidency),
                 residency: gen_core::MemoryComponentResidency::WholeRender,
             },
@@ -2478,20 +2566,21 @@ mod tests {
             resident_components: components,
         };
         contract.asset_facts = gen_core::MemoryAssetFacts {
-            conditioning_bytes: gib(6),
-            transformer_bytes: gib(10),
-            decoder_bytes: gib(2),
-            base_bytes: gib(18),
+            conditioning_bytes: gib(conditioning_gib),
+            transformer_bytes: gib(transformer_gib),
+            decoder_bytes: gib(decoder_gib),
+            base_bytes: gib(conditioning_gib + transformer_gib + decoder_gib),
             overlay_bytes: gib(if use_pid { 5 } else { 2 }),
         };
         contract
     }
 
     fn kolors_registered_probe_contract(
+        tier: &str,
         with_adapter: bool,
         use_pid: bool,
     ) -> gen_core::MemoryProviderContract {
-        let mut contract = kolors_bespoke_probe_contract("candle_kolors_control", use_pid);
+        let mut contract = kolors_bespoke_probe_contract("candle_kolors_control", tier, use_pid);
         contract.provider_id = "kolors".to_owned();
         let mut components = contract.resident_components().to_vec();
         components.retain(|component| !component.id.starts_with(KOLORS_CONTROL_RECEIPT_PREFIX));
@@ -2532,7 +2621,7 @@ mod tests {
         .unwrap()
         .clone();
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("kolors-q4")));
-        let contract = kolors_registered_probe_contract(true, true);
+        let contract = kolors_registered_probe_contract("q4", true, true);
         let evaluation = evaluate_shared_image_inner(
             "kolors",
             "kolors",
@@ -2605,7 +2694,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             None,
-            Some(kolors_registered_probe_contract(false, false)),
+            Some(kolors_registered_probe_contract("q4", false, false)),
             None,
         );
         assert!(crossed_pid.is_err());
@@ -2639,7 +2728,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             None,
-            Some(kolors_registered_probe_contract(false, false)),
+            Some(kolors_registered_probe_contract("q4", false, false)),
             None,
         );
         assert!(crossed_adapters.is_err());
@@ -2682,7 +2771,7 @@ mod tests {
             Some(30.0),
             0,
             MemoryCacheState::Cold,
-            kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+            kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
             KOLORS_REQUEST_EVIDENCE_REVISION,
         )
         .unwrap()
@@ -2729,7 +2818,7 @@ mod tests {
             Some(30.0),
             0,
             MemoryCacheState::Cold,
-            kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+            kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
             KOLORS_REQUEST_EVIDENCE_REVISION,
         );
         assert!(
@@ -2759,7 +2848,7 @@ mod tests {
             Some(30.0),
             0,
             MemoryCacheState::Cold,
-            kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+            kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
             "crossed-kolors-revision",
         )
         .is_err());
@@ -2769,7 +2858,7 @@ mod tests {
     fn kolors_bespoke_staged_surface_covers_tiers_geometries_modes_pid_and_cache_states() {
         let manifest = json!({
             "candle": {
-                "vramGbByTier": { "q4": 63.7, "q8": 63.7, "bf16": 63.7 },
+                "vramGbByTier": { "q4": 16.0, "q8": 22.0, "bf16": 34.0 },
                 "measured": true
             }
         })
@@ -2780,7 +2869,15 @@ mod tests {
             free_gb: 40.0,
             total_gb: 48.0,
         });
+        // The declared resident row and the provider receipt describe the SAME physical tier. Both
+        // move together, so a tier is a real axis of this coverage rather than a label on one set
+        // of bytes: see `kolors_tier_gib`.
+        let tier_resident_gb = |tier: &str| {
+            let (conditioning, transformer, decoder) = kolors_tier_gib(tier);
+            (conditioning + transformer + decoder) as f64 + 4.0
+        };
         let geometries = [(768, 768), (1024, 1024), (1280, 768), (768, 1280)];
+        let mut ip_peaks_by_tier: Vec<(&str, u64)> = Vec::new();
         for tier in ["q4", "q8", "bf16"] {
             let base_spec =
                 LoadSpec::new(WeightsSource::Dir(PathBuf::from(format!("kolors-{tier}"))));
@@ -2818,10 +2915,10 @@ mod tests {
                         false,
                         false,
                         budget,
-                        Some(63.7),
+                        Some(tier_resident_gb(tier)),
                         0,
                         cache_state,
-                        kolors_bespoke_probe_contract("candle_kolors_ipadapter", false),
+                        kolors_bespoke_probe_contract("candle_kolors_ipadapter", tier, false),
                         KOLORS_REQUEST_EVIDENCE_REVISION,
                     )
                     .unwrap()
@@ -2830,6 +2927,9 @@ mod tests {
                         ip.context.selection.strategy,
                         MemoryStrategy::StagedResidency
                     );
+                    if (width, height) == (1024, 1024) && cache_state == MemoryCacheState::Cold {
+                        ip_peaks_by_tier.push((tier, ip.context.predicted_peak_bytes));
+                    }
 
                     for (mode, use_pid) in [
                         ("text_to_image", false),
@@ -2861,10 +2961,10 @@ mod tests {
                             use_pid,
                             false,
                             budget,
-                            Some(63.7),
+                            Some(tier_resident_gb(tier)),
                             0,
                             cache_state,
-                            kolors_bespoke_probe_contract("candle_kolors_control", use_pid),
+                            kolors_bespoke_probe_contract("candle_kolors_control", tier, use_pid),
                             KOLORS_REQUEST_EVIDENCE_REVISION,
                         )
                         .unwrap()
@@ -2877,6 +2977,24 @@ mod tests {
                 }
             }
         }
+        // The tier axis has to REACH the admitted number. Before sc-20799 the probe contract
+        // returned identical bytes for q4, q8 and bf16 and the declared row was 63.7 for all
+        // three, so every tier iteration above admitted the same peak and no tier-keyed mutation
+        // could be killed. Assert the SHAPE — three tiers, strictly ordered by their physical
+        // size — never a byte literal, which would freeze the fixture into a golden.
+        assert_eq!(
+            ip_peaks_by_tier
+                .iter()
+                .map(|(tier, _)| *tier)
+                .collect::<Vec<_>>(),
+            vec!["q4", "q8", "bf16"]
+        );
+        assert!(
+            ip_peaks_by_tier
+                .windows(2)
+                .all(|pair| pair[0].1 < pair[1].1),
+            "staged admission must price each Kolors tier's own bytes, got {ip_peaks_by_tier:?}"
+        );
     }
 
     fn ideogram_probe_contract(
@@ -3718,20 +3836,144 @@ mod tests {
     #[test]
     fn ideogram_pid_receipt_only_allows_the_native_hires_refinement_coordinate() {
         let contract = ideogram_probe_contract("ideogram_4", None, false, true);
-        validate_ideogram_asset_facts("ideogram_4", &contract, true, &MemoryMode::TextToImage)
-            .expect("the PiD first pass binds its receipt");
-        validate_ideogram_asset_facts("ideogram_4", &contract, false, &MemoryMode::ImageToImage)
-            .expect("the native Hires refinement retains the load's charged PiD receipt");
+        validate_ideogram_asset_facts(
+            "ideogram_4",
+            &contract,
+            true,
+            &MemoryMode::TextToImage,
+            true,
+        )
+        .expect("the PiD first pass binds its receipt");
+        validate_ideogram_asset_facts(
+            "ideogram_4",
+            &contract,
+            false,
+            &MemoryMode::ImageToImage,
+            true,
+        )
+        .expect("the native Hires refinement retains the load's charged PiD receipt");
         assert!(validate_ideogram_asset_facts(
             "ideogram_4",
             &contract,
             false,
             &MemoryMode::TextToImage,
+            true,
+        )
+        .is_err());
+        // sc-20799: the tolerance is the HIRES FINAL pass, identified by `worker_multipass`, not
+        // "any image-to-image request". A single-pass edit or style variation asks for no PiD
+        // decode, so a PiD-charged contract is bytes it never requested and must be refused.
+        assert!(
+            validate_ideogram_asset_facts(
+                "ideogram_4",
+                &contract,
+                false,
+                &MemoryMode::ImageToImage,
+                false,
+            )
+            .is_err(),
+            "a single-pass image-to-image request must not borrow a PiD-charged contract"
+        );
+        // The tolerance still has to be reachable in both hires directions, and an unrelated mode
+        // must not acquire it just by being multipass.
+        assert!(validate_ideogram_asset_facts(
+            "ideogram_4",
+            &contract,
+            false,
+            &MemoryMode::Edit,
+            true,
         )
         .is_err());
         assert!(ideogram_physical_receipt_identity(&contract)
             .expect("physical receipt")
             .starts_with(IDEOGRAM_PHYSICAL_RECEIPT_PREFIX));
+    }
+
+    /// sc-20799: Chroma's receipt is bound to its ROUTE, exactly as SANA's and SD3.5's are. The
+    /// three Chroma turnkeys are different physical tensor sets under one family name, so without
+    /// `provider_id == engine_id` a contract minted by `chroma1_base` prices a `chroma1_hd`
+    /// request.
+    #[test]
+    fn chroma_asset_facts_bind_the_exact_route_identity() {
+        let contract = chroma_probe_contract(None, 0, 0);
+        assert_eq!(contract.provider_id, "chroma1_base");
+        validate_chroma_asset_facts("chroma1_base", &contract)
+            .expect("the minting route prices its own request");
+        for crossed in ["chroma1_hd", "chroma1_flash"] {
+            assert!(
+                validate_chroma_asset_facts(crossed, &contract).is_err(),
+                "{crossed} must not price a request from another Chroma turnkey's contract"
+            );
+        }
+        assert!(
+            validate_chroma_asset_facts("sana_1600m", &contract).is_err(),
+            "a non-Chroma route must not reach the Chroma receipt at all"
+        );
+    }
+
+    /// sc-20799: SDXL's overlay identity used to be `control:{N}` / `ip-adapter` / `pid` —
+    /// cardinality and kind only — so two different ControlNets or IP-Adapters shared one
+    /// admission identity. Assert the SHAPE (distinct payloads are distinct, equal payloads are
+    /// stable, order matters), never a digest literal: the seal covers absolute paths, which are
+    /// machine-dependent and must never be frozen into a golden.
+    #[test]
+    fn sdxl_overlay_identity_separates_distinct_physical_payloads() {
+        let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sdxl-q4")));
+        assert_eq!(sdxl_provider_overlay(&base), None);
+
+        let control_a = base
+            .clone()
+            .with_control(WeightsSource::File(PathBuf::from("tile-a.safetensors")));
+        let control_b = base
+            .clone()
+            .with_control(WeightsSource::File(PathBuf::from("tile-b.safetensors")));
+        let a = sdxl_provider_overlay(&control_a).expect("control overlay");
+        let b = sdxl_provider_overlay(&control_b).expect("control overlay");
+        assert!(a.starts_with(SDXL_OVERLAY_RECEIPT_PREFIX));
+        assert_ne!(a, b, "two different tile ControlNets are two identities");
+        assert_eq!(
+            a,
+            sdxl_provider_overlay(&control_a).expect("control overlay"),
+            "the same assembly must seal to the same identity"
+        );
+
+        let ip_a = base
+            .clone()
+            .with_ip_adapter(WeightsSource::File(PathBuf::from("ip-a.safetensors")));
+        let ip_b = base
+            .clone()
+            .with_ip_adapter(WeightsSource::File(PathBuf::from("ip-b.safetensors")));
+        assert_ne!(
+            sdxl_provider_overlay(&ip_a),
+            sdxl_provider_overlay(&ip_b),
+            "two different IP-Adapter checkpoints are two identities"
+        );
+        assert_ne!(
+            sdxl_provider_overlay(&ip_a),
+            sdxl_provider_overlay(&control_a),
+            "an IP-Adapter slot and a control slot are different roles"
+        );
+
+        // The source KIND is sealed: a directory snapshot is not the same load as a single file.
+        let control_dir = base
+            .clone()
+            .with_control(WeightsSource::Dir(PathBuf::from("tile-a.safetensors")));
+        assert_ne!(sdxl_provider_overlay(&control_dir), a.clone().into());
+
+        // PiD contributes both of its sources, and the slot ORDER is load order.
+        let pid = control_a.clone().with_pid(
+            WeightsSource::File(PathBuf::from("pid.safetensors")),
+            WeightsSource::Dir(PathBuf::from("gemma")),
+        );
+        let pid_swapped = control_a.clone().with_pid(
+            WeightsSource::File(PathBuf::from("gemma")),
+            WeightsSource::Dir(PathBuf::from("pid.safetensors")),
+        );
+        assert_ne!(sdxl_provider_overlay(&pid), Some(a));
+        assert_ne!(
+            sdxl_provider_overlay(&pid),
+            sdxl_provider_overlay(&pid_swapped)
+        );
     }
 
     #[test]

@@ -526,10 +526,27 @@ pub(crate) async fn run_image_detail_job(
         "tileControlNetRepo",
         TILE_CONTROLNET_REPO,
     );
+    // `tileControlNetRepo` is a public advanced control that accepted any repo before this epic,
+    // and the MLX detail route still loads whatever it resolves. Refusing an override here removed
+    // a previously-working user control to protect a memory identity that is already protected by
+    // certification: `control_certified` below is computed against the PINNED repo+revision, so an
+    // override resolves a different file, reports uncertified, and is admitted resident-only with
+    // no packaged record and no estimate floor — it cannot borrow the pinned ControlNet's receipt
+    // (sc-20799). The candle detail provider enforces its own pin at load
+    // (`candle_gen_sdxl::memory_strategy::validate_detail_spec`); that refusal belongs to the
+    // provider and is reported in its own words rather than pre-empted here.
     if control_repo != TILE_CONTROLNET_REPO {
-        return Err(WorkerError::InvalidPayload(format!(
-            "SDXL detail requires the immutable {TILE_CONTROLNET_REPO}@{TILE_CONTROLNET_REVISION} tile ControlNet; arbitrary overrides are not admitted"
-        )));
+        tracing::info!(
+            event = "image_memory_evidence_excluded",
+            model = %request.model,
+            mode = "image_detail",
+            axis = "tileControlNetRepo",
+            requested_repo = control_repo,
+            pinned_repo = TILE_CONTROLNET_REPO,
+            pinned_revision = TILE_CONTROLNET_REVISION,
+            "SDXL detail tile ControlNet override is outside the certified artifact; \
+             admission falls back to the uncertified resident estimate"
+        );
     }
     let control_dir =
         huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {
