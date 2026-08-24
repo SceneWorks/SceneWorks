@@ -20526,6 +20526,365 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
     );
 }
 
+/// sc-20644 Krea row, AC1 — the FULL Krea 2 surface runs off the plan's verified layer, and a
+/// LINKED copy and a MANAGED copy of the same bytes are the same model.
+///
+/// Two properties, and neither is provable from the plan route alone:
+///
+///   * **same semantic plan** — `compile_linked` and `compile_managed` over identical bytes produce
+///     the same semantic digest (E1). The two records differ only in source-binding identity, which
+///     is what makes "linked or managed" an ownership choice rather than a different model.
+///   * **same inputs to the same body** — for every request shape the plan route does NOT serve
+///     (LoRA, img2img, edit, pose, multi-phase, Hires.fix), the bespoke Krea lane now resolves its
+///     primary to the PLAN's verified layer instead of declining. The LoadSpec the lane assembles
+///     and the per-image seed sequence are therefore identical to the legacy `paths.model` route's
+///     for the same request, which is what makes a fixed-seed render equal across routes: same
+///     weights bytes, same components, same seeds, one generation body.
+///
+/// Before this row a plan-backed Krea entry had NO lane for any of those shapes — importing a
+/// checkpoint removed capabilities it had, and a linked checkpoint could never reach them at all.
+///
+/// Failing mutations: delete the `checkpoint_plan_bespoke_primary_pin` call in
+/// `resolve_imported_krea_dit_pin` (every non-t2i shape loses its lane); return the managed
+/// checkpoint's layer for the linked request (paths diverge); drop `layers_with_role` filtering in
+/// `checkpoint_plan_primary_selection` (wrong layer selected).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_krea_full_surface_loads_the_plans_verified_layer_for_linked_and_managed_copies() {
+    let fx = CheckpointPlanFixture::new("krea-full-surface", true);
+    let linked_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // The MANAGED copy: the same bytes under the app-owned installs tree, compiled by the same
+    // inspector through the managed entry point.
+    let install_id = "install-kreamania";
+    let install_dir = fx.store.install_dir(install_id).unwrap();
+    std::fs::create_dir_all(&install_dir).unwrap();
+    // The store resolves an install through its own canonicalization, so compare against the
+    // canonical spelling rather than the `/var` alias the temp dir hands out on macOS. A
+    // machine-dependent prefix is never asserted — only that the two spellings name one file.
+    let install_dir = std::fs::canonicalize(&install_dir).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        install_dir.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let managed = fx
+        .store
+        .compile_managed(
+            install_id,
+            "kreamania.safetensors",
+            sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+                source: "local-copy".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let linked_resolved = fx.store.resolve(&linked_id).unwrap();
+    let managed_resolved = fx.store.resolve(&managed.checkpoint_id).unwrap();
+    assert_eq!(
+        linked_resolved.record.plan.semantic_digest, managed_resolved.record.plan.semantic_digest,
+        "E1: the same bytes compile to the same SEMANTIC plan under either ownership"
+    );
+    assert_ne!(
+        linked_id, managed.checkpoint_id,
+        "fixture check: the two copies are distinct checkpoints, so the assertions below are not \
+         reading one record twice"
+    );
+
+    // A LoRA request: a shape the plan route declines by construction, so this is the bespoke lane.
+    let lora_request = |checkpoint_id: &str| {
+        fx.plan_backed_request(
+            checkpoint_id,
+            json!({ "loras": [{ "name": "style", "weight": 0.4 }] }),
+        )
+    };
+    for (checkpoint_id, expected) in [
+        (
+            linked_id.as_str(),
+            fx.library_dir.join("kreamania.safetensors"),
+        ),
+        (
+            managed.checkpoint_id.as_str(),
+            install_dir.join("kreamania.safetensors"),
+        ),
+    ] {
+        let request = lora_request(checkpoint_id);
+        assert!(
+            !request_is_checkpoint_plan_backed(&request),
+            "fixture check: the plan route does not serve a LoRA request, so the bespoke lane owns it"
+        );
+        let pin = resolve_imported_krea_dit_pin(&request, &fx.settings)
+            .expect("a plan-backed Krea entry resolves its primary through the plan")
+            .expect("the bespoke lane claims the LoRA shape a plan-backed entry used to lose");
+        assert_eq!(
+            pin.loader_path(),
+            expected.as_path(),
+            "the lane loads THIS checkpoint's own verified layer, never the other copy's"
+        );
+    }
+
+    // The legacy `paths.model` route for the same bytes: same primary, same spec shape, same seeds.
+    let legacy_install = fx.settings.data_dir.join("models/legacy-kreamania");
+    std::fs::create_dir_all(&legacy_install).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        legacy_install.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "count": 3,
+        "seed": 4242,
+        "loras": [{ "name": "style", "weight": 0.4 }],
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": legacy_install.to_str().unwrap() }
+        }
+    }));
+    let legacy_pin = resolve_imported_krea_dit_pin(&legacy, &fx.settings)
+        .unwrap()
+        .expect("fixture check: the legacy scan still finds its install");
+    assert_eq!(
+        legacy_pin.loader_path(),
+        legacy_install.join("kreamania.safetensors").as_path()
+    );
+    assert_eq!(
+        std::fs::read(legacy_pin.loader_path()).unwrap(),
+        std::fs::read(fx.library_dir.join("kreamania.safetensors")).unwrap(),
+        "fixture check: the legacy route and the plan routes open byte-identical weights, which is \
+         the premise a same-seed render equality rests on"
+    );
+
+    // Seeds are request-derived, not route-derived: the same request renders the same seed sequence
+    // on either route, so identical weights + identical spec + identical seeds is same-seed equality.
+    let mut plan_backed_seeded = fx.plan_backed_request(&linked_id, json!({}));
+    plan_backed_seeded.count = legacy.count;
+    plan_backed_seeded.seed = legacy.seed;
+    plan_backed_seeded.loras = legacy.loras.clone();
+    let seeds = |r: &ImageRequest| -> Vec<i64> {
+        (0..r.count as usize).map(|i| resolve_seed(r, i)).collect()
+    };
+    assert_eq!(seeds(&plan_backed_seeded), seeds(&legacy));
+    assert_eq!(seeds(&legacy).len(), 3);
+}
+
+/// sc-20644 Krea row, AC2 — per-request single-claim conformance across the FULL surface, plus the
+/// exact bespoke surface sc-20651 deletes, pinned by name.
+///
+/// The claim is per REQUEST, not per entry, so proving it on one shape proves nothing: the row
+/// widened the bespoke lane to serve every plan-backed shape the plan route declines, and the two
+/// gates that keep them disjoint (`checkpoint_plan_serves_request_shape` and the
+/// `request_is_checkpoint_plan_backed` early return in `resolve_imported_krea_dit_pin`) are now
+/// load-bearing for six shapes rather than none. The matrix below walks them.
+///
+/// Failing mutations (each run individually): delete the `request_is_checkpoint_plan_backed` early
+/// return in `resolve_imported_krea_dit_pin` → the t2i row is claimed twice; drop `loras.is_empty()`
+/// from `checkpoint_plan_serves_request_shape` → the LoRA row is claimed twice; drop
+/// `hires_fix.enabled` → the Hires row is claimed twice.
+#[cfg(target_os = "macos")]
+#[test]
+fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
+    let fx = CheckpointPlanFixture::new("krea-single-claim", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // Each lane's OWN claim answer, in the same terms the lane's production preparation uses: the
+    // plan route's availability, the bespoke non-pose lane (shape gate + a resolvable primary, the
+    // two halves of `prepare_krea_imported_sources` before adapters), and the bespoke pose lane
+    // (`prepare_krea_imported_control_sources`' own pose condition). A source resolution that
+    // ERRORS still counts as a claim: the lane took the request and refused it, which is a claim
+    // with a typed refusal, not a decline.
+    let plan_claims = |r: &ImageRequest| {
+        prepare_checkpoint_plan_sources(r, &fx.settings)
+            .map(|selection| selection.is_available())
+            .unwrap_or(true)
+    };
+    let primary_resolves =
+        |r: &ImageRequest| !matches!(resolve_imported_krea_dit_pin(r, &fx.settings), Ok(None));
+    let krea_claims = |r: &ImageRequest| {
+        pose_entries(r).is_empty()
+            && krea_imported_request_shape_available(r)
+            && primary_resolves(r)
+    };
+    let krea_pose_claims = |r: &ImageRequest| {
+        r.mode != "edit_image"
+            && !pose_entries(r).is_empty()
+            && krea_imported_request_shape_available(r)
+            && primary_resolves(r)
+    };
+
+    let shapes: Vec<(&str, ImageRequest)> = vec![
+        ("t2i", fx.plan_backed_request(&checkpoint_id, json!({}))),
+        (
+            "img2img",
+            fx.plan_backed_request(&checkpoint_id, json!({ "referenceAssetId": "asset-1" })),
+        ),
+        (
+            "lora",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "loras": [{ "name": "style", "weight": 0.4 }] }),
+            ),
+        ),
+        (
+            "edit",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "mode": "edit_image", "referenceAssetId": "asset-1" }),
+            ),
+        ),
+        (
+            "pose",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "advanced": { "poses": [{ "id": "a" }] } }),
+            ),
+        ),
+        (
+            "multiphase",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "advanced": { "phases": [
+                    { "steps": 4, "guidance": 3.0 },
+                    { "steps": 4, "guidance": 1.0 }
+                ] } }),
+            ),
+        ),
+        (
+            "hires",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+            ),
+        ),
+    ];
+
+    for (label, request) in &shapes {
+        let claimants: Vec<&str> = [
+            ("checkpoint-plan", plan_claims(request)),
+            ("krea-imported", krea_claims(request)),
+            ("krea-imported-control", krea_pose_claims(request)),
+        ]
+        .into_iter()
+        .filter_map(|(name, claimed)| claimed.then_some(name))
+        .collect();
+        assert_eq!(
+            claimants.len(),
+            1,
+            "{label}: exactly one lane may claim a plan-backed request, got {claimants:?}"
+        );
+        assert!(
+            resolve_image_route(request, &fx.settings).is_some(),
+            "{label}: a plan-backed request must never fall through to the procedural stub"
+        );
+    }
+
+    // The route the claim resolves to, named, so a mutation that moves a shape to the wrong lane is
+    // caught even when the count stays at one.
+    let route_of = |label: &str| {
+        let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
+        resolve_image_route(request, &fx.settings)
+    };
+    assert_eq!(route_of("t2i"), Some(ImageRoute::CheckpointPlan));
+    assert_eq!(route_of("lora"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("edit"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("multiphase"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("hires"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("pose"), Some(ImageRoute::KreaImportedControl));
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME -------------------------------
+    //
+    // sc-20651 removes the Krea family's filesystem-scan source resolution once its one-time
+    // catalog migration has given every legacy entry a plan. Naming those symbols here means that
+    // deletion is mechanical and this test is what tells sc-20651 it removed the right things: the
+    // day the scan goes, this list is what has to be updated, and nothing else in the row.
+    let source = include_str!("krea_imported.rs");
+    for symbol in [
+        // The scan itself — the three predicates that decide "is this a single-file import".
+        "fn is_single_file_checkpoint(",
+        "fn is_diffusers_snapshot_dir(",
+        "fn imported_dit_file(",
+        // The claim branch that keeps the two routes disjoint.
+        "if request_is_checkpoint_plan_backed(request) {",
+        // The plan-backed source the row added; this must OUTLIVE the deletion above.
+        "checkpoint_plan_bespoke_primary_pin(request, settings, \"krea_2\")",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Krea bespoke surface sc-20651 deletes must be live code, not a comment: {symbol}"
+        );
+    }
+    // Ordering: the plan-backed decline precedes the plan-backed SOURCE, which precedes the scan.
+    // Reversing any pair either double-claims or scans a linked entry that has nothing to scan.
+    let decline_at = source
+        .find("if request_is_checkpoint_plan_backed(request) {")
+        .unwrap();
+    let plan_source_at = source
+        .find("checkpoint_plan_bespoke_primary_pin(request, settings, \"krea_2\")")
+        .unwrap();
+    let scan_at = source.find("imported_dit_file(&confined)").unwrap();
+    assert!(
+        decline_at < plan_source_at && plan_source_at < scan_at,
+        "decline → plan source → filesystem scan, in that order"
+    );
+}
+
+/// sc-20644 Krea row — a plan the bespoke lane cannot fully consume refuses during PLANNING.
+///
+/// A linked Krea checkpoint compiled from a directory carries its own `vae` and `text_encoder`
+/// layers. The bespoke lane pairs a bare transformer with the RESIDENT base tier's encoder and VAE,
+/// so serving that plan would load the plan's transformer while silently substituting other bytes
+/// for two layers the plan declares — consuming the plan partly while claiming it fully (E7/E8).
+/// It refuses instead, with the plan store's own code, before any loader is constructed.
+///
+/// Failing mutation: drop the `checkpoint_plan_unconsumed_layers` call from
+/// `checkpoint_plan_bespoke_primary_pin` → the lane silently loads the transformer alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_krea_plan_with_layers_the_bespoke_lane_cannot_source_refuses_during_planning() {
+    let fx = CheckpointPlanFixture::new("krea-unconsumed", true);
+    write_tiny_safetensors(
+        &fx.library_dir.join("tree/transformer/model.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    write_tiny_safetensors(
+        &fx.library_dir
+            .join("tree/vae/diffusion_pytorch_model.safetensors"),
+        &[("decoder.conv_in.weight", "F32")],
+        0x11,
+    );
+    let compiled = match fx.store.compile_linked(&fx.root_id, "tree") {
+        Ok(compiled) => compiled,
+        // A tree the inspector will not call runnable is not the fixture this test needs; say so
+        // rather than passing for the wrong reason.
+        Err(error) => panic!("fixture check: the multi-layer tree must compile: {error}"),
+    };
+    let resolved = fx.store.resolve(&compiled.checkpoint_id).unwrap();
+    assert!(
+        resolved.plan.layers.len() > 1,
+        "fixture check: the plan must carry more than the backbone, got {:?}",
+        checkpoint_plan_layer_roles(&resolved)
+    );
+
+    let request = fx.plan_backed_request(
+        &compiled.checkpoint_id,
+        json!({ "loras": [{ "name": "style", "weight": 0.4 }] }),
+    );
+    let error = resolve_imported_krea_dit_pin(&request, &fx.settings)
+        .expect_err("a plan the lane cannot fully consume must refuse, not load its backbone")
+        .to_string();
+    assert!(
+        error.contains("[checkpoint-plan:unconsumed-layer]")
+            || error.contains("[checkpoint-plan:unsupported-operation]"),
+        "the refusal must name the plan-level reason, got: {error}"
+    );
+}
+
 /// The plan route runs the SAME MLX admission as the legacy Krea imported lane (sc-20634 review).
 ///
 /// It previously ran `apply_residency_policy` plus the bare `start_cached_gen_stream`, which
@@ -20729,16 +21088,33 @@ fn checkpoint_plan_route_refuses_before_load_with_typed_diagnostics() {
         "{message}"
     );
 
-    // An operation the skeleton does not serve refuses loudly instead of falling through.
+    // An operation this route's body does not serve DECLINES, retaining its refusal, so the
+    // family's own lane can take it (sc-20644). It is re-raised verbatim only if no lane claims —
+    // which is what `into_unclaimed_refusal` is for, and what a family with no landed row still
+    // gets. A shape refusal is the ONE class that declines this way: every refusal above is one no
+    // other lane could fix, so each still refuses in PLANNING rather than moving into a loader.
     let compiled = fx.compile("kreamania.safetensors", &krea_native_entries());
     let edit = fx.plan_backed_request(
         &compiled,
         json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
     );
-    let message = refusal(&edit, &fx.settings);
+    let declined = prepare_checkpoint_plan_sources(&edit, &fx.settings).unwrap();
+    assert!(
+        !declined.is_available(),
+        "the plan route has no edit surface"
+    );
+    let message = declined
+        .into_unclaimed_refusal(&edit)
+        .expect_err("the decline retains the typed refusal for the no-lane case")
+        .to_string();
     assert!(
         message.starts_with("[checkpoint-plan:unsupported-operation]"),
         "{message}"
+    );
+    assert_eq!(
+        resolve_image_route(&edit, &fx.settings),
+        Some(ImageRoute::KreaImported),
+        "and with the Krea row landed, a lane does claim it"
     );
 }
 
@@ -21677,8 +22053,8 @@ fn an_approved_root_becomes_a_selectable_plan_backed_model_through_the_import_st
     };
     assert_eq!(sources.checkpoint_id, compiled.checkpoint_id);
     assert_eq!(
-        sources.primary.loader_path(),
-        fx.library_dir.join("kreamania.safetensors").as_path(),
+        sources.primary,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors")),
         "the handler loads the LINKED file in place; nothing was copied"
     );
 }
@@ -21766,8 +22142,8 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
         panic!("the plan route must carry its own prepared sources");
     };
     assert_eq!(
-        sources.primary.loader_path(),
-        moved_dir.join("kreamania.safetensors").as_path()
+        sources.primary,
+        WeightsSource::File(moved_dir.join("kreamania.safetensors"))
     );
 }
 
@@ -21974,45 +22350,42 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
         .is_none(),
         "a provenance breadcrumb is not a loadable path"
     );
-    let message = match prepare_checkpoint_plan_sources(&linked_with_provenance_path, &fx.settings)
-    {
-        Err(WorkerError::InvalidPayload(message)) => message,
-        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
-        Ok(selection) => panic!(
-            "a linked entry with only a provenance `source.path` must refuse, got {:?}",
-            selection
-                .into_sources()
-                .map(|sources| sources.checkpoint_id)
-        ),
-    };
     assert!(
-        message.starts_with("[checkpoint-plan:unsupported-operation]"),
-        "{message}"
+        !prepare_checkpoint_plan_sources(&linked_with_provenance_path, &fx.settings)
+            .unwrap()
+            .is_available(),
+        "the plan route never claims an edit; a provenance breadcrumb changes nothing about that"
+    );
+    // sc-20644 (Krea row) changed the ANSWER here, not the rule: a linked Krea checkpoint now has a
+    // bespoke lane, because that lane sources the plan's own verified layer rather than scanning an
+    // install directory. So the route declines to it instead of refusing, and the shape is served —
+    // which is the capability a linked import used to lack entirely. The provenance breadcrumb is
+    // still never read: the lane's primary is the plan's layer, under the LIBRARY root.
+    let pin = resolve_imported_krea_dit_pin(&linked_with_provenance_path, &fx.settings)
+        .unwrap()
+        .expect("a linked Krea entry's bespoke lane sources the plan's verified layer");
+    assert_eq!(
+        pin.loader_path(),
+        fx.library_dir.join("kreamania.safetensors")
     );
     assert!(
-        !krea_imported_available(&linked_with_provenance_path, &fx.settings),
-        "premise: no bespoke lane exists for it, which is why the decline would have been a stub"
+        krea_imported_available(&linked_with_provenance_path, &fx.settings),
+        "the bespoke lane claims the edit the plan route declined"
     );
 
-    // The same unsupported shape on a LINKED entry — no installed path, so no other lane — still
-    // refuses loudly rather than silently falling through to the stub.
+    // The same unsupported shape on a plain LINKED entry: declined by the plan route, served by the
+    // family's lane, never a stub.
     let linked_edit = fx.plan_backed_request(
         &checkpoint_id,
         json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
     );
-    let message = match prepare_checkpoint_plan_sources(&linked_edit, &fx.settings) {
-        Err(WorkerError::InvalidPayload(message)) => message,
-        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
-        Ok(selection) => panic!(
-            "a linked entry with no bespoke lane must refuse, got {:?}",
-            selection
-                .into_sources()
-                .map(|sources| sources.checkpoint_id)
-        ),
-    };
-    assert!(
-        message.starts_with("[checkpoint-plan:unsupported-operation]"),
-        "{message}"
+    assert!(!prepare_checkpoint_plan_sources(&linked_edit, &fx.settings)
+        .unwrap()
+        .is_available());
+    assert_eq!(
+        resolve_image_route(&linked_edit, &fx.settings),
+        Some(ImageRoute::KreaImported),
+        "a linked Krea edit is served, not refused (sc-20644 Krea row)"
     );
 
     // Integrity refusals are NEVER declined, even for a managed entry with a bespoke lane: falling

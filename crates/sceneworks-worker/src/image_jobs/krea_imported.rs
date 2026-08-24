@@ -32,16 +32,15 @@
 const KREA_IMPORTED_ENGINE: &str = "mlx_krea_imported";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
+/// The registry operation this request asks for — the SAME discrimination the plan-driven route
+/// makes ([`checkpoint_plan_operation`]), not a second copy of it.
+///
+/// The two used to differ on one input: a pose set INSIDE edit mode resolved to `Pose` here and to
+/// `Edit` there. Both lanes then refused that request, so nothing was mis-served, but two lanes
+/// answering "which operation is this" differently is precisely the drift a per-request single-claim
+/// discriminator cannot afford (sc-20644), so there is now one answer.
 fn krea_imported_operation(request: &ImageRequest) -> gen_core::ImportedModelOperation {
-    if request_has_multiphase(request) {
-        gen_core::ImportedModelOperation::MultiPhase
-    } else if !pose_entries(request).is_empty() {
-        gen_core::ImportedModelOperation::Pose
-    } else if request.mode == "edit_image" {
-        gen_core::ImportedModelOperation::Edit
-    } else {
-        gen_core::ImportedModelOperation::Generate
-    }
+    checkpoint_plan_operation(request)
 }
 
 fn krea_imported_native_nvfp4(request: &ImageRequest) -> bool {
@@ -182,10 +181,20 @@ fn resolve_imported_krea_dit_pin(
     {
         return Ok(None);
     }
-    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven route;
-    // this bespoke lane never also claims it, so one entry has exactly one owner.
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) whose REQUEST the plan-driven
+    // route claims belongs to that route; this lane never also claims it, so one REQUEST has exactly
+    // one owner (the single-claim discriminator).
     if request_is_checkpoint_plan_backed(request) {
         return Ok(None);
+    }
+    // A plan-backed entry whose request the plan route does NOT claim still runs here — Krea 2's
+    // full surface is LoRA, img2img, Kontext edit, strict pose, multi-phase and Hires.fix, and the
+    // plan route's body serves none of them. Its bytes are the plan's verified backbone layer, not a
+    // directory scan, so the two routes hand this family's generation bodies identical inputs and a
+    // fixed seed renders equal either way (sc-20644 AC1). This is also the ONLY way a LINKED
+    // checkpoint reaches those shapes: it has no installed path for the scan below to find.
+    if let Some(pin) = checkpoint_plan_bespoke_primary_pin(request, settings, "krea_2")? {
+        return Ok(Some(pin));
     }
     // A builtin Krea engine id (in `MODEL_TABLE`) loads from its snapshot turnkey via the normal MLX
     // lane — never through the single-file entrypoint. Leaving those to the existing path is what keeps

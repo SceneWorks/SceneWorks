@@ -327,20 +327,66 @@ fn checkpoint_plan_request_shape_refusal(
     None
 }
 
-/// A SceneWorks-owned install path on the entry, if it has one. A MANAGED install (sc-20636) keeps
-/// `paths.model` alongside `importPlan.checkpointId`, so its family's bespoke lane is still there
-/// for the shapes this route does not serve. A LINKED checkpoint has no installed path — the plan
-/// is its only route.
+/// Plan families whose bespoke lane can load a PLAN-BACKED entry — the migration state of sc-20644,
+/// one row per family whose parity row has landed.
 ///
-/// LOADABLE paths only (`modelPath` / `paths.model` / `installedPath`), never
-/// `imported_entry_installed_path`'s provenance-only `source.path` fallback: that one is a
-/// data-dir-relative breadcrumb an import writes, and a linked entry carrying one would claim a
-/// bespoke lane it does not have and hand that lane a path it must not read (sc-20636 review). The
-/// admission side keeps the wider reading — "does this entry describe bytes anywhere" is a
-/// different question from "can a lane load it".
+/// Not family truth, and deliberately not derived from anything: it is the answer to "has this
+/// family's lane been taught to take its bytes from the plan yet", which is a fact about THIS
+/// repository's migration, true of a different set of families each week. A family in this list has
+/// a bespoke lane for a LINKED checkpoint (it sources the plan's verified layer); a family not in it
+/// has one only for a MANAGED install, which still has `paths.model` for the lane to scan.
+///
+/// sc-20651 deletes this table together with the lanes it names; the row's conformance test pins it
+/// by name so that deletion is mechanical.
+const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &["krea_2"];
+
+/// Whether SOME other lane could take this request if the plan route declines it.
+///
+/// Two ways a lane can exist, and both matter because the answer decides whether a route-capability
+/// refusal is raised HERE or retained for the router's fall-through
+/// ([`CheckpointPlanSelection::into_unclaimed_refusal`]):
+///
+/// * **installed bytes** — a MANAGED install (sc-20636) keeps `paths.model` alongside
+///   `importPlan.checkpointId`, so its family's bespoke lane can scan for them. LOADABLE paths only
+///   (`modelPath` / `paths.model` / `installedPath`), never `imported_entry_installed_path`'s
+///   provenance-only `source.path` fallback: that one is a data-dir-relative breadcrumb an import
+///   writes, and a linked entry carrying one would claim a bespoke lane it does not have and hand
+///   that lane a path it must not read (sc-20636 review). The admission side keeps the wider reading
+///   — "does this entry describe bytes anywhere" is a different question from "can a lane load it".
+/// * **plan-sourced lane** — a family whose sc-20644 row has landed
+///   ([`CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES`]) has a lane for a LINKED checkpoint too: it
+///   loads the plan's own verified layer. Without this, every shape the plan route does not serve
+///   refused for a linked checkpoint, which is precisely the surface a family row exists to restore.
+///
+/// Declining rather than refusing never loses the refusal: the message is retained and re-raised if
+/// no lane claims. Integrity refusals do not reach here at all — they are raised with `?`.
 fn checkpoint_plan_entry_has_bespoke_lane(request: &ImageRequest) -> bool {
     sceneworks_core::jobs_store::imported_entry_loadable_path(&request.model_manifest_entry)
         .is_some()
+}
+
+/// Whether a lane exists that could serve a request SHAPE this route does not implement.
+///
+/// Strictly wider than [`checkpoint_plan_entry_has_bespoke_lane`], and used for exactly one class of
+/// refusal: "this route's body does not do edit / pose / LoRA / Hires". That class is the one
+/// another lane can cover, and for a family whose sc-20644 row has landed it covers it even for a
+/// LINKED checkpoint, because the lane sources the plan's own verified layer.
+///
+/// Every OTHER refusal keeps the narrow reading. A missing base tier, an unresolvable component, an
+/// unconsumed layer, an unbound adapter: no bespoke lane can fix any of those — it needs the same
+/// component from the same place — so declining would only move an identical error out of PLANNING
+/// and into a handler preamble, which is what AC2's "fail during planning, not in the loader" and E7
+/// forbid.
+fn checkpoint_plan_shape_has_other_lane(request: &ImageRequest) -> bool {
+    if checkpoint_plan_entry_has_bespoke_lane(request) {
+        return true;
+    }
+    request
+        .model_manifest_entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|family| CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES.contains(&family))
 }
 
 /// Whether the plan-driven route claims this request (the single-claim discriminator the bespoke
@@ -436,7 +482,24 @@ fn checkpoint_plan_unservable(
     request: &ImageRequest,
     message: String,
 ) -> WorkerResult<CheckpointPlanSelection> {
-    if checkpoint_plan_entry_has_bespoke_lane(request) {
+    checkpoint_plan_unservable_when(request, message, checkpoint_plan_entry_has_bespoke_lane)
+}
+
+/// The SHAPE-refusal form of [`checkpoint_plan_unservable`]: declines to any lane that could serve
+/// the shape, including a plan-sourced bespoke lane for a linked checkpoint.
+fn checkpoint_plan_unservable_shape(
+    request: &ImageRequest,
+    message: String,
+) -> WorkerResult<CheckpointPlanSelection> {
+    checkpoint_plan_unservable_when(request, message, checkpoint_plan_shape_has_other_lane)
+}
+
+fn checkpoint_plan_unservable_when(
+    request: &ImageRequest,
+    message: String,
+    has_other_lane: fn(&ImageRequest) -> bool,
+) -> WorkerResult<CheckpointPlanSelection> {
+    if has_other_lane(request) {
         return Ok(CheckpointPlanSelection {
             prepared: None,
             declined: Some(message),
@@ -852,7 +915,7 @@ fn prepare_checkpoint_plan_sources(
         return Ok(CheckpointPlanSelection::default());
     };
     if !checkpoint_plan_serves_request_shape(request) {
-        return checkpoint_plan_unservable(
+        return checkpoint_plan_unservable_shape(
             request,
             format!(
                 "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?} is served \
@@ -896,7 +959,7 @@ fn prepare_checkpoint_plan_sources(
     if let Some(reason) =
         checkpoint_plan_request_shape_refusal(request, &descriptor, operation, checkpoint_id)
     {
-        return checkpoint_plan_unservable(request, reason);
+        return checkpoint_plan_unservable_shape(request, reason);
     }
     let primary = match checkpoint_plan_primary(&resolved, source) {
         Ok(primary) => primary,
@@ -940,6 +1003,75 @@ fn prepare_checkpoint_plan_sources(
             pins,
         },
     ))
+}
+
+/// The verified plan layer a family's BESPOKE lane must load, for a plan-backed entry whose request
+/// this route does not claim.
+///
+/// The two halves of sc-20644's per-family parity are separable: WHICH lane runs a request is the
+/// single-claim discriminator ([`request_is_checkpoint_plan_backed`]), and WHICH BYTES that lane
+/// opens is the plan. Before this existed the second half was tied to the first — a plan-backed
+/// entry's bespoke lane declined outright — so importing a checkpoint through the managed or linked
+/// path REMOVED every capability the plan route does not yet serve (LoRA, edit, pose, multi-phase,
+/// img2img, Hires.fix), and a LINKED checkpoint, which has no installed path at all, could not reach
+/// them by any route. The family's lane now serves those shapes, on the SAME verified layer the plan
+/// route would have handed the provider, so the two routes are byte-identical inputs to the same
+/// generation body and a fixed seed renders equal on either (E2/E5).
+///
+/// `Ok(None)` only when the entry is not plan-backed; every other outcome is decided here:
+///
+/// * integrity — a drifted, missing or tampered plan is FATAL, exactly as it is on the plan route.
+///   Falling back to a directory scan of the same bytes the store just rejected is the silent
+///   substitution E7/E8 forbid, and it is the reason this helper resolves the store rather than
+///   letting the lane's own scan continue.
+/// * family — a plan compiled for another family never feeds this lane, even if the manifest entry
+///   claims otherwise.
+/// * shape — a bespoke lane whose primary is one FILE cannot be handed a component directory; that
+///   refuses by name rather than loading the directory's first shard.
+/// * completeness — a plan carrying layers this lane does not source (a linked Krea directory's own
+///   `vae` / `text_encoder`) refuses through the SAME [`checkpoint_plan_unconsumed_layers`] the plan
+///   route uses, because loading the plan's transformer while quietly substituting the resident base
+///   tier's encoder and VAE would consume the plan only partly while claiming it fully.
+pub(crate) fn checkpoint_plan_bespoke_primary_pin(
+    request: &ImageRequest,
+    settings: &Settings,
+    family: &str,
+) -> WorkerResult<Option<gen_core::PinnedWeightsFile>> {
+    let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
+        return Ok(None);
+    };
+    let store = CheckpointPlanStore::open(&settings.data_dir);
+    let resolved = store.resolve(checkpoint_id).map_err(checkpoint_plan_refusal)?;
+    if resolved.family() != family {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:family-mismatch] checkpoint {checkpoint_id:?} compiles to the {:?} \
+             family, but this entry routes to the {family:?} lane; a plan is never loaded by another \
+             family's loader",
+            resolved.family()
+        )));
+    }
+    let adapter = checkpoint_plan_adapter(family, checkpoint_id)?;
+    checkpoint_plan_backend_eligible(adapter, checkpoint_id)?;
+    let source = checkpoint_plan_source_shape(adapter, checkpoint_id)?;
+    if source == gen_core::ImportedModelSource::TransformerDirectory {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?} ({family} family) \
+             resolves to a component directory, which this family's single-file lane cannot open"
+        )));
+    }
+    let primary = checkpoint_plan_primary(&resolved, source)?;
+    checkpoint_plan_unconsumed_layers(&resolved, &primary.consumed)?;
+    // A non-directory shape's selection is exactly its backbone layer, so its pin list is the one
+    // pin the lane loads. Assert rather than index blindly: a future shape that widened the
+    // selection would otherwise silently hand the lane the first of several files.
+    match primary.pins.as_slice() {
+        [pin] => Ok(Some(pin.clone())),
+        many => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:ambiguous-component] checkpoint {checkpoint_id:?} ({family} family) \
+             resolves a {source:?} primary to {} files; this family's lane loads exactly one",
+            many.len()
+        ))),
+    }
 }
 
 /// Optional per-request override of a u32 knob: `advanced[key]`, else the manifest entry's
