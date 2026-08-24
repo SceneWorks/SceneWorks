@@ -1311,19 +1311,17 @@ pub(crate) fn checkpoint_plan_bespoke_tree(
     let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
         return Ok(None);
     };
+    // Same first question as every other bespoke source helper: is this lane the one being asked?
+    // (review blocker 1 — the ComfyUI-tree lanes are on the reviewer's list too.)
+    if !checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family) {
+        return Ok(None);
+    }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
     let resolved = store
         .resolve(&checkpoint_id)
         .map_err(checkpoint_plan_refusal)?;
-    if resolved.family() != family {
-        return Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:family-mismatch] checkpoint {checkpoint_id:?} compiles to the {:?} \
-             family, but this entry routes to the {family:?} lane; a plan is never loaded by \
-             another family's loader",
-            resolved.family()
-        )));
-    }
+    checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
     checkpoint_plan_backend_eligible(adapter, &checkpoint_id)?;
     let source = checkpoint_plan_source_shape(adapter, &checkpoint_id)?;

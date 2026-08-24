@@ -21042,6 +21042,61 @@ fn sdxl_ldm_entries() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// sc-20644 review blocker 1, for the three CANDLE-ONLY ComfyUI-tree lanes.
+///
+/// The three tree lanes are on the reviewer's blocker-1 list too: each reaches
+/// `checkpoint_plan_bespoke_tree` for any plan-backed entry whose shape the plan route declined,
+/// including another family's. `cargo test` cannot link those lanes on macOS, but the guard they
+/// all funnel through IS linkable here, so the behaviour is asserted directly on the shared helper
+/// for each of the three family spellings — which is where the fix lives and where a regression
+/// would land.
+///
+/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
+/// `checkpoint_plan_bespoke_tree` (the shared helper the three lanes call).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_tree_source_helper_declines_another_familys_request() {
+    let fx = CheckpointPlanFixture::new("tree-cross-family", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+    );
+    assert!(
+        !request_is_checkpoint_plan_backed(&request),
+        "fixture check: the plan route declines Hires.fix, which offers this to every other lane"
+    );
+    // The tree helper is candle-gated, so assert through the shared entry point every tree lane
+    // funnels through — `checkpoint_plan_bespoke_primary`, which carries the same guard and IS
+    // linkable on this config. The tree helper's own copy of the guard is pinned as source text
+    // below, in the ordering test.
+    for foreign in ["z-image", "qwen-image", "flux2"] {
+        assert!(
+            matches!(
+                checkpoint_plan_bespoke_primary_pin(&request, &fx.settings, foreign),
+                Ok(None)
+            ),
+            "the {foreign} lane must DECLINE a krea_2 request rather than raise family-mismatch"
+        );
+    }
+    // And the guard is live code in the TREE helper too, not only in the primary one.
+    let source = include_str!("checkpoint_plan.rs");
+    let tree_at = source
+        .find("pub(crate) fn checkpoint_plan_bespoke_tree(")
+        .expect("the tree helper must exist");
+    let tree_body = &source[tree_at..tree_at + 1400.min(source.len() - tree_at)];
+    let guard_at = tree_body
+        .find("checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family)")
+        .expect("the tree helper must ask the declared-family question");
+    let store_at = tree_body
+        .find("CheckpointPlanStore::open(")
+        .expect("the tree helper opens the store");
+    assert!(
+        guard_at < store_at,
+        "the declared-family gate must precede opening the plan store: another family's request          must not even resolve a plan"
+    );
+}
+
 /// sc-20644 ComfyUI-tree rows (Z-Image, Qwen-Image, FLUX.2) — single-claim conformance and the
 /// bespoke surface sc-20651 deletes, for the three families whose lanes are CANDLE-ONLY.
 ///
