@@ -338,7 +338,14 @@ fn checkpoint_plan_request_shape_refusal(
 ///
 /// sc-20651 deletes this table together with the lanes it names; the row's conformance test pins it
 /// by name so that deletion is mechanical.
-const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &["krea_2", "sdxl", "mage-flow"];
+const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &[
+    "krea_2",
+    "sdxl",
+    "mage-flow",
+    "z-image",
+    "qwen-image",
+    "flux2",
+];
 
 /// Whether SOME other lane could take this request if the plan route declines it.
 ///
@@ -1193,6 +1200,113 @@ impl CheckpointPlanBespokeDir {
                     present.join(", ")
                 ))
             })
+    }
+}
+
+/// A plan-sourced ComfyUI tree: the backbone plus each sidecar role the lane declared it consumes.
+///
+/// The tree families (Z-Image, Qwen-Image, FLUX.2) differ from the single-file ones in that their
+/// checkpoint is SEVERAL files — a transformer, and depending on the family a text encoder and a
+/// VAE — and the bespoke lanes assemble those from a live catalog scan of an `external_base_*` row.
+/// A LINKED tree has no such row, so the plan's own verified layers are the only source, and they
+/// are also the only source that was hashed by the inspector and re-checked by the store.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) struct CheckpointPlanBespokeTree {
+    pub(crate) primary: gen_core::PinnedWeightsFile,
+    /// `(role, pin)` for each role the caller declared, in the order it declared them.
+    pub(crate) sidecars: Vec<(&'static str, gen_core::PinnedWeightsFile)>,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl CheckpointPlanBespokeTree {
+    /// The pin for one REQUIRED sidecar role. Panics only on a role the caller did not declare as
+    /// required, which is a programming error rather than a runtime condition — a role declared and
+    /// absent already refused inside [`checkpoint_plan_bespoke_tree`].
+    pub(crate) fn sidecar(&self, role: &str) -> &gen_core::PinnedWeightsFile {
+        self.optional_sidecar(role).unwrap_or_else(|| {
+            panic!("role {role:?} was not declared required to checkpoint_plan_bespoke_tree")
+        })
+    }
+
+    /// The pin for an OPTIONAL sidecar role: `None` when the plan does not carry it, which is the
+    /// family's signal to fall back to its resident snapshot's own copy.
+    pub(crate) fn optional_sidecar(&self, role: &str) -> Option<&gen_core::PinnedWeightsFile> {
+        self.sidecars
+            .iter()
+            .find(|(candidate, _)| *candidate == role)
+            .map(|(_, pin)| pin)
+    }
+}
+
+/// The TREE form of [`checkpoint_plan_bespoke_primary_pin`], for a family whose checkpoint is a
+/// backbone plus named sidecar artifacts.
+///
+/// `consumed_roles` is the lane's DECLARATION of which sidecars it loads, and it is what makes the
+/// completeness check meaningful: the unconsumed-layer refusal runs over the backbone plus exactly
+/// these roles, so a plan carrying an artifact the lane would silently replace with a resident
+/// snapshot's own copy refuses instead (E8). Declaring a role the plan does not carry refuses too —
+/// a lane never loads a sidecar the plan did not record.
+///
+/// `optional_roles` is for a family whose tree MAY carry an artifact (Qwen-Image's in-place VAE): a
+/// plan that has it consumes it, a plan that does not falls back to the family's resident snapshot.
+/// The distinction is the family's, not this route's, and it is spelled at the call site so the
+/// completeness check still refuses anything neither list names.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn checkpoint_plan_bespoke_tree(
+    request: &ImageRequest,
+    settings: &Settings,
+    family: &str,
+    consumed_roles: &[&'static str],
+    optional_roles: &[&'static str],
+) -> WorkerResult<Option<CheckpointPlanBespokeTree>> {
+    let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
+        return Ok(None);
+    };
+    let checkpoint_id = checkpoint_id.to_owned();
+    let store = CheckpointPlanStore::open(&settings.data_dir);
+    let resolved = store
+        .resolve(&checkpoint_id)
+        .map_err(checkpoint_plan_refusal)?;
+    if resolved.family() != family {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:family-mismatch] checkpoint {checkpoint_id:?} compiles to the {:?} \
+             family, but this entry routes to the {family:?} lane; a plan is never loaded by \
+             another family's loader",
+            resolved.family()
+        )));
+    }
+    let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
+    checkpoint_plan_backend_eligible(adapter, &checkpoint_id)?;
+    let source = checkpoint_plan_source_shape(adapter, &checkpoint_id)?;
+    let primary = checkpoint_plan_primary(&resolved, source)?;
+    let mut consumed = primary.consumed.clone();
+    let mut sidecars = Vec::with_capacity(consumed_roles.len());
+    for role in consumed_roles {
+        let (_, layer_id, pin) = checkpoint_plan_component_from_layers(&resolved, role, role)?;
+        consumed.insert(layer_id);
+        sidecars.push((*role, pin));
+    }
+    for role in optional_roles {
+        // Present-or-absent is the question; a role present MORE than once is still ambiguous and
+        // still refuses, so this asks the layer table directly rather than swallowing the error.
+        if resolved.layers_with_role(role).next().is_none() {
+            continue;
+        }
+        let (_, layer_id, pin) = checkpoint_plan_component_from_layers(&resolved, role, role)?;
+        consumed.insert(layer_id);
+        sidecars.push((*role, pin));
+    }
+    checkpoint_plan_unconsumed_layers(&resolved, &consumed)?;
+    match primary.pins.as_slice() {
+        [pin] => Ok(Some(CheckpointPlanBespokeTree {
+            primary: pin.clone(),
+            sidecars,
+        })),
+        many => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:ambiguous-component] checkpoint {checkpoint_id:?} ({family} family) \
+             resolves a {source:?} backbone to {} files; this family's lane loads exactly one",
+            many.len()
+        ))),
     }
 }
 
