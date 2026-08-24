@@ -341,13 +341,16 @@ export function CheckpointImportPanel({
     }
   }
 
+  // A linked import carries no family override: the family select lives in the managed pane, which
+  // is not on screen here, so reading it would let a value the user cannot see decide how their
+  // checkpoint is classified. The compile detects it from the bytes, which is the better answer
+  // anyway.
   function submitLinked(candidate) {
     return submit({
       body: linkedImportBody({
         rootId: activeRootId,
         relativePath: candidate.candidate.relativePath,
         name: candidate.candidate.relativePath.split("/").pop(),
-        family: managed.family || undefined,
       }),
     });
   }
