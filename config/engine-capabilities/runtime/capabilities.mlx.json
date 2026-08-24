@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
+    "inferenceRevision": "ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -1610,6 +1610,7 @@
         "modality": "video",
         "conditioning": [
           "reference",
+          "multiReference",
           "keyframe",
           "videoClip",
           "controlClip"
@@ -2029,7 +2030,6 @@
         "conditioning": [
           "reference",
           "mask",
-          "multiReference",
           "controlClip"
         ],
         "supports_lora": true,

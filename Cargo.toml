@@ -145,4 +145,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "31e02510ad6e9e1a3c3d205058576329d724c60d" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6" }

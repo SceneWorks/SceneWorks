@@ -1479,6 +1479,505 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     spec
 }
 
+/// Provider-only request modifiers share the overlay evidence axis with adapters and enhancers.
+/// A catalog `text_to_video` request can still select a different provider workload (LTX's
+/// `no_audio` is the live case), so the resolved provider mode must not borrow the ordinary
+/// no-overlay curve until a receipt names this exact carrier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_overlay(
+    input: &VideoGenInput,
+    mode: &str,
+    contract: Option<&gen_core::MemoryProviderContract>,
+) -> WorkerResult<Option<String>> {
+    let mut overlays = Vec::new();
+    if !input.adapters.is_empty() {
+        if input.engine_id == "bernini" {
+            // The provider contract seals the exact files the loader opened, after its stability
+            // read, and prices them according to dense-folded versus packed-additive residency.
+            // Re-reading paths or formatting f32s here would create a second, weaker receipt.
+            let loaded_receipt = contract.and_then(|contract| {
+                contract
+                    .resident_components()
+                    .iter()
+                    .find(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack)
+                    .map(|component| {
+                        crate::video_admission::bernini_adapter_receipt_axis(&component.id)
+                    })
+            });
+            overlays
+                .push(loaded_receipt.unwrap_or_else(|| "bernini-adapter-unverified".to_owned()));
+        } else if input.engine_id == "scail2_14b" {
+            // SCAIL-2's step-distill recipe is one fixed advertised stack; the seam spells its
+            // overlay as the literal `adapter`, so keying anything else here can never match a
+            // real record. The per-request carrier is sealed separately below.
+            overlays.push("adapter".to_owned());
+        } else if let Some(identity) = gen_core::adapter_stack_identity(&input.adapters) {
+            // sc-20799: `adapters:{N}` was cardinality only — two different LoRA stacks of the
+            // same length shared one admission identity. `adapter_stack_identity` is the exact
+            // ordered content receipt (`adapters:<sha256>` over path, kind and scale) that the
+            // Wan seam already requires, so this is the real spelling, not a parallel one.
+            overlays.push(identity);
+        } else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} carries adapters with no exact ordered stack identity",
+                input.engine_id
+            )));
+        }
+    }
+    if input.use_uncensored_enhancer || input.uncensored_enhancer_dir.is_some() {
+        overlays.push("enhancer:uncensored".to_owned());
+    } else if input.enhance_prompt {
+        overlays.push("enhancer:standard".to_owned());
+    }
+    if let Some(video_mode) = input.video_mode.as_deref() {
+        overlays.push(format!("provider_video_mode:{video_mode}"));
+    }
+    if input.engine_id == "bernini" && matches!(input.video_mode.as_deref(), Some("r2v" | "rv2v")) {
+        overlays.push(
+            crate::video_admission::bernini_r2v_reference_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    if input.engine_id == "bernini" && input.video_mode.as_deref() == Some("mv2v") {
+        overlays.push(
+            crate::video_admission::bernini_mv2v_clip_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    if input.engine_id == "bernini" && input.video_mode.as_deref() == Some("ads2v") {
+        overlays.push(
+            crate::video_admission::bernini_ads2v_source_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    // sc-20799: seal the carriers that were keyed shape-`other` + `conditioning.len()` before any
+    // curve exists for them. Each fails CLOSED on a shape it cannot price exactly, exactly as the
+    // Bernini receipts do — an unpriceable carrier is a refusal, never an "unknown" token another
+    // request could also mint.
+    if input.engine_id == "scail2_14b" && matches!(mode, "animate_character" | "replace_person") {
+        overlays.push(
+            crate::video_admission::scail2_carrier_receipt(
+                crate::video_admission::LANE,
+                mode,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    } else if mode == "replace_person"
+        && !input.conditioning.is_empty()
+        && !matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled")
+    {
+        overlays.push(
+            crate::video_admission::wan_vace_replace_person_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    } else if input.engine_id == "krea_realtime_14b" && mode == "video_to_video" {
+        overlays.push(
+            crate::video_admission::krea_v2v_clip_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    if matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled") {
+        let mut references = input.conditioning.iter().filter_map(|conditioning| {
+            let Conditioning::Reference { image, strength } = conditioning else {
+                return None;
+            };
+            Some((image, strength.unwrap_or(1.0)))
+        });
+        if let (Some((image, strength)), None) = (references.next(), references.next()) {
+            overlays.push(format!(
+                "reference:image:{}x{}:strength:{:08x}",
+                image.width,
+                image.height,
+                strength.to_bits()
+            ));
+        }
+        // SC-20776: native LTX replacement has a different physical carrier than I2V. Its exact
+        // `ControlClip + MultiReference` request becomes a deterministic ordered contact sheet at
+        // frame zero plus masked IC-LoRA clip tokens. Include every observable request fact in the
+        // admission key so it cannot borrow an I2V/clip curve or silently erase a reference order.
+        let controls = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| match conditioning {
+                Conditioning::ControlClip {
+                    frames,
+                    mask,
+                    masking_strength,
+                    start_frame,
+                    mode,
+                } => Some((
+                    frames.as_slice(),
+                    mask.as_slice(),
+                    *masking_strength,
+                    *start_frame,
+                    mode,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let multi_references = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| match conditioning {
+                Conditioning::MultiReference { images } => Some(images.as_slice()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if let ([(frames, masks, masking_strength, start_frame, mode)], [references]) =
+            (controls.as_slice(), multi_references.as_slice())
+        {
+            if (1..=4).contains(&references.len())
+                && frames.len() == masks.len()
+                && *start_frame == 0
+            {
+                let reference_shapes = references
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, image)| format!("{ordinal}:{}x{}", image.width, image.height))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let control_shapes = frames
+                    .iter()
+                    .zip(masks.iter())
+                    .enumerate()
+                    .map(|(ordinal, (frame, mask))| {
+                        format!(
+                            "{ordinal}:{}x{}@{}x{}",
+                            frame.width, frame.height, mask.width, mask.height
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let grid = match references.len() {
+                    1 => "1x1",
+                    2 => "2x1",
+                    3 | 4 => "2x2",
+                    _ => unreachable!("the cardinality guard is closed above"),
+                };
+                overlays.push(format!(
+                    "replace_person:control:frames:{}:shapes:{}:frame:0:mode:{mode:?}:strength:{:08x}:references:ordered_grid:{}:count:{}:shapes:{}:composite:{}x{}",
+                    frames.len(),
+                    control_shapes,
+                    masking_strength.to_bits(),
+                    grid,
+                    references.len(),
+                    reference_shapes,
+                    input.width,
+                    input.height,
+                ));
+            }
+        }
+        let keyframes = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::Keyframe {
+                    image,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((image, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(first, 0, first_strength), (last, -1, last_strength)] = keyframes.as_slice() {
+            overlays.push(format!(
+                "keyframe:first:image:{}x{}:frame:0:strength:{:08x}",
+                first.width,
+                first.height,
+                first_strength.to_bits()
+            ));
+            overlays.push(format!(
+                "keyframe:last:image:{}x{}:frame:-1:strength:{:08x}",
+                last.width,
+                last.height,
+                last_strength.to_bits()
+            ));
+        }
+        let clips = input
+            .conditioning
+            .iter()
+            .filter_map(|conditioning| {
+                let Conditioning::VideoClip {
+                    frames,
+                    frame_idx,
+                    strength,
+                } = conditioning
+                else {
+                    return None;
+                };
+                Some((frames, *frame_idx, *strength))
+            })
+            .collect::<Vec<_>>();
+        if let [(frames, 0, strength)] = clips.as_slice() {
+            if let Some(image) = frames.first() {
+                if frames
+                    .iter()
+                    .all(|frame| frame.width == image.width && frame.height == image.height)
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        frames.len(),
+                        image.width,
+                        image.height,
+                        strength.to_bits()
+                    ));
+                }
+            }
+        }
+        if let [(left, 0, left_strength), (right, -1, right_strength)] = clips.as_slice() {
+            if let (Some(first), Some(last)) = (left.first(), right.first()) {
+                if left
+                    .iter()
+                    .chain(right.iter())
+                    .all(|frame| frame.width == first.width && frame.height == first.height)
+                    && first.width == last.width
+                    && first.height == last.height
+                {
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:0:strength:{:08x}",
+                        left.len(),
+                        first.width,
+                        first.height,
+                        left_strength.to_bits()
+                    ));
+                    overlays.push(format!(
+                        "clip:append:frames:{}:image:{}x{}:frame:-1:strength:{:08x}",
+                        right.len(),
+                        last.width,
+                        last.height,
+                        right_strength.to_bits()
+                    ));
+                }
+            }
+        }
+    }
+    Ok((!overlays.is_empty()).then(|| overlays.join("+")))
+}
+
+/// Bernini v2v carries one normalized [`Conditioning::VideoClip`]. A count-only identity would
+/// let another temporal carrier borrow the same evidence, so admission records the resolved
+/// carrier shape explicitly.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_reference_shape(
+    model_id: &str,
+    mode: &str,
+    conditioning: &[Conditioning],
+) -> &'static str {
+    if conditioning.is_empty() {
+        return "none";
+    }
+    if model_id == "bernini"
+        && mode == "video_to_video"
+        && matches!(conditioning, [Conditioning::VideoClip { .. }])
+    {
+        return "video";
+    }
+    if model_id == "bernini"
+        && mode == "reference_to_video"
+        && matches!(conditioning, [Conditioning::MultiReference { images }] if (1..=8).contains(&images.len()))
+    {
+        return "multi_image";
+    }
+    if model_id == "bernini"
+        && mode == "reference_video_to_video"
+        && matches!(
+            conditioning,
+            [
+                Conditioning::VideoClip { .. },
+                Conditioning::MultiReference { images }
+            ] if (1..=8).contains(&images.len())
+        )
+    {
+        return "video+multi_image";
+    }
+    if model_id == "bernini"
+        && mode == "multi_video_to_video"
+        && matches!(
+            conditioning,
+            [
+                Conditioning::VideoClip { .. },
+                Conditioning::VideoClip { .. },
+                ..
+            ]
+        )
+        && conditioning.len() <= 8
+    {
+        return "multi_video";
+    }
+    if model_id == "bernini"
+        && mode == "ads2v"
+        && matches!(conditioning,
+        [Conditioning::VideoClip { .. }, Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }]
+        if (1..=8).contains(&images.len()))
+    {
+        return "ads2v";
+    }
+    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+        return match mode {
+            "image_to_video" => "image",
+            "first_last_frame" => "keyframe",
+            // The LTX IC-LoRA clips are temporal carriers, not image references.
+            "extend_clip" | "video_bridge" => "none",
+            // sc-20799 round 2: `"other"` was a dead key here too — no evidence emitter ever
+            // serializes the literal string, so an LTX mode that landed on it could match no
+            // record. Every remaining LTX mode carries no image reference, which is exactly what
+            // `"none"` names, so it binds to real evidence instead of an unmatchable label.
+            _ => "none",
+        };
+    }
+    // sc-20799: `"other"` was a DEAD key. The evidence emitters serialize a reference shape as
+    // "none"/"image"/"video"/"mask" or the raw `Other(..)` payload — they never produce the literal
+    // string "other" — so every carrier that landed here could match no real record while still
+    // sharing one admission identity with every other such carrier. Name the resolved carrier
+    // instead, per engine and mode.
+    if model_id == "scail2_14b" {
+        return match mode {
+            // One physical assembly (identity still + painted mask + driving clip) under two
+            // engine tasks with different working sets, so the task stays part of the shape.
+            "animate_character" => "reference+mask+driving_video:animation",
+            "replace_person" => "reference+mask+driving_video:replacement",
+            _ => "none",
+        };
+    }
+    if model_id == "krea_realtime_14b" {
+        return match conditioning {
+            [Conditioning::VideoClip { .. }] => "video",
+            [Conditioning::Reference { .. }] => "image",
+            _ => "none",
+        };
+    }
+    if mode == "replace_person" {
+        // Single-expert Wan-VACE: one driving ControlClip plus N ordered character references. The
+        // reference cardinality is the axis a bare `"other"` erased.
+        if let [Conditioning::ControlClip { .. }, references @ ..] = conditioning {
+            if references
+                .iter()
+                .all(|entry| matches!(entry, Conditioning::Reference { .. }))
+            {
+                return if references.is_empty() {
+                    "control_video"
+                } else {
+                    "control_video+references"
+                };
+            }
+        }
+        return "none";
+    }
+    match mode {
+        "image_to_video" => "image",
+        "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
+        // No carrier this admission can name exactly. `"none"` is the emitters' own spelling for
+        // an absent reference surface and cannot be confused with a measured carrier.
+        _ => "none",
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_admission_reference_count(
+    model_id: &str,
+    mode: &str,
+    conditioning: &[Conditioning],
+) -> u32 {
+    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+        return u32::try_from(
+            conditioning
+                .iter()
+                .filter(|conditioning| {
+                    matches!(
+                        conditioning,
+                        Conditioning::Reference { .. } | Conditioning::Keyframe { .. }
+                    )
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+    }
+    if model_id == "bernini" && mode == "reference_to_video" {
+        if let [Conditioning::MultiReference { images }] = conditioning {
+            return u32::try_from(images.len()).unwrap_or(u32::MAX);
+        }
+    }
+    if model_id == "bernini" && mode == "reference_video_to_video" {
+        if let [Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }] =
+            conditioning
+        {
+            return u32::try_from(images.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(1);
+        }
+    }
+    if model_id == "bernini"
+        && mode == "multi_video_to_video"
+        && (2..=8).contains(&conditioning.len())
+        && conditioning
+            .iter()
+            .all(|entry| matches!(entry, Conditioning::VideoClip { .. }))
+    {
+        return u32::try_from(conditioning.len()).unwrap_or(u32::MAX);
+    }
+    if model_id == "bernini" && mode == "ads2v" {
+        if let [Conditioning::VideoClip { .. }, Conditioning::VideoClip { .. }, Conditioning::MultiReference { images }] =
+            conditioning
+        {
+            return u32::try_from(images.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(2);
+        }
+    }
+    // sc-20799: `conditioning.len()` collapses a MultiReference of ONE image and a MultiReference
+    // of EIGHT into the same count — one entry either way — so two very different working sets
+    // shared an admission identity. Count the images a MultiReference actually carries.
+    conditioning
+        .iter()
+        .map(|entry| match entry {
+            Conditioning::MultiReference { images } => {
+                u32::try_from(images.len()).unwrap_or(u32::MAX)
+            }
+            _ => 1,
+        })
+        .fold(0_u32, u32::saturating_add)
+}
+
 /// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
 /// This check runs before the live-budget probe and before contract selection, so unsupported
 /// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
@@ -1487,17 +1986,6 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) fn calibrated_video_memory_surface(input: &VideoGenInput, mode: &str) -> bool {
-    mode == "text_to_video"
-        && input.conditioning.is_empty()
-        && input.adapters.is_empty()
-        && !input.enhance_prompt
-        && !input.use_uncensored_enhancer
-        && input.uncensored_enhancer_dir.is_none()
-        && input.video_mode.is_none()
-        && (24..=30).contains(&input.fps)
-}
-
 /// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
 /// lifecycle context in one operation makes it impossible for the generation request to carry an
 /// optimized rung while silently bypassing its safety/begin/configure/finish contract.
@@ -2029,25 +2517,51 @@ pub(super) async fn generate_video_using(
                     crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
                 let spec_headroom_bytes =
                     crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
-                let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
-                let mut overlays = Vec::new();
-                if !input.adapters.is_empty() {
-                    overlays.push(format!("adapters:{}", input.adapters.len()));
-                }
-                if input.enhance_prompt
-                    || input.use_uncensored_enhancer
-                    || input.uncensored_enhancer_dir.is_some()
-                {
-                    overlays.push("enhancer".to_owned());
-                }
-                let admission_overlay = (!overlays.is_empty()).then(|| overlays.join("+"));
-                let exact_promoted_surface =
-                    calibrated_video_memory_surface(&input, &admission_mode);
-                // No contract means no declared lifecycle/selection seam. Preserve direct
-                // generation without even asking for a live budget; a budget-probe failure must
-                // not turn contract absence into a new refusal.
+                let reference_count = video_admission_reference_count(
+                    &admission_model_id,
+                    &admission_mode,
+                    &input.conditioning,
+                );
+                // This is the provider-facing carrier, not a synonym for the user-visible mode:
+                // Wan turns clip extension/bridging into pinned keyframes, while I2V reaches the
+                // reference-image encoder. A future measured row must name that real residency
+                // surface before request-scoped selection can use it.
+                let admission_reference_shape = video_admission_reference_shape(
+                    &admission_model_id,
+                    &admission_mode,
+                    &input.conditioning,
+                );
+                let admission_overlay = video_admission_overlay(
+                    &input,
+                    &admission_mode,
+                    generator.memory_strategy_contract(),
+                )?;
+                let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
+                    model_id: &admission_model_id,
+                    model_family: &admission_model_family,
+                    route: engine_id,
+                    mode: &admission_mode,
+                    reference_count,
+                    reference_shape: admission_reference_shape,
+                    overlay: admission_overlay.as_deref(),
+                    lane: crate::video_admission::LANE,
+                    tier: admission_tier,
+                    width: admission_geometry.0,
+                    height: admission_geometry.1,
+                    frames: admission_geometry.2,
+                    decode_chunk_size: admission_geometry.3,
+                    fps: input.fps,
+                    runtime: None,
+                    headroom_bytes: spec_headroom_bytes,
+                    expected_closure_digest: &admission_closure_digest,
+                };
+                // Evidence is the preflight: an unsupported request stays direct generation without
+                // attempting a platform memory probe that could fail independently of admission.
                 let admission_runtime =
-                    if exact_promoted_surface && generator.memory_strategy_contract().is_some() {
+                    if crate::video_admission::packaged_video_evidence_covers_request(
+                        generator,
+                        &admission_inputs,
+                    ) {
                         crate::video_admission::live_video_runtime_state(
                             engine_id,
                             cache_state,
@@ -2071,27 +2585,10 @@ pub(super) async fn generate_video_using(
                     // open before selection, so this value is observationally inert there.
                     None => spec_headroom_bytes,
                 };
-                let outcome = crate::video_admission::admit_video_generation(
-                    generator,
-                    crate::video_admission::VideoAdmissionInputs {
-                        model_id: &admission_model_id,
-                        model_family: &admission_model_family,
-                        route: engine_id,
-                        mode: &admission_mode,
-                        reference_count,
-                        overlay: admission_overlay.as_deref(),
-                        lane: crate::video_admission::LANE,
-                        tier: admission_tier,
-                        width: admission_geometry.0,
-                        height: admission_geometry.1,
-                        frames: admission_geometry.2,
-                        decode_chunk_size: admission_geometry.3,
-                        fps: input.fps,
-                        runtime: admission_runtime,
-                        headroom_bytes: admission_headroom_bytes,
-                        expected_closure_digest: &admission_closure_digest,
-                    },
-                );
+                admission_inputs.runtime = admission_runtime;
+                admission_inputs.headroom_bytes = admission_headroom_bytes;
+                let outcome =
+                    crate::video_admission::admit_video_generation(generator, admission_inputs);
                 apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /

@@ -453,7 +453,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
         .as_ref()
         .and_then(|evaluation| evaluation.memory);
     let memory_strategy_context = memory_evaluation
-        .and_then(|evaluation| optimized_shared_memory_context(evaluation.context));
+        .and_then(|evaluation| optimized_shared_memory_context(descriptor_id, evaluation.context));
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
     let work: Vec<(i64, String)> = (0..request.count as usize)

@@ -4,8 +4,8 @@
   "summary": {
     "modelCount": 94,
     "importedFamilyCount": 3,
-    "cellCount": 918,
-    "mlxOnlyCellCount": 62,
+    "cellCount": 919,
+    "mlxOnlyCellCount": 63,
     "candleOnlyCellCount": 47,
     "exceptionCount": 18
   },
@@ -15,14 +15,14 @@
     "apiGeneration": "b92394e1c975eae735db050be3605c615a228068176debd709706037ced841a0",
     "apiValidation": "b9f21500465791d78015f258623acbf946333746147c65ffd477605c0c9ce43e",
     "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
-    "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
-    "descriptorCandleFacts": "e2b4448d0ee00cd84af113ee3367bc36b1d615f131779c0d53ce934bc47c7b90",
-    "descriptorCandleRuntime": "24888b0ebde298d11eb0961a86e3d701b1a242e5684717652964b8e9625a8d4e",
-    "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
-    "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
-    "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
-    "exceptionRegister": "6645ec832bfe4a49f266f9475f70748af1a3deb99660d780dcdb74e195b15984",
-    "manifest": "9cffb0d4762da659ecf12a02e2a92876b15dc9bb048ba6b62afbe6fe9225b13d",
+    "descriptorAudioFacts": "72b28a219462d0cd9980550c8a245c50dfb404804d06f7d277c1d47fb0970597",
+    "descriptorCandleFacts": "3bae721901f35595a86abe7057ead40d66f2356ecdc49b4e37533075be430661",
+    "descriptorCandleRuntime": "f63ee2d5f4a20c8d4af32cc00d2984e7d80626cb2743a99b6327a8fc5e38a433",
+    "descriptorMlxFacts": "73e86a7628d13b4202fcea2fbced65addc689a4a1cfe41380cc74b292964a512",
+    "descriptorMlxRuntime": "7475135eedfac4ea2501b1a079d2143a56b0852d28fe0bd22b38080e49cf164a",
+    "descriptorPreviewFacts": "a4baec441f369d2f573616fd27f749d6e54650d4a4f8a1678211687893db5726",
+    "exceptionRegister": "fa0c6c68e2b6b05a87649041aff8248a1d4c14363decaba63dd0abc8659e9be1",
+    "manifest": "841776f3dfbad123cbc15e432d57dc38d8495eb42ddb466112558d68046c4acb",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
     "routerCandle": "d55ed85e9d208c42848f22c1e245caca1015d196e002e7bb891642b32b5c2bf6",
     "routerCatalog": "0a08189104df04729dddc8a94c210876e243afd0b03812ce6c072b3a9efe453c",
@@ -31,7 +31,7 @@
     "scheduler": "7adf257c047f8fd15dff086add27a928d5e09ceed29c1371ab3058de254d0748",
     "trainingCatalog": "ba87e0cb93ab872fd2a430f2ac4aeaedf8c65d6869b37b7ff7df4071309289e0",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
-    "webFallbackCatalog": "a891ecf336d746433b0e10279132bfdc8425e85b6f71a62ec842ccc2a56907bc",
+    "webFallbackCatalog": "fd1bb16453bce60062ca5bc6e94984473f446c8ae76589fe6bd5ae7d26c173b3",
     "webImageAdvanced": "b18fa5be38f71fa65b88e8e7eef48e96f44d6031196dcfc4d434d27438f8516d",
     "webImageRequest": "07833b54289d0c457ebb05b9db06e32b0221bc8c2d5d7eb1f4ae04124b0a60e3",
     "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
@@ -48,26 +48,26 @@
     "workerDispatch": "17dc38a3d43d9ce435edab4ab67b2fad04ed083571368ea26abaf2362ef307cf",
     "workerEngineTable": "03c64b8abe9c47424d601d4def9a255ef4c9da081098d972a23925bbce16e63b",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "46a43735de93117bcbebba5a4846b68302272568ba2abd629a7b2834a998af72",
+    "workerImageDispatch": "531c0ce66baf790ac57011670d67ebd3e1459906a5be2f2a399d6d570ab36de1",
     "workerImageKreaImported": "0ce6e705505c9e75ead843201d2cb88f996962247b6f4b5d8e19bab326401d2c",
-    "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
+    "workerImageMageFinetuned": "84dad283dd6e8f747b95ebec700cb27a2f30d51488caddcaa887910fb61b50c5",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
-    "workerImagePulidCandle": "e03c33082e5e8c1762a166769ada64cc4942abc5c06a8c6990a5a8914ea205c2",
-    "workerImageQwenEditCandle": "68676c54a15f92e0d7e79343bd32cd3bf8e6f86613be1dec06c3cf568ab41142",
-    "workerImageSdxlImported": "63e5f2891be1f3e8ea1dc77ef3837254ab188ccc63fdaf608de2d37499332efd",
+    "workerImagePulidCandle": "ef37dd61757bd6a35cf2da1255527d3a557ebc93ca91a7a9b49e69d687610359",
+    "workerImageQwenEditCandle": "52f13c259f11d2ecd7f1cb118ec3e024f435e171b8ad6d5336dc5580f9ca6e8c",
+    "workerImageSdxlImported": "cd4966612f5f876c6b6de271e711622999ba43d46e5a1e778973e9fdb533e025",
     "workerTrainingDispatch": "479520bfabe44f79ff1e18617c442fadead941e2a8dac973b26ee1e54100c447",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
-    "workerVideoBernini": "352991ae26c8d842c9af1c37e9c6d3261ae6554debe5089744ef8e7972fd15ed",
+    "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "b0c85088d156a93f28b33b15d1d9cc2649cebb55bcb52eba370b89ac27cfd9b4",
     "workerVideoDispatch": "c0e34c2411906d90138fd935a406e3515f177b0da503ed032fbf130c321cd6a4",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "82a228aa7883504a4f4bb910c3b9aa1450693152e5e781bd067e701d6f5af6ba",
+    "workerVideoLtx": "d3bb7913724f49cd33a45544776a6b621dc2e7ec146ffef0112fa25c316ac1c9",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "fbcafb8a560c5f341a5c87924fe2080705822fd338675ae398566e5e89223f3a",
     "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
-    "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
-    "workerVideoWan": "7075c99b863098aaef4cc80e46e49cbee27545c294f412a978aa21e4bde385c8"
+    "workerVideoVace": "466e9a6a9fc26d3ee3bb185685278c1ac8b38b4325fd6e430c1447a397f52462",
+    "workerVideoWan": "6544a3eed85bab509c798fcc0f6f4333634a2db8d7d8f222caff304e1be28ba5"
   },
   "models": [
     {
@@ -1681,13 +1681,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -2710,6 +2710,11 @@
           "candle": true
         },
         {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
           "capability": "reference",
           "mlx": true,
           "candle": true
@@ -2881,6 +2886,16 @@
         },
         {
           "capability": "keyframe",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "multiReference",
           "mlx": true,
           "candle": false,
           "parityObligation": {
@@ -4735,11 +4750,6 @@
         },
         {
           "capability": "mask",
-          "mlx": true,
-          "candle": true
-        },
-        {
-          "capability": "multiReference",
           "mlx": true,
           "candle": true
         },
@@ -7628,6 +7638,7 @@
       "cells": [
         "models/ltx_2_3_eros/conditioningShape/controlClip",
         "models/ltx_2_3_eros/conditioningShape/keyframe",
+        "models/ltx_2_3_eros/conditioningShape/multiReference",
         "models/ltx_2_3_eros/conditioningShape/reference",
         "models/ltx_2_3_eros/conditioningShape/videoClip"
       ]

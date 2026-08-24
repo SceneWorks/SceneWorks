@@ -465,18 +465,6 @@ impl WarmPolicyOnce {
                 .unwrap_or_else(|| WarmPolicyProposal::inert(self.engine_id).silenced()),
         }
     }
-
-    /// Settle the proposal without evaluating any request, for a route that turns out to have no
-    /// request-scoped memory plan at all. A no-op once [`Self::take`] has handed it out.
-    ///
-    /// A holder that is simply DROPPED unsettled reports nothing, and that is the intended outcome for
-    /// a job cancelled before its first evaluation: no request ran, so there is no decision to report.
-    /// The alternative — logging a policy decision for work that never happened — would be noise.
-    pub(crate) fn decline_if_unsettled(&mut self, reason: ServedAsIsReason) {
-        if let Some(proposal) = self.proposal.take() {
-            proposal.decline(reason);
-        }
-    }
 }
 
 /// What the request-scoped selection did with a granted proposal.
@@ -1050,16 +1038,6 @@ mod tests {
                 "item {item} must not re-emit the one cache access's decision"
             );
         }
-    }
-
-    /// `decline_if_unsettled` covers the path where no request is ever evaluated, and is one-shot too.
-    #[test]
-    fn declining_an_unused_holder_is_one_shot_as_well() {
-        let mut once = WarmPolicyOnce::new(WarmPolicyProposal::inert("fixture"));
-        once.decline_if_unsettled(ServedAsIsReason::RouteHasNoRequestScopedMemory);
-        let after = once.take();
-        assert_eq!(after.decision(), WarmPolicyDecision::Unchanged);
-        assert!(!after.reports(), "the decision was already settled");
     }
 
     #[test]

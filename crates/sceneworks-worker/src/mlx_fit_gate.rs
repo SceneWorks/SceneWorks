@@ -42,9 +42,9 @@ use gen_core::{
     MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
     MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
-    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
-    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
-    TransformerComponent, WeightsSource,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryReferenceShape,
+    MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision,
+    Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -62,7 +62,10 @@ use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
-const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+// Must remain identical to mlx-gen-mage's loaded provider contract. The prior generation-peak
+// token predated the shared ladder and caused every exact Mage request to fail the provider/gate
+// handshake before selection.
+const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-mlx-shared-ladder-2026-08-03-v1";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1311,6 +1314,15 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
         "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
+        // sc-20799 round 2: unlike the video lane's reference-shape `"other"`, this `"other"` is
+        // IDENTITY-BEARING and must stay. `mode_key` is matched against `binding.mode` when
+        // resolving packaged evidence and is round-tripped by `memory_mode_from_mode_key`, whose
+        // catch-all arm reconstructs `MemoryMode::Other("other")`. Renaming it (to "none" or
+        // anything else) would silently repoint every non-standard image mode at a different
+        // admission coordinate. The real asymmetry worth knowing about is that the typed value
+        // keeps the concrete mode while the key collapses to a single bucket, so two distinct
+        // non-standard modes share one evidence key; narrowing that is a calibration-corpus change,
+        // not a rename, and is out of scope for this pass.
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
     }
 }
@@ -1496,13 +1508,20 @@ fn resident_evidence(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -1888,6 +1907,7 @@ fn evidence_admission_route(
                 })?;
                 let memory_evidence = MemoryEvidence {
                     key: MemoryEvidenceKey {
+                        model_family: plan.model_id.to_owned(),
                         resolved_route: plan.engine_id.to_owned(),
                         backend: gen_core::MemoryBackend::Mlx,
                         tier: plan.tier,
@@ -1895,8 +1915,14 @@ fn evidence_admission_route(
                             record.load_shape,
                         ),
                         mode: memory_mode_from_mode_key(mode_key),
+                        reference_shape: if inputs.reference_count == 0 {
+                            MemoryReferenceShape::None
+                        } else {
+                            MemoryReferenceShape::Image
+                        },
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
+                        frames_per_second: None,
                         strategy: evidence_strategy(binding.rung),
                         engaged_composition: record
                             .strategy
@@ -2161,13 +2187,20 @@ pub(crate) fn estimate_evidence(
 ) -> MemoryEvidence {
     MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -4156,16 +4189,16 @@ pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumer
 /// Resolve the numeric tier that the loaded video checkpoint actually carries.
 ///
 /// Provider-owned resolution runs first for video loaders that carry their tier outside
-/// `LoadSpec.quantize` (currently Wan TI2V-5B). LTX then resolves its immutable `split_model.json`.
+/// `LoadSpec.quantize` (Wan TI2V-5B and Bernini). LTX then resolves its immutable `split_model.json`.
 /// An explicit assertion that disagrees with the checkpoint fails closed before selection.
 pub(crate) fn resolved_video_numeric_tier(
     engine_id: &str,
     spec: &LoadSpec,
 ) -> WorkerResult<MemoryNumericTier> {
-    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. MLX Wan
-    // TI2V-5B reads its immutable packed config/header surface and also carries the Q4 text-encoder
-    // Q8 floor; deriving from `LoadSpec.quantize` here would misprice the normal prepacked load,
-    // whose request-side quant hint is deliberately `None`.
+    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. Wan and
+    // Bernini read immutable packed config/header surfaces (Wan also carries the Q4 text-encoder Q8
+    // floor); deriving from `LoadSpec.quantize` would misprice their normal prepacked loads, whose
+    // request-side quant hint is deliberately `None`.
     #[cfg(target_os = "macos")]
     if let Some(tier) =
         runtime_macos::resolved_video_memory_numeric_tier(engine_id, spec).map_err(|error| {
@@ -4954,6 +4987,7 @@ fn generic_mlx_shared_observation(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: "generic_mlx_cold_load".into(),
             resolved_route: "generic_mlx_cold_load".into(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
@@ -4961,8 +4995,10 @@ fn generic_mlx_shared_observation(
             // defers transformer materialization.
             load_shape: gen_core::LoadShape::EagerMaterialization,
             mode: memory_mode_from_mode_key("image_generation"),
+            reference_shape: MemoryReferenceShape::None,
             overlay: Some("resolved_load_spec".into()),
             geometry,
+            frames_per_second: None,
             strategy: MemoryStrategy::Resident,
             engaged_composition: vec![MemoryStrategy::Resident],
             parameters: Default::default(),
@@ -13546,10 +13582,12 @@ mod tests {
             // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
             // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
             // those providers reachable rung-4 ladders, so they are no longer Resident-only and
-            // have no estimate band left to flip. The four that remain have no ladder yet, which is
-            // what keeps this list a live audit rather than a formality.
+            // have no estimate band left to flip. sc-20799 removed the fourth row the same way:
+            // retiring `flux2_dev`'s `exhaustive` reading gave its T2I route a declared
+            // `staged_residency` rung across bf16/q4/q8, so the bf16 cell is no longer
+            // Resident-only and has no band to flip. The three that remain have no ladder yet,
+            // which is what keeps this list a live audit rather than a formality.
             vec![
-                ("flux2_dev", "flux2_dev", "bf16", 128),
                 ("flux2_dev", "flux2_dev_control", "q4", 64),
                 ("ideogram_4", "ideogram_4", "q8", 48),
                 ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
@@ -15186,6 +15224,16 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
+        assert_eq!(
+            MAGE_CALIBRATION_FINGERPRINT,
+            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
+            "the worker's Mage peak estimator must fail at compile/test time when the linked provider identity moves",
+        );
+    }
+
     #[test]
     fn mage_adapter_requests_require_and_consume_declared_residency() {
         use gen_core::{
@@ -15380,11 +15428,17 @@ mod tests {
         };
         let evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "mage_flow".to_owned(),
                 resolved_route: "mage_flow".to_owned(),
                 backend: gen_core::MemoryBackend::Mlx,
                 tier: plan.tier,
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: memory_mode_from_mode_key("edit"),
+                reference_shape: if inputs.reference_count == 0 {
+                    MemoryReferenceShape::None
+                } else {
+                    MemoryReferenceShape::Image
+                },
                 overlay: inputs.overlay.clone(),
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -15393,6 +15447,7 @@ mod tests {
                     frames: 1,
                     reference_count: inputs.reference_count,
                 },
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),
                 parameters: selection.parameters,
