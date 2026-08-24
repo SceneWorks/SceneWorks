@@ -338,7 +338,7 @@ fn checkpoint_plan_request_shape_refusal(
 ///
 /// sc-20651 deletes this table together with the lanes it names; the row's conformance test pins it
 /// by name so that deletion is mechanical.
-const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
+const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &["krea_2", "sdxl", "mage-flow"];
 
 /// Whether SOME other lane could take this request if the plan route declines it.
 ///
@@ -841,17 +841,63 @@ fn resolve_checkpoint_plan_component(
             consumed: None,
             pin: None,
         }),
-        _ => Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:missing-component] checkpoint {:?} ({family} family) requires \
-             component '{component}', which this runtime cannot supply for that family",
-            resolved.checkpoint_id
-        ))),
+        // Anything else is a component only the FAMILY knows where to find — Mage-Flow's shared
+        // `text_encoder` / `vae` live in an installed base tier addressed through the co-requisite
+        // seam, not anywhere this route could guess. Ask that family's own resolver, so the plan
+        // route and the family's other consumers refuse a missing component with one message.
+        _ => {
+            let resolved_components =
+                checkpoint_plan_family_components(family, component, &resolved.checkpoint_id, settings)?;
+            Ok(CheckpointPlanComponent {
+                id: component,
+                source: resolved_components,
+                consumed: None,
+                pin: None,
+            })
+        }
     }
 }
 
 /// The fused-LDM tokenizer component id (SDXL's `ldm_tokenizer`), spelled here because the constant
 /// lives in the MLX-only `mlx-gen-sdxl` crate while this route serves both backends.
 const CHECKPOINT_PLAN_LDM_TOKENIZER_COMPONENT: &str = "ldm_tokenizer";
+
+/// Each plan family's SHARED-COMPONENT resolver: `(plan family, resolver)`.
+///
+/// The sibling of [`CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`] for families whose provider declares named
+/// components rather than one base snapshot. Catalog data, not family truth: the descriptor already
+/// says WHICH components are required; this is only the app's answer to where that family installed
+/// them. Each entry is the family's EXISTING resolver — the same function, not a copy — so a missing
+/// component produces one message and one completeness probe no matter which route asked.
+///
+/// A family with no row refuses the component by name rather than loading a neighbour's (E8).
+#[allow(clippy::type_complexity)]
+const CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS: &[(
+    &str,
+    fn(&Settings) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>>,
+)] = &[("mage-flow", resolve_mage_finetuned_components)];
+
+/// One provider-declared component resolved through its family's own component resolver.
+fn checkpoint_plan_family_components(
+    family: &str,
+    component: &str,
+    checkpoint_id: &str,
+    settings: &Settings,
+) -> WorkerResult<WeightsSource> {
+    let unsupplyable = || {
+        WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] checkpoint {checkpoint_id:?} ({family} family) \
+             requires component '{component}', which this runtime cannot supply for that family"
+        ))
+    };
+    let (_, resolve) = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
+        .iter()
+        .find(|(candidate, _)| *candidate == family)
+        .ok_or_else(unsupplyable)?;
+    // The family's own resolver raises its own actionable error when the components are not
+    // installed; that error is propagated verbatim rather than replaced with a generic one.
+    resolve(settings)?.remove(component).ok_or_else(unsupplyable)
+}
 
 /// Each plan family's resident base tier resolver: `(plan family, resolver)`.
 ///
@@ -1102,26 +1148,17 @@ pub(crate) fn checkpoint_plan_bespoke_primary_pin(
     settings: &Settings,
     family: &str,
 ) -> WorkerResult<Option<gen_core::PinnedWeightsFile>> {
-    let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
+    let Some((checkpoint_id, source, primary)) =
+        checkpoint_plan_bespoke_primary(request, settings, family)?
+    else {
         return Ok(None);
     };
-    if !checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family) {
-        return Ok(None);
-    }
-    let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = store.resolve(checkpoint_id).map_err(checkpoint_plan_refusal)?;
-    checkpoint_plan_family_matches(&resolved, checkpoint_id, family)?;
-    let adapter = checkpoint_plan_adapter(family, checkpoint_id)?;
-    checkpoint_plan_backend_eligible(adapter, checkpoint_id)?;
-    let source = checkpoint_plan_source_shape(adapter, checkpoint_id)?;
     if source == gen_core::ImportedModelSource::TransformerDirectory {
         return Err(WorkerError::InvalidPayload(format!(
             "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?} ({family} family) \
              resolves to a component directory, which this family's single-file lane cannot open"
         )));
     }
-    let primary = checkpoint_plan_primary(&resolved, source)?;
-    checkpoint_plan_unconsumed_layers(&resolved, &primary.consumed)?;
     // A non-directory shape's selection is exactly its backbone layer, so its pin list is the one
     // pin the lane loads. Assert rather than index blindly: a future shape that widened the
     // selection would otherwise silently hand the lane the first of several files.
@@ -1133,6 +1170,111 @@ pub(crate) fn checkpoint_plan_bespoke_primary_pin(
             many.len()
         ))),
     }
+}
+
+/// The DIRECTORY form of [`checkpoint_plan_bespoke_primary_pin`], for a family whose loader opens a
+/// component directory rather than one file (Mage-Flow's `diffusers` dialect).
+///
+/// Same authority and the same refusals; the only difference is which artifact the lane is handed.
+/// The directory's own layers — the transformer weight file and its `config.json` sidecar — are
+/// consumed by the selection, so a torn artifact is caught here rather than mid-load, and the lane
+/// re-pins the fixed filenames it loads from inside the verified directory.
+pub(crate) fn checkpoint_plan_bespoke_primary_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+    family: &str,
+) -> WorkerResult<Option<CheckpointPlanBespokeDir>> {
+    let Some((checkpoint_id, source, primary)) =
+        checkpoint_plan_bespoke_primary(request, settings, family)?
+    else {
+        return Ok(None);
+    };
+    match primary.weights {
+        WeightsSource::Dir(directory) => Ok(Some(CheckpointPlanBespokeDir {
+            directory,
+            pins: primary.pins,
+        })),
+        WeightsSource::File(_) => Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?} ({family} family) \
+             resolves to a {source:?} source, but this family's loader opens a component directory"
+        ))),
+    }
+}
+
+/// A plan-sourced component directory and the pins covering every plan layer inside it.
+///
+/// The pins matter as much as the path. A LINKED library root is an APPROVED root of the checkpoint
+/// plan store, not an app-managed root, so the lane must NOT re-pin the files it loads through
+/// `paths::pin_app_managed_model_file` — that confinement rejects every linked checkpoint by
+/// construction, which is the wrong answer rather than a safe one. The plan store is the authority
+/// that already proved these bytes: it resolved the approved root, re-checked every layer's digest,
+/// and pinned each one here.
+pub(crate) struct CheckpointPlanBespokeDir {
+    pub(crate) directory: PathBuf,
+    pub(crate) pins: Vec<gen_core::PinnedWeightsFile>,
+}
+
+impl CheckpointPlanBespokeDir {
+    /// The pin for the layer whose file name is `file_name`, or a typed refusal naming what the
+    /// directory does carry. Never falls back to pinning the path itself: a file the plan did not
+    /// record is a file the store never verified.
+    pub(crate) fn pin_named(&self, file_name: &str) -> WorkerResult<gen_core::PinnedWeightsFile> {
+        self.pins
+            .iter()
+            .find(|pin| {
+                pin.loader_path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == Some(file_name)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                let present: Vec<String> = self
+                    .pins
+                    .iter()
+                    .filter_map(|pin| pin.loader_path().file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .collect();
+                WorkerError::InvalidPayload(format!(
+                    "[checkpoint-plan:missing-component] the compiled checkpoint's component \
+                     directory {} carries no verified {file_name:?} layer; it carries [{}]",
+                    self.directory.display(),
+                    present.join(", ")
+                ))
+            })
+    }
+}
+
+/// The shared body of both bespoke-source helpers: resolve and re-verify the plan, prove it belongs
+/// to this family and this backend, read the shape from the adapter, select the primary, and refuse
+/// a plan whose layers this lane would not consume.
+#[allow(clippy::type_complexity)]
+fn checkpoint_plan_bespoke_primary(
+    request: &ImageRequest,
+    settings: &Settings,
+    family: &str,
+) -> WorkerResult<Option<(String, gen_core::ImportedModelSource, CheckpointPlanPrimary)>> {
+    let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
+        return Ok(None);
+    };
+    // FIRST, before the store is even opened: is this lane the one being asked? A lane is offered
+    // every plan-backed request whose shape the plan route declined, other families' included, and
+    // one of those is not an error (review blocker 1).
+    if !checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family) {
+        return Ok(None);
+    }
+    let checkpoint_id = checkpoint_id.to_owned();
+    let store = CheckpointPlanStore::open(&settings.data_dir);
+    let resolved = store
+        .resolve(&checkpoint_id)
+        .map_err(checkpoint_plan_refusal)?;
+    checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
+    let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
+    checkpoint_plan_backend_eligible(adapter, &checkpoint_id)?;
+    let source = checkpoint_plan_source_shape(adapter, &checkpoint_id)?;
+    let primary = checkpoint_plan_primary(&resolved, source)?;
+    checkpoint_plan_unconsumed_layers(&resolved, &primary.consumed)?;
+    Ok(Some((checkpoint_id, source, primary)))
 }
 
 /// Optional per-request override of a u32 knob: `advanced[key]`, else the manifest entry's

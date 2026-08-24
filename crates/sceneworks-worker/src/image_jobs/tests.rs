@@ -21129,6 +21129,223 @@ fn sdxl_ldm_entries() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// The tensor surface a Mage-Flow transformer directory is recognized by: exactly the published
+/// twelve `transformer_blocks`, each carrying the Mage-specific modulation and dual-stream MLP
+/// names. The exact block count is load-bearing in `detect_transformer_family` — it is what keeps
+/// the broader Qwen-Image arm from claiming a Mage DiT — so the fixture reproduces it rather than
+/// truncating.
+#[cfg(target_os = "macos")]
+fn mage_flow_entries() -> Vec<(String, &'static str)> {
+    let mut entries = Vec::new();
+    for block in 0..12 {
+        for leaf in [
+            "attn.add_q_proj.weight",
+            "img_mlp.net.0.proj.weight",
+            "txt_mlp.net.0.proj.weight",
+            "img_mod.1.weight",
+            "txt_mod.1.weight",
+        ] {
+            entries.push((format!("transformer_blocks.{block}.{leaf}"), "BF16"));
+        }
+    }
+    entries
+}
+
+/// sc-20644 review blocker 1, REPRODUCED against the Mage-Flow lane end to end.
+///
+/// The reviewer's exact case: a plan-backed `krea_2` entry carrying Hires.fix. The plan route
+/// declines the shape, which offers the request to every other lane, and
+/// `prepare_mage_finetuned_transformer` reached its plan-source resolver for it. That resolver
+/// opened the plan store and compared the PLAN's family (`krea_2`) against the ASKING lane's
+/// (`mage-flow`), raising a FATAL `[checkpoint-plan:family-mismatch]` — which
+/// `prepare_image_route` propagates with `?`, killing a job the Krea lane was about to serve.
+///
+/// Asserted at BOTH levels, because either alone is weaker than it looks: the Mage resolver must
+/// return `Ok(None)` (not raise), and the whole route preparation must reach `KreaImported`. The
+/// second is the one that would have caught this in the first place.
+///
+/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
+/// `checkpoint_plan_bespoke_primary` — the Mage resolver raises and route preparation dies.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_backed_krea_hires_request_is_declined_by_the_mage_lane_not_fatal() {
+    let fx = CheckpointPlanFixture::new("mage-cross-family", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+    );
+    assert_eq!(
+        request
+            .model_manifest_entry
+            .get("family")
+            .and_then(Value::as_str),
+        Some("krea_2"),
+        "fixture check: the entry declares krea_2, which is what makes this a CROSS-family probe"
+    );
+    assert!(
+        !request_is_checkpoint_plan_backed(&request),
+        "fixture check: the plan route declines Hires.fix, which is what offers this request to          the Mage-Flow lane at all"
+    );
+
+    // The Mage-Flow lane declines rather than raising.
+    assert!(
+        matches!(
+            resolve_plan_backed_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "the Mage-Flow plan-source resolver must DECLINE a krea_2 request"
+    );
+    assert!(
+        matches!(
+            prepare_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "and so must the lane's whole preparation"
+    );
+
+    // End to end: the job is served by the lane that owns it, not killed in route preparation.
+    let prepared = prepare_image_route(&request, &fx.settings)
+        .expect("route preparation must not fail: this is the reviewer's reproduced crash")
+        .expect("a plan-backed Hires.fix request is served by the Krea lane");
+    assert_eq!(prepared.kind(), ImageRoute::KreaImported);
+}
+
+/// sc-20644 Mage-Flow row — a plan-backed Mage-Flow fine-tune loads from the plan's verified
+/// component DIRECTORY, and its request shapes are single-claimed.
+///
+/// Mage-Flow is the row that proves the seam is shape-general rather than file-shaped: its only
+/// registered dialect is `diffusers` → `TransformerDirectory`, so its plan's primary is a directory
+/// and it uses `checkpoint_plan_bespoke_primary_dir`. It is also the family whose adapter's portable
+/// `family` (`mage_flow`) differs from the spelling a compiled plan records and the adapter registry
+/// is keyed on (`mage-flow`); passing the wrong one answers "no adapter" for a family this backend
+/// binds, which is why `MAGE_FLOW_PLAN_FAMILY` is named and asserted here.
+///
+/// Failing mutations: spell `MAGE_FLOW_PLAN_FAMILY` as `mage_flow`; delete the plan-sourced resolver
+/// call in `prepare_mage_finetuned_transformer`; drop the `is_mage_flow_transformer_dir`
+/// completeness probe from the plan-sourced resolver.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
+    let fx = CheckpointPlanFixture::new("mage-plan-dir", true);
+    let entries = mage_flow_entries();
+    let borrowed: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(name, dtype)| (name.as_str(), *dtype))
+        .collect();
+    write_tiny_safetensors(
+        &fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+        &borrowed,
+        0x33,
+    );
+    std::fs::write(
+        fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
+        br#"{"_class_name":"MageFlowTransformer2DModel"}"#,
+    )
+    .unwrap();
+    let compiled = fx
+        .store
+        .compile_linked(&fx.root_id, "mage-tune")
+        .expect("fixture check: a complete Mage-Flow transformer directory must compile");
+    let resolved = fx.store.resolve(&compiled.checkpoint_id).unwrap();
+    assert_eq!(
+        resolved.family(),
+        MAGE_FLOW_PLAN_FAMILY,
+        "the spelling a compiled plan records IS the one the lane passes to the adapter registry"
+    );
+
+    let request = request(json!({
+        "projectId": "p",
+        "model": "linked_mage_tune",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "id": "linked_mage_tune",
+            "catalogScope": "user",
+            "family": "mage-flow",
+            "importSourceShape": "transformer_directory",
+            "importPlan": { "checkpointId": compiled.checkpoint_id }
+        }
+    }));
+
+    // The plan's DIRECTORY reaches the lane, and the lane pins the two fixed files inside it —
+    // through the same helper the filesystem scan uses, so the two routes cannot pin different
+    // things.
+    let prepared = resolve_plan_backed_mage_finetuned_transformer(&request, &fx.settings)
+        .expect("a plan-backed Mage-Flow entry resolves its directory through the plan")
+        .expect("the row's plan-sourced resolver claims it");
+    assert_eq!(prepared.directory, fx.library_dir.join("mage-tune"));
+    assert_eq!(
+        prepared.weights.loader_path(),
+        fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE)
+    );
+    assert_eq!(
+        prepared.config.loader_path(),
+        fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE)
+    );
+
+    // Single claim, and the plan route's shared components come from the FAMILY's own resolver.
+    //
+    // This fixture deliberately does NOT install the Mage-Flow base tier, because that is what makes
+    // the next assertion meaningful: the plan route reaches
+    // `resolve_mage_finetuned_components` — the same function the bespoke lane calls — and surfaces
+    // ITS actionable message verbatim, rather than the generic "this runtime cannot supply that
+    // component for that family" it produced before this row. A missing component therefore fails
+    // during PLANNING, with one message, whichever route asked.
+    let plan_refusal = match prepare_checkpoint_plan_sources(&request, &fx.settings) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!(
+            "t2i on a plan-backed Mage entry is the plan route's, and its base tier is absent, so \
+             it must refuse rather than prepare"
+        ),
+    };
+    assert!(
+        plan_refusal.contains("install the Mage-Flow Base model (bf16) first")
+            && plan_refusal.contains("text_encoder"),
+        "the plan route must surface the family's own component diagnostic: {plan_refusal}"
+    );
+    assert!(
+        matches!(
+            prepare_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "and the bespoke lane must decline the request the plan route claimed"
+    );
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME ------------------------------
+    let source = include_str!("mage_finetuned.rs");
+    for symbol in [
+        "fn resolve_mage_finetuned_transformer(",
+        "if request_is_checkpoint_plan_backed(request) {",
+        "checkpoint_plan_bespoke_primary_dir(request, settings, MAGE_FLOW_PLAN_FAMILY)",
+        "is_mage_flow_transformer_dir(&path)",
+        "fn resolve_mage_finetuned_components(",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Mage-Flow bespoke surface sc-20651 deletes must be live code: {symbol}"
+        );
+    }
+    let plan_source_at = source
+        .find("resolve_plan_backed_mage_finetuned_transformer(request, settings)?")
+        .expect("the plan-sourced resolver is reached from the prepare wrapper");
+    let scan_at = source
+        .find("resolve_mage_finetuned_transformer(request, settings)\n}")
+        .expect("the filesystem scan is the fallback");
+    assert!(
+        plan_source_at < scan_at,
+        "the plan source must precede the filesystem scan: a linked entry has nothing to scan"
+    );
+}
+
 /// Populate the isolated Hugging Face cache with CLIP-L's two model-agnostic tokenizer assets at
 /// the exact pinned revision the SDXL lane and the plan route both resolve against. Without them
 /// the fused route's `ldm_tokenizer` component is genuinely absent and every claim probe below
