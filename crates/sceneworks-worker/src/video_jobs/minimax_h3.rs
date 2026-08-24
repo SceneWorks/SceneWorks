@@ -154,10 +154,7 @@ pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
 ///
 /// The same `media_descriptor(...).is_none()` idiom already gates the not-in-this-bundle branches
 /// of `mlx_fit_gate`, so this is the established way to ask the question.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(target_os = "macos")]
 pub(super) fn minimax_h3_engine_is_registered() -> bool {
     crate::inference_runtime::media_descriptor(MINIMAX_H3_ENGINE_ID).is_some()
 }
