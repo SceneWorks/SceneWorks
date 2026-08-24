@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  cp, lstat, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -2477,7 +2479,7 @@ test("campaign paths are fresh non-nested RUNNER_TEMP descendants and cleanup re
     const guard = await validateCampaignPaths({
       runnerTemp, output, scratch, cacheRoot, repositories,
     });
-    assert.equal(guard.output, output);
+    assert.equal(guard.output, path.join(await realpath(runnerTemp), "output"));
     await mkdir(scratch);
     await safeRemoveTree(scratch, guard, "fixture scratch");
 
@@ -2521,6 +2523,67 @@ test("campaign paths are fresh non-nested RUNNER_TEMP descendants and cleanup re
       }
       throw error;
     }
+    const benignParentLink = path.join(temporary, "benign-cache-parent-link");
+    const repositoryParentLink = path.join(temporary, "repository-cache-parent-link");
+    const runnerParentLink = path.join(temporary, "runner-parent-link");
+    const benignCacheRoot = path.join(benignParentLink, "cache");
+    const repositoryCacheRoot = path.join(repositoryParentLink, "cache");
+    await Promise.all([
+      mkdir(path.join(outside, "cache")),
+      mkdir(path.join(sceneworks, "cache")),
+      symlink(outside, benignParentLink, process.platform === "win32" ? "junction" : "dir"),
+      symlink(sceneworks, repositoryParentLink, process.platform === "win32" ? "junction" : "dir"),
+      symlink(runnerTemp, runnerParentLink, process.platform === "win32" ? "junction" : "dir"),
+    ]);
+    const aliasedGuard = await validateCampaignPaths({
+      runnerTemp,
+      output: path.join(runnerTemp, "aliased-cache-output"),
+      scratch: path.join(runnerTemp, "aliased-cache-scratch"),
+      cacheRoot: benignCacheRoot,
+      repositories,
+    });
+    assert.equal(aliasedGuard.cacheRoot, await realpath(benignCacheRoot));
+    // Mutation check: removing the canonical repository confinement check must make this reject fail.
+    await assert.rejects(
+      validateCampaignPaths({
+        runnerTemp,
+        output: path.join(runnerTemp, "repository-cache-output"),
+        scratch: path.join(runnerTemp, "repository-cache-scratch"),
+        cacheRoot: repositoryCacheRoot,
+        repositories,
+      }),
+      /trusted cache root must be outside repository/,
+    );
+    await assert.rejects(
+      validateCampaignPaths({
+        runnerTemp,
+        output: path.join(runnerTemp, "canonical-collision"),
+        scratch: path.join(runnerParentLink, "canonical-collision"),
+        cacheRoot,
+        repositories,
+      }),
+      /output and scratch must be distinct, non-nested/,
+    );
+    const retargetableGuard = await validateCampaignPaths({
+      runnerTemp: runnerParentLink,
+      output: path.join(runnerParentLink, "retarget-output"),
+      scratch: path.join(runnerParentLink, "retarget-scratch"),
+      cacheRoot,
+      repositories,
+    });
+    assert.equal(retargetableGuard.output, path.join(await realpath(runnerTemp), "retarget-output"));
+    assert.equal(retargetableGuard.scratch, path.join(await realpath(runnerTemp), "retarget-scratch"));
+    await rm(runnerParentLink);
+    await symlink(outside, runnerParentLink, process.platform === "win32" ? "junction" : "dir");
+    await Promise.all([
+      mkdir(retargetableGuard.output),
+      mkdir(retargetableGuard.scratch),
+      mkdir(path.join(outside, "retarget-scratch")),
+    ]);
+    await writeFile(path.join(outside, "retarget-scratch", "keep.txt"), "keep", "utf8");
+    await safeRemoveTree(retargetableGuard.scratch, retargetableGuard, "retargeted scratch");
+    await assert.rejects(lstat(retargetableGuard.scratch), { code: "ENOENT" });
+    assert.equal(await readFile(path.join(outside, "retarget-scratch", "keep.txt"), "utf8"), "keep");
     await assert.rejects(
       validateCampaignPaths({
         runnerTemp,
