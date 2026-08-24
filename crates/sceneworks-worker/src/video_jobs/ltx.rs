@@ -889,9 +889,17 @@ pub(super) fn resolve_ltx_conditioning(
     }
 }
 
-/// The SC20772 conditioned memory cells are calibrated only for a fully pinned starting image.
-/// Keep the public advanced knob explicit: accepting another value and silently borrowing the
-/// 1.0 receipt would admit a different workload under the same evidence identity.
+/// The SC20772 conditioned memory cells are calibrated only for a fully pinned starting image, but
+/// `imageConditioningStrength` is a public advanced knob that accepted any value before this epic,
+/// and the LTX first/last-frame path (`resolve_keyframe_conditioning`, below) still does. Refusing
+/// it here broke previously-working requests to protect an evidence identity that is already
+/// protected elsewhere: `video_jobs::wan::video_admission_overlay` keys the LTX reference carrier
+/// as `reference:image:{w}x{h}:strength:{bits}` from `strength.to_bits()`, so a non-1.0 strength is
+/// a DISTINCT admission axis and cannot borrow the 1.0 receipt (sc-20799).
+///
+/// A strength with no fitted cell therefore finds no candidate and falls open to the historical
+/// weights-plus-headroom path — the same outcome as any other uncalibrated geometry — instead of
+/// failing the job. The fallback is disclosed rather than silent.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -899,9 +907,15 @@ pub(super) fn resolve_ltx_conditioning(
 pub(super) fn ltx_i2v_conditioning_strength(request: &VideoRequest) -> WorkerResult<f32> {
     let strength = advanced::f32(&request.advanced, "imageConditioningStrength", 1.0);
     if strength.to_bits() != 1.0f32.to_bits() {
-        return Err(WorkerError::InvalidPayload(
-            "LTX image_to_video memory coverage requires imageConditioningStrength 1.0.".to_owned(),
-        ));
+        tracing::info!(
+            event = "video_memory_evidence_excluded",
+            model = %request.model,
+            mode = %request.mode,
+            axis = "imageConditioningStrength",
+            strength,
+            "LTX image_to_video conditioning strength is outside the calibrated 1.0 cell; \
+             admission keys its own strength axis and falls back to the direct estimate"
+        );
     }
     Ok(strength)
 }

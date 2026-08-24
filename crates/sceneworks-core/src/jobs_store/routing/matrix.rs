@@ -2039,9 +2039,18 @@ fn precision_cell(
         let backend = facts.snapshot.backend.as_str();
         let descriptor = descriptor_tier_support(facts, &model.id, video_mode, tier);
         // Runtime descriptors and exact backend-specific manifest artifacts are independent
-        // authorities. A macOS-only exact tier must not veto a native Candle descriptor merely
-        // because Candle installs an unvarianted whole-repository snapshot (and vice versa).
-        // The production scheduler predicate below remains mandatory for either source of truth.
+        // authorities for WHICH TIER a lane serves: a macOS-only exact tier must not veto a native
+        // Candle descriptor merely because Candle installs an unvarianted whole-repository
+        // snapshot (and vice versa).
+        //
+        // They are NOT the whole cell: `manifest_artifact_tier_support` reads only
+        // `model.downloads[].variant` and `.platforms`, a SHIPPING fact that says nothing about a
+        // route existing. What supplies the missing conjunct is `backend_supports` below, which
+        // runs the production scheduler predicate `worker_supports_job` — the same per-model
+        // `job_is_mlx_eligible` / candle-eligibility tables the real router uses. The join is
+        // therefore `(descriptor || artifact) && production route`, and the per-family probe in
+        // `rich_runtime_mutations_change_descriptor_and_dispatch_answers` proves it holds for
+        // every family rather than for one spot-checked model (sc-20799).
         descriptor || manifest_artifact_tier_support(model, tier, backend)
     };
     let mlx = support(mlx_facts) && backend_supports(&job, mlx_facts)?;
@@ -5248,8 +5257,9 @@ mod tests {
         assert_eq!((dense.mlx, dense.candle), (Some(true), Some(true)));
 
         // The exact platform artifact independently preserves each lane's dense support when its
-        // runtime descriptor is removed. Production dispatch remains an additional requirement,
-        // exercised by the mutation below.
+        // runtime descriptor is removed, because the PRODUCTION SCHEDULER PREDICATE still routes
+        // the model. That second authority is what makes the artifact disjunct legitimate; the
+        // per-family probe below proves it is load-bearing for every family, not just this one.
         let mut no_candle_descriptor = candle.clone();
         no_candle_descriptor.model_mappings.remove("sana_1600m");
         no_candle_descriptor
@@ -5265,6 +5275,92 @@ mod tests {
             .retain(|mapping| mapping.model_id != "sana_1600m");
         let dense = precision_cell(sana, "bf16", &no_mlx_descriptor, &candle).unwrap();
         assert_eq!(dense.mlx, Some(true));
+
+        // sc-20799: the artifact row is a SHIPPING fact, not a routing one. Joined with nothing it
+        // let `"variant": "bf16"` on a `["windows","linux"]` download entry claim the candle cell
+        // outright. Prove the join is actually constructed by keeping the artifact rows EXACTLY as
+        // they are and removing only the routing: a family id in neither the runtime descriptors
+        // nor the production route tables must claim no cell on either lane.
+        //
+        // The probe manifest is the real one with every model id suffixed: identical download rows
+        // (so `manifest_artifact_tier_support` answers exactly as before), an id nothing routes.
+        let mut probe_value: Value = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        for entry in probe_value["models"].as_array_mut().unwrap() {
+            let renamed = format!("{}_unrouted_probe", entry["id"].as_str().unwrap());
+            entry["id"] = Value::String(renamed);
+        }
+        let probe_manifest: ManifestRoot = serde_json::from_value(probe_value).unwrap();
+        let unrouted_twin = |model: &ManifestModel| {
+            let id = format!("{}_unrouted_probe", model.id);
+            probe_manifest
+                .models
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .unwrap()
+        };
+        let unrouted = unrouted_twin(sana);
+        assert!(
+            manifest_artifact_tier_support(unrouted, "bf16", "candle"),
+            "the probe must keep the exact candle artifact row that used to sustain the cell"
+        );
+        assert!(
+            manifest_artifact_tier_support(unrouted, "bf16", "mlx"),
+            "the probe must keep the exact mlx artifact row that used to sustain the cell"
+        );
+        let unrouted_cell = precision_cell(unrouted, "bf16", &original, &candle).unwrap();
+        assert_eq!(
+            (unrouted_cell.mlx, unrouted_cell.candle),
+            (Some(false), Some(false)),
+            "a shipped tier artifact must not claim a lane that routes nothing"
+        );
+
+        // The join has to hold for EVERY family the matrix can claim a precision cell for, not
+        // only the one that exposed the hole. The family set is DERIVED from the manifest and the
+        // live fixtures — never a hand-typed list, never a population count — so it grows with the
+        // corpus. Each family must land in the partition: a claimed cell is backed by a runtime
+        // descriptor or by the production router, and stripping BOTH always drops it.
+        let mut asserted_families = BTreeSet::new();
+        for model in &manifest.models {
+            for tier in ["bf16", "q8", "q4"] {
+                let Ok(baseline) = precision_cell(model, tier, &original, &candle) else {
+                    continue;
+                };
+                let (job_type, payload) =
+                    precision_payload(model, tier, &original, &candle).unwrap();
+                let job = probe_job(job_type, &model.id, payload).unwrap();
+                for (lane, claimed) in [("mlx", baseline.mlx), ("candle", baseline.candle)] {
+                    if claimed != Some(true) {
+                        continue;
+                    }
+                    let facts = if lane == "mlx" { &original } else { &candle };
+                    assert!(
+                        backend_supports(&job, facts).unwrap(),
+                        "{} {tier} {lane}: a claimed precision cell must satisfy the production \
+                         scheduler predicate, never the artifact row alone",
+                        model.id
+                    );
+                    // Removing the routing while KEEPING the artifact row must drop the cell. A
+                    // video model fails even earlier — the probe cannot resolve a routed canonical
+                    // mode — which is the same fail-closed conclusion, so `Err` counts as dropped.
+                    let stripped = precision_cell(unrouted_twin(model), tier, &original, &candle)
+                        .map(|cell| if lane == "mlx" { cell.mlx } else { cell.candle })
+                        .unwrap_or(Some(false));
+                    assert_eq!(
+                        stripped,
+                        Some(false),
+                        "{} {tier} {lane}: the artifact row must not sustain the cell once nothing \
+                         routes the model",
+                        model.id
+                    );
+                    asserted_families.insert(model.id.clone());
+                }
+            }
+        }
+        assert!(
+            asserted_families.contains("sana_1600m"),
+            "the derived family set must cover the family that exposed this hole, got \
+             {asserted_families:?}"
+        );
 
         // Neither authority bypasses production routing: a snapshot without image dispatch cannot
         // claim the precision cell even when both its descriptor and manifest artifact remain.

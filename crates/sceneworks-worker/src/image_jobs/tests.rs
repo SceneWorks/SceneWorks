@@ -20439,6 +20439,21 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     assert!(detail.contains("admit_sdxl_bespoke_memory("));
     assert!(detail.contains("SdxlDetail::load_admitted("));
     assert!(detail.contains("TILE_CONTROLNET_REVISION"));
+    // sc-20799: an overridden `tileControlNetRepo` is a previously-working user control. It must
+    // still run — conservatively, as an UNCERTIFIED artifact that can borrow no packaged receipt —
+    // rather than being refused outright.
+    assert!(
+        !detail.contains("arbitrary overrides are not admitted"),
+        "SDXL detail must not refuse a non-pinned tile ControlNet outright"
+    );
+    assert!(
+        detail.contains("let control_certified = candle_certified_hf_artifact_path("),
+        "the override's conservative fallback is certification against the PINNED repo/revision"
+    );
+    assert!(
+        detail.contains("control_certified,"),
+        "certification must reach admission as `additional_artifacts_certified`"
+    );
     assert!(detail.contains("detail_memory_receipt.as_ref()"));
     assert!(detail.contains("raw_adapter_settings[\"memoryStrategy\"]"));
     assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));

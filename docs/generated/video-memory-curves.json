@@ -1,11 +1,28 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "generatedBy": "scripts/fit-ltx-temporal-form.mjs",
   "sourceFit": "docs/generated/ltx-temporal-form-fit-sc-18810.json",
   "sourceCatalog": [
     {
       "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
       "sha256": "1d8ebc3048b42f5f0d325fff5ec9a3e6db422b6d181790528ac68a9fdad7f0da"
+    }
+  ],
+  "unmodeledRecords": [
+    {
+      "reason": "insufficient_geometries",
+      "selectorKey": "[\"ltx_2_3\",\"ltx-video\",\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"none\",0,24,null,\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",3,\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",\"single_pass\"]",
+      "distinctGeometries": 1,
+      "sources": [
+        {
+          "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+          "sha256": "1d8ebc3048b42f5f0d325fff5ec9a3e6db422b6d181790528ac68a9fdad7f0da",
+          "recordIds": [
+            "imc-60f463ae74a2d3cd7fc5",
+            "imc-f3ef6ea4a4033293f99f"
+          ]
+        }
+      ]
     }
   ],
   "curves": [

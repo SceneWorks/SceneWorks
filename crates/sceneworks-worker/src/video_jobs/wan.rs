@@ -1489,6 +1489,7 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
 ))]
 pub(super) fn video_admission_overlay(
     input: &VideoGenInput,
+    mode: &str,
     contract: Option<&gen_core::MemoryProviderContract>,
 ) -> WorkerResult<Option<String>> {
     let mut overlays = Vec::new();
@@ -1508,8 +1509,22 @@ pub(super) fn video_admission_overlay(
             });
             overlays
                 .push(loaded_receipt.unwrap_or_else(|| "bernini-adapter-unverified".to_owned()));
+        } else if input.engine_id == "scail2_14b" {
+            // SCAIL-2's step-distill recipe is one fixed advertised stack; the seam spells its
+            // overlay as the literal `adapter`, so keying anything else here can never match a
+            // real record. The per-request carrier is sealed separately below.
+            overlays.push("adapter".to_owned());
+        } else if let Some(identity) = gen_core::adapter_stack_identity(&input.adapters) {
+            // sc-20799: `adapters:{N}` was cardinality only — two different LoRA stacks of the
+            // same length shared one admission identity. `adapter_stack_identity` is the exact
+            // ordered content receipt (`adapters:<sha256>` over path, kind and scale) that the
+            // Wan seam already requires, so this is the real spelling, not a parallel one.
+            overlays.push(identity);
         } else {
-            overlays.push(format!("adapters:{}", input.adapters.len()));
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} carries adapters with no exact ordered stack identity",
+                input.engine_id
+            )));
         }
     }
     if input.use_uncensored_enhancer || input.uncensored_enhancer_dir.is_some() {
@@ -1545,6 +1560,45 @@ pub(super) fn video_admission_overlay(
     if input.engine_id == "bernini" && input.video_mode.as_deref() == Some("ads2v") {
         overlays.push(
             crate::video_admission::bernini_ads2v_source_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    }
+    // sc-20799: seal the carriers that were keyed shape-`other` + `conditioning.len()` before any
+    // curve exists for them. Each fails CLOSED on a shape it cannot price exactly, exactly as the
+    // Bernini receipts do — an unpriceable carrier is a refusal, never an "unknown" token another
+    // request could also mint.
+    if input.engine_id == "scail2_14b" && matches!(mode, "animate_character" | "replace_person") {
+        overlays.push(
+            crate::video_admission::scail2_carrier_receipt(
+                crate::video_admission::LANE,
+                mode,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    } else if mode == "replace_person"
+        && !input.conditioning.is_empty()
+        && !matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled")
+    {
+        overlays.push(
+            crate::video_admission::wan_vace_replace_person_receipt(
+                crate::video_admission::LANE,
+                input.width,
+                input.height,
+                &input.conditioning,
+            )
+            .map_err(WorkerError::InvalidPayload)?,
+        );
+    } else if input.engine_id == "krea_realtime_14b" && mode == "video_to_video" {
+        overlays.push(
+            crate::video_admission::krea_v2v_clip_receipt(
                 crate::video_admission::LANE,
                 input.width,
                 input.height,
@@ -1804,10 +1858,50 @@ pub(super) fn video_admission_reference_shape(
             _ => "other",
         };
     }
+    // sc-20799: `"other"` was a DEAD key. The evidence emitters serialize a reference shape as
+    // "none"/"image"/"video"/"mask" or the raw `Other(..)` payload — they never produce the literal
+    // string "other" — so every carrier that landed here could match no real record while still
+    // sharing one admission identity with every other such carrier. Name the resolved carrier
+    // instead, per engine and mode.
+    if model_id == "scail2_14b" {
+        return match mode {
+            // One physical assembly (identity still + painted mask + driving clip) under two
+            // engine tasks with different working sets, so the task stays part of the shape.
+            "animate_character" => "reference+mask+driving_video:animation",
+            "replace_person" => "reference+mask+driving_video:replacement",
+            _ => "none",
+        };
+    }
+    if model_id == "krea_realtime_14b" {
+        return match conditioning {
+            [Conditioning::VideoClip { .. }] => "video",
+            [Conditioning::Reference { .. }] => "image",
+            _ => "none",
+        };
+    }
+    if mode == "replace_person" {
+        // Single-expert Wan-VACE: one driving ControlClip plus N ordered character references. The
+        // reference cardinality is the axis a bare `"other"` erased.
+        if let [Conditioning::ControlClip { .. }, references @ ..] = conditioning {
+            if references
+                .iter()
+                .all(|entry| matches!(entry, Conditioning::Reference { .. }))
+            {
+                return if references.is_empty() {
+                    "control_video"
+                } else {
+                    "control_video+references"
+                };
+            }
+        }
+        return "none";
+    }
     match mode {
         "image_to_video" => "image",
         "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",
-        _ => "other",
+        // No carrier this admission can name exactly. `"none"` is the emitters' own spelling for
+        // an absent reference surface and cannot be confused with a measured carrier.
+        _ => "none",
     }
 }
 
@@ -1866,7 +1960,18 @@ pub(super) fn video_admission_reference_count(
                 .saturating_add(2);
         }
     }
-    u32::try_from(conditioning.len()).unwrap_or(u32::MAX)
+    // sc-20799: `conditioning.len()` collapses a MultiReference of ONE image and a MultiReference
+    // of EIGHT into the same count — one entry either way — so two very different working sets
+    // shared an admission identity. Count the images a MultiReference actually carries.
+    conditioning
+        .iter()
+        .map(|entry| match entry {
+            Conditioning::MultiReference { images } => {
+                u32::try_from(images.len()).unwrap_or(u32::MAX)
+            }
+            _ => 1,
+        })
+        .fold(0_u32, u32::saturating_add)
 }
 
 /// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
@@ -2422,8 +2527,11 @@ pub(super) async fn generate_video_using(
                     &admission_mode,
                     &input.conditioning,
                 );
-                let admission_overlay =
-                    video_admission_overlay(&input, generator.memory_strategy_contract())?;
+                let admission_overlay = video_admission_overlay(
+                    &input,
+                    &admission_mode,
+                    generator.memory_strategy_contract(),
+                )?;
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,

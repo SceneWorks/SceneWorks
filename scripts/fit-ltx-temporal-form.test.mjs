@@ -292,8 +292,45 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
   );
   const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
-  assert.equal(bundle.schemaVersion, 3);
+  assert.equal(bundle.schemaVersion, 4);
   assert.equal(bundle.curves.length, 1);
+  // sc-20799: the fps24 group is under-sampled (one distinct geometry), so the fit drops it — but
+  // the drop must be DECLARED, not silent. Assert the shape of the declaration, not a record count.
+  assert.ok(Array.isArray(bundle.unmodeledRecords));
+  assert.ok(bundle.unmodeledRecords.length > 0, "the fps24 split must be declared unmodeled");
+  for (const entry of bundle.unmodeledRecords) {
+    assert.equal(entry.reason, "insufficient_geometries");
+    assert.ok(entry.selectorKey.length > 0);
+    assert.ok(entry.distinctGeometries < 3);
+    assert.ok(entry.sources.length > 0);
+    for (const source of entry.sources) {
+      assert.ok(source.recordIds.length > 0);
+      assert.match(source.sha256, /^[0-9a-f]{64}$/);
+    }
+  }
+  // The catalog must PARTITION: every source record is modeled or declared, never both, never
+  // neither. No literal counts — this has to survive the corpus growing.
+  const modeled = new Set(
+    bundle.curves.flatMap((curve) =>
+      curve.evidence.sources.flatMap((source) =>
+        source.recordIds.map((id) => `${source.path}\0${id}`)),
+    ),
+  );
+  const declared = new Set(
+    bundle.unmodeledRecords.flatMap((entry) =>
+      entry.sources.flatMap((source) => source.recordIds.map((id) => `${source.path}\0${id}`)),
+    ),
+  );
+  for (const key of modeled) assert.ok(!declared.has(key), `${key} is modeled and declared`);
+  const catalog = new Set(
+    DATASET_SOURCES.flatMap((source) =>
+      JSON.parse(source.raw).records.map((record) => `${source.path}\0${record.id}`)),
+  );
+  assert.deepEqual(
+    [...new Set([...modeled, ...declared])].sort(),
+    [...catalog].sort(),
+    "modeled union declared must equal the compiled source catalog",
+  );
   const curve = bundle.curves[0];
   assert.deepEqual(
     {
@@ -389,7 +426,7 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
   );
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(schema.properties.schemaVersion.const, 3);
+  assert.equal(schema.properties.schemaVersion.const, 4);
   assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
   assert.equal(
     schema.properties.sourceFit.pattern,
@@ -400,6 +437,7 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     "generatedBy",
     "sourceFit",
     "sourceCatalog",
+    "unmodeledRecords",
     "curves",
   ]);
   assert.equal(schema.additionalProperties, false);

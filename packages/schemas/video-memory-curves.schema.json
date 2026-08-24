@@ -10,10 +10,11 @@
     "generatedBy",
     "sourceFit",
     "sourceCatalog",
+    "unmodeledRecords",
     "curves"
   ],
   "properties": {
-    "schemaVersion": { "const": 3 },
+    "schemaVersion": { "const": 4 },
     "generatedBy": { "const": "scripts/fit-ltx-temporal-form.mjs" },
     "sourceFit": {
       "type": "string",
@@ -25,6 +26,11 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/sourceCatalogEntry" }
     },
+    "unmodeledRecords": {
+      "description": "Source records the fit deliberately did not model, each with the reason. Required so a regeneration that sheds sealed evidence cannot validate silently; an empty array is the fully-modeled case.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/unmodeledRecordGroup" }
+    },
     "curves": {
       "type": "array",
       "minItems": 1,
@@ -35,6 +41,21 @@
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "unmodeledRecordGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "selectorKey", "distinctGeometries", "sources"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1 },
+        "selectorKey": { "type": "string", "minLength": 1 },
+        "distinctGeometries": { "type": "integer", "minimum": 0 },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidenceSource" }
+        }
+      }
     },
     "sourceCatalogEntry": {
       "type": "object",
