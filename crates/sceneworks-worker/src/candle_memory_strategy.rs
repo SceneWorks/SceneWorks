@@ -403,19 +403,43 @@ fn verified_candidates(
         if record.quality.result != Some(QualityResult::Passed) {
             continue;
         }
+        // The packaged corpus has no frame-RATE column — only a frame count — so a temporal cell
+        // cannot be keyed from it at all. Every record shipped today is a still `text_to_image`
+        // cell, which is why the key below can state the non-temporal identity outright; this guard
+        // is what keeps that a fact rather than an assumption. Skipping is the fail-closed reading:
+        // a temporal record admitted with `frames_per_second: None` would key as non-temporal and
+        // let one rate's measurement price another's request.
+        if geometry.frames > 1 {
+            continue;
+        }
         let selected_strategy = strategy(rung);
         let load_shape = match record.load_shape {
             LoadShapeKey::EagerMaterialization => gen_core::LoadShape::EagerMaterialization,
             LoadShapeKey::DeferredMaterialization => gen_core::LoadShape::DeferredMaterialization,
         };
         let evidence_key = MemoryEvidenceKey {
+            // The manifest entry IS in scope here, and every catalog entry declares a `family`, so
+            // this lane keys on the real catalog family rather than standing the route in for it.
+            // Falling back to the route keeps the key valid (the field must be non-empty) without
+            // ever letting two families share a cell.
+            model_family: manifest
+                .get("family")
+                .and_then(Value::as_str)
+                .unwrap_or(runtime_provider)
+                .to_owned(),
             resolved_route: runtime_provider.to_owned(),
             backend: MemoryBackend::Candle,
             tier: numeric_tier(runtime_provider, tier).expect("validated numeric tier"),
             mode: mode.mode.clone(),
             load_shape,
+            reference_shape: crate::memory_strategy::reference_shape_for_count(
+                geometry.reference_count,
+            ),
             overlay: (overlay != "none").then(|| overlay.to_owned()),
             geometry,
+            // Every packaged calibration record is a still `text_to_image` cell (frames = 1), so
+            // the measured evidence this key describes has no temporal identity to carry.
+            frames_per_second: None,
             strategy: selected_strategy,
             engaged_composition: record
                 .strategy
@@ -597,13 +621,26 @@ fn synthesize_estimate_floors(
             selection,
             MemoryEvidence {
                 key: MemoryEvidenceKey {
+                    // Real catalog family from the manifest row this floor is derived from;
+                    // the route is only the fallback that keeps the field non-empty.
+                    model_family: manifest
+                        .get("family")
+                        .and_then(Value::as_str)
+                        .unwrap_or(engine_id)
+                        .to_owned(),
                     resolved_route: engine_id.to_owned(),
                     backend: MemoryBackend::Candle,
                     tier,
                     mode: mode.mode.clone(),
                     load_shape: contract.load_shape,
+                    reference_shape: crate::memory_strategy::reference_shape_for_count(
+                        geometry.reference_count,
+                    ),
                     overlay: overlay.map(str::to_owned),
                     geometry,
+                    // The candle manifest-row floors are still-image rows; this lane never
+                    // synthesizes a temporal cell.
+                    frames_per_second: None,
                     strategy,
                     engaged_composition: engaged,
                     parameters,
@@ -875,13 +912,24 @@ fn evaluate_shared_image_inner(
     };
     let mut resident = MemoryEvidence {
         key: MemoryEvidenceKey {
+            // Real catalog family; the route only backstops the non-empty requirement.
+            model_family: manifest
+                .get("family")
+                .and_then(Value::as_str)
+                .unwrap_or(engine_id)
+                .to_owned(),
             resolved_route: engine_id.to_owned(),
             backend: MemoryBackend::Candle,
             tier,
             mode: mode.mode.clone(),
             load_shape: contract.load_shape,
+            reference_shape: crate::memory_strategy::reference_shape_for_count(
+                geometry.reference_count,
+            ),
             overlay: provider_overlay.map(str::to_owned),
             geometry,
+            // The candle image gate; its geometry carries no temporal identity.
+            frames_per_second: None,
             strategy: MemoryStrategy::Resident,
             engaged_composition: contract.engaged_composition(MemoryStrategy::Resident),
             parameters: resident_selection.parameters,
@@ -2519,11 +2567,13 @@ mod tests {
     fn optimized_candidates_reserve_the_actual_runtime_adapter_bytes() {
         let mut evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "z-image".to_owned(),
                 resolved_route: "z_image".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier("z_image", "q4").expect("q4 is a supported numeric tier"),
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: gen_core::MemoryMode::TextToImage,
+                reference_shape: gen_core::MemoryReferenceShape::None,
                 overlay: Some("lora".to_owned()),
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -2533,6 +2583,7 @@ mod tests {
                     // Text-to-image fixture: no reference images (sc-17054).
                     reference_count: 0,
                 },
+                frames_per_second: None,
                 strategy: MemoryStrategy::BoundedTransformerResidency,
                 engaged_composition: vec![MemoryStrategy::BoundedTransformerResidency],
                 parameters: Default::default(),

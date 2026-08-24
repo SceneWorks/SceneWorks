@@ -6446,7 +6446,9 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
     let model = InstantId::load(&paths).expect("InstantID load");
     let scrfd = Weights::from_file(&scrfd_path).expect("SCRFD weights");
     let arcface = Weights::from_file(&arcface_path).expect("ArcFace weights");
-    let model = model.with_face(&scrfd, &arcface).expect("face stack");
+    // `mut`: `largest_face` takes `&mut self` at the pinned inference revision — it stages the
+    // conditioning components in and out around the detection (inference sc-20762).
+    let mut model = model.with_face(&scrfd, &arcface).expect("face stack");
 
     // Reference identity embedding (frontal source).
     let ref_face = model

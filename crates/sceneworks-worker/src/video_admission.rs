@@ -157,6 +157,11 @@ pub(crate) struct VideoRequestIdentity<'a> {
     /// references and no overlay, but these still travel through evidence identity so a future
     /// calibrated surface cannot accidentally inherit the base T2V cell.
     pub(crate) reference_count: u32,
+    /// Exact output frame rate. Part of evidence identity, not a display detail: two requests at
+    /// the same frame COUNT and different rates are different memory cells, and geometry alone
+    /// cannot separate them. `admit_video_generation_with_curves_and_profiles` already range-gates
+    /// the request's rate before building this, so the value here is the admitted one.
+    pub(crate) frames_per_second: u32,
     pub(crate) overlay: Option<&'a str>,
     pub(crate) lane: VideoLane,
     pub(crate) tier: MemoryNumericTier,
@@ -615,10 +620,14 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             let evidence = crate::mlx_fit_gate::estimate_evidence(
                 self.contract,
                 backend,
+                // The video lane has a REAL catalog family (not the route), and a real output
+                // rate — both are evidence identity here.
+                self.identity.model_family,
                 self.identity.tier,
                 self.identity.mode,
                 self.identity.overlay,
                 memory_geometry,
+                Some(self.identity.frames_per_second),
                 selection,
                 predicted_peak_bytes,
                 calibration_fingerprint,
@@ -824,6 +833,7 @@ fn admit_video_generation_with_curves_and_profiles(
             route: request.route,
             mode: request.mode,
             reference_count: request.reference_count,
+            frames_per_second: request.fps,
             overlay: request.overlay,
             lane: request.lane,
             tier: request.tier,

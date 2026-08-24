@@ -1496,13 +1496,24 @@ fn resident_evidence(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            // No catalog family reaches this helper — `MlxRequestPlan` does not retain the one its
+            // manifest carries, so the route is the only identity here. Repeating it as the family
+            // is gen-core's own conservative legacy reading: it cannot widen this cell's identity
+            // to share evidence across routes.
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: crate::memory_strategy::reference_shape_for_count(
+                geometry.reference_count,
+            ),
             overlay: overlay.map(str::to_owned),
             geometry,
+            // This helper is reached only from the MLX IMAGE request path, whose geometry pins
+            // `frames: 1` — the non-temporal identity, not a nominal rate.
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -1888,6 +1899,11 @@ fn evidence_admission_route(
                 })?;
                 let memory_evidence = MemoryEvidence {
                     key: MemoryEvidenceKey {
+                        // The plan carries `model_id` and `engine_id` but no catalog family, and
+                        // the packaged record this cell is derived from has no family token
+                        // either. The route is the conservative stand-in — it cannot let this
+                        // cell share evidence with another route.
+                        model_family: plan.engine_id.to_owned(),
                         resolved_route: plan.engine_id.to_owned(),
                         backend: gen_core::MemoryBackend::Mlx,
                         tier: plan.tier,
@@ -1895,8 +1911,14 @@ fn evidence_admission_route(
                             record.load_shape,
                         ),
                         mode: memory_mode_from_mode_key(mode_key),
+                        reference_shape: crate::memory_strategy::reference_shape_for_count(
+                            inputs.reference_count,
+                        ),
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
+                        // MLX image lane: `request_geometry` pins `frames: 1`, so the
+                        // non-temporal identity is the only correct value.
+                        frames_per_second: None,
                         strategy: evidence_strategy(binding.rung),
                         engaged_composition: record
                             .strategy
@@ -2147,27 +2169,45 @@ fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase 
 /// `backend` is a parameter rather than a constant because sc-18814 routes the VIDEO lane through
 /// this same shape on both backends; every image caller here passes [`MemoryBackend::Mlx`], which
 /// is what the field was hardcoded to before.
+///
+/// `model_family` is the resolved CATALOG family, which is not the same axis as
+/// `contract.provider_id` — gen-core keys evidence on it precisely so two catalog families sharing
+/// one engine cannot share evidence. The video lane has a real family to pass
+/// ([`crate::video_admission::VideoRequestIdentity::model_family`]); image callers have none on
+/// this path and pass the route, the conservative reading that cannot widen a cell's identity.
+///
+/// `frames_per_second` must be `Some` exactly when the request has temporal output. Image callers
+/// pass `None` (their geometry pins `frames: 1`); the video caller passes the request's real rate,
+/// because two runs at the same frame COUNT and different rates are different memory cells and
+/// geometry alone cannot separate them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn estimate_evidence(
     contract: &MemoryProviderContract,
     backend: gen_core::MemoryBackend,
+    model_family: &str,
     tier: MemoryNumericTier,
     mode: &str,
     overlay: Option<&str>,
     geometry: MemoryGeometry,
+    frames_per_second: Option<u32>,
     selection: MemorySelection,
     predicted_peak_bytes: u64,
     calibration_fingerprint: Option<&str>,
 ) -> MemoryEvidence {
     MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: model_family.to_owned(),
             resolved_route: contract.provider_id.clone(),
             backend,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: crate::memory_strategy::reference_shape_for_count(
+                geometry.reference_count,
+            ),
             overlay: overlay.map(str::to_owned),
             geometry,
+            frames_per_second,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -2739,10 +2779,15 @@ fn synthesize_estimate_ladder(
                         evidence: estimate_evidence(
                             contract,
                             gen_core::MemoryBackend::Mlx,
+                            // MLX image lane: no catalog family on this path, and the geometry pins
+                            // `frames: 1`, so the route stands in for the family and the rate is the
+                            // non-temporal identity.
+                            &contract.provider_id,
                             plan.tier,
                             mode_key,
                             overlay,
                             geometry,
+                            None,
                             selection,
                             predicted_peak_bytes,
                             calibration_fingerprint,
@@ -2783,10 +2828,15 @@ fn synthesize_estimate_ladder(
                 evidence: estimate_evidence(
                     contract,
                     gen_core::MemoryBackend::Mlx,
+                    // MLX image lane: no catalog family on this path, and the geometry pins
+                    // `frames: 1`, so the route stands in for the family and the rate is the
+                    // non-temporal identity.
+                    &contract.provider_id,
                     plan.tier,
                     mode_key,
                     overlay,
                     geometry,
+                    None,
                     selection,
                     predicted_peak_bytes,
                     calibration_fingerprint,
@@ -4954,6 +5004,11 @@ fn generic_mlx_shared_observation(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            // This whole cell is the synthetic pseudo-route, not a catalog entry — no manifest,
+            // engine id or family reaches this load-time gate (see `decide_residency_for_spec`).
+            // Repeating the route as the family is the conservative reading gen-core's own legacy
+            // records use: it cannot make this estimate share evidence with a real family.
+            model_family: "generic_mlx_cold_load".into(),
             resolved_route: "generic_mlx_cold_load".into(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
@@ -4961,8 +5016,12 @@ fn generic_mlx_shared_observation(
             // defers transformer materialization.
             load_shape: gen_core::LoadShape::EagerMaterialization,
             mode: memory_mode_from_mode_key("image_generation"),
+            // `geometry.reference_count` is the literal 0 above, and this gate is geometry-blind
+            // and resolution-blind, so both axes are the non-temporal, reference-free identity.
+            reference_shape: gen_core::MemoryReferenceShape::None,
             overlay: Some("resolved_load_spec".into()),
             geometry,
+            frames_per_second: None,
             strategy: MemoryStrategy::Resident,
             engaged_composition: vec![MemoryStrategy::Resident],
             parameters: Default::default(),
@@ -15380,11 +15439,20 @@ mod tests {
         };
         let evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "mage_flow".to_owned(),
                 resolved_route: "mage_flow".to_owned(),
                 backend: gen_core::MemoryBackend::Mlx,
                 tier: plan.tier,
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: memory_mode_from_mode_key("edit"),
+                // The contract requires the shape to be `None` exactly when the count is zero, and
+                // this fixture varies the count — so it tracks it. `edit` consumes reference
+                // IMAGES, and it is not a temporal mode, so the frame rate is `None`.
+                reference_shape: if inputs.reference_count == 0 {
+                    gen_core::MemoryReferenceShape::None
+                } else {
+                    gen_core::MemoryReferenceShape::Image
+                },
                 overlay: inputs.overlay.clone(),
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -15393,6 +15461,7 @@ mod tests {
                     frames: 1,
                     reference_count: inputs.reference_count,
                 },
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),
                 parameters: selection.parameters,

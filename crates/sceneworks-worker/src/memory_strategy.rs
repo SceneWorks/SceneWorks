@@ -31,6 +31,35 @@ use crate::ladder_margin_policy::{
     MLX_STALE_MEASURED_MARGIN,
 };
 
+/// The [`gen_core::MemoryReferenceShape`] for a request carrying `reference_count` references.
+///
+/// gen-core requires the shape to be `None` EXACTLY when the count is zero
+/// (`MemoryEvidenceKey::validation_errors`), so this is the one place that invariant is decided
+/// rather than re-argued per construction site.
+///
+/// A non-zero count reports the legacy-untyped spelling rather than guessing `Image`, and that is
+/// the fail-CLOSED direction for a reason SceneWorks-specific: the worker's `reference_count` is
+/// already conflated before it reaches any evidence key — `image_jobs/base.rs` folds an Ideogram
+/// edit MASK into the same counter as identity-init and edit reference IMAGES. A site that claimed
+/// `Image` would therefore characterize some mask-carrying edits as image-referenced, and evidence
+/// for one carrier must never price another. `Other` cannot alias a typed cell, so an untyped
+/// SceneWorks cell and an inference-captured `Image` cell stay distinct keys. The count is carried
+/// in the string because it is part of what little is actually known about the carrier.
+///
+/// This matches how inference migrates its own untyped legacy records
+/// (`candle-gen/src/testkit.rs`, `legacy-untyped-reference-count-{n}`), so the two trees spell the
+/// same unknown the same way. Typing these properly means typing the counter at its source in
+/// `image_jobs`, not guessing here.
+pub(crate) fn reference_shape_for_count(reference_count: u32) -> gen_core::MemoryReferenceShape {
+    if reference_count == 0 {
+        gen_core::MemoryReferenceShape::None
+    } else {
+        gen_core::MemoryReferenceShape::Other(format!(
+            "legacy-untyped-reference-count-{reference_count}"
+        ))
+    }
+}
+
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
 /// deliberately has no gen-core dependency.
@@ -776,6 +805,34 @@ mod tests {
     };
     use std::sync::{Arc, Mutex};
 
+    /// gen-core REFUSES a key whose reference shape and reference count disagree
+    /// (`MemoryEvidenceKey::validation_errors`: "reference shape must be none exactly when
+    /// reference count is zero"). Every worker construction site routes through this helper, so
+    /// proving the biconditional here proves it for all of them.
+    #[test]
+    fn a_reference_shape_is_none_exactly_when_the_count_is_zero() {
+        assert!(reference_shape_for_count(0).is_none());
+        for count in 1..=4 {
+            let shape = reference_shape_for_count(count);
+            assert!(
+                !shape.is_none(),
+                "a request carrying {count} reference(s) must not key as reference-free"
+            );
+            // The untyped spelling must never collide with a TYPED carrier: evidence for one
+            // carrier must not price another, which is the whole reason the axis exists.
+            assert_ne!(shape, gen_core::MemoryReferenceShape::Image);
+            assert_ne!(shape, gen_core::MemoryReferenceShape::Video);
+            assert_ne!(shape, gen_core::MemoryReferenceShape::Mask);
+            // ...and `Other` must be non-empty, which gen-core also refuses.
+            let gen_core::MemoryReferenceShape::Other(spelling) = &shape else {
+                panic!("an untyped count reports the `Other` carrier");
+            };
+            assert!(!spelling.trim().is_empty());
+        }
+        // Different counts are different cells, not one collapsed "has references" bucket.
+        assert_ne!(reference_shape_for_count(1), reference_shape_for_count(2));
+    }
+
     const FP: &str = "provider-formula-v1";
     const SW: &str = "sc-15449-contract-v1";
     const INF: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
@@ -874,11 +931,16 @@ mod tests {
     fn evidence(strategy: MemoryStrategy) -> MemoryEvidence {
         MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "test".into(),
                 resolved_route: "test".into(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: tier(),
                 load_shape: LoadShape::DeferredMaterialization,
                 mode: MemoryMode::TextToImage,
+                // `reference_count` is 0 below, and the contract requires the shape to be `None`
+                // exactly then; `TextToImage` has no temporal output, so the frame rate is the
+                // non-temporal identity rather than a nominal number.
+                reference_shape: gen_core::MemoryReferenceShape::None,
                 overlay: None,
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -887,6 +949,7 @@ mod tests {
                     frames: 1,
                     reference_count: 0,
                 },
+                frames_per_second: None,
                 strategy,
                 engaged_composition: contract().engaged_composition(strategy),
                 parameters: params(strategy),
