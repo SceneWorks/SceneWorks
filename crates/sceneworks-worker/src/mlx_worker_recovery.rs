@@ -12,6 +12,7 @@
 //! timeout. If scheduling makes the secondary visible first, the later timeout fills the still-empty
 //! primary slot; the secondary is never promoted to an OOM or an invented timeout.
 
+use std::future::Future;
 use std::sync::{Mutex, PoisonError};
 
 const H3_MLX_I2V_PHASE_MARKER: &str = "minimax-h3 mlx i2v";
@@ -172,6 +173,41 @@ pub(crate) struct RecycleRequest {
     pub(crate) saw_submissions_ignored: bool,
 }
 
+/// Result of one injected active-job terminal persistence attempt.
+pub(crate) enum TerminalPersistenceAttempt {
+    /// The truthful failure reached the API. Recycling may now be armed.
+    Persisted,
+    /// The write failed transiently. Remain quarantined and retry without claiming.
+    Retry,
+    /// Shutdown interrupted retrying. Remain quarantined and do not arm recycling.
+    Stop,
+}
+
+/// Drive the terminal-write lifecycle through an injected async attempt.
+///
+/// Production injects the real `fail_job` POST plus unhealthy heartbeat/backoff. Tests inject
+/// deterministic results, which pins the load-bearing ordering: the first failure cannot restore
+/// claim eligibility or arm recycling, and only a later successful POST advances the state.
+pub(crate) async fn persist_terminal_failure_with<P, Fut>(
+    state: &MlxWorkerRecovery,
+    mut attempt: P,
+) -> bool
+where
+    P: FnMut() -> Fut,
+    Fut: Future<Output = TerminalPersistenceAttempt>,
+{
+    loop {
+        match attempt().await {
+            TerminalPersistenceAttempt::Persisted => {
+                state.note_terminal_failure_persisted();
+                return true;
+            }
+            TerminalPersistenceAttempt::Retry => {}
+            TerminalPersistenceAttempt::Stop => return false,
+        }
+    }
+}
+
 /// The process-global state consulted by the job terminal seam and the next claim turn.
 pub(crate) fn global() -> &'static MlxWorkerRecovery {
     static STATE: MlxWorkerRecovery = MlxWorkerRecovery::new();
@@ -258,6 +294,42 @@ mod tests {
         let request = state.begin_recycle().expect("one recycle");
         assert!(request.reason.contains(TIMEOUT), "{}", request.reason);
         assert!(request.saw_submissions_ignored);
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_post_stays_quarantined_then_success_arms_one_recycle() {
+        use std::cell::Cell;
+
+        let state = MlxWorkerRecovery::new();
+        state.observe(TIMEOUT).expect("timeout must poison");
+        let attempts = Cell::new(0_u32);
+
+        let persisted = persist_terminal_failure_with(&state, || {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt == 1 {
+                assert!(!state.can_claim(), "failed POST must not reopen claims");
+                assert!(
+                    state.begin_recycle().is_none(),
+                    "failed POST must not arm the clean-exit recycle"
+                );
+                std::future::ready(TerminalPersistenceAttempt::Retry)
+            } else {
+                assert!(!state.can_claim(), "retry must remain quarantined");
+                assert!(
+                    state.begin_recycle().is_none(),
+                    "recycle must still be unarmed immediately before POST success"
+                );
+                std::future::ready(TerminalPersistenceAttempt::Persisted)
+            }
+        })
+        .await;
+
+        assert!(persisted, "the second terminal POST succeeded");
+        assert_eq!(attempts.get(), 2, "one failure was retried exactly once");
+        assert!(!state.can_claim(), "success arms recycle, not reuse");
+        assert!(state.begin_recycle().is_some(), "success arms recycling");
+        assert!(state.begin_recycle().is_none(), "recycle remains one-shot");
     }
 
     #[test]

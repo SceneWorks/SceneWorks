@@ -2218,33 +2218,39 @@ async fn run_utility_job(
                     // quarantined and retry without claiming; shutdown cancellation stops the
                     // retry and leaves the loop's no-claim backstop armed.
                     let mut attempt = 0_u32;
-                    loop {
-                        match fail_job(api, &job.id, message, Some(detail.clone())).await {
-                            Ok(()) => {
-                                mlx_worker_recovery::global().note_terminal_failure_persisted();
-                                break;
-                            }
-                            Err(terminal_error) => {
-                                attempt = attempt.saturating_add(1);
+                    let _ = mlx_worker_recovery::persist_terminal_failure_with(
+                        mlx_worker_recovery::global(),
+                        || {
+                            attempt = attempt.saturating_add(1);
+                            let post_attempt = attempt;
+                            let detail = detail.clone();
+                            let job_id = job.id.clone();
+                            let shutdown = shutdown.clone();
+                            async move {
+                                let Err(terminal_error) =
+                                    fail_job(api, &job_id, message, Some(detail)).await
+                                else {
+                                    return mlx_worker_recovery::TerminalPersistenceAttempt::Persisted;
+                                };
                                 emit_event_value(
                                     Level::ERROR,
                                     json!({
                                         "event": "mlx_h3_i2v_terminal_failure_retry",
                                         "workerId": settings.worker_id,
                                         "gpuId": settings.gpu_id,
-                                        "jobId": job.id,
-                                        "attempt": attempt,
+                                        "jobId": &job_id,
+                                        "attempt": post_attempt,
                                         "error": terminal_error.to_string(),
                                     }),
                                 );
                                 if shutdown.is_cancelled() {
-                                    break;
+                                    return mlx_worker_recovery::TerminalPersistenceAttempt::Stop;
                                 }
                                 let _ = heartbeat_with_reason(
                                     api,
                                     settings,
                                     WorkerStatus::Unhealthy,
-                                    Some(&job.id),
+                                    Some(&job_id),
                                     mlx_worker_recovery::global().quarantine_reason(),
                                 )
                                 .await;
@@ -2252,9 +2258,11 @@ async fn run_utility_job(
                                     settings.poll_seconds.max(1),
                                 ))
                                 .await;
+                                mlx_worker_recovery::TerminalPersistenceAttempt::Retry
                             }
-                        }
-                    }
+                        },
+                    )
+                    .await;
                 } else {
                     let _ = fail_job(api, &job.id, message, Some(detail)).await;
                 }
