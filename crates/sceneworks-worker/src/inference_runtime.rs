@@ -310,6 +310,43 @@ pub(crate) fn imported_model_descriptor(
     media().imported_model_descriptor(family, source, operation)
 }
 
+/// The portable checkpoint-adapter authority for one PLAN family spelling (epic 20398, sc-20644).
+///
+/// Keyed on [`CheckpointAdapterRegistration::compatibility_projection`], not on the adapter's own
+/// portable `family`: a compiled `ImportPlanV1` carries the inspector's family token
+/// (`crate::checkpoint_inspector::normalize_family` — `"mage-flow"`, `"z-image"`, `"krea_2"`), which
+/// is exactly the projection spelling, and it is the same key
+/// [`ProviderRegistry::imported_model_descriptor`] resolves routes under. Looking the adapter up by
+/// the portable `family` instead would silently miss `mage_flow` vs `mage-flow` and hand the plan
+/// route a "no adapter" answer for a family this backend really does bind.
+///
+/// This is what makes a family's eligible backends, dialect source shapes, component topology and
+/// capability policy PLAN truth rather than a per-lane constant in this repository (E2/E5).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn checkpoint_adapter(
+    plan_family: &str,
+) -> Option<&'static gen_core::CheckpointAdapterRegistration> {
+    media()
+        .checkpoint_adapters()
+        .find(|adapter| adapter.compatibility_projection.family == plan_family)
+}
+
+/// The [`gen_core::CheckpointBackend`] this worker build actually binds providers for.
+///
+/// A single value per build, not a runtime probe: the MLX and Candle catalogs are compiled in by
+/// mutually exclusive cfg, so "which backend am I" is a compile-time fact. Used to check a family's
+/// declared [`CheckpointAdapterRegistration::eligible_backends`] before any load is attempted, so an
+/// explicitly ineligible family (Z-Image on MLX, Mage-Flow on Candle) refuses during planning with
+/// the adapter's own truth instead of failing inside a loader.
+#[cfg(target_os = "macos")]
+pub(crate) const CHECKPOINT_BACKEND: gen_core::CheckpointBackend = gen_core::CheckpointBackend::Mlx;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const CHECKPOINT_BACKEND: gen_core::CheckpointBackend =
+    gen_core::CheckpointBackend::Candle;
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
