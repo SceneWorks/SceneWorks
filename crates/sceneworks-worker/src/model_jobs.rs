@@ -4635,6 +4635,155 @@ async fn stable_model_file_sha256(
     Ok((hash, after))
 }
 
+/// The manifest entry a compiled linked checkpoint becomes (epic 20398, sc-20635).
+///
+/// This is the stamp that makes a linked checkpoint REACHABLE. `importPlan.checkpointId` is the
+/// persisted identity — `rootId + relativePath`, never an absolute path (E6) — and it is the single
+/// discriminator every consumer keys on: the scheduler's imported claim
+/// (`jobs_store::checkpoint_plan_checkpoint_id`), the worker's route selection
+/// (`image_jobs::checkpoint_plan`), and every bespoke imported lane's decline. Without it a
+/// compiled plan is a file on disk nothing can select.
+///
+/// A plan-backed entry carries NO `paths.model`. The plan-driven route resolves the plan's own
+/// layers through the plan store; writing an install path here would both be a lie (nothing was
+/// installed) and hand the entry to a bespoke lane as well, breaking the single-claim invariant.
+pub(crate) fn linked_checkpoint_manifest_entry(
+    mut entry: JsonObject,
+    compiled: &sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1,
+) -> JsonObject {
+    entry
+        .entry("family")
+        .or_insert_with(|| Value::String(compiled.plan.family.clone()));
+    entry.insert(
+        "importPlan".to_owned(),
+        json!({
+            "checkpointId": compiled.checkpoint_id,
+            "planId": compiled.plan.plan_id,
+            "semanticDigest": compiled.record.plan.semantic_digest,
+        }),
+    );
+    // A linked checkpoint is referenced in place; nothing was copied into an app-owned install
+    // directory, so any inherited install path would name a directory that does not exist.
+    if let Some(paths) = entry.get_mut("paths").and_then(Value::as_object_mut) {
+        paths.remove("model");
+    }
+    let model_type = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("image")
+        .to_owned();
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    apply_model_manifest_defaults(&mut entry, &model_type, family.as_deref());
+    entry
+}
+
+/// Compile a linked checkpoint under an approved root and register it as a selectable model.
+///
+/// Nothing is downloaded, copied, moved or deleted: the only writes are the plan store's own
+/// documents under `<data>/checkpoints/` and the manifest entry (E6).
+async fn run_linked_checkpoint_import_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    root_id: &str,
+    relative_path: &str,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Importing,
+            0.1,
+            "Inspecting the linked checkpoint.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let root_id = root_id.to_owned();
+    let relative_path = relative_path.to_owned();
+    // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
+    let compiled =
+        match tokio::task::spawn_blocking(move || store.compile_linked(&root_id, &relative_path))
+            .await
+        {
+            Ok(Ok(compiled)) => compiled,
+            // Every refusal is already a typed `[checkpoint-plan:<code>]` diagnostic naming what is
+            // wrong with the source; surface it verbatim rather than flattening it to "import failed".
+            Ok(Err(error)) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(error.to_string()),
+                )
+                .await;
+            }
+            Err(error) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(format!("Checkpoint inspection task failed: {error}")),
+                )
+                .await;
+            }
+        };
+
+    if let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        let manifest_entry = linked_checkpoint_manifest_entry(manifest_entry, &compiled);
+        let manifest_path = model_manifest_target(settings, &job.payload)?;
+        upsert_manifest_entry(&manifest_path, "models", manifest_entry).await?;
+    }
+
+    let mut result = JsonObject::new();
+    result.insert(
+        "modelId".to_owned(),
+        job.payload.get("modelId").cloned().unwrap_or(Value::Null),
+    );
+    result.insert(
+        "checkpointId".to_owned(),
+        Value::String(compiled.checkpoint_id.clone()),
+    );
+    result.insert(
+        "importPlanId".to_owned(),
+        Value::String(compiled.plan.plan_id.clone()),
+    );
+    result.insert(
+        "family".to_owned(),
+        Value::String(compiled.plan.family.clone()),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Linked checkpoint registered.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 /// The managed install id for a resolved model-import target directory (sc-20636).
 ///
 /// The install id is the target directory's own name, so a managed install occupies exactly the
@@ -4749,6 +4898,28 @@ pub(crate) async fn run_model_import_job(
     http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // Linked (in-place) ownership is its own transaction: no transfer, no install directory, no
+    // `paths.model` (sc-20635). Dispatched before anything below so the download-oriented path
+    // cannot reach a plan-backed entry at all.
+    if let Some(root_id) = optional_payload_string(&job.payload, "linkedRootId") {
+        let Some(relative_path) = optional_payload_string(&job.payload, "linkedRelativePath")
+        else {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(
+                    "A linked checkpoint import requires both linkedRootId and \
+                     linkedRelativePath."
+                        .to_owned(),
+                ),
+            )
+            .await;
+        };
+        let (root_id, relative_path) = (root_id.to_owned(), relative_path.to_owned());
+        return run_linked_checkpoint_import_job(api, settings, job, &root_id, &relative_path)
+            .await;
+    }
     let repo = optional_payload_string(&job.payload, "repo");
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
@@ -5174,6 +5345,14 @@ pub(crate) async fn run_model_import_job(
             .and_then(Value::as_str)
             .map(str::to_owned);
         apply_model_manifest_defaults(&mut manifest_entry, &model_type, family.as_deref());
+        // `paths.model` names the directory this job actually INSTALLED into, so every entry that
+        // reaches here gets one — including a MANAGED plan-backed entry, which carries both the
+        // install path and `importPlan.checkpointId` and whose bespoke lane still serves the
+        // request shapes the plan route does not (sc-20636).
+        //
+        // A LINKED import never reaches this code at all: it is dispatched to
+        // `run_linked_checkpoint_import_job` at the top of this function and installs nothing, and
+        // `linked_checkpoint_manifest_entry` strips any inherited `paths.model` itself (sc-20635).
         if let Some(paths) = manifest_entry
             .entry("paths")
             .or_insert_with(|| json!({}))

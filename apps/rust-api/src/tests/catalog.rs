@@ -5096,9 +5096,15 @@ async fn deleting_a_managed_model_removes_its_checkpoint_so_the_id_can_be_import
 
 /// The other half of the discrimination: a LINKED checkpoint's bytes are the user's own library
 /// copy, which this route never owned, so deleting the model must not reach `remove_managed` at all.
-/// Guards the seam sc-20635 (linked plan/derivative invalidation) lands in.
+///
+/// sc-20635's linked plan/derivative invalidation has now landed in the seam this was written to
+/// guard, so the record assertion below is the post-landing contract rather than the placeholder
+/// it started as: SceneWorks forgets its OWN documents (record, plan, bindings, derivatives),
+/// because leaving them behind stranded a plan nothing could reach or reclaim. The two guards this
+/// test actually exists for are unchanged and still asserted — managed teardown is never run for a
+/// linked entry, and the user's library file is never touched (E6).
 #[tokio::test]
-async fn deleting_a_linked_model_leaves_its_checkpoint_record_untouched() {
+async fn deleting_a_linked_model_never_runs_managed_teardown_or_touches_the_library() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let data_dir = temp_dir.path().join("data");
@@ -5153,8 +5159,22 @@ async fn deleting_a_linked_model_leaves_its_checkpoint_record_untouched() {
     );
     let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
     assert!(
-        store.record(&checkpoint_id).is_ok(),
-        "the linked catalog record must survive the model delete"
+        matches!(
+            store.record(&checkpoint_id),
+            Err(
+                sceneworks_core::checkpoint_plan_store::CheckpointPlanError::UnknownCheckpoint { .. }
+            )
+        ),
+        "SceneWorks' own plan record is forgotten with the model (sc-20635): {:?}",
+        store.record(&checkpoint_id)
+    );
+    assert!(
+        store
+            .approved_roots()
+            .expect("approved roots load")
+            .get(&root.root_id)
+            .is_some(),
+        "forgetting one checkpoint must never un-approve its library root"
     );
     assert!(
         library.join("krea.safetensors").is_file(),
@@ -7553,4 +7573,166 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
         .lookup_complete(&keys[1])
         .expect("sibling lookup succeeds")
         .is_some());
+}
+
+/// `POST /api/v1/models/import` accepts linked (in-place) ownership: an approved library root id
+/// plus a confined relative path (sc-20635, AC1/AC2).
+///
+/// This is the API half of the reachability chain — without it, `approve_root`/`compile_linked`
+/// have no caller and a linked checkpoint can never become a manifest entry. What it pins: both
+/// halves are required, the pair excludes the fetch sources, an unapproved root and a traversal
+/// path are refused BEFORE a job is queued, and an accepted request carries no install directory.
+#[tokio::test]
+async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    for name in [
+        "builtin.models.jsonc",
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+    ] {
+        let field = if name.ends_with("models.jsonc") {
+            "models"
+        } else {
+            "loras"
+        };
+        std::fs::write(
+            config_dir.join(name),
+            format!("{{ \"schemaVersion\": 1, \"{field}\": [] }}"),
+        )
+        .expect("manifest writes");
+    }
+
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let library = temp_dir.path().join("comfy-library");
+    std::fs::create_dir_all(library.join("checkpoints")).expect("library creates");
+    std::fs::write(
+        library.join("checkpoints/dit.safetensors"),
+        b"not-inspected-here",
+    )
+    .expect("checkpoint writes");
+    let library = std::fs::canonicalize(&library).expect("library canonicalizes");
+    let root = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+        .approve_root(&library)
+        .expect("root approves");
+
+    let app = create_app(settings).expect("app creates");
+
+    // Half a pair names no checkpoint.
+    for half in [
+        json!({ "linkedRootId": root.root_id, "type": "image" }),
+        json!({ "linkedRelativePath": "checkpoints/dit.safetensors", "type": "image" }),
+    ] {
+        let (status, body) = request(app.clone(), "POST", "/api/v1/models/import", half).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    }
+
+    // Linked ownership excludes the fetch sources: one import, one ownership mode.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": root.root_id,
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "sourceUrl": "https://example.com/models/custom.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+
+    // An unapproved root is refused before anything is queued.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": "root-0000000000000000",
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[checkpoint-plan:unknown-root]"),
+        "the typed refusal reaches the caller: {body:?}"
+    );
+
+    // Traversal, absolute and non-portable paths are refused by the SAME validator `compile_linked`
+    // applies, so the API and the store cannot disagree about what is confined (AC2).
+    for bad in [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "checkpoints/../../escape.safetensors",
+        "checkpoints\\dit.safetensors",
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "linkedRootId": root.root_id,
+                "linkedRelativePath": bad,
+                "type": "image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?} -> {body:?}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[checkpoint-plan:invalid-relative-path]"),
+            "{bad:?} -> {body:?}"
+        );
+    }
+
+    // The accepted request queues an import that carries the durable identity and NO install
+    // directory: a linked checkpoint is referenced in place, never copied.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": root.root_id,
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["type"], "model_import");
+    assert_eq!(job["payload"]["linkedRootId"], json!(root.root_id));
+    assert_eq!(
+        job["payload"]["linkedRelativePath"],
+        json!("checkpoints/dit.safetensors")
+    );
+    assert_eq!(
+        job["payload"]["targetDir"],
+        Value::Null,
+        "a linked import installs nothing, so it gets no install directory: {job:?}"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["source"]["provider"], json!("linked-library"));
+    assert_eq!(entry["source"]["rootId"], json!(root.root_id));
+    assert_eq!(
+        entry["paths"],
+        Value::Null,
+        "no install path is written for a linked entry: {entry:?}"
+    );
+    let serialized = serde_json::to_string(entry).expect("entry serializes");
+    assert!(
+        !serialized.contains(library.to_str().expect("utf-8 library path")),
+        "the queued entry must carry rootId + relativePath, never an absolute path: {serialized}"
+    );
 }

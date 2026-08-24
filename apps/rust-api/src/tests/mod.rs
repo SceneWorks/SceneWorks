@@ -3,6 +3,7 @@
 
 mod auth;
 mod catalog;
+mod checkpoint_library;
 mod compression;
 mod dataset_catalogs;
 #[cfg(feature = "embed-web")]
