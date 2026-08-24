@@ -1465,26 +1465,6 @@ export function parseInternalCandleVideoRoutes(candleDispatchSource, minimaxSour
   ]);
 }
 
-/** Keep direct/replay-only executors out of the user-facing matrix until routing is authorized. */
-export function assertInternalCandleVideoRoutesStayExcluded(
-  internalRoutes,
-  publicRoutes,
-  routedBackends,
-) {
-  for (const id of internalRoutes.keys()) {
-    if (publicRoutes.get(id)?.candle) {
-      throw new Error(
-        `${id}: direct-only Candle executor leaked into parseVideoRoutes before candle_video_routed`,
-      );
-    }
-    if (routedBackends.get(id)?.has("candle")) {
-      throw new Error(
-        `${id}: direct-only Candle executor leaked into the routing catalog before candle_video_routed`,
-      );
-    }
-  }
-}
-
 // sc-16268: anchored on CODE, not on a doc comment. Provenance hashes these sources with inert
 // comments stripped, so a parse that reads comment text would let a semantic change slip past the
 // staleness tripwire. SC-18816 deliberately parses the broader staged-residency sweep rather than

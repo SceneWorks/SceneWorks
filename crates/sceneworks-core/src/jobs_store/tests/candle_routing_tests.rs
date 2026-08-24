@@ -10,7 +10,7 @@ fn object(value: Value) -> Map<String, Value> {
 }
 
 #[test]
-fn minimax_h3_base_candle_surface_is_user_routed() {
+fn minimax_h3_candle_surface_is_user_routed_per_partition() {
     assert!(video_request_candle_eligible(
         "minimax_h3",
         &object(json!({ "mode": "text_to_video" }))
@@ -27,13 +27,34 @@ fn minimax_h3_base_candle_surface_is_user_routed() {
             "lastFrameAssetId": "last"
         }))
     ));
-    assert!(!video_request_candle_eligible(
+    assert!(video_request_candle_eligible(
         "minimax_h3_ref",
-        &object(json!({ "mode": "reference_to_video" }))
+        &object(json!({
+            "mode": "reference_to_video",
+            "referenceAssetIds": ["reference"]
+        }))
     ));
+    for payload in [
+        json!({ "mode": "reference_to_video" }),
+        json!({ "mode": "text_to_video", "referenceAssetIds": ["reference"] }),
+        json!({
+            "mode": "reference_to_video",
+            "referenceAssetIds": ["reference"],
+            "sourceAssetId": "base-keyframe"
+        }),
+    ] {
+        assert!(!video_request_candle_eligible(
+            "minimax_h3_ref",
+            &object(payload)
+        ));
+    }
     assert!(
         CANDLE_VIDEO_ROUTED_MODELS.contains(&"minimax_h3"),
         "the base executor route must advertise the user-facing Candle capability"
+    );
+    assert!(
+        CANDLE_VIDEO_ROUTED_MODELS.contains(&"minimax_h3_ref"),
+        "the reference executor route must advertise the user-facing Candle capability"
     );
 }
 

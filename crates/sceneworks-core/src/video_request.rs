@@ -5388,7 +5388,12 @@ mod tests {
                 "referenceAssetId": "asset_1",
                 "sourceClipAssetId": "clip_1",
             }));
-            let candle_predicate = [&t2v, &i2v, &animate].into_iter().any(|payload| {
+            let ref2va = payload(json!({
+                "model": model,
+                "mode": "reference_to_video",
+                "referenceAssetIds": ["asset_1"],
+            }));
+            let candle_predicate = [&t2v, &i2v, &animate, &ref2va].into_iter().any(|payload| {
                 crate::jobs_store::video_request_candle_eligible(model, payload)
                     || crate::jobs_store::scail2_animate_candle_eligible(model, payload)
                     || crate::jobs_store::bernini_video_candle_eligible(model, payload)
@@ -5524,7 +5529,7 @@ mod tests {
         // sc-20755, but the provider's reference-parity fixed 256/64 spatial tiler does not consume
         // gen-core's writable-element VaeTiling planner; inventing a channel transcription would
         // state a cap the engine does not enforce. MLX remains terminal-campaign-owned, and the
-        // reference Candle route remains withheld until sc-20756.
+        // Ref2VA joins the same unmodelled Candle set in sc-20756.
         for (lane, deliberately_unmodelled) in [
             (VideoLane::Mlx, &["svd", "minimax_h3", "minimax_h3_ref"][..]),
             (VideoLane::Candle, &["minimax_h3", "minimax_h3_ref"][..]),

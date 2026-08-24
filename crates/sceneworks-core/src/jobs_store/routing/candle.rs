@@ -36,6 +36,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
     "ltx_2_3",
     "bernini",
     "minimax_h3",
+    "minimax_h3_ref",
 ];
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
@@ -783,7 +784,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     } else if model == "minimax_h3" {
         // MiniMax-H3 base partition (sc-20755): t2va with no anchors, or fl2va with one/two
         // keyframes. Keep this explicit like the MLX twin: the reference partition is a different
-        // catalog entry and stays withheld until sc-20756.
+        // catalog entry with its own exact Ref2VA arm below.
         match payload.get("mode").and_then(Value::as_str) {
             Some("text_to_video") => {
                 if has_nonempty_string(payload, "sourceAssetId")
@@ -814,6 +815,31 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
             || has_nonempty_or_malformed_array(payload, "sourceClipAssetIds")
             || has_nonempty_or_malformed_array(payload, "referenceAudioAssetIds")
         {
+            return false;
+        }
+    } else if model == "minimax_h3_ref" {
+        // SC-20756: the reference partition serves Ref2VA alone. It must carry at least one
+        // heterogeneous reference and must not inherit the base partition's keyframe surface.
+        if payload.get("mode").and_then(Value::as_str) != Some("reference_to_video")
+            || has_nonempty_string(payload, "sourceAssetId")
+            || has_nonempty_string(payload, "lastFrameAssetId")
+            || has_nonempty_string(payload, "sourceClipAssetId")
+            || has_nonempty_string(payload, "bridgeRightClipAssetId")
+        {
+            return false;
+        }
+        if ![
+            "referenceAssetIds",
+            "sourceClipAssetIds",
+            "referenceAudioAssetIds",
+        ]
+        .iter()
+        .any(|key| {
+            payload
+                .get(*key)
+                .and_then(Value::as_array)
+                .is_some_and(|values| !values.is_empty())
+        }) {
             return false;
         }
     } else if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
@@ -865,7 +891,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if matches!(
         model,
-        "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "minimax_h3"
+        "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "minimax_h3" | "minimax_h3_ref"
     ) {
         return true;
     }
