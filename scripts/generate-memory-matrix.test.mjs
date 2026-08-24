@@ -8,6 +8,7 @@ import {
   MODEL_STORIES,
   SOURCE_PATHS,
   activeCalibrationPlan,
+  assertMinimaxH3CalibrationPlan,
   assertCellOwnershipIsBackendScoped,
   assertCharacterizationIsConsistent,
   assertCalibrationPlanTargetsResolvedCoordinates,
@@ -5108,53 +5109,28 @@ test("a plan row for an OUT-OF-MATRIX family is exempt, and nothing else is (sc-
   const plan = activeCalibrationPlan(
     JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8")),
   );
-  const minimaxRow = (over = {}) => ({
-    name: "mlx-minimax-h3-q4-t2va-window",
-    evidenceScope: "authoritative",
-    backend: "mlx",
-    loadShape: "deferred_materialization",
-    rung: "bounded_transformer_residency",
-    engagedRungs: ["bounded_transformer_residency"],
-    calibrationFingerprint: "minimax-h3-mlx-deferred-v1",
-    fixture: "minimax-h3-q4-1344x768-f124",
-    cases: [{ parameters: {}, expectedResult: "passed" }],
-    ...over,
-    target: {
-      provider: "minimax_h3",
-      modelId: "minimax_h3",
-      tier: "q4",
-      mode: "text_to_video_audio",
-      overlay: "none",
-      geometry: { width: 1344, height: 768, batch: 1, frames: 124 },
-      ...over.target,
-    },
-  });
-  const withRow = (over) => {
-    const mutated = JSON.parse(JSON.stringify(plan));
-    mutated.providers.push(minimaxRow(over));
-    return mutated;
-  };
-
-  // The fix, at both entry points: exported guard and the generation path `--check` takes.
-  for (const modelId of ["minimax_h3", "minimax_h3_ref"]) {
-    const planned = withRow({ target: { modelId } });
-    assert.doesNotThrow(() =>
-      assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
-    );
-    await buildMatrix({
-      publish: false,
-      sourceOverrides: { calibrationPlan: JSON.stringify(planned) },
-    });
-  }
+  const minimaxRows = plan.providers.filter((entry) => entry.target.modelId === "minimax_h3");
+  assert.ok(minimaxRows.length > 0, "the terminal campaign has checked-in MiniMax-H3 plan rows");
+  assert.doesNotThrow(() =>
+    assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells, { outOfMatrixEntries }),
+  );
+  await buildMatrix({ publish: false });
 
   // ...and it is an exemption, not a hole. A family in NEITHER the matrix nor the survey's
   // out-of-matrix set still fails closed, and so does a row that merely borrows the exempt family's
   // provider — the exemption is keyed on `target.modelId`, the same field the subtraction is.
-  for (const [label, over] of [
-    ["a family in neither set", { target: { modelId: "hailuo_4", provider: "hailuo_4" } }],
-    ["an exempt provider on an unknown model", { target: { modelId: "not_a_catalog_entry" } }],
+  for (const [label, mutate] of [
+    ["a family in neither set", (entry) => {
+      entry.target.modelId = "hailuo_4";
+      entry.target.provider = "hailuo_4";
+    }],
+    ["an exempt provider on an unknown model", (entry) => {
+      entry.target.modelId = "not_a_catalog_entry";
+    }],
   ]) {
-    const planned = withRow(over);
+    const planned = structuredClone(plan);
+    const donor = planned.providers.find((entry) => entry.target.modelId !== "minimax_h3");
+    mutate(donor);
     assert.throws(
       () =>
         assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
@@ -5170,8 +5146,48 @@ test("a plan row for an OUT-OF-MATRIX family is exempt, and nothing else is (sc-
   // The exemption is opt-in and defaults to the strict behaviour, so a caller that forgets to pass
   // the set gets the old guard rather than a silently widened one.
   assert.throws(
-    () => assertCalibrationPlanTargetsResolvedCoordinates(withRow({}), resolved.cells),
+    () => assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells),
     /match no resolved matrix coordinate/,
+  );
+});
+
+test("MiniMax-H3 has one legal measured-spanning grid per implemented tier/rung family (sc-18663)", async () => {
+  const plan = activeCalibrationPlan(
+    JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8")),
+  );
+  const rows = plan.providers.filter((entry) => entry.target.modelId === "minimax_h3");
+  assert.equal(rows.length, 72, "3 tiers × 4 implemented rungs × 2 areas × 3 frame levels");
+  assert.doesNotThrow(() => assertMinimaxH3CalibrationPlan(plan));
+  await buildMatrix({ publish: false });
+
+  const families = new Map();
+  for (const row of rows) {
+    const key = `${row.target.tier}:${row.rung}`;
+    if (!families.has(key)) families.set(key, []);
+    families.get(key).push(row);
+    assert.equal(row.target.geometry.frames % 17, 5, `${row.name}: frame lattice`);
+  }
+  assert.equal(families.size, 12, "only the three tiers and four implemented rungs are planned");
+  for (const [family, entries] of families) {
+    assert.equal(entries.length, 6, `${family}: the full 2×3 grid is planned`);
+    assert.equal(new Set(entries.map((entry) => entry.target.geometry.width * entry.target.geometry.height)).size, 2);
+    assert.equal(new Set(entries.map((entry) => entry.target.geometry.frames)).size, 3);
+  }
+
+  // Bounded attention is structurally unavailable for every MiniMax-H3 tier.  It must not slip
+  // into a declared composition just because it appears earlier in a generic five-rung ladder.
+  const impossible = structuredClone(plan);
+  impossible.providers.find((entry) =>
+    entry.target.modelId === "minimax_h3" && entry.rung === "bounded_decode",
+  ).engagedRungs = ["resident", "bounded_decode", "bounded_attention"];
+  assert.throws(
+    () => assertMinimaxH3CalibrationPlan(impossible),
+    /declares engaged rungs/,
+  );
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { calibrationPlan: JSON.stringify(impossible) } }),
+    /declares engaged rungs/,
+    "the generator must reject an impossible declared engaged rung before terminal capture",
   );
 });
 
