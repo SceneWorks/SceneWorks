@@ -3556,10 +3556,25 @@ mod tests {
     #[test]
     fn sc19059_resolved_candle_conditioning_is_not_left_in_the_residual_register() {
         let baseline = backend_capability_matrix().expect("production matrix derives");
+        // `scail2_14b`/`multiReference` was here until epic 20398's pin refresh (sc-20644). It was
+        // a genuine sc-19059 row while SCAIL-2 declared the shape on both engines. At inference
+        // `725c6bc59` BOTH authoritative dumps drop it — MLX's runtime snapshot no longer lists it
+        // under `scail2_14b`, the Candle snapshot does not either, and upstream pins the absence
+        // deliberately rather than incidentally:
+        //
+        //     // candle-gen-scail2/src/pipeline.rs, at the pinned revision
+        //     assert!(!d.capabilities.accepts(ConditioningKind::MultiReference));
+        //
+        // So the derivation emits no such cell at all, and a row asserting the cell is RESOLVED on
+        // both backends has lost its subject. It is removed rather than flipped to an expectation
+        // of absence: this test's question is "did a cell Candle actually resolved get left behind
+        // in the residual register", which a retired capability cannot be an instance of. The
+        // symmetric retirement itself is held by
+        // `scail2_replace_person_still_routes_to_mlx_without_a_multireference_declaration`, which
+        // proves the modes SCAIL-2 serves still route end to end without the declaration.
         let resolved = [
             ("realvisxl", "control"),
             ("realvisxl_lightning", "control"),
-            ("scail2_14b", "multiReference"),
             ("sdxl", "control"),
         ];
         for (model, shape) in resolved {
@@ -3632,22 +3647,35 @@ mod tests {
             "the route-backed exact five must survive descriptor-only capture drift"
         );
 
-        let mut missing_scail_multi_reference: Value =
-            serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
-        let scail = missing_scail_multi_reference["snapshot"]["generator_capabilities"]
+        // The asymmetry guard, INVERTED at epic 20398's pin refresh (sc-20644).
+        //
+        // This block used to strip `multiReference` from the CANDLE snapshot and prove the cell
+        // became an MLX-only residual carrying a parity obligation. That mutation depended on MLX
+        // still DECLARING the shape — and at inference `725c6bc59` it no longer does: both engines
+        // retired it symmetrically, upstream pinning the absence with a negative assertion. So the
+        // old mutation produced no cell at all and the guard silently lost its subject.
+        //
+        // The property being guarded is unchanged and is still worth guarding: an ASYMMETRIC
+        // declaration must surface as a flagged residual rather than pass quietly. Against the new
+        // baseline the way to create that asymmetry is to add the shape back on the MLX side, so
+        // the mutation is inverted rather than deleted. Deleting it would have removed the only
+        // check that SCAIL-2 conditioning asymmetry still fails closed.
+        let mut extra_mlx_multi_reference: Value = serde_json::from_str(MLX_RUNTIME_FACTS).unwrap();
+        let scail = extra_mlx_multi_reference["snapshot"]["generator_capabilities"]
             .as_array_mut()
-            .expect("Candle snapshot has generator capabilities")
+            .expect("MLX snapshot has generator capabilities")
             .iter_mut()
             .find(|entry| entry["id"] == "scail2_14b")
-            .expect("Candle snapshot has the SCAIL-2 provider");
+            .expect("MLX snapshot has the SCAIL-2 provider");
         scail["conditioning"] = Value::Array(vec![
             Value::String("reference".to_owned()),
             Value::String("mask".to_owned()),
+            Value::String("multiReference".to_owned()),
             Value::String("controlClip".to_owned()),
         ]);
         let mutated_scail = backend_capability_matrix_from_runtime_sources(
-            MLX_RUNTIME_FACTS,
-            &serde_json::to_string(&missing_scail_multi_reference).unwrap(),
+            &serde_json::to_string(&extra_mlx_multi_reference).unwrap(),
+            CANDLE_RUNTIME_FACTS,
         )
         .expect("mutated SCAIL-2 facts still derive a matrix");
         let scail_cell = mutated_scail
@@ -5082,8 +5110,16 @@ mod tests {
                 ("epic-18803", "operation", 6usize),
             ),
             (
+                // 4 -> 5 at epic 20398's pin refresh (sc-20644). This count is a frozen-shape
+                // assertion, so it moves in the same PR as the register it pins. The MLX
+                // `ltx_2_3` engine gained `multiReference` at inference `725c6bc59`, and
+                // `engines.rs` maps `ltx_2_3_eros` to that MLX engine and to no Candle engine at
+                // all, so Eros's conditioning surface grew a fifth member that the already-approved
+                // route-level Candle withdrawal covers. No new approval: same approver, authority
+                // and date, and no Candle control becomes newly hidden because Eros has no Candle
+                // route to hide one on.
                 "epic-18803-eros-candle-conditioning-withdrawal",
-                ("epic-18803", "conditioning", 4usize),
+                ("epic-18803", "conditioning", 5usize),
             ),
             (
                 "epic-18803-eros-candle-adapter-withdrawal",

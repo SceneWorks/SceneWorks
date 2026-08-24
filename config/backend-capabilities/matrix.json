@@ -4,34 +4,34 @@
   "summary": {
     "modelCount": 94,
     "importedFamilyCount": 3,
-    "cellCount": 918,
-    "mlxOnlyCellCount": 62,
+    "cellCount": 919,
+    "mlxOnlyCellCount": 63,
     "candleOnlyCellCount": 47,
     "exceptionCount": 18
   },
   "sources": {
-    "apiContractEntry": "9a2ea9bcc03c8dc48bd4f67d818d497d2d76baacf260de401c5c4fcf572b4f4b",
-    "apiDto": "0ba0ba823907657d51830fc5f8e7829da4d9ab3501d3916bdc7d861d7fb766ff",
+    "apiContractEntry": "c837111e617cd0252d05530aca5095ec9c73f67c52b45fd57138fd8c48d8026f",
+    "apiDto": "f7942944e603a00c57afc147dc6899cad2722200341a852814f7bf4c4305a8a3",
     "apiGeneration": "b92394e1c975eae735db050be3605c615a228068176debd709706037ced841a0",
     "apiValidation": "b9f21500465791d78015f258623acbf946333746147c65ffd477605c0c9ce43e",
     "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
-    "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
-    "descriptorCandleFacts": "e2b4448d0ee00cd84af113ee3367bc36b1d615f131779c0d53ce934bc47c7b90",
-    "descriptorCandleRuntime": "24888b0ebde298d11eb0961a86e3d701b1a242e5684717652964b8e9625a8d4e",
-    "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
-    "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
-    "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
-    "exceptionRegister": "6645ec832bfe4a49f266f9475f70748af1a3deb99660d780dcdb74e195b15984",
-    "manifest": "9cffb0d4762da659ecf12a02e2a92876b15dc9bb048ba6b62afbe6fe9225b13d",
+    "descriptorAudioFacts": "526258e63c09a515fc1939d244547cd27846d397b71b9f5cda576cdf24ec4d31",
+    "descriptorCandleFacts": "a67ad15c1445ffb6d52e9126fd650e2acec9c03a473cae426c11987d320399ca",
+    "descriptorCandleRuntime": "0f3be8e86742e586d607abb2be5872781096494c6c3f7ea4525b30e70577c64f",
+    "descriptorMlxFacts": "bcf1cb67e9464902db5b245be120c6a4cd6d14a141b006be680cd014abb344d2",
+    "descriptorMlxRuntime": "d2989b2bf94eb5c3f08488d9012745ebb250a2da2debdd6f26c1e815b38a0d2f",
+    "descriptorPreviewFacts": "a1a05d7e2565ed784245369a787fe8bcab2aaff51a84e444eada212576e1b78f",
+    "exceptionRegister": "12cc119a18fada7865611f7b78bdf3b4db4f5d0e9ac6f393568608960209a852",
+    "manifest": "84120d808ee4e95e67accacd676532805abb40856c016e51ce3ec41751197277",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
     "routerCandle": "d55ed85e9d208c42848f22c1e245caca1015d196e002e7bb891642b32b5c2bf6",
-    "routerCatalog": "0a08189104df04729dddc8a94c210876e243afd0b03812ce6c072b3a9efe453c",
+    "routerCatalog": "98821c923bc4c587b2c7bfa09c9dfbcf7f876ec5358c67e3a5240d4ddcbaca04",
     "routerGaps": "885a73b08cd2d598d656adb15d69a2ea0a78faa0437fc3ba0e25d5f5245efcb2",
     "routerMlx": "a9d4618464115f939befbdb052e1739b8ab6060c39820508ce9c2b4f32df677f",
-    "scheduler": "7adf257c047f8fd15dff086add27a928d5e09ceed29c1371ab3058de254d0748",
+    "scheduler": "8a5209218b5d1161f7fd089b738c5237f1a6d418623cc18986714050df8a25b1",
     "trainingCatalog": "ba87e0cb93ab872fd2a430f2ac4aeaedf8c65d6869b37b7ff7df4071309289e0",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
-    "webFallbackCatalog": "a891ecf336d746433b0e10279132bfdc8425e85b6f71a62ec842ccc2a56907bc",
+    "webFallbackCatalog": "fd1bb16453bce60062ca5bc6e94984473f446c8ae76589fe6bd5ae7d26c173b3",
     "webImageAdvanced": "b18fa5be38f71fa65b88e8e7eef48e96f44d6031196dcfc4d434d27438f8516d",
     "webImageRequest": "07833b54289d0c457ebb05b9db06e32b0221bc8c2d5d7eb1f4ae04124b0a60e3",
     "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
@@ -45,21 +45,21 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "aeb30734a088abddc46610baa3c5bf9c78830ac4f6291e7a8b0616147a715926",
-    "workerDispatch": "17dc38a3d43d9ce435edab4ab67b2fad04ed083571368ea26abaf2362ef307cf",
+    "workerDispatch": "015fdd8297bcea0adc0dda978e9b858f93a6d4ebedfa00f94bc87e16180153e1",
     "workerEngineTable": "03c64b8abe9c47424d601d4def9a255ef4c9da081098d972a23925bbce16e63b",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "46a43735de93117bcbebba5a4846b68302272568ba2abd629a7b2834a998af72",
-    "workerImageKreaImported": "0ce6e705505c9e75ead843201d2cb88f996962247b6f4b5d8e19bab326401d2c",
-    "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
+    "workerImageDispatch": "7091adf575821b96f2c8fefb50a2efafc24712cfc112d22b30bb0ec8deec0e6d",
+    "workerImageKreaImported": "246fbf8fcdcea41496d286928803b2ebf5c55249cb069fc9819d0fd1c5c01bf9",
+    "workerImageMageFinetuned": "3c0bd3bff6f2d14e37574c7bc5180f1293f594e1159a3e10bb98b684e94ef658",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
     "workerImagePulidCandle": "e03c33082e5e8c1762a166769ada64cc4942abc5c06a8c6990a5a8914ea205c2",
     "workerImageQwenEditCandle": "68676c54a15f92e0d7e79343bd32cd3bf8e6f86613be1dec06c3cf568ab41142",
-    "workerImageSdxlImported": "63e5f2891be1f3e8ea1dc77ef3837254ab188ccc63fdaf608de2d37499332efd",
+    "workerImageSdxlImported": "feb3279304f4e23000fd0051f78890679fda89d350b62ef815f613e874ec9621",
     "workerTrainingDispatch": "479520bfabe44f79ff1e18617c442fadead941e2a8dac973b26ee1e54100c447",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "352991ae26c8d842c9af1c37e9c6d3261ae6554debe5089744ef8e7972fd15ed",
-    "workerVideoCandle": "b0c85088d156a93f28b33b15d1d9cc2649cebb55bcb52eba370b89ac27cfd9b4",
-    "workerVideoDispatch": "c0e34c2411906d90138fd935a406e3515f177b0da503ed032fbf130c321cd6a4",
+    "workerVideoCandle": "9a8e8a11b7ef172c64da668bae4e768645e3930c5284f5ab6c20e784c2a1d9c3",
+    "workerVideoDispatch": "1c73dd7079bc901ba9c46584213214442a62dc78284122fce3adaf136e275b9c",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
     "workerVideoLtx": "82a228aa7883504a4f4bb910c3b9aa1450693152e5e781bd067e701d6f5af6ba",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
@@ -2710,6 +2710,11 @@
           "candle": true
         },
         {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
           "capability": "reference",
           "mlx": true,
           "candle": true
@@ -2881,6 +2886,16 @@
         },
         {
           "capability": "keyframe",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "multiReference",
           "mlx": true,
           "candle": false,
           "parityObligation": {
@@ -4735,11 +4750,6 @@
         },
         {
           "capability": "mask",
-          "mlx": true,
-          "candle": true
-        },
-        {
-          "capability": "multiReference",
           "mlx": true,
           "candle": true
         },
@@ -7619,7 +7629,7 @@
       "id": "epic-18803-eros-candle-conditioning-withdrawal",
       "category": "conditioning",
       "decisionType": "product_decision",
-      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312. NO NEW DECISION was taken for multiReference (added sc-20644, epic-20398): the approved decision is route-level -- the whole Eros Candle route is withdrawn -- and this cells[] list is the derivation-tracking enumeration of the conditioning surface that decision covers. At inference 725c6bc59 the MLX ltx_2_3 engine gained multiReference, and models/engines.rs maps ltx_2_3_eros to exactly that MLX engine and to NO candle engine, so Eros's MLX conditioning surface became [reference, multiReference, keyframe, videoClip, controlClip] and the four cells already listed here became four of five. The fifth is listed for the same reason as the other four, with no change to approver, authority, approvedDate, or user-facing outcome: Eros has no Candle route at all, so no Candle control becomes newly hidden.",
       "approver": "Michael Trefry",
       "authority": "epic-18803",
       "approvedDate": "2026-08-14",
@@ -7628,6 +7638,7 @@
       "cells": [
         "models/ltx_2_3_eros/conditioningShape/controlClip",
         "models/ltx_2_3_eros/conditioningShape/keyframe",
+        "models/ltx_2_3_eros/conditioningShape/multiReference",
         "models/ltx_2_3_eros/conditioningShape/reference",
         "models/ltx_2_3_eros/conditioningShape/videoClip"
       ]

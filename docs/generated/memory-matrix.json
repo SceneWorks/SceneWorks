@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f745095588ef335a368aafa48451be1ae1010505d3da6457b8876729d13f3d3a",
+    "sceneWorksRevision": "source-tree:c6a4c3773944801a339240ae4aa48df511c60e612c6c995efd384b714a1e3e90",
     "inferenceRevision": "725c6bc59c61e940859fd925037184294cd2cafb",
     "sources": {
       "manifest": {
@@ -94,11 +94,11 @@
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "f4a00074ecb91f68e9fb335e9c4377422d2c87dc213228519afce1748ae00cee"
+        "sha256": "f55480caaaa2e63de92fa2296fcba1ebef5f49e5125c356e13dde180b492138b"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "7b03e32d060d8ecc1fa2915d71d6737379801bcd2cf6e701f7ee571d30dc8ea6"
+        "sha256": "2aa3f1c92128400251845b8b980975a2c0877de4f3d6537483b589361be07907"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -193,11 +193,11 @@
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 73,
+      "providers": 99,
       "bespokeWaivers": 1,
-      "mismatches": 503,
+      "mismatches": 605,
       "byLeg": {
-        "engine_manifest": 284,
+        "engine_manifest": 386,
         "manifest_route": 70,
         "survey_engine": 149
       }
