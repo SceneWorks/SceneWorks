@@ -7,9 +7,8 @@ import stat
 import sys
 import tempfile
 import types
-import unittest
 from pathlib import Path
-from unittest import mock
+from unittest import TestCase, main, mock, skipUnless
 
 
 MODULE_PATH = Path(__file__).with_name("provision-epic-20738-terminal-artifact.py")
@@ -19,7 +18,7 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
-class CacheOnlyProvisionTests(unittest.TestCase):
+class CacheOnlyProvisionTests(TestCase):
     REVISION = "a" * 40
     CURRENT_REPOSITORY = "SceneWorks/illustrious-xl-v1-mlx"
     CURRENT_REVISION = "778c3f02b7703b0c2755d0c0447592897193c6b5"
@@ -507,7 +506,7 @@ class CacheOnlyProvisionTests(unittest.TestCase):
                     "commitSha": self.CURRENT_REVISION,
                 }])
 
-    @unittest.skipUnless(os.name == "nt", "Windows extended path spellings are Windows-only")
+    @skipUnless(os.name == "nt", "Windows extended path spellings are Windows-only")
     def test_windows_extended_prefix_normalizes_only_drive_and_unc_paths(self) -> None:
         self.assertEqual(
             MODULE._without_windows_extended_prefix(
@@ -547,4 +546,4 @@ class CacheOnlyProvisionTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

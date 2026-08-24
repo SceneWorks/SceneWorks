@@ -132,7 +132,6 @@ export async function listCachedArtifactFiles(root, trustedRoot) {
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       const childRelative = path.join(relative, entry.name);
       const candidate = path.join(absolute, childRelative);
-      const metadata = await lstat(candidate);
       if (entry.isDirectory() && !entry.isSymbolicLink()) {
         const resolved = await realpath(candidate);
         const relation = path.relative(resolvedRoot, resolved);
