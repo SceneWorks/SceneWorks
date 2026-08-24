@@ -9,6 +9,24 @@ fn object(value: Value) -> Map<String, Value> {
     value.as_object().expect("test value is an object").clone()
 }
 
+#[test]
+fn minimax_h3_candle_executor_surface_is_ready_but_not_user_routed() {
+    for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+        assert!(!video_request_candle_eligible(
+            "minimax_h3",
+            &object(json!({ "mode": mode }))
+        ));
+    }
+    assert!(!video_request_candle_eligible(
+        "minimax_h3_ref",
+        &object(json!({ "mode": "reference_to_video" }))
+    ));
+    assert!(
+        !CANDLE_VIDEO_ROUTED_MODELS.contains(&"minimax_h3"),
+        "the executor route must not flip the user-facing Candle capability"
+    );
+}
+
 /// A queued `image_generate` job carrying `payload`, built via serde so the test never has to
 /// spell out the full `JobSnapshot` field set.
 fn image_generate_job(payload: Value) -> JobSnapshot {

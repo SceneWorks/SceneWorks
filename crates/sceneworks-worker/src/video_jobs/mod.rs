@@ -386,6 +386,10 @@ enum CandleVideoRoute {
     Bernini(&'static str),
     /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
     CandleVideo,
+    /// MiniMax-H3's joint audio/video Candle provider. This remains unreachable through the
+    /// scheduler until the separately-owned `candle_video_routed` capability flip, but direct or
+    /// replayed off-Mac jobs must use the real provider rather than procedural stub output.
+    MiniMaxH3(&'static str),
     /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
     /// (epic 10451 Phase 2c, sc-10671). Not an `is_candle_video_engine` id — routed off the forwarded row.
     WanComfyui,
@@ -456,6 +460,8 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, so it matches no
         // `is_candle_video_engine` arm below — route it off the forwarded `modelManifestEntry`.
         CandleVideoRoute::WanComfyui
+    } else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {
+        CandleVideoRoute::MiniMaxH3(engine_id)
     } else if is_candle_video_engine(&request.model) {
         CandleVideoRoute::CandleVideo
     } else {
@@ -1058,6 +1064,24 @@ pub(crate) async fn run_video_generate_job(
                     generate_candle_video(api, settings, job, &request, &project_path, backend)
                         .await?;
                 (decoded, adapter, raw_settings, status)
+            }
+            CandleVideoRoute::MiniMaxH3(engine_id) => {
+                let (decoded, raw_settings) = generate_candle_minimax_h3(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_MINIMAX_H3_ADAPTER,
+                    raw_settings,
+                    None::<Value>,
+                )
             }
             CandleVideoRoute::WanComfyui => {
                 let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
@@ -2071,10 +2095,15 @@ mod mochi;
 #[cfg(target_os = "macos")]
 use mochi::{generate_mochi, mochi_available, mochi_engine_id, MOCHI_ADAPTER};
 pub(crate) mod minimax_h3;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use minimax_h3::minimax_h3_engine_id;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use minimax_h3::{generate_candle_minimax_h3, CANDLE_MINIMAX_H3_ADAPTER};
 #[cfg(target_os = "macos")]
-use minimax_h3::{
-    generate_minimax_h3, minimax_h3_available, minimax_h3_engine_id, MINIMAX_H3_ADAPTER,
-};
+use minimax_h3::{generate_minimax_h3, minimax_h3_available, MINIMAX_H3_ADAPTER};
 mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};
@@ -2144,6 +2173,13 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     // noise. Keep capability facts on the same terminal-refusal truth as production dispatch:
     // generic replacement/extension fallbacks must never advertise Wan-VACE for this stable id.
     if model == "ltx_2_3_eros" {
+        return Vec::new();
+    }
+    // The executor is present for direct/replayed jobs, but the user-facing Candle capability is
+    // deliberately still withheld pending the MiniMax-H3 VRAM measurement. Keep the generated
+    // capability facts on that product truth; otherwise merely adding the dispatch arm would make
+    // the backend-capability matrix advertise a route before the separate one-line flip.
+    if matches!(model, "minimax_h3" | "minimax_h3_ref") {
         return Vec::new();
     }
     if model == "wan_2_2_vace_fun_14b" {

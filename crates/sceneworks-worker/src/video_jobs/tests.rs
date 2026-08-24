@@ -14545,6 +14545,38 @@ fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
     );
 }
 
+/// Direct/replayed off-Mac MiniMax-H3 work must select the real Candle provider even while the
+/// scheduler capability column remains deliberately false. Otherwise the worker completes a
+/// procedural clip and reports success for a request whose real engine exists.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_resolves_the_real_route_not_stub() {
+    let settings = Settings {
+        backend_candle_enabled: true,
+        ..offline_settings()
+    };
+    for (model, mode) in [
+        ("minimax_h3", "text_to_video"),
+        ("minimax_h3", "image_to_video"),
+        ("minimax_h3", "first_last_frame"),
+        ("minimax_h3_ref", "reference_to_video"),
+    ] {
+        let req = request(json!({
+            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums"
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&req, &settings),
+            CandleVideoRoute::MiniMaxH3("minimax_h3"),
+            "{model}/{mode} must dispatch to the real Candle MiniMax-H3 route, never Stub"
+        );
+        assert!(
+            runtime_descriptor_engine_ids(model, mode).is_empty(),
+            "{model}/{mode} must stay absent from generated Candle capability facts until the \
+             separate candle_video_routed flip"
+        );
+    }
+}
+
 /// The engine-presence check reads the REGISTRY, not a pinned revision string (sc-19508).
 ///
 /// This is the substitution sc-17159's guard asked for, and the property that makes the whole arm
