@@ -2753,10 +2753,45 @@ mod plan_backed_wan_tests {
         ]
     }
 
+    /// A UMT5 text encoder's tensor surface — the T5 signature
+    /// `sceneworks_core::base_weights::has_text_encoder_signature` actually reads: the exact
+    /// `shared.weight` embedding key, an `encoder.block.` stack, and a `SelfAttention` projection.
+    ///
+    /// This exists because `write_expert` writes a TRANSFORMER surface whatever path it is given,
+    /// so a fixture that dropped an expert at `text_encoder/umt5.safetensors` produced a file whose
+    /// PATH says `text_encoder` and whose DESCRIPTOR says `transformer`. `reconcile_role` refuses
+    /// exactly that disagreement with `AmbiguousComponentRole`, so the tree never compiled and the
+    /// worker-level `[checkpoint-plan:unconsumed-layer]` refusal under test was never reached.
+    /// Production was right; the fixture was writing a contradiction.
+    ///
+    /// Deliberately carries NO transformer marker: none of `detect_transformer_family`'s families
+    /// match these keys (`encoder.block.0` contains `block.` but not `blocks.`, and `SelfAttention`
+    /// is not `.self_attn.`), so `detect_component_role` answers `TextEncoder` rather than the
+    /// `Checkpoint` it returns for a file carrying both.
+    fn text_encoder_entries() -> Vec<(String, String, Vec<u64>)> {
+        vec![
+            ("shared.weight".to_owned(), "BF16".to_owned(), vec![4, 4]),
+            (
+                "encoder.block.0.layer.0.SelfAttention.q.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, 4],
+            ),
+            (
+                "encoder.block.0.layer.1.DenseReluDense.wi.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, 4],
+            ),
+        ]
+    }
+
     fn write_expert(path: &Path, in_channels: u64) {
+        write_safetensors(path, expert_entries(in_channels));
+    }
+
+    fn write_safetensors(path: &Path, entries: Vec<(String, String, Vec<u64>)>) {
         let mut header = serde_json::Map::new();
         let mut offset = 0_u64;
-        for (name, dtype, shape) in expert_entries(in_channels) {
+        for (name, dtype, shape) in entries {
             let elems: u64 = shape.iter().product();
             let bytes = elems * 2;
             header.insert(
@@ -2775,6 +2810,47 @@ mod plan_backed_wan_tests {
         bytes.resize(bytes.len() + offset as usize, 0x5a);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    /// Plant a resident `SceneWorks/wan2.2-t2v-a14b-candle` tier inside `data_dir`'s Hugging Face
+    /// cache, and PIN the cache-location env vars at it until the returned guard drops.
+    ///
+    /// Both halves are required, and the second is the one the fixture was missing.
+    /// `huggingface_hub_cache_dir` consults `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`
+    /// **before** it ever looks at `data_dir` (`test_env`'s own docs say so), and the self-hosted
+    /// Windows candle runner sets a machine-level `HF_HOME` — so on that lane the probe resolved
+    /// against the box's real cache, found no Wan tier, and `resolve_plan_backed_wan_comfyui_paths`
+    /// refused with `[checkpoint-plan:missing-component]` before it could reach the channel gate
+    /// the test asserts on. On macOS, where nothing sets those vars, the same fixture silently took
+    /// the `data_dir` fallback and the missing tier went unnoticed for the same reason.
+    ///
+    /// Goes through [`crate::test_env::EnvVars`] rather than a bare `set_var`: this crate's tests
+    /// are threads in one process, so the crate-wide lock is what keeps the pin from being
+    /// clobbered by — or clobbering — another module's cache-dir test.
+    #[must_use = "the env pin lives only as long as the guard; bind it for the whole test body"]
+    fn resident_wan_snapshot(data_dir: &Path) -> crate::test_env::EnvVars {
+        let hub = data_dir.join("cache").join("huggingface").join("hub");
+        let repo = hub.join("models--SceneWorks--wan2.2-t2v-a14b-candle");
+        // A deliberately NON-hex snapshot name: `discover_installed_snapshot_path` resolves a
+        // mutable name by a direct `is_dir()`, while a 40-hex one re-enters the lease-aware
+        // `discover_snapshot` — a dependency this fixture has no reason to take on.
+        let snapshot = repo.join("snapshots").join("resident");
+        // `q8` is the first entry `WAN_COMFYUI_SNAPSHOT_TIERS` probes.
+        let tier = snapshot.join("q8");
+        for component in ["text_encoder", "vae", "tokenizer"] {
+            std::fs::create_dir_all(tier.join(component)).expect("tier component dir creates");
+        }
+        std::fs::write(tier.join("tokenizer").join("tokenizer.json"), b"{}")
+            .expect("tokenizer.json writes");
+        std::fs::create_dir_all(repo.join("refs")).expect("refs dir creates");
+        std::fs::write(repo.join("refs").join("main"), b"resident").expect("refs/main writes");
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().expect("hub path is utf-8")),
+            // Emptied, not set: `EnvVars` REMOVES a var given an empty value, and these two are
+            // consulted ahead of / alongside `HF_HUB_CACHE`.
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
     }
 
     struct Fixture {
@@ -2826,8 +2902,17 @@ mod plan_backed_wan_tests {
                     .join("tree/unet/wan2.2_t2v_low_noise_14B.safetensors"),
                 in_channels,
             );
-            for (relative, _role) in extras {
-                write_expert(&self.library.join("tree").join(relative), in_channels);
+            // Each extra is written with the tensor surface its ROLE implies, not with an expert's.
+            // The inspector reconciles the path-implied role against the descriptor-implied one and
+            // refuses a disagreement, so an artifact whose bytes contradict its directory is a
+            // fixture that never reaches the behaviour under test.
+            for (relative, role) in extras {
+                let path = self.library.join("tree").join(relative);
+                match *role {
+                    "text_encoder" => write_safetensors(&path, text_encoder_entries()),
+                    "transformer" => write_expert(&path, in_channels),
+                    other => panic!("fixture has no tensor surface for the {other:?} role"),
+                }
             }
             self.store
                 .compile_linked(&self.root_id, "tree")
@@ -2925,9 +3010,15 @@ mod plan_backed_wan_tests {
 
     /// A plan-backed I2V expert pair REFUSES by name rather than declining into `Stub`
     /// (review blocker 3).
+    ///
+    /// The resident snapshot tier is part of the SETUP, not part of what is asserted: the
+    /// snapshot probe sits ahead of the channel gate on purpose (a plan-integrity refusal precedes
+    /// operation admission), so without a resident tier this test only ever observed
+    /// `[checkpoint-plan:missing-component]` and never exercised the channel-count refusal at all.
     #[test]
     fn a_plan_backed_i2v_expert_pair_refuses_by_name() {
         let fx = Fixture::new("i2v");
+        let _cache = resident_wan_snapshot(&fx.settings.data_dir);
         let checkpoint_id = fx.compile(&[], WAN_I2V_IN_CHANNELS);
         let payload = serde_json::json!({
             "projectId": "p",
