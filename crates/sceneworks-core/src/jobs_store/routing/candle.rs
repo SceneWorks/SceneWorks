@@ -35,6 +35,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
     "wan_2_2_i2v_14b",
     "ltx_2_3",
     "bernini",
+    "minimax_h3",
 ];
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
@@ -779,6 +780,42 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         {
             return false;
         }
+    } else if model == "minimax_h3" {
+        // MiniMax-H3 base partition (sc-20755): t2va with no anchors, or fl2va with one/two
+        // keyframes. Keep this explicit like the MLX twin: the reference partition is a different
+        // catalog entry and stays withheld until sc-20756.
+        match payload.get("mode").and_then(Value::as_str) {
+            Some("text_to_video") => {
+                if has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                {
+                    return false;
+                }
+            }
+            Some("image_to_video") => {
+                if !has_nonempty_string(payload, "sourceAssetId")
+                    || has_nonempty_string(payload, "lastFrameAssetId")
+                {
+                    return false;
+                }
+            }
+            Some("first_last_frame") => {
+                if !has_nonempty_string(payload, "sourceAssetId")
+                    || !has_nonempty_string(payload, "lastFrameAssetId")
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        if has_nonempty_string(payload, "sourceClipAssetId")
+            || has_nonempty_string(payload, "bridgeRightClipAssetId")
+            || has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+            || has_nonempty_or_malformed_array(payload, "sourceClipAssetIds")
+            || has_nonempty_or_malformed_array(payload, "referenceAudioAssetIds")
+        {
+            return false;
+        }
     } else if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
         // Wan 14B I2V is image→video ONLY (sc-5175): require the `image_to_video` mode + a source
         // image. A txt2video shape (no source) is rejected and remains queued.
@@ -826,7 +863,10 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if matches!(model, "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b") {
+    if matches!(
+        model,
+        "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "minimax_h3"
+    ) {
         return true;
     }
     model == "ltx_2_3"

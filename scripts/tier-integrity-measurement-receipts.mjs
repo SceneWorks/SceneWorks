@@ -126,7 +126,7 @@ export const HEADER_MEASUREMENT_TERMS = Object.freeze({
   //
   // The AUDIO VAE is the opposite: `mlx-gen-minimax-h3/src/model.rs` hard-codes `Dtype::Float32` for
   // both halves regardless of tier or `Precision`, so its width is 4 on every tier.
-  "minimax_h3::vae::mlx": [[2603868984, 2]],
+  "minimax_h3::vae::mlx+candle": [[2603868984, 2]],
   "minimax_h3_ref::vae::mlx": [[2603868984, 2]],
   // t2va and fl2va decode audio and never encode it, so the base partition takes the 914-tensor
   // decode half (`decoder.*` + `dec_in_proj.*`). ref2va additionally constructs
@@ -144,7 +144,7 @@ export const HEADER_MEASUREMENT_TERMS = Object.freeze({
   // re-emits them verbatim (`quantize_map` casts only inside its packable branch), so a q4 shard
   // holds these 16 tensors byte-identical to upstream. Both partitions are the same architecture and
   // measure identically.
-  "minimax_h3::transformerHead::mlx": [[56442624, 2], [17222144, 4]],
+  "minimax_h3::transformerHead::mlx+candle": [[56442624, 2], [17222144, 4]],
   "minimax_h3_ref::transformerHead::mlx": [[56442624, 2], [17222144, 4]],
 });
 
@@ -156,8 +156,9 @@ export const VAE_SCOPES = Object.freeze({
 const DECODER_ONLY_VAE_RECEIPT_KEYS = Object.freeze([
   // MiniMax-H3's BASE partition serves t2va + fl2va, neither of which encodes audio, so its audio
   // VAE is the decode half alone. The VIDEO VAE is deliberately NOT here for either partition:
-  // `MiniMaxH3VideoVae::load` refuses a snapshot whose encode half is missing, so both halves are
-  // constructed on every advertised mode including plain text-to-video.
+  // MLX `MiniMaxH3VideoVae::load` refuses a snapshot whose encode half is missing, so MLX constructs
+  // both halves on every advertised mode. Candle's FL2VA route also constructs both halves, while
+  // its T2VA route uses the documented decode-only loader; the full row is the advertised-mode max.
   "minimax_h3::audioVae::mlx",
   "qwen_image::vae::candle",
   "lens::vae::candle",

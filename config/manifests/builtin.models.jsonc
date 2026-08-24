@@ -20447,11 +20447,10 @@
         // re-hosted and no byte counts move. The bf16 rows stay platform-split: see the note on the
         // bf16 DiT row below and the off-Mac block further down for which route serves which lane.
         //
-        // ⚠️ THIS IS OBTAINABILITY, NOT ROUTING. `VIDEO_MODEL_CAPS` still carries every candle column
-        // false for both partitions, `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is still
-        // `#[cfg(target_os = "macos")]` end to end, and SceneWorks' own inference pin is unchanged by
-        // sc-20267 — so the app it builds does not yet contain the flip these rows anticipate.
-        // Declaration is not reachability (GH #2074).
+        // ⚠️ OBTAINABILITY AND ROUTING ARE SEPARATE. SC-20755 makes these base-partition rows
+        // scheduler-visible on Candle and binds them to the direct executor, per-tier resolver and
+        // fail-closed admission gate. The sibling `minimax_h3_ref` entry remains withheld until
+        // SC-20756 widens its own transformer_ref rows. Declaration is not reachability (GH #2074).
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
@@ -20782,14 +20781,10 @@
         //     (18,780,109,783 B) and is declared as the per-tier sibling co-requisite in the sc-19573
         //     block above. Do not reintroduce it as a dependency of anything.
         //
-        // ⚠️ WHAT THESE ROWS DO **NOT** DO. They make the weights OBTAINABLE off-Mac. They do not
-        // by themselves make the lane serve a job, and `VIDEO_MODEL_CAPS` still carries every candle
-        // column false for both partitions. TWO preconditions remain, and both are named here so
-        // the next reader does not mistake an artifact for a route:
-        //   1. the candle block's `measured: false` — there is no measured VRAM ceiling for this
-        //      lane (`vramGbByTier` / `minMemoryGb` are deliberately absent below); and
-        //   2. `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is `#[cfg(target_os =
-        //      "macos")]` end to end, so there is no candle dispatch arm to route to yet.
+        // ⚠️ WHAT THESE ROWS DO **NOT** DO BY THEMSELVES. They make the weights obtainable off-Mac;
+        // SC-20755 is the separate change that makes the base partition scheduler-visible, resolves
+        // q4/q8 from the rehost and bf16 from this upstream snapshot, and applies SC-20754's measured
+        // ceilings before loading. The `minimax_h3_ref` route remains withheld until SC-20756.
         // `candle_video_routed_models_have_an_installable_off_mac_download`
         // (crates/sceneworks-core/src/jobs_store/tests/mlx_routing_tests.rs) is the guard for the
         // weights half: flip a candle column with no row here and it goes red.
@@ -20924,12 +20919,10 @@
       // this value names the right repo for those two tiers. It is still wrong for the off-Mac bf16
       // tier, whose weights come from `MiniMaxAI/MiniMax-H3`.
       //
-      // INERT EITHER WAY TODAY: nothing off-Mac reads it, because the candle columns in
-      // `VIDEO_MODEL_CAPS` are all false and there is no H3 arm in the candle ladder, so no off-Mac
-      // code path resolves this value. Recorded rather than silently left, because the change that
-      // flips a candle column must resolve the per-tier root the way `resolve_minimax_h3_load`
-      // resolves the macOS one — a single scalar here cannot express "the rehost at q4/q8, upstream
-      // at bf16", which is precisely the shape the off-Mac rows now have.
+      // SC-20755's off-Mac resolver deliberately does not read this scalar: it resolves q4/q8 from
+      // `SceneWorks/minimax-h3-mlx` and bf16 plus shared components from `MiniMaxAI/MiniMax-H3`.
+      // Keeping `paths.model` as the MLX tier root remains correct for the native lane; the Candle
+      // split is represented by its two explicit repository roots rather than by this one value.
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
       },
@@ -21184,7 +21177,7 @@
         //      not render at all.
         // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
         // in the prompt guide, which is the only place a user would copy that syntax from.
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It RENDERS on macOS only, through the native MLX lane, and needs a large-memory Mac; the weights themselves may be downloadable on other platforms.",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
         "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
         "promptGuide": {
@@ -21448,18 +21441,15 @@
         // `ReferenceVideo` and `ReferenceAudio` — in its descriptor's allowlist. There is no engine
         // refusal to cite.
         //
-        // WHAT ACTUALLY KEEPS THE OFF-MAC ROWS ABSENT TODAY, both of which are about this repository
-        // rather than the engine:
-        //   1. every `transformer_ref` row is `macos`-ONLY — this entry's three primaries and the three
+        // WHAT ACTUALLY KEEPS THE OFF-MAC ROWS ABSENT TODAY is about this repository rather than the
+        // engine: every `transformer_ref` row is `macos`-ONLY — this entry's three primaries and the three
         //      sibling co-requisites on `minimax_h3` alike — and they all live in
         //      `SceneWorks/minimax-h3-mlx`, while the off-Mac bf16 route reads raw upstream. So
         //      declaring an off-Mac Ref2VA set means first deciding which route serves `transformer_ref`
         //      at which tier off-Mac. That platform split is sc-19573's concern; sc-20267 widened only
-        //      the base `transformer` tiers and deliberately left every `transformer_ref` row alone; and
-        //   2. there is still no candle dispatch arm — `crates/sceneworks-worker/src/video_jobs/
-        //      minimax_h3.rs` is `#[cfg(target_os = "macos")]` end to end — and this entry still has no
-        //      measured off-Mac VRAM ceiling of its own.
-        // Add the rows in the same change that resolves those two, not before.
+        //      the base `transformer` tiers and deliberately left every `transformer_ref` row alone.
+        // SC-20753 already supplied the Ref2VA direct/replay executor, and SC-20754 supplied the accepted
+        // ceiling evidence. SC-20756 owns these rows and the remaining scheduler-visibility flip.
       ],
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
@@ -21525,8 +21515,8 @@
           "schedulers": ["default"]
         }
       },
-      // NO `candle` block HERE — and as of sc-20267 the reason is the SAME KIND as `minimax_h3`'s (a
-      // missing measurement plus a missing dispatch arm), not a different kind.
+      // NO `candle` block HERE YET. The provider and direct/replay executor are already present;
+      // SC-20756 owns the scheduler-visible Ref2VA route and its off-Mac transformer_ref rows.
       //
       // ⚠️ sc-20267 CORRECTION — WHAT THIS COMMENT USED TO CLAIM IS FACTUALLY FALSE AGAINST THE PIN.
       // sc-17156 wrote that the reason was "a REFUSAL IN CODE rather than a missing measurement":
@@ -21541,17 +21531,10 @@
       // deleted because it is cited elsewhere as the reason this entry has no candle surface; anyone
       // who finds that citation should land here and stop.
       //
-      // THE HONEST CURRENT REASON, and it is exactly two things:
-      //   1. NO MEASURED VRAM CEILING for this entry on the candle lane. It needs its own, not a copy
-      //      of `minimax_h3`'s, because the reference presentation adds an encode stage the base
-      //      partition never runs — and `minimax_h3`'s own candle block still carries `measured: false`
-      //      for a probe that has never been executed, so there is nothing to copy even if copying
-      //      were sound; and
-      //   2. NO CANDLE DISPATCH ARM — `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is
-      //      `#[cfg(target_os = "macos")]` end to end for BOTH partitions.
-      // Neither is a statement about what the engine can do; both are about what this repository can
-      // yet prove and route. See also the trailing note in `downloads` above for why this entry
-      // declares no off-Mac rows.
+      // THE HONEST CURRENT REASON is sequencing, not a provider refusal: SC-20753 supplied the real
+      // Ref2VA direct/replay executor and SC-20754 supplied the accepted q4/q8/bf16 ceiling evidence.
+      // SC-20756 still must widen the transformer_ref downloads, bind the per-tier roots and make the
+      // entry scheduler-visible. See the trailing `downloads` note above for the artifact half.
       "ui": {
         "label": "MiniMax-H3 References",
         // §IV.2 attribution, same as `minimax_h3` — see that entry for the citation (sc-17227).

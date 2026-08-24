@@ -1,20 +1,20 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:0959457aa1948382615b05d302e7257ef292e8c81c87fbe3671649b2a851b83f",
+    "sceneWorksRevision": "source-tree:86bdf152545be6fd354a6920c5206498fca39ade90ddfcd3e6c2aaba37b208dd",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "997e1bbeb3754c9d333d2c9f0a57e0893b3dc3504350561536231a9e068d5d30"
+        "sha256": "95e36c01f7513914990979dc4f6d5348c397eec7c4027426961901710bdf34b0"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "fe927562117d616d1d6be27841d56d984ba735a928f85f8d17213829ffa8e256"
+        "sha256": "c49a4afd8ef0b3c7242fd43fd29a47fdcd93643df099df18264ca0ba7a5b28b2"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "0867b5c59ffc50ccd387fda81de9deec44e8ae4ad99ee97c741fb96f3efd6d58"
+        "sha256": "c7ac7021e9981778778846eedad20c992690b3d023f71caa31f921bf136e354d"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "2d4fe1efd4113a782667886144276ab0a9d1dc3612842d3028927031f36c468b"
+        "sha256": "2a0c1817e7d9704055dc8a56b782a46d3e4c1774f3124d6bc3a7f30eb19a3eba"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",

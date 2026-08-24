@@ -294,10 +294,11 @@ fn expected_vae_tiling(id: &str, lane: VideoLane) -> Option<VaeTiling> {
         | "bernini"
         | "scail2_14b"
         | "krea_realtime_14b" => Some(VaeTiling::WAN),
-        // MiniMax-H3 (both partitions) is deliberately unmodelled on BOTH lanes, mirroring
-        // sceneworks-core's `vae_full_res_channels` unmodelled lists: the family has no candle
-        // lane at all, and its MLX decode envelope is owned by the epic's terminal calibration
-        // campaign rather than transcribed unverified (sc-17137 main-sync reconciliation).
+        // MiniMax-H3 remains deliberately unmodelled on both lanes. Candle base routing is real as
+        // of sc-20755, but its provider uses the reference-parity fixed 256/64 spatial tiler rather
+        // than gen-core's writable-element VaeTiling planner; inventing a VaeTiling transcription
+        // would claim a decode cap the provider does not consume. The reference partition is still
+        // off-Mac-withheld until sc-20756.
         "minimax_h3" | "minimax_h3_ref" => None,
         "svd" => match lane {
             VideoLane::Mlx => None,
@@ -345,7 +346,8 @@ fn core_transcribes_the_pinned_vae_write_bounds() {
         }
         assert_eq!(modelled + unmodelled, EXPECTED_SHIPPED_VIDEO_COUNT);
         assert!(modelled > 0);
-        // MiniMax-H3's pair is unmodelled on BOTH lanes; SVD only on MLX.
+        // MiniMax-H3's pair is unmodelled on both lanes for the provider-specific reason above;
+        // SVD is additionally unmodelled on MLX.
         assert_eq!(unmodelled, 2 + usize::from(lane == VideoLane::Mlx));
     }
 

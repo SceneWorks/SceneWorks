@@ -14633,9 +14633,8 @@ fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
     );
 }
 
-/// Direct/replayed off-Mac MiniMax-H3 work must select the real Candle provider even while the
-/// scheduler capability column remains deliberately false. Otherwise the worker completes a
-/// procedural clip and reports success for a request whose real engine exists.
+/// The base entry is scheduler-reachable and the reference entry remains direct/replay-only until
+/// sc-20756. Both must select the real provider rather than a procedural stub.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_minimax_h3_resolves_the_real_route_not_stub() {
@@ -14657,10 +14656,139 @@ fn candle_minimax_h3_resolves_the_real_route_not_stub() {
             CandleVideoRoute::MiniMaxH3("minimax_h3"),
             "{model}/{mode} must dispatch to the real Candle MiniMax-H3 route, never Stub"
         );
+        let expected = if model == "minimax_h3" {
+            vec!["minimax_h3"]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            runtime_descriptor_engine_ids(model, mode),
+            expected,
+            "only the base partition's three modes become scheduler-reachable in sc-20755"
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_tier_selection_defaults_q4_and_preserves_explicit_precision() {
+    use crate::video_jobs::minimax_h3::candle_minimax_h3_tier;
+
+    let cases = [
+        (json!({}), ("q4", Some(Quant::Q4))),
+        (json!({ "mlxQuantize": 4 }), ("q4", Some(Quant::Q4))),
+        (json!({ "mlxQuantize": "8" }), ("q8", Some(Quant::Q8))),
+        (json!({ "mlxQuantize": 0 }), ("bf16", None)),
+    ];
+    for (advanced, expected) in cases {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "minimax_h3",
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums",
+            "advanced": advanced
+        }));
+        assert_eq!(candle_minimax_h3_tier(&req), expected);
+    }
+}
+
+/// The scheduler-visible base route must combine the two installed snapshots exactly as the pinned
+/// Candle provider expects: shared components and dense bf16 from upstream, packed q4/q8 DiT and
+/// text encoder from the SceneWorks tier rehost. This is a filesystem resolver test, not just an
+/// enum test, and it also guards the final `VideoGenInput` wiring from silently swapping a root.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
+    use crate::video_jobs::minimax_h3::resolve_candle_minimax_h3_load;
+
+    const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
+    const REHOST: &str = "SceneWorks/minimax-h3-mlx";
+    const REVISION: &str = "1111111111111111111111111111111111111111";
+
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_minimax_h3_roots_")
+        .tempdir()
+        .expect("temp dir");
+    let stage = |repo: &str| {
+        let root = huggingface_repo_cache_path(data.path(), repo)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&root).expect("snapshot dir");
+        std::fs::write(root.join("receipt-file"), b"installed").expect("snapshot sentinel");
+        root
+    };
+    let upstream = stage(UPSTREAM);
+    let rehost = stage(REHOST);
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+
+    for (advanced, tier, quant) in [
+        (json!({}), "q4", Some(Quant::Q4)),
+        (json!({ "mlxQuantize": 8 }), "q8", Some(Quant::Q8)),
+        (json!({ "mlxQuantize": 0 }), "bf16", None),
+    ] {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "minimax_h3",
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums",
+            "advanced": advanced
+        }));
+        let load = resolve_candle_minimax_h3_load(&settings, &req).expect("installed tier");
+        assert_eq!(
+            load.root, upstream,
+            "shared and bf16 root is always upstream"
+        );
+        assert_eq!(load.tier, tier);
+        assert_eq!(load.quant, quant);
+        if quant.is_some() {
+            assert_eq!(load.dit_dir, Some(rehost.join(tier).join("transformer")));
+            assert_eq!(
+                load.text_encoder_dir,
+                Some(rehost.join(tier).join("text_encoder"))
+            );
+        } else {
+            assert_eq!(
+                load.dit_dir, None,
+                "bf16 DiT resolves under the upstream root"
+            );
+            assert_eq!(
+                load.text_encoder_dir, None,
+                "bf16 text encoder resolves under the upstream root"
+            );
+        }
         assert!(
-            runtime_descriptor_engine_ids(model, mode).is_empty(),
-            "{model}/{mode} must stay absent from generated Candle capability facts until the \
-             separate candle_video_routed flip"
+            load.dit_dir
+                .as_ref()
+                .is_none_or(|path| !path.to_string_lossy().contains("transformer_ref")),
+            "SC-20755 must never activate the reference partition"
+        );
+    }
+
+    const SOURCE: &str = include_str!("minimax_h3.rs");
+    let candle_arm = SOURCE
+        .split_once("pub(super) async fn generate_candle_minimax_h3(")
+        .expect("Candle entrypoint")
+        .1;
+    let input = candle_arm
+        .split_once("let input = VideoGenInput {")
+        .expect("Candle input")
+        .1
+        .split_once("};")
+        .expect("Candle input closes")
+        .0;
+    for mapping in [
+        "model_dir: load.root",
+        "quant: load.quant",
+        "dit_component_dir: load.dit_dir",
+        "text_encoder_component_dir: load.text_encoder_dir",
+    ] {
+        assert!(
+            input.contains(mapping),
+            "missing exact LoadSpec mapping: {mapping}"
         );
     }
 }

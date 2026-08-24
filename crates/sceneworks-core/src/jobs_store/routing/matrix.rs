@@ -4960,10 +4960,9 @@ mod tests {
         );
 
         // Keyed by record id, not by (authority, category): one epic can approve more than one
-        // record in the same category on different days. epic-17137 does — the minimax_h3 rows
-        // were approved 2026-08-16 and the minimax_h3_ref twin's on 2026-08-20 — and under the
-        // old (authority, category) key those two collapsed into one entry, silently losing a
-        // record from the comparison.
+        // record in the same category on different days. epic-17137 still does for the residual
+        // base/ref adapter records; under the old (authority, category) key those would collapse
+        // into one entry, silently losing a record from the comparison.
         let expected_records = BTreeMap::from([
             (
                 "epic-9083-precision-sequencing",
@@ -4990,20 +4989,8 @@ mod tests {
                 ("epic-7434", "guidance", 4usize),
             ),
             (
-                "epic-17137-minimax-h3-operation-sequencing",
-                ("epic-17137", "operation", 3usize),
-            ),
-            (
-                "epic-17137-minimax-h3-conditioning-sequencing",
-                ("epic-17137", "conditioning", 2usize),
-            ),
-            (
-                "epic-17137-minimax-h3-precision-sequencing",
-                ("epic-17137", "precision", 3usize),
-            ),
-            (
                 "epic-17137-minimax-h3-adapter-sequencing",
-                ("epic-17137", "adapter", 2usize),
+                ("epic-17137", "adapter", 1usize),
             ),
             (
                 "epic-17137-minimax-h3-ref-operation-sequencing",

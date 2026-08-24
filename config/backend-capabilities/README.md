@@ -42,9 +42,9 @@ with `preservedCandleOnly: true` rather than normalized away.
 2026-08-14, with the direct approval preserved in Shortcut activity 19457. The former
 `epic-8588-conditioning-sequencing` record is intentionally absent: the authoritative Candle
 runtime facts now prove all six of its cells on both backends. It also records four product-decision
-records for the 13 Eros cells withdrawn from Candle by SC-18902; four
-epic-17137 sequencing records approved 2026-08-16 for the 10 `minimax_h3` cells the sc-19721 pin bump
-made visible; and four more approved 2026-08-20 for the 9 `minimax_h3_ref` cells sc-18650's Ref2VA
+records for the 13 Eros cells withdrawn from Candle by SC-18902; the one residual
+epic-17137 base record now covers only `minimax_h3` LoKr after SC-20755 enabled the other nine cells;
+and four records approved 2026-08-20 cover the 9 `minimax_h3_ref` cells sc-18650's Ref2VA
 activation made visible — 8 of those on the Ref2VA activation itself, and a ninth,
 `conditioningShape/referenceVideo`, approved separately later the same day once PR #2460's
 `referenceVideo => videoClip` fix exposed it (`mlxOnlyCellCount` 80 -> 81). `summary.exceptionCount`
