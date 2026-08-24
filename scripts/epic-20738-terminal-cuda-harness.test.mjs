@@ -33,11 +33,13 @@ import {
   safeRemoveTree,
   importSparseRecovery,
   importPass18Recovery,
+  importOpenPoseRecovery,
   importRecoveryContinuation,
   selectImportedPrefix,
   selectRecoveryContinuation,
   selectSparseRecovery,
   selectPass18Recovery,
+  selectOpenPoseRecovery,
   validateCampaignPaths,
   validateCachePreflightEvidence,
   validateDocumentWithSchema,
@@ -79,6 +81,21 @@ function scail2ReferenceCounterfactuals() {
       },
     };
   });
+}
+
+function openPoseControlCounterfactual() {
+  return {
+    kind: "mirroredPose",
+    sameSeed: true,
+    meanAbsDelta: 0.02,
+    deltaFloor: 0.01,
+    witnesses: {
+      baselineControl: "input-openpose.png",
+      counterfactualControl: "input-openpose-counterfactual.png",
+      baselineOutput: "output.png",
+      counterfactualOutput: "counterfactual-output.png",
+    },
+  };
 }
 
 function fixtureSidecarObstructions(sharedArtifacts) {
@@ -582,6 +599,9 @@ test("all 19 cells require the exact family loadSpec quant policy", () => {
         kind: "scail2",
         referencePairs: 6,
         referenceCounterfactuals: scail2ReferenceCounterfactuals(),
+      } : cell.kind === "sdxlOpenPose" ? {
+        kind: "sdxlOpenPose",
+        controlCounterfactual: openPoseControlCounterfactual(),
       } : { referenceCounterfactuals: null },
     };
     assert.equal(validateRuntimeResult(valid, cell), valid, cell.id);
@@ -653,6 +673,42 @@ test("SCAIL2 six-reference causal metrics reject missing, duplicate, nonfinite, 
   assert.throws(() => validateRuntimeResult(copied, cell), /position-bound/);
 });
 
+test("OpenPose causal metrics reject missing, trivial, and unbound mirrored-control evidence", () => {
+  const cell = profile().cells.find((candidate) => candidate.kind === "sdxlOpenPose");
+  const valid = {
+    kind: "sdxlOpenPose",
+    controlCounterfactual: openPoseControlCounterfactual(),
+  };
+  assert.equal(validateRuntimeResult({
+    requestedTier: cell.requestedTier,
+    resolvedTier: cell.requestedTier,
+    denseFallback: false,
+    loadSpecQuantBits: 4,
+    requestMemoryStrategy: {
+      strategy: "not-applicable", requestMemoryPresent: false,
+      stageResidency: false, streamTransformerBlocks: false,
+    },
+    metrics: valid,
+  }, cell).metrics, valid);
+  for (const mutate of [
+    (candidate) => { delete candidate.controlCounterfactual; },
+    (candidate) => { candidate.controlCounterfactual.meanAbsDelta = 0.01; },
+    (candidate) => { candidate.controlCounterfactual.witnesses.counterfactualOutput = "output.png"; },
+  ]) {
+    const mutated = structuredClone(valid);
+    mutate(mutated);
+    assert.throws(() => validateRuntimeResult({
+      requestedTier: cell.requestedTier, resolvedTier: cell.requestedTier, denseFallback: false,
+      loadSpecQuantBits: 4,
+      requestMemoryStrategy: {
+        strategy: "not-applicable", requestMemoryPresent: false,
+        stageResidency: false, streamTransformerBlocks: false,
+      },
+      metrics: mutated,
+    }, cell), /counterfactual|control influence|witnesses/);
+  }
+});
+
 function fixtureReceipt(status = "passed", cellIndex = 0, checked = profile()) {
   const cell = checked.cells[cellIndex];
   const artifacts = cell.artifactIds.map((artifactId) => {
@@ -700,6 +756,9 @@ function fixtureReceipt(status = "passed", cellIndex = 0, checked = profile()) {
   receipt.logs = [{ path: "controller.log", bytes: 7, sha256: "5".repeat(64) }];
   if (status === "passed" && cell.capability === "multiReference") {
     receipt.cell.referenceCounterfactuals = scail2ReferenceCounterfactuals();
+  }
+  if (status === "passed" && cell.kind === "sdxlOpenPose") {
+    receipt.cell.controlCounterfactual = openPoseControlCounterfactual();
   }
   const fluxArtifact = cell.artifactIds.find((artifactId) => artifactId.startsWith("flux1-"));
   receipt.authorityLifecycle = {
@@ -870,6 +929,16 @@ test("Draft 2020-12 schemas validate the profile and close adversarial receipt d
     assert.throws(
       () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, duplicateScailEvidenceFile),
       /must be equal to constant/,
+    );
+
+    const openPose = fixtureReceipt("passed", 14);
+    const openPoseFile = await writeReceipt("openpose-control.json", openPose);
+    assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, openPoseFile));
+    delete openPose.cell.controlCounterfactual;
+    const missingOpenPoseEvidenceFile = await writeReceipt("openpose-control-missing.json", openPose);
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingOpenPoseEvidenceFile),
+      /must have required property 'controlCounterfactual'/,
     );
 
     const openInventory = fixtureReceipt();
@@ -1602,6 +1671,86 @@ async function writePass18RecoveryCandidate(root) {
   return { candidate, evidence, metadata, summary };
 }
 
+async function writeOpenPoseRecoveryCandidate(root) {
+  const pass18Root = path.join(path.dirname(root), `${path.basename(root)}-pass18-source`);
+  await mkdir(pass18Root);
+  await writePass18RecoveryCandidate(pass18Root);
+  const selectedPass18 = await selectPass18Recovery(pass18Root, profile(), {
+    validateCacheEvidence: async () => {},
+  });
+  const candidate = path.join(root, "9500244306");
+  const evidence = path.join(candidate, "evidence");
+  await mkdir(evidence, { recursive: true });
+  const imported = await importPass18Recovery(selectedPass18, evidence);
+  const metadata = {
+    artifactId: "9500244306",
+    artifactName: "sc-20945-epic-20738-7d7a3efa3088204311e3be01330f35702774feb6-32664618999-1",
+    artifactSize: 17_134_718,
+    artifactDigest: "sha256:9af191547befc7833f82f4d9057fff8abfe09b21eada2be2b4f252d73ae30818",
+    runId: "32664618999",
+    runAttempt: "1",
+    headSha: "7d7a3efa3088204311e3be01330f35702774feb6",
+    inferenceSha: "31e02510ad6e9e1a3c3d205058576329d724c60d",
+    profile: PROFILE_NAME,
+    cellSemanticsSha256: "2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1",
+    artifactSemanticsSha256: "1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255",
+  };
+  await writeFile(path.join(candidate, "artifact-metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+  const checked = profile();
+  const cell = checked.cells[13];
+  const ordinalName = `14-${cell.id}`;
+  const cellDir = path.join(evidence, ordinalName);
+  await mkdir(cellDir);
+  await writeFile(path.join(cellDir, "cell.json"), `{"id":"${cell.id}"}\n`);
+  await writeFile(path.join(cellDir, "runtime-result.json"), "{}\n");
+  await writeFile(path.join(cellDir, "controller.log"), `audited ${cell.id}\n`);
+  const receipt = fixtureReceipt("passed", 13, checked);
+  receipt.repositories.sceneworks.sha = metadata.headSha;
+  receipt.repositories.inference.sha = metadata.inferenceSha;
+  receipt.execution.headSha = metadata.headSha;
+  receipt.execution.runId = metadata.runId;
+  receipt.execution.runAttempt = metadata.runAttempt;
+  const files = await hashedFiles(cellDir);
+  receipt.inputs = files.filter((file) => file.path === "cell.json");
+  receipt.outputs = files.filter((file) => file.path === "runtime-result.json");
+  receipt.logs = files.filter((file) => file.path === "controller.log");
+  await writeFile(path.join(cellDir, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+  await writeFile(path.join(evidence, "cache-preflight-initial.json"), "{}\n");
+  await writeFile(path.join(evidence, "cache-preflight.json"), "{}\n");
+  const cacheBytes = await readFile(path.join(evidence, "cache-preflight.json"));
+  const outcomes = [
+    ...imported.outcomes,
+    { id: cell.id, status: "passed", receipt: `${ordinalName}/receipt.json`, error: null, source: "continuation" },
+  ].sort((left, right) => checked.cells.findIndex((entry) => entry.id === left.id)
+    - checked.cells.findIndex((entry) => entry.id === right.id));
+  const empty = createHash("sha256").digest("hex");
+  const summary = {
+    schemaVersion: 1, profile: PROFILE_NAME,
+    repositories: { sceneworks: { sha: metadata.headSha, clean: true }, inference: { sha: metadata.inferenceSha, clean: true } },
+    execution: {
+      runId: metadata.runId, runAttempt: metadata.runAttempt, headSha: metadata.headSha,
+      headRef: "refs/heads/feature/sc-20738-candle-cuda-parity", workflow: "Windows Candle worker",
+      runnerName: "cuda-windows-3", runnerOs: "Windows", runnerArch: "X64",
+    },
+    receipts: outcomes,
+    lineage: { imported: imported.lineage, continuation: {
+      runId: metadata.runId, runAttempt: metadata.runAttempt, headSha: metadata.headSha,
+      inferenceSha: metadata.inferenceSha, profileCellSemanticsSha256: metadata.cellSemanticsSha256,
+      profileArtifactSemanticsSha256: metadata.artifactSemanticsSha256, executionOrdinals: [14],
+    } },
+    cachePreflight: { path: "cache-preflight.json", bytes: cacheBytes.length, sha256: createHash("sha256").update(cacheBytes).digest("hex") },
+    authorityLifecycle: [receipt.authorityLifecycle], diskFreeProbes: [],
+    finalAuthorityLifecycle: {
+      stage: { root: "fixture-stage", files: 0, bytes: 0, sha256: empty },
+      derived: { root: "fixture-derived", files: 0, bytes: 0, sha256: empty },
+      derivedNamespaces: [], missingStoreAbsent: true,
+    },
+    passed: 19, failed: 0, campaignErrors: [],
+  };
+  await writeFile(path.join(evidence, "campaign-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+  return { candidate, evidence, metadata };
+}
+
 test("18-PASS recovery imports authentic PASS ordinals and keeps failed LTX cell 14 quarantined", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-21306-pass18-recovery-"));
   const skipCache = async () => {};
@@ -1660,6 +1809,28 @@ test("18-PASS recovery imports authentic PASS ordinals and keeps failed LTX cell
         selectPass18Recovery(root, profile(), { validateCacheEvidence: skipCache }), pattern, label,
       );
     }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("OpenPose recovery imports only 1 through 14 and replaces exactly the five causal-control cells", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-20739-openpose-recovery-"));
+  try {
+    const validRoot = path.join(temporary, "valid");
+    await mkdir(validRoot);
+    const fixture = await writeOpenPoseRecoveryCandidate(validRoot);
+    const selected = await selectOpenPoseRecovery(validRoot, profile());
+    assert.equal(selected.metadata.artifactId, "9500244306");
+    assert.deepEqual(selected.receipts.map(({ cell }) => cell.id), profile().cells.slice(0, 14).map(({ id }) => id));
+    const output = path.join(temporary, "output");
+    await mkdir(output);
+    const imported = await importOpenPoseRecovery(selected, output);
+    assert.equal(imported.outcomes.length, 14);
+    assert.deepEqual(imported.lineage.executionOrdinals, [15, 16, 17, 18, 19]);
+    assert.equal((await readdir(path.join(output, "_imported-prefix"))).includes("15-sdxl-openpose"), false);
+    await writeFile(path.join(fixture.candidate, "artifact-metadata.json"), "{}\n");
+    await assert.rejects(() => selectOpenPoseRecovery(validRoot, profile()), /metadata|artifact 9500244306/);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -2629,6 +2800,11 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
                 kind: "scail2",
                 referencePairs: 6,
                 referenceCounterfactuals: scail2ReferenceCounterfactuals(),
+              },
+            } : runtimeCell.kind === "sdxlOpenPose" ? {
+              metrics: {
+                kind: "sdxlOpenPose",
+                controlCounterfactual: openPoseControlCounterfactual(),
               },
             } : {}),
           };
@@ -3602,10 +3778,10 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /HF_HUB_OFFLINE: "1"/);
   assert.match(terminalBlock, /TRANSFORMERS_OFFLINE: "1"/);
   assert.match(terminalBlock, /actions\/artifacts\/\$artifactId/);
-  assert.match(terminalBlock, /9498929065[\s\S]*?16071005[\s\S]*?fae791001dd4e2015ce0567290b9b0a1d67de9e503712d2b9a60a0f9af07ec9c/);
+  assert.match(terminalBlock, /9500244306[\s\S]*?17134718[\s\S]*?9af191547befc7833f82f4d9057fff8abfe09b21eada2be2b4f252d73ae30818/);
   assert.match(terminalBlock, /\$artifact\.expired[\s\S]*?\$artifact\.size_in_bytes[\s\S]*?\$artifact\.digest/);
   assert.match(terminalBlock, /gh run download \$runId --name \$artifactName --dir \$evidence/);
-  assert.match(terminalBlock, /655414ef3e4dec1fe9142901caea538e73ac1490/);
+  assert.match(terminalBlock, /7d7a3efa3088204311e3be01330f35702774feb6[\s\S]*?31e02510ad6e9e1a3c3d205058576329d724c60d/);
   assert.doesNotMatch(terminalBlock, /snapshot_download/);
   assert.match(terminalBlock, /python -m venv \$venv/);
   assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);
@@ -3617,6 +3793,7 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
   assert.match(controller, /SPARSE_EXECUTION_ORDINALS = \[14, 18, 19\][\s\S]*?SPARSE_REMAINING_AUTHORITIES = 8[\s\S]*?SPARSE_REMAINING_FILES = 70/);
   assert.match(controller, /PASS18_EXECUTION_ORDINALS = \[14\][\s\S]*?PASS18_REMAINING_AUTHORITIES = 2[\s\S]*?PASS18_REMAINING_FILES = 28/);
+  assert.match(controller, /OPENPOSE_RECOVERY_EXECUTION_ORDINALS = \[15, 16, 17, 18, 19\][\s\S]*?selectOpenPoseRecovery[\s\S]*?importOpenPoseRecovery/);
   assert.match(controller, /stale cell-10 sentinel/);
   assert.match(controller, /selectRecoveryContinuation[\s\S]*?importRecoveryContinuation/);
   assert.match(controller, /selectSparseRecovery[\s\S]*?importSparseRecovery/);

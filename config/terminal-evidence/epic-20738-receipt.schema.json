@@ -22,12 +22,15 @@
         "resolvedTier": { "enum": ["q4", "q8"] },
         "denseFallback": { "const": false },
         "loadSpecQuantBits": { "enum": [null, 4, 8] },
-        "referenceCounterfactuals": { "$ref": "#/$defs/scail2ReferenceCounterfactuals" }
+        "referenceCounterfactuals": { "$ref": "#/$defs/scail2ReferenceCounterfactuals" },
+        "controlCounterfactual": { "$ref": "#/$defs/openPoseControlCounterfactual" }
       },
       "allOf": [
         {
           "if": { "properties": { "kind": { "const": "sdxlOpenPose" } }, "required": ["kind"] },
-          "then": { "properties": { "loadSpecQuantBits": { "const": 4 } } },
+          "then": {
+            "properties": { "loadSpecQuantBits": { "const": 4 } }
+          },
           "else": {
             "if": { "properties": { "kind": { "const": "scail2" } }, "required": ["kind"] },
             "then": {
@@ -163,6 +166,29 @@
           "status": { "const": "passed" },
           "cell": {
             "type": "object",
+            "required": ["kind"],
+            "properties": { "kind": { "const": "sdxlOpenPose" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "cell": {
+            "type": "object",
+            "required": ["controlCounterfactual"],
+            "properties": { "controlCounterfactual": { "$ref": "#/$defs/openPoseControlCounterfactual" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": ["status", "cell"],
+        "properties": {
+          "status": { "const": "passed" },
+          "cell": {
+            "type": "object",
             "required": ["id"],
             "properties": { "id": { "const": "scail2-multi-reference-q4" } }
           }
@@ -218,6 +244,28 @@
         { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 5 } } }] },
         { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 6 } } }] }
       ]
+    },
+    "openPoseControlCounterfactual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sameSeed", "meanAbsDelta", "deltaFloor", "witnesses"],
+      "properties": {
+        "kind": { "const": "mirroredPose" },
+        "sameSeed": { "const": true },
+        "meanAbsDelta": { "type": "number", "exclusiveMinimum": 0.01 },
+        "deltaFloor": { "const": 0.01 },
+        "witnesses": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baselineControl", "counterfactualControl", "baselineOutput", "counterfactualOutput"],
+          "properties": {
+            "baselineControl": { "const": "input-openpose.png" },
+            "counterfactualControl": { "const": "input-openpose-counterfactual.png" },
+            "baselineOutput": { "const": "output.png" },
+            "counterfactualOutput": { "const": "counterfactual-output.png" }
+          }
+        }
+      }
     },
     "repository": {
       "type": "object",

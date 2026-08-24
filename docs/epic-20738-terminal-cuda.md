@@ -318,3 +318,12 @@ The final promotion therefore removes the LTX-2.3 q8 exception, admits its q8 pr
 expands the exact q4-only SDXL OpenPose product set to SDXL, RealVisXL, RealVisXL Lightning,
 Illustrious XL v1, and Illustrious XL v2. Final cleanup reports zero staged and derived files and an
 absent temporary missing store.
+
+## OpenPose causal-control recovery
+
+The next terminal dispatch must import only PASS ordinals `[1-14]` from immutable artifact
+`9500244306` and execute only `[15-19]`: SDXL, RealVisXL, RealVisXL Lightning, Illustrious XL v1,
+and Illustrious XL v2 OpenPose. Each replacement uses the same seed and all non-control inputs with
+a mirrored whole-body pose, records both control/output witnesses, and requires a mean absolute
+pixel delta greater than `0.01`. The older five receipts remain immutable source evidence; they are
+not rewritten or promoted as causal-control proof.

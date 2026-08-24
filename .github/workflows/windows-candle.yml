@@ -1191,9 +1191,9 @@ jobs:
       # source-reviewed fixed cache root is censused from checked-in immutable download evidence
       # before transfer: there is no cache input,
       # snapshot/glob/ref-main fallback, matrix, child workflow, per-cell dispatch, or secret weight
-      # path. Exact archived artifact 9498929065 is revalidated under its frozen b646 provenance. Its
-      # 18 authentic PASS cells are imported while failed LTX cell 14 remains quarantined. The
-      # resulting 2-authority/28-file scope executes only ordinal 14 after its complete source/disk
+      # path. Exact archived 19-PASS artifact 9500244306 is revalidated under the final pinned
+      # 31e02510 provenance. Its authentic PASS cells 1-14 are imported while only the five OpenPose
+      # cells 15-19 are replaced with same-seed causal-control receipts after their complete source/disk
       # plan passes and network is forced
       # offline. Authorities are copied just in time, retained only through their exact last consumer,
       # rehashed before/after use, and durably cleaned. Exact authority files exclude derivative extras;
@@ -1249,7 +1249,7 @@ jobs:
             throw 'the fixed terminal cache root must be an existing ordinary directory'
           }
           node scripts/epic-20738-terminal-cuda-harness.mjs check
-      - name: Discover the exact audited 18-PASS recovery source
+      - name: Discover the exact audited 19-PASS OpenPose recovery source
         id: terminal_prefix
         continue-on-error: true
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
@@ -1258,28 +1258,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $artifactId = '9498929065'
-          $artifactName = 'sc-20945-epic-20738-655414ef3e4dec1fe9142901caea538e73ac1490-32655428377-1'
-          $artifactSize = 16071005
-          $artifactDigest = 'sha256:fae791001dd4e2015ce0567290b9b0a1d67de9e503712d2b9a60a0f9af07ec9c'
-          $runId = '32655428377'
+          $artifactId = '9500244306'
+          $artifactName = 'sc-20945-epic-20738-7d7a3efa3088204311e3be01330f35702774feb6-32664618999-1'
+          $artifactSize = 17134718
+          $artifactDigest = 'sha256:9af191547befc7833f82f4d9057fff8abfe09b21eada2be2b4f252d73ae30818'
+          $runId = '32664618999'
           $runAttempt = '1'
-          $headSha = '655414ef3e4dec1fe9142901caea538e73ac1490'
-          $root = Join-Path $env:RUNNER_TEMP "sc-21306-pass18-recovery-candidates-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $headSha = '7d7a3efa3088204311e3be01330f35702774feb6'
+          $root = Join-Path $env:RUNNER_TEMP "sc-20739-openpose-recovery-candidates-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
           $artifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$artifactId" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or [string]$artifact.id -ne $artifactId -or $artifact.name -ne $artifactName -or [int64]$artifact.size_in_bytes -ne $artifactSize -or [string]$artifact.digest -ne $artifactDigest -or [string]$artifact.workflow_run.id -ne $runId -or [string]$artifact.workflow_run.head_sha -ne $headSha) { throw 'audited 18-PASS recovery artifact identity is missing, expired, or tampered' }
+          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or [string]$artifact.id -ne $artifactId -or $artifact.name -ne $artifactName -or [int64]$artifact.size_in_bytes -ne $artifactSize -or [string]$artifact.digest -ne $artifactDigest -or [string]$artifact.workflow_run.id -ne $runId -or [string]$artifact.workflow_run.head_sha -ne $headSha) { throw 'audited 19-PASS OpenPose recovery artifact identity is missing, expired, or tampered' }
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$runId" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or [string]$run.id -ne $runId -or [string]$run.run_attempt -ne $runAttempt -or [string]$run.head_sha -ne $headSha) { throw 'audited 18-PASS recovery workflow run identity drifted' }
+          if ($LASTEXITCODE -ne 0 -or [string]$run.id -ne $runId -or [string]$run.run_attempt -ne $runAttempt -or [string]$run.head_sha -ne $headSha) { throw 'audited 19-PASS OpenPose recovery workflow run identity drifted' }
           $candidate = Join-Path $root $artifactId
           $evidence = Join-Path $candidate 'evidence'
           New-Item -ItemType Directory -Path $evidence -Force | Out-Null
           gh run download $runId --name $artifactName --dir $evidence
-          if ($LASTEXITCODE -ne 0) { throw "failed to download audited 18-PASS recovery artifact $artifactId" }
+          if ($LASTEXITCODE -ne 0) { throw "failed to download audited 19-PASS OpenPose recovery artifact $artifactId" }
           $metadata = [ordered]@{
             artifactId = $artifactId; artifactName = $artifactName; artifactSize = $artifactSize; artifactDigest = $artifactDigest
             runId = $runId; runAttempt = $runAttempt; headSha = $headSha
-            inferenceSha = 'b646a6f89ba9f6b07efe53dd583d8a42e21e9871'
+            inferenceSha = '31e02510ad6e9e1a3c3d205058576329d724c60d'
             profile = 'epic-20738-candle-cuda-terminal-v1'
             cellSemanticsSha256 = '2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1'
             artifactSemanticsSha256 = '1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255'

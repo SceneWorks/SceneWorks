@@ -15,12 +15,6 @@ const SDXL_CONTROL_DEFAULT_GUIDANCE: f32 = 7.0;
 const SDXL_CONTROL_LIGHTNING_STEPS: u32 = 4;
 const SDXL_CONTROL_LIGHTNING_GUIDANCE: f32 = 1.0;
 
-// The currently pinned mlx-gen-sdxl provider rejects ControlNet whenever the `lightning`
-// acceleration sampler is selected. Keep the route itself exact and backend-neutral, but fail
-// before downloads/load on Mac until the inference follow-up makes this composition truthful.
-// Candle's registered SDXL control provider already implements the Lightning composition.
-const MLX_LIGHTNING_CONTROLNET_READY: bool = false;
-
 const SDXL_CONTROL_MODELS: &[&str] = &[
     "sdxl",
     "realvisxl",
@@ -62,19 +56,6 @@ fn sdxl_control_candidate(request: &ImageRequest) -> bool {
         return false;
     }
     has_material_sdxl_control_intent(&request.advanced)
-}
-
-fn validate_sdxl_control_backend(model: &str, backend: &str) -> WorkerResult<()> {
-    if backend == "mlx"
-        && model == "realvisxl_lightning"
-        && !MLX_LIGHTNING_CONTROLNET_READY
-    {
-        return Err(WorkerError::InvalidPayload(
-            "RealVisXL Lightning pose control is not available on the currently pinned MLX provider; refusing instead of exposing a broken Mac render path"
-                .to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 /// The terminal CUDA campaign proved only the q4 composition. Missing selectors resolve to each
@@ -597,10 +578,9 @@ async fn generate_sdxl_control_stream(
     let request = &plan.request;
     let poses = validate_sdxl_control_request(request)?;
     // `backend` is the telemetry device label (`metal`, `cuda:0`, ...), not the provider family.
-    // Select the native provider from the compiled bundle so the MLX Lightning refusal cannot be
-    // bypassed by a device-specific label.
+    // Select the native provider from the compiled bundle; both current native implementations
+    // support the exact single-ControlNet Lightning composition.
     let native_backend = sdxl_control_native_backend();
-    validate_sdxl_control_backend(&request.model, native_backend)?;
     let weights_dir = if native_backend == "candle" {
         resolve_sdxl_control_candle_q4_weights_dir(request, settings)?
     } else {
@@ -1180,16 +1160,12 @@ mod sdxl_control_tests {
     }
 
     #[test]
-    fn current_mlx_lightning_gap_fails_closed_without_disabling_candle_or_other_models() {
-        assert!(validate_sdxl_control_backend("realvisxl_lightning", "mlx").is_err());
-        assert!(validate_sdxl_control_backend("realvisxl_lightning", "candle").is_ok());
+    fn native_lightning_control_route_is_available_on_both_supported_backends() {
         if cfg!(target_os = "macos") {
             assert_eq!(sdxl_control_native_backend(), "mlx");
         } else {
             assert_eq!(sdxl_control_native_backend(), "candle");
         }
-        for model in ["sdxl", "realvisxl", "illustrious_xl_v1", "illustrious_xl_v2"] {
-            assert!(validate_sdxl_control_backend(model, "mlx").is_ok());
-        }
+        assert!(is_sdxl_control_model("realvisxl_lightning"));
     }
 }

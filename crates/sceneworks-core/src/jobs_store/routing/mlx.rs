@@ -218,17 +218,15 @@ pub(crate) fn sdxl_control_mlx_candidate(payload: &Map<String, Value>) -> bool {
 /// `sdxl` engine on its few-step `lightning` (Euler-trailing) sampler, which the engine restricts to
 /// **txt2img** (it rejects an img2img/reference init — `mlx-gen-sdxl` "acceleration sampler is
 /// txt2img-only"). Plain text-to-image remains generating; a material pose carrier is also claimed by
-/// the named control lane so the worker can fail closed while the current provider still rejects the
-/// ControlNet + Lightning composition. Any non-pose `edit_image`, source, reference, or mask shape is
+/// the named control lane, where the worker executes the supported ControlNet + Lightning composition.
+/// Any non-pose `edit_image`, source, reference, or mask shape is
 /// refused and remains queued. LoRAs + quant are fine on the SDXL path, so they don't gate.
 pub(crate) fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
     realvisxl_lightning_mlx_lane(payload).is_some()
 }
 
 pub(crate) fn realvisxl_lightning_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane> {
-    // Material pose carriers are worker-owned before the legacy txt2img-only exclusions. The worker
-    // currently rejects this exact MLX provider composition explicitly; once inference supports
-    // ControlNet + Lightning, the same named lane becomes generating without changing precedence.
+    // Material pose carriers are worker-owned before the legacy txt2img-only exclusions.
     if sdxl_control_mlx_candidate(payload) {
         return Some(MlxSdxlLane::Control);
     }
