@@ -1891,17 +1891,149 @@ test("OpenPose recovery preflight is an exact five-cell byte, peak, floor, and a
   }
 });
 
+test("OpenPose exact selector runs the production preflight before any continuation cell", async () => {
+  async function fixture({ sourceDelta = 0, peakDelta = 0, omitAuthorityFile = false } = {}) {
+    const temporary = await mkdtemp(path.join(tmpdir(), "sc-20739-openpose-preflight-run-"));
+    const runnerTemp = path.join(temporary, "runner-temp");
+    const sceneworks = path.join(temporary, "sceneworks");
+    const inference = path.join(temporary, "inference");
+    const cacheRoot = path.join(temporary, "cache");
+    await Promise.all([runnerTemp, sceneworks, inference, cacheRoot].map((directory) => mkdir(directory)));
+    const output = path.join(runnerTemp, "output");
+    const scratch = path.join(runnerTemp, "scratch");
+    const guard = await validateCampaignPaths({
+      runnerTemp, output, scratch, cacheRoot, repositories: [sceneworks, inference],
+    });
+    await Promise.all([output, scratch].map((directory) => mkdir(directory)));
+    const checked = profile();
+    const { artifactExpectedFiles, downloadEvidenceSha256 } = expectedCurrentArtifactFilesFromEvidenceBytes(
+      checked, await readFile("config/download-pattern-evidence.json"),
+    );
+    if (omitAuthorityFile) artifactExpectedFiles["sdxl-base-q4"] = artifactExpectedFiles["sdxl-base-q4"].slice(1);
+    const authorityBytes = new Map([
+      ["sdxl-base-q4", 6_614_864_978 + sourceDelta - peakDelta],
+      ["sdxl-openpose", 1], ["sdxl-tokenizer-l", 1], ["sdxl-tokenizer-bigg", 1], ["sdxl-vae-fix", 1],
+      ["realvisxl-q4", 1], ["realvisxl-lightning-q4", 14_576_195_183 + peakDelta],
+      ["illustrious-v1-q4", 1], ["illustrious-v2-q4", 1],
+    ]);
+    const events = [];
+    const executedCells = [];
+    const emptyInventory = (root) => ({
+      root, files: 0, bytes: 0, sha256: createHash("sha256").digest("hex"),
+    });
+    const operations = {
+      auditArtifact: async ({ id, artifact }) => {
+        events.push(`audit:${id}`);
+        const files = artifactExpectedFiles[id];
+        const total = authorityBytes.get(id);
+        return {
+          id, ...artifact, complete: true, missingFiles: [],
+          reusedFiles: files.map((file, index) => ({
+            path: file, bytes: index === 0 ? total - (files.length - 1) : 1,
+            sha256: "a".repeat(64),
+          })),
+        };
+      },
+      diskFreeBytes: async () => 256 * 1024 ** 3,
+      directoryInventory: async (root) => emptyInventory(root),
+      cleanup: async (candidate) => { await rm(candidate, { recursive: true, force: true }); },
+      executeCell: async ({ cellDir }) => {
+        const cell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
+        executedCells.push(cell.id);
+        throw new Error("OpenPose preflight fixture must not execute a continuation cell");
+      },
+      sample: () => {},
+    };
+    const execution = {
+      runId: "openpose-preflight", runAttempt: "1", headSha: "1".repeat(40), headRef: "refs/heads/fixture",
+      workflow: "fixture", runnerName: "fixture-runner", runnerOs: "Windows", runnerArch: "X64",
+    };
+    const importedPrefix = {
+      lineage: { kind: "fixture-openpose-prefix" },
+      outcomes: checked.cells.slice(0, 14).map((cell, index) => ({
+        id: cell.id, status: "passed", receipt: `_imported-prefix/${index + 1}/receipt.json`,
+        error: null, emergencyReceiptError: null, source: "imported-openpose-recovery",
+      })),
+    };
+    try {
+      const result = await runCampaign({}, {
+        prepared: {
+          profile: checked,
+          repositories: { sceneworks: { sha: execution.headSha, clean: true }, inference: { sha: "2".repeat(40), clean: true } },
+          execution, guard, output, scratch, startupErrors: [], gpuIdentity: [],
+          systemMemory: { totalBytes: 128 * 1024 ** 3, availableBytesAtStart: 100 * 1024 ** 3 },
+          sceneworksRoot: sceneworks, artifactExpectedFiles, downloadEvidenceSha256,
+        },
+        prefixSelection: {}, importedPrefix, operations,
+        fault: async (stage) => {
+          if (stage === "preflightSchema") throw new Error("injected preflightSchema");
+        },
+        suppressVerdict: true,
+        executionOrdinals: [15, 16, 17, 18, 19],
+      });
+      return { result, events, executedCells };
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  }
+
+  const valid = await fixture();
+  assert.deepEqual(valid.events, [
+    "audit:sdxl-base-q4", "audit:sdxl-openpose", "audit:sdxl-tokenizer-l", "audit:sdxl-tokenizer-bigg", "audit:sdxl-vae-fix",
+    "audit:realvisxl-q4", "audit:realvisxl-lightning-q4", "audit:illustrious-v1-q4", "audit:illustrious-v2-q4",
+  ]);
+  assert.deepEqual(valid.executedCells, []);
+  assert.match(valid.result.summary.campaignErrors.join("\n"), /injected preflightSchema/);
+
+  for (const [label, options, pattern] of [
+    ["source total", { sourceDelta: 1 }, /OpenPose recovery disk\/JIT plan drifted/],
+    ["staged peak", { peakDelta: 1 }, /OpenPose recovery disk\/JIT plan drifted/],
+    ["authority census", { omitAuthorityFile: true }, /OpenPose recovery authority set drifted/],
+  ]) {
+    const mutated = await fixture(options);
+    assert.deepEqual(mutated.executedCells, [], `${label} must block before any cell executes`);
+    assert.match(mutated.result.summary.campaignErrors.join("\n"), pattern, label);
+  }
+});
+
 test("final missing-file store cleanup tolerates only already-absent ENOENT", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20739-missing-store-cleanup-"));
   try {
-    const missingStore = path.join(temporary, "already-absent");
+    const missingStore = path.join(temporary, "present");
+    await mkdir(missingStore);
+    let removed = false;
     await cleanupMissingFileStore({
-      cleanup: async () => {
-        const error = new Error("already absent");
+      cleanup: async (candidate) => {
+        assert.equal(candidate, missingStore);
+        removed = true;
+        await rm(candidate, { recursive: true });
+      },
+    }, missingStore, {}, "present fixture");
+    assert.equal(removed, true);
+    await assert.rejects(lstat(missingStore), { code: "ENOENT" });
+
+    const racedStore = path.join(temporary, "enoent-race");
+    await mkdir(racedStore);
+    await cleanupMissingFileStore({
+      cleanup: async (candidate) => {
+        await rm(candidate, { recursive: true });
+        const error = new Error("removed concurrently");
         error.code = "ENOENT";
         throw error;
       },
-    }, missingStore, {}, "already absent fixture");
+    }, racedStore, {}, "ENOENT race fixture");
+    await assert.rejects(lstat(racedStore), { code: "ENOENT" });
+
+    const unclearedStore = path.join(temporary, "cleanup-bypassed");
+    await mkdir(unclearedStore);
+    await assert.rejects(
+      cleanupMissingFileStore({ cleanup: async () => {} }, unclearedStore, {}, "absence proof fixture"),
+      /still exists after recursive cleanup/,
+    );
+    assert.equal((await lstat(unclearedStore)).isDirectory(), true);
+
+    const retainedStore = path.join(temporary, "non-enoent");
+    await mkdir(retainedStore);
     await assert.rejects(
       cleanupMissingFileStore({
         cleanup: async () => {
@@ -1909,9 +2041,10 @@ test("final missing-file store cleanup tolerates only already-absent ENOENT", as
           error.code = "EACCES";
           throw error;
         },
-      }, missingStore, {}, "non-ENOENT fixture"),
+      }, retainedStore, {}, "non-ENOENT fixture"),
       /permission denied/,
     );
+    assert.equal((await lstat(retainedStore)).isDirectory(), true);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
