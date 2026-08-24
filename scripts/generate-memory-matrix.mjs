@@ -29,7 +29,7 @@ const EXPECTED_IMAGE_COUNT = 53;
 const MATRIX_MODALITIES = new Set(["image", "video"]);
 const EXPECTED_VIDEO_COUNT = 10;
 // SC-18218 removed FLUX.2-dev from the MLX staged-residency census when the then-pinned provider was
-// eager/resident-only; sc-20799 REVERSED that at pin 42cab15ba4, where all three Dev MLX providers
+// eager/resident-only; sc-20799 REVERSED that at pin ebcdc7da7, where all three Dev MLX providers
 // declare selectable Sequential staged residency, so flux2_dev is now census-required (the assertion
 // direction flipped with the pin). Bernini is the older mirror case — inference sc-18609 made its
 // DECLARED MLX rung-4 ladder actually reachable on both variants, so it belongs in the census.
@@ -603,7 +603,7 @@ export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
   );
   if (!staged.has("flux2_dev")) {
     throw new Error(
-      "flux2_dev lost its MLX staged coverage; at pin 42cab15ba4 all three Dev providers declare " +
+      "flux2_dev lost its MLX staged coverage; at pin ebcdc7da7 all three Dev providers declare " +
         "selectable Sequential staged residency (sc-20799 retired the SC-18218 resident-only pin)",
     );
   }

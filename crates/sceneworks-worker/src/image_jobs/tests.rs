@@ -20473,3 +20473,47 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     assert!(base.contains("| \"sdxl\""));
     assert!(base.contains("provider_contract_for_spec(&spec)"));
 }
+
+/// SC-20799 receipt-authority seam guard. `generate_candle_stream` is the only place that decides
+/// whether a receipt priced *this* request, and the decision has to be family-agnostic
+/// (`is_receipt_priced`) rather than the reverted `(is_sana || is_sd35)` allowlist. The executed
+/// load policy must then be compared against that selection AFTER Ideogram's warm-staged rebinding,
+/// otherwise the comparison is against a strategy the request never executes. Source-contract only:
+/// the Candle body is cfg-gated off on macOS, so no runtime test on this lane can ask the question.
+#[test]
+fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebinding() {
+    let base = include_str!("base.rs");
+    let body = base
+        .split_once("async fn generate_candle_stream(")
+        .expect("missing production function marker generate_candle_stream")
+        .1
+        .split_once("\n}\n")
+        .expect("generate_candle_stream has no top-level end marker")
+        .0;
+
+    assert!(
+        body.contains("is_receipt_priced(engine_id)"),
+        "receipt authority must be the shared per-engine predicate, not a SANA/SD3.5 allowlist"
+    );
+    assert!(
+        body.contains("receipt_priced_selection.is_some()"),
+        "the executed load policy must be gated on whether the receipt priced this request, \
+         including a Resident selection that `optimized_shared_memory_context` drops"
+    );
+
+    let closure = body
+        .split_once("start_cached_gen_stream_with_request_state(")
+        .expect("generate_candle_stream no longer opens a cached generator closure")
+        .1;
+    let bind = closure
+        .find("bind_ideogram_cache_execution(")
+        .expect("the cache-execution closure omitted Ideogram's warm-staged rebinding");
+    let guard = closure
+        .find("if let Some(selected_strategy) = receipt_priced_selection")
+        .expect("the cache-execution closure omitted the receipt-vs-loaded policy comparison");
+    assert!(
+        bind < guard,
+        "the receipt-vs-loaded policy comparison must run AFTER Ideogram's warm-staged rebinding, \
+         so it compares against the strategy this request actually executes"
+    );
+}

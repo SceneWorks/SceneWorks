@@ -464,11 +464,23 @@ fn select_once(
 /// identity would correctly sever its immutable source-record handshake and make `evaluate` fail
 /// closed before these selector tests reached the coefficient under test.
 fn fixture_curve_bundle() -> VideoMemoryCurveBundle {
-    let bundle = sceneworks_core::video_memory_curves::packaged_video_memory_curves()
+    let mut bundle = sceneworks_core::video_memory_curves::packaged_video_memory_curves()
         .expect("packaged video curve")
         .clone();
-    assert_eq!(bundle.curves.len(), 1);
-    assert_eq!(bundle.curves[0].closure_digest, FITTED_CURVE_CLOSURE);
+    // Select the fixture BY its closure digest rather than asserting the packaged bundle happens to
+    // hold exactly one curve and taking `[0]` (sc-20799 round 2). The bundle grows a curve every
+    // time a new selector key is fitted; a positional read would then silently hand these tests a
+    // different model's coefficients, and the `len() == 1` guard would have failed for a reason
+    // that says nothing about what this fixture needs.
+    let fixture = bundle
+        .curves
+        .iter()
+        .find(|curve| curve.closure_digest == FITTED_CURVE_CLOSURE)
+        .unwrap_or_else(|| {
+            panic!("packaged video curves omit the sc-18810 fixture closure {FITTED_CURVE_CLOSURE}")
+        })
+        .clone();
+    bundle.curves = vec![fixture];
     bundle
 }
 

@@ -1314,6 +1314,15 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
         "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
+        // sc-20799 round 2: unlike the video lane's reference-shape `"other"`, this `"other"` is
+        // IDENTITY-BEARING and must stay. `mode_key` is matched against `binding.mode` when
+        // resolving packaged evidence and is round-tripped by `memory_mode_from_mode_key`, whose
+        // catch-all arm reconstructs `MemoryMode::Other("other")`. Renaming it (to "none" or
+        // anything else) would silently repoint every non-standard image mode at a different
+        // admission coordinate. The real asymmetry worth knowing about is that the typed value
+        // keeps the concrete mode while the key collapses to a single bucket, so two distinct
+        // non-standard modes share one evidence key; narrowing that is a calibration-corpus change,
+        // not a rename, and is out of scope for this pass.
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
     }
 }
