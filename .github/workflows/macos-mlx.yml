@@ -95,6 +95,8 @@ on:
       # The native producer below delegates its content comparison to this script. A script-only
       # change must exercise the lane it governs.
       - "scripts/compare-engine-capability-facts.mjs"
+      # Both jobs below run this to fetch the prebuilt libmlx; an edit to it must exercise them.
+      - "scripts/fetch-prebuilt-mlx.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       # sc-17703 (Michael's call — a deliberate under-trigger fix): rust-toolchain.toml
@@ -366,6 +368,26 @@ jobs:
             sudo xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun metal --version || true
+      - name: Fetch prebuilt MLX (sc-21382)
+        # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on a hosted runner on every cache miss
+        # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
+        # commit (`prebuilt-<sha12>` releases, cell = target × deployment target × Debug/Release);
+        # scripts/fetch-prebuilt-mlx.sh picks the asset for the mlx-rs rev pinned in Cargo.lock
+        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and build.rs
+        # links it from PMETAL_MLX_PREBUILT_DIR only after checking the manifest against its own
+        # key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
+        # published for this rev" (exit 1): the right answer then is the source build, surfaced
+        # as a workflow annotation. Anything else is an error. Same step as inference ci.yml.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -537,6 +559,26 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy
+      - name: Fetch prebuilt MLX (sc-21382)
+        # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on every cache miss; this self-hosted runner keeps the extracted tarball in ~/.cache/pmetal/prebuilt across runs
+        # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
+        # commit (`prebuilt-<sha12>` releases, cell = target × deployment target × Debug/Release);
+        # scripts/fetch-prebuilt-mlx.sh picks the asset for the mlx-rs rev pinned in Cargo.lock
+        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and build.rs
+        # links it from PMETAL_MLX_PREBUILT_DIR only after checking the manifest against its own
+        # key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
+        # published for this rev" (exit 1): the right answer then is the source build, surfaced
+        # as a workflow annotation. Anything else is an error. Same step as inference ci.yml.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"

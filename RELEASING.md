@@ -127,6 +127,14 @@ fail-closed remediation it prints. In particular, do not hand-edit a license,
 provenance, compatibility, capability, or calibration digest to make a stale
 audit appear current.
 
+If the new inference pin moves the `mlx-rs` fork revision in `Cargo.lock`, the
+macOS lanes' `Fetch prebuilt MLX` step looks for the fork's `prebuilt-<sha12>`
+release for that revision (`scripts/fetch-prebuilt-mlx.sh`; the fork publishes
+it on every push to its `main`). Until it exists the lanes build libmlx from
+source once per cache miss and say so with a workflow annotation — check
+`https://github.com/SceneWorks/mlx-rs/releases/tag/prebuilt-<sha12>` if the
+macOS job is slower than usual after a bump (sc-21382).
+
 Review the complete diff and run the repository checks plus relevant backend
 tests. Push the branch and open a PR against SceneWorks `release/next`. The pin
 PR must merge before the version bump is finalized.

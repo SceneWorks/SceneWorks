@@ -60,7 +60,11 @@ import {
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { replacementModeApplies, videoGenerateValidation } from "../videoStudioValidation.js";
+import {
+  replacementModeApplies,
+  SCAIL2_MODEL_ID,
+  videoGenerateValidation,
+} from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import {
@@ -131,11 +135,53 @@ function humanizedNumberMenu(menu) {
 
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
-const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
+// Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
+// picker only enables entries whose individual install is complete (`installedTiers`); in particular,
+// adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
+const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"]);
+// sc-20969 terminal acceptance admits exactly SCAIL-2's shipped q4/q8/bf16 Candle packages. Keep
+// this execution allowlist literal and local so an unrelated future catalog tier cannot become
+// runnable merely by appearing in the manifest. MLX continues to use the complete installed tier set.
+const SCAIL2_CANDLE_PRODUCT_TIERS = Object.freeze(["q4", "q8", "bf16"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
 const TIER_SCREEN = "video";
+const MAX_SCAIL2_REFERENCE_CHARACTERS = 6;
+
+function videoExecutionTierModel(model, backend) {
+  if (backend !== "candle" || model?.id !== SCAIL2_MODEL_ID) {
+    return model;
+  }
+  const accepted = (tier) => SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier);
+  return {
+    ...model,
+    variants: Array.isArray(model.variants)
+      ? model.variants.filter((variant) => accepted(variant?.variant))
+      : model.variants,
+    runtimeQuantTiers: Array.isArray(model.runtimeQuantTiers)
+      ? model.runtimeQuantTiers.filter(accepted)
+      : model.runtimeQuantTiers,
+    mlxTiers: Array.isArray(model.mlxTiers)
+      ? model.mlxTiers.filter(accepted)
+      : model.mlxTiers,
+    mlxTierStates: Array.isArray(model.mlxTierStates)
+      ? model.mlxTierStates.filter((state) => accepted(state?.tier))
+      : model.mlxTierStates,
+  };
+}
+
+function unavailableRecipeTierMessage(model, backend, tier) {
+  const recorded = tierLabel(tier);
+  if (
+    backend === "candle" &&
+    model?.id === SCAIL2_MODEL_ID &&
+    !SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier)
+  ) {
+    return `This recipe was recorded at ${recorded}, which is not enabled for SCAIL-2 Candle generation. Replay it on MLX, or install an admitted SCAIL-2 tier in Model Manager before starting a new generation.`;
+  }
+  return `This recipe was recorded at ${recorded}, but that tier is not installed and available for ${model?.name ?? "the selected model"} on ${backend === "mlx" ? "MLX" : "Candle"}. Install or repair that tier in Model Manager before replaying this recipe.`;
+}
 
 // Video sub-modes that map onto a recipe workflow. extend_clip / replace_person
 // aren't recipe workflows, so "Save as Preset" is gated to these.
@@ -241,8 +287,19 @@ export function VideoStudio() {
   // restore; the mode-snap effect moves the picker to a model that serves the mode. Named rather
   // than silent so the swap doesn't read as the recipe's own choice.
   const [recipeModelNotice, setRecipeModelNotice] = useState("");
+  // A recorded native tier is an exact replay request, not a preference. Keep it separate from the
+  // picker state so an unavailable/disallowed replay can block instead of being clamped to whatever
+  // installed tier the current model would normally seed.
+  const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
+  // Every USER model picker must retire replay-only state. Automatic catalog/mode/recipe snaps use
+  // the raw state setter below and preserve the replay while its target model becomes active.
+  const setUserModel = useCallback((nextModel) => {
+    setRecipeModelNotice("");
+    setRecipeTierRequest(null);
+    setModel(nextModel);
+  }, []);
   const textEncoderModel =
     textEncoderSelection.modelId === model ? textEncoderSelection.id : null;
   const setTextEncoderModel = (next, modelId = model) =>
@@ -271,6 +328,12 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
+  // behind the descriptor-derived manifest flag: the currently pinned engine descriptor does not
+  // advertise the paired contract yet, so a normal catalog remains on the existing single picker
+  // until the final inference-main pin makes the capability truthful.
+  const scail2MultiReferenceEnabled =
+    model === "scail2_14b" && selectedModel?.ui?.scail2MultiReference === true;
   // Runtime-curated selector surface (sc-13800). The API emits only complete encoders the worker can
   // resolve; Video Studio stays adapter-agnostic and future models can expose the same shape.
   const textEncoderOptions = selectedModel?.textEncoderOptions ?? [];
@@ -650,35 +713,53 @@ export function VideoStudio() {
   const nativeTierLane =
     activeBackend === "mlx" ||
     (activeBackend === "candle" && candleTierModelIds.has(selectedModel?.id));
+  const scail2CandleTierLane =
+    activeBackend === "candle" && selectedModel?.id === SCAIL2_MODEL_ID;
+  // A Video Studio-only projection: retain the complete catalog object for every non-tier concern,
+  // but narrow every tier vocabulary the shared picker understands. The original model object still
+  // reaches Model Manager unchanged, so q4/q8 install and repair metadata remain visible there.
+  const executionTierModel = useMemo(
+    () => videoExecutionTierModel(selectedModel, activeBackend),
+    [selectedModel, activeBackend],
+  );
   const tierOptions = useMemo(
     () => ({ convRotEligible: false, nvfp4Eligible: false }),
     [],
   );
   const availableTiers = useMemo(
-    () => (nativeTierLane ? installedTiers(selectedModel, tierOptions) : []),
-    [nativeTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? installedTiers(executionTierModel, tierOptions) : []),
+    [nativeTierLane, executionTierModel, tierOptions],
   );
   // The full display set (all possible tiers, installed or not) + the picker option list with
   // un-downloaded tiers disabled — same show-all/disable-unavailable rule as Image Studio. `availableTiers`
-  // stays the SELECTABLE/send set; the picker shows whenever there is more than one POSSIBLE tier and at
-  // least one is installed to select.
+  // stays the SELECTABLE/send set. Ordinarily the picker needs more than one possible tier; the
+  // explicit SCAIL-2 Candle tier surface remains visible so users can see which shipped packages
+  // are admitted even when a particular local install is incomplete.
   const possibleTiers = useMemo(
-    () => (nativeTierLane ? allPossibleTiers(selectedModel, tierOptions) : []),
-    [nativeTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? allPossibleTiers(executionTierModel, tierOptions) : []),
+    [nativeTierLane, executionTierModel, tierOptions],
   );
   const tierPickerItems = useMemo(
-    () => (nativeTierLane ? tierPickerOptions(selectedModel, tierOptions) : []),
-    [nativeTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? tierPickerOptions(executionTierModel, tierOptions) : []),
+    [nativeTierLane, executionTierModel, tierOptions],
   );
   const showTierPicker = useMemo(
-    () => nativeTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
-    [nativeTierLane, possibleTiers, availableTiers],
+    () =>
+      nativeTierLane &&
+      possibleTiers.length > 0 &&
+      availableTiers.length > 0 &&
+      (possibleTiers.length > 1 || scail2CandleTierLane),
+    [nativeTierLane, possibleTiers, availableTiers, scail2CandleTierLane],
   );
+  const baseExecutionTierBlockMessage =
+    scail2CandleTierLane && availableTiers.length === 0
+      ? "SCAIL-2 Candle generation requires an installed q4, q8, or bf16 tier. Install or repair one in Model Manager."
+      : null;
   const hostMemory = useHostMemory();
   const nativeMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
-    () => suggestTier(selectedModel, nativeMemoryGb, { backend: activeBackend }),
-    [selectedModel, nativeMemoryGb, activeBackend],
+    () => suggestTier(executionTierModel, nativeMemoryGb, { backend: activeBackend }),
+    [executionTierModel, nativeMemoryGb, activeBackend],
   );
   // Seed from the per-(video, model) sticky, then the global quality/Auto policy, clamped to installed.
   // A model transition always re-seeds even when both models happen to expose the same tier list.
@@ -687,17 +768,134 @@ export function VideoStudio() {
     setQuantTier,
     tierSwitching,
     handleTierChange,
-    skipNextReseed,
   } = useQuantTierPicker({
     screen: TIER_SCREEN,
     model,
-    selectedModel,
+    selectedModel: executionTierModel,
     availableTiers,
     tierOptions,
     autoTier,
     useGenerationQuality: true,
     reseedOnModelChange: true,
   });
+  const availableTierKey = availableTiers.join(",");
+  const recipeTierTargetModel = recipeTierRequest
+    ? videoModels.find((item) => item.id === recipeTierRequest.modelId)
+    : null;
+  const recipeTierTargetAvailable = Boolean(
+    recipeTierRequest && macVideoModels.some((item) => item.id === recipeTierRequest.modelId),
+  );
+  // Re-activate a replay target after a transient capability/catalog refresh when it can still
+  // serve the current mode, then apply its exact tier. A user mode change that the target cannot
+  // serve deliberately keeps the automatic fallback model active; the global replay guard below
+  // still refuses submission until the user explicitly starts a new generation.
+  useEffect(() => {
+    if (
+      recipeTierRequest &&
+      selectedModel?.id !== recipeTierRequest.modelId &&
+      recipeTierTargetAvailable &&
+      recipeTierTargetModel &&
+      videoModelServesMode(recipeTierTargetModel, mode, macCapabilities)
+    ) {
+      setModel(recipeTierRequest.modelId);
+      return;
+    }
+    if (
+      recipeTierRequest &&
+      recipeTierTargetAvailable &&
+      recipeTierRequest.modelId === selectedModel?.id &&
+      availableTiers.includes(recipeTierRequest.tier)
+    ) {
+      setQuantTier(recipeTierRequest.tier);
+    }
+    // The stable key represents exact tier availability; the array identity changes with renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    recipeTierRequest,
+    recipeTierTargetModel,
+    recipeTierTargetAvailable,
+    selectedModel?.id,
+    mode,
+    activeBackend,
+    availableTierKey,
+  ]);
+  const handleExecutionTierChange = useCallback(
+    (nextTier) => {
+      setRecipeTierRequest(null);
+      handleTierChange(nextTier);
+    },
+    [handleTierChange],
+  );
+  const replayTierTargetsActiveModel = Boolean(
+    recipeTierRequest && recipeTierRequest.modelId === selectedModel?.id,
+  );
+  const replayTierTargetName =
+    recipeTierTargetModel?.name ?? recipeTierRequest?.modelName ?? recipeTierRequest?.modelId;
+  const replayTierBlockMessage = recipeTierRequest
+    ? !recipeTierTargetAvailable
+      ? `This recipe requires ${replayTierTargetName} at ${tierLabel(recipeTierRequest.tier)}, but that model is not available on the current backend. Generation stays blocked while the recipe replay is active.`
+      : !replayTierTargetsActiveModel
+        ? `This recipe requires ${replayTierTargetName} at ${tierLabel(recipeTierRequest.tier)}, but ${selectedModel?.name ?? model} is active for the current mode. Generation stays blocked while the recipe replay is active.`
+      : !availableTiers.includes(recipeTierRequest.tier)
+      ? unavailableRecipeTierMessage(
+          selectedModel,
+          activeBackend,
+          recipeTierRequest.tier,
+        )
+      : quantTier !== recipeTierRequest.tier
+        ? `Preparing this recipe's exact ${tierLabel(recipeTierRequest.tier)} tier. Generation stays blocked until that tier is selected.`
+        : null
+    : null;
+  const executionTierBlockMessage = replayTierBlockMessage ?? baseExecutionTierBlockMessage;
+  const canStartNewBf16FromReplay =
+    replayTierTargetsActiveModel &&
+    scail2CandleTierLane &&
+    recipeTierRequest.tier !== "bf16" &&
+    !SCAIL2_CANDLE_PRODUCT_TIERS.includes(recipeTierRequest.tier) &&
+    availableTiers.includes("bf16");
+  const canStartNewGenerationFromReplay = Boolean(
+    replayTierBlockMessage &&
+      model === selectedModel?.id &&
+      macVideoModels.some((item) => item.id === model) &&
+      !baseExecutionTierBlockMessage &&
+      (!nativeTierLane || availableTiers.includes(quantTier)),
+  );
+  const startNewGenerationLabel = canStartNewBf16FromReplay
+    ? "Use bf16 for a new generation"
+    : `Start new generation with ${selectedModel?.name ?? model}${
+        nativeTierLane ? ` ${tierLabel(quantTier)}` : ""
+      }`;
+  const handleStartNewGenerationFromReplay = useCallback(() => {
+    // Recheck the same identity/tier contract at the click boundary. During a catalog refresh,
+    // `selectedModel` can already derive the fallback while `model` still carries the removed id;
+    // clearing replay in that transient render would advertise one model and submit another.
+    if (
+      !recipeTierRequest ||
+      !replayTierBlockMessage ||
+      model !== selectedModel?.id ||
+      !macVideoModels.some((item) => item.id === model) ||
+      baseExecutionTierBlockMessage ||
+      (nativeTierLane && !availableTiers.includes(quantTier))
+    ) {
+      return;
+    }
+    setRecipeModelNotice("");
+    setRecipeTierRequest(null);
+    if (nativeTierLane && availableTiers.includes(quantTier)) {
+      handleTierChange(quantTier);
+    }
+  }, [
+    recipeTierRequest,
+    replayTierBlockMessage,
+    model,
+    selectedModel?.id,
+    macVideoModels,
+    baseExecutionTierBlockMessage,
+    nativeTierLane,
+    availableTiers,
+    quantTier,
+    handleTierChange,
+  ]);
   const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
   const selectedTierQuantize =
     nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
@@ -921,6 +1119,7 @@ export function VideoStudio() {
   // reproduce the recipe, not a hybrid of the recipe and whatever was on screen.
   useEffect(() => {
     if (launchRequest?.view !== "Video" || !launchRequest.recipe) {
+      setRecipeTierRequest(null);
       return;
     }
     const recipe = launchRequest.recipe;
@@ -1008,14 +1207,22 @@ export function VideoStudio() {
     setVideoConditioningStrength(rawSettings.videoConditioningStrength ?? "");
     setBridgeRightVideoConditioningStrength(rawSettings.bridgeRightVideoConditioningStrength ?? "");
 
-    // The MLX tier the clip was generated at. Arm the reseed skip only when the model is actually
-    // changing — that's exactly when the tier effect fires and would overwrite this.
+    // The exact native tier the clip was generated at. Record the request against the model this
+    // replay will actually activate; the reactive validator above applies it only when that exact
+    // tier is selectable on the active backend. It deliberately does NOT write picker state here:
+    // same-model q4/q8 SCAIL Candle replays used to escape the narrowed tier set through this setter,
+    // then serialize no mlxQuantize and silently run bf16.
     const recipeTier = quantizeTier(rawSettings.mlxQuantize);
     if (recipeTier) {
-      if (recipe.model && recipeModelAvailable && recipe.model !== model) {
-        skipNextReseed();
-      }
-      setQuantTier(recipeTier);
+      const recipeTierModelId = recipe.model && recipeModelAvailable ? recipe.model : model;
+      setRecipeTierRequest({
+        modelId: recipeTierModelId,
+        modelName:
+          videoModels.find((item) => item.id === recipeTierModelId)?.name ?? recipeTierModelId,
+        tier: recipeTier,
+      });
+    } else {
+      setRecipeTierRequest(null);
     }
 
     // Sources. A deleted asset is left to the existing `hasInputs` + validation machinery to
@@ -1379,7 +1586,16 @@ export function VideoStudio() {
     (mode === "multi_video_to_video" && sourceClipAssetIds.length >= 2) ||
     (mode === "ads2v" && sourceClipAssetId && referenceClipAssetId && referenceAssetIds.length > 0) ||
     // SCAIL-2 character animation (sc-5449): a driving video + a reference character image.
-    (mode === "animate_character" && sourceClipAssetId && referenceAssetIds.length > 0);
+    // Once the paired multi-reference descriptor is live, its source-position table admits 1–6
+    // ordered character images. Keep all seven in state to show a rejection; never truncate one.
+    (mode === "animate_character" &&
+      sourceClipAssetId &&
+      referenceAssetIds.length > 0 &&
+      (!scail2MultiReferenceEnabled || referenceAssetIds.length <= MAX_SCAIL2_REFERENCE_CHARACTERS));
+  const scail2ReferenceOverflow =
+    mode === "animate_character" &&
+    scail2MultiReferenceEnabled &&
+    referenceAssetIds.length > MAX_SCAIL2_REFERENCE_CHARACTERS;
   // Don't let Replace Person queue a job the readiness endpoint says no live
   // worker can run — that would sit unclaimable instead of honoring the gate.
   const replaceReady = mode !== "replace_person" || personReadiness?.replace?.ready !== false;
@@ -1451,8 +1667,10 @@ export function VideoStudio() {
       requiresLtxIcLora,
       hasLtxIcLora,
       replaceReady,
+      scail2ReferenceOverflow,
       referenceLimitMessage,
       audioOnlyReferenceSet,
+      executionTierBlockMessage,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1470,8 +1688,10 @@ export function VideoStudio() {
       requiresLtxIcLora,
       hasLtxIcLora,
       replaceReady,
+      scail2ReferenceOverflow,
       referenceLimitMessage,
       audioOnlyReferenceSet,
+      executionTierBlockMessage,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1494,7 +1714,10 @@ export function VideoStudio() {
 
   async function submit(event) {
     event.preventDefault();
-    if (submitting) {
+    // The button and validation summary already expose this refusal. Keep the submit boundary exact
+    // as well so a direct/stale form submit cannot enqueue a SCAIL-2 Candle request that no product
+    // tier is allowed to claim.
+    if (submitting || executionTierBlockMessage) {
       return;
     }
     setSubmitting(true);
@@ -1970,21 +2193,32 @@ export function VideoStudio() {
                   projectId={activeProject?.id}
                   value={sourceClipAssetId}
                 />
-                {/* One character today; the worker reads the first reference. Multi-reference is
-                    experimental and tracked separately (sc-5583), so this stays a single image. */}
+                {/* The paired-reference UI stays descriptor-gated until the matching inference pin is
+                    live. Its ordered array maps to strict Reference,Mask pairs in both workers. */}
                 <ImageEditSourcePickerField
                   assets={imageAssets}
-                  buttonLabel="Select image"
+                  buttonLabel={scail2MultiReferenceEnabled ? "Select images" : "Select image"}
                   characters={characters}
-                  changeLabel="Change character"
-                  emptyLabel="No reference character selected"
+                  changeLabel={scail2MultiReferenceEnabled ? "Edit characters" : "Change character"}
+                  emptyLabel={scail2MultiReferenceEnabled ? "No reference characters selected" : "No reference character selected"}
                   eyebrow="Video Studio"
                   importAsset={importAsset}
-                  label="Reference character"
-                  onChange={(id) => setReferenceAssetIds(id ? [id] : [])}
+                  label={scail2MultiReferenceEnabled ? "Reference characters (ordered, up to 6)" : "Reference character"}
+                  multiple={scail2MultiReferenceEnabled}
+                  onChange={(ids) =>
+                    setReferenceAssetIds(
+                      scail2MultiReferenceEnabled ? ids : ids ? [ids] : [],
+                    )
+                  }
                   projectId={activeProject?.id}
                   value={referenceAssetIds[0] ?? ""}
+                  values={referenceAssetIds}
                 />
+                {scail2ReferenceOverflow ? (
+                  <p className="inline-warning" role="alert">
+                    SCAIL-2 supports at most {MAX_SCAIL2_REFERENCE_CHARACTERS} reference characters. Remove one before rendering.
+                  </p>
+                ) : null}
               </>
             ) : null}
 
@@ -2015,7 +2249,7 @@ export function VideoStudio() {
                 videoAssets={videoAssets}
                 videoModels={videoModels}
                 model={model}
-                setModel={setModel}
+                setModel={setUserModel}
               />
             ) : null}
           </div>
@@ -2027,11 +2261,7 @@ export function VideoStudio() {
                 Model
                 <StudioUpdateBadge item={selectedModel} />
                 <select
-                  onChange={(event) => {
-                    // Picking a model answers the recipe notice, so retire it.
-                    setRecipeModelNotice("");
-                    setModel(event.target.value);
-                  }}
+                  onChange={(event) => setUserModel(event.target.value)}
                   value={model}
                 >
                   {/* Models gated on the selected tab (sc-5716): show only models that serve the
@@ -2089,7 +2319,7 @@ export function VideoStudio() {
                 <TierPickerField
                   className="settings-field settings-field-tier"
                   value={quantTier}
-                  onChange={handleTierChange}
+                  onChange={handleExecutionTierChange}
                   items={tierPickerItems}
                   tierSwitching={tierSwitching}
                   tierLabel={tierLabel}
@@ -2630,6 +2860,15 @@ export function VideoStudio() {
               row, from the same summary that gates the button (sc-10650). Project, prompt
               and inputs are silent requirements: their empty fields show it. */}
           <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
+          {canStartNewGenerationFromReplay ? (
+            <button
+              className="secondary-action"
+              onClick={handleStartNewGenerationFromReplay}
+              type="button"
+            >
+              {startNewGenerationLabel}
+            </button>
+          ) : null}
 
         </WorkPanel>
 

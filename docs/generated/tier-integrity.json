@@ -864,12 +864,12 @@
         "q8": 334615452
       },
       "vaeScope": "full-autoencoder",
-      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision c5a92a902dd4e6ee99c2a57981ecf66209905dd1; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+      "isolation": "Re-summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 778c3f02b7703b0c2755d0c0447592897193c6b5; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
-      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q8/vae/diffusion_pytorch_model.safetensors",
-      "note": null
+      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": "The metadata-only child keeps the q8 VAE LFS identity a91793eaf162d3531017f59decf47890e2abb6a376e709bb33542ebe8d4cfe0f unchanged. Its reviewed q4 config SHA-256 values are f87b89e4249e027632236caba75d1140e14fd4c2ce4b4e554f2912b234e72cf9 / 3b96bc14843360d24e864f7d1ac6d83e95cad8f68209e7e503cefa9a4f65b18b / aeb34c12f61f1edd9f7e17d8332f91197bacad70754bfaa450836137c40c8c4d; q8 values are c74289384c56ae6fdac29b39f01c081aa7dbd20161b371c5dc3b486fa94bf8fb / 2891a3c519b99c3b5983aeee973095974f2e08df5d88e7d59c88635638fa8d6a / 379fb37b8b7a893113925439117acebc03b205615b281bcc139b7c418b26ce7f."
     },
     {
       "model": "illustrious_xl_v2",
@@ -920,12 +920,12 @@
         "q8": 334615452
       },
       "vaeScope": "full-autoencoder",
-      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 7c5c8b2bb75a8f38a7365e70bdf84d38d6204473; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+      "isolation": "Re-summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 672e9851ede4dc856fa945649b6691975c9d74a3; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
-      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q8/vae/diffusion_pytorch_model.safetensors",
-      "note": null
+      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": "The metadata-only child keeps the q8 VAE LFS identity b0a960def5b0ff715be74a7a82202a80300f8b06a3bc08e364af3647b6d7a653 unchanged. Its reviewed q4 config SHA-256 values are f87b89e4249e027632236caba75d1140e14fd4c2ce4b4e554f2912b234e72cf9 / 3b96bc14843360d24e864f7d1ac6d83e95cad8f68209e7e503cefa9a4f65b18b / aeb34c12f61f1edd9f7e17d8332f91197bacad70754bfaa450836137c40c8c4d; q8 values are c74289384c56ae6fdac29b39f01c081aa7dbd20161b371c5dc3b486fa94bf8fb / 2891a3c519b99c3b5983aeee973095974f2e08df5d88e7d59c88635638fa8d6a / 379fb37b8b7a893113925439117acebc03b205615b281bcc139b7c418b26ce7f."
     },
     {
       "model": "instantid_realvisxl",
