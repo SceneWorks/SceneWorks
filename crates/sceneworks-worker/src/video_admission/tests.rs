@@ -294,11 +294,10 @@ fn expected_vae_tiling(id: &str, lane: VideoLane) -> Option<VaeTiling> {
         | "bernini"
         | "scail2_14b"
         | "krea_realtime_14b" => Some(VaeTiling::WAN),
-        // MiniMax-H3 remains deliberately unmodelled on both lanes. Candle base routing is real as
-        // of sc-20755, but its provider uses the reference-parity fixed 256/64 spatial tiler rather
-        // than gen-core's writable-element VaeTiling planner; inventing a VaeTiling transcription
-        // would claim a decode cap the provider does not consume. The reference partition is still
-        // off-Mac-withheld until sc-20756.
+        // MiniMax-H3 remains deliberately unmodelled on both lanes. Its Candle provider uses the
+        // reference-parity fixed 256/64 spatial tiler rather than gen-core's writable-element
+        // VaeTiling planner; inventing a VaeTiling transcription would claim a decode cap the
+        // provider does not consume.
         "minimax_h3" | "minimax_h3_ref" => None,
         "svd" => match lane {
             VideoLane::Mlx => None,

@@ -166,6 +166,13 @@
       ]
     },
     {
+      "modelId": "minimax_h3_ref",
+      "mode": "reference_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
       "modelId": "scail2_14b",
       "mode": "animate_character",
       "engineIds": [

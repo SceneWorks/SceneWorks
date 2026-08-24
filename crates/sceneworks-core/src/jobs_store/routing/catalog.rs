@@ -1142,14 +1142,11 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // the matching tier resolver and fail-closed fit gate. Its t2va + fl2va modes therefore use the
     // base partition on both lanes; it is not a generic Candle i2v/VACE model.
     //
-    // `minimax_h3_ref`'s candle columns stay false for the SAME kind of reason, not a different
-    // kind (sc-20267 corrected the old "candle default-denies ref2va" claim — sc-17157 landed the
-    // candle port and is an ancestor of the pinned revision): it has no off-Mac `transformer_ref`
-    // download rows or measured off-Mac ceiling of its own. sc-20756 owns that separate rehost.
-    //
     // Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
     VideoModelCaps::new("minimax_h3", true, true, false, false),
-    VideoModelCaps::new("minimax_h3_ref", true, false, false, false),
+    // MiniMax-H3 reference partition (sc-20756): dedicated Ref2VA Candle route over the hosted
+    // transformer_ref tiers, sharing the provider and accepted q4/q8/bf16 ceilings with base.
+    VideoModelCaps::new("minimax_h3_ref", true, true, false, false),
 ];
 
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
@@ -2316,9 +2313,10 @@ mod tests {
         // Mochi 1 (sc-11991): the candle descriptor is `mac_only: false` and ingests the same hosted
         // mlx-affine tiers, so the off-Mac t2v lane is real. Not in the i2v/VACE subsets (t2v only).
         "mochi_1",
-        // MiniMax-H3 base partition (sc-20755): dedicated t2va/fl2va Candle route with measured
-        // q4/q8/bf16 admission. The reference partition remains withheld until sc-20756.
+        // MiniMax-H3 partitions: base t2va/fl2va (sc-20755) plus Ref2VA (sc-20756), both using
+        // the dedicated provider route and accepted q4/q8/bf16 admission ceilings.
         "minimax_h3",
+        "minimax_h3_ref",
     ];
 
     const EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
@@ -3329,12 +3327,6 @@ mod tests {
             ("ltx_2_3_eros", "extend_clip"),
             ("ltx_2_3_eros", "video_bridge"),
             ("ltx_2_3_eros", "replace_person"),
-            // Back since sc-18650 restored the MLX Ref2VA declaration (the `minimax_h3_ref` arm
-            // in `routing/mlx.rs`; the conditioning requirement now admits the engines' ordered
-            // omni-reference surface). MLX-only because its direct/replay Candle executor is not
-            // yet scheduler-visible and its `transformer_ref` rows are still macOS-scoped. The
-            // engine conditioning surface itself is real; sc-20756 owns the remaining route flip.
-            ("minimax_h3_ref", "reference_to_video"),
         ];
 
         let models = builtin_video_models();

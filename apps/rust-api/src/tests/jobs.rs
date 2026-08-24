@@ -11256,15 +11256,6 @@ fn mlx_only_stranded_pairs() -> Vec<(&'static str, Value)> {
             "krea_realtime_14b",
             json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
         ),
-        // The fourth row, back since sc-18650 restored the MLX Ref2VA route (it left this table
-        // while the declaration was withheld and NO lane claimed the pair, so sc-19504's enqueue
-        // gate 400'd it instead of admitting it for a platform verdict). It enqueues again, and
-        // off-Mac it strands exactly like its three neighbours: mac-only downloads, no candle
-        // dispatch arm, no off-Mac ceiling.
-        (
-            "minimax_h3_ref",
-            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
-        ),
     ]
 }
 
@@ -11302,9 +11293,7 @@ fn candle_served_pairs() -> Vec<(&'static str, Value)> {
             "wan_2_2_i2v_14b",
             json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
         ),
-        // MiniMax-H3 base moved here in sc-20755: all three advertised shapes now have the
-        // measured Candle route, while the separate reference partition remains in the stranded
-        // table until sc-20756.
+        // MiniMax-H3 base moved here in sc-20755; SC-20756 adds the Ref2VA twin.
         ("minimax_h3", json!({ "mode": "text_to_video" })),
         (
             "minimax_h3",
@@ -11313,6 +11302,10 @@ fn candle_served_pairs() -> Vec<(&'static str, Value)> {
         (
             "minimax_h3",
             json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "minimax_h3_ref",
+            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
         ),
         (
             "svd",
@@ -11355,13 +11348,13 @@ async fn the_video_enqueue_contract_is_identical_on_every_platform() {
     let stranded = mlx_only_stranded_pairs();
     let served = candle_served_pairs();
     // Was 20 when sc-19570 measured it. Syncing `main` into this epic branch gave thirteen of those
-    // pairs a real Candle lane; sc-20755 moved the three MiniMax-H3 base modes too. The guard is
-    // KEPT, not deleted, and kept EXACT: a drop below four means a genuinely stranded pair stopped
-    // being covered without its replacement lane being recorded here.
+    // pairs a real Candle lane; sc-20755 moved the three MiniMax-H3 base modes, and sc-20756 moved
+    // Ref2VA. The guard is KEPT, not deleted, and kept EXACT: a drop below three means a genuinely
+    // stranded pair stopped being covered without its replacement lane being recorded here.
     assert_eq!(
         stranded.len(),
-        4,
-        "the stranded set is the four remaining mac-only-download pairs that enqueue — a shrunken table \
+        3,
+        "the stranded set is the three remaining mac-only-download pairs that enqueue — a shrunken table \
          would narrow every guard that reads it"
     );
 

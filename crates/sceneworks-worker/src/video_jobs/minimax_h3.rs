@@ -1531,6 +1531,19 @@ fn candle_minimax_h3_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResu
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_minimax_h3_component_dir(root: &Path, component: &str) -> WorkerResult<PathBuf> {
+    let dir = root.join(component);
+    if dir.is_dir() && dir.join("config.json").is_file() {
+        Ok(dir)
+    } else {
+        Err(WorkerError::InvalidPayload(format!(
+            "candle MiniMax-H3 installed snapshot is incomplete: missing {component}/config.json under {}",
+            root.display()
+        )))
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CandleMiniMaxH3Load {
     pub(super) root: PathBuf,
@@ -1547,15 +1560,32 @@ pub(super) fn resolve_candle_minimax_h3_load(
 ) -> WorkerResult<CandleMiniMaxH3Load> {
     let (tier, quant) = candle_minimax_h3_tier(request);
     let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;
-    let (dit_dir, text_encoder_dir) = if quant.is_some() {
-        let tier_root =
-            candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)?.join(tier);
-        (
-            Some(tier_root.join("transformer")),
-            Some(tier_root.join("text_encoder")),
-        )
+    let is_reference = request.model == "minimax_h3_ref";
+    let tier_root = (quant.is_some() || is_reference)
+        .then(|| candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO))
+        .transpose()?
+        .map(|root| root.join(tier));
+    let dit_dir = match (tier_root.as_deref(), is_reference, quant.is_some()) {
+        (Some(tier_root), true, _) => {
+            // The provider's `transformer` component is always the base partition. Ref2VA derives
+            // `transformer_ref` as its sibling, so validate both halves but stage only the base.
+            let transformer = candle_minimax_h3_component_dir(tier_root, "transformer")?;
+            candle_minimax_h3_component_dir(tier_root, "transformer_ref")?;
+            Some(transformer)
+        }
+        (Some(tier_root), false, true) => {
+            Some(candle_minimax_h3_component_dir(tier_root, "transformer")?)
+        }
+        _ => None,
+    };
+    let text_encoder_dir = if quant.is_some() {
+        Some(candle_minimax_h3_component_dir(
+            tier_root.as_deref().expect("packed tier root"),
+            "text_encoder",
+        )?)
     } else {
-        (None, None)
+        candle_minimax_h3_component_dir(&root, "text_encoder")?;
+        None
     };
     Ok(CandleMiniMaxH3Load {
         root,

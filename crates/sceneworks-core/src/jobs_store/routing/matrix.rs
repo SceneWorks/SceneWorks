@@ -4993,20 +4993,8 @@ mod tests {
                 ("epic-17137", "adapter", 1usize),
             ),
             (
-                "epic-17137-minimax-h3-ref-operation-sequencing",
-                ("epic-17137", "operation", 1usize),
-            ),
-            (
-                "epic-17137-minimax-h3-ref-conditioning-sequencing",
-                ("epic-17137", "conditioning", 3usize),
-            ),
-            (
-                "epic-17137-minimax-h3-ref-precision-sequencing",
-                ("epic-17137", "precision", 3usize),
-            ),
-            (
                 "epic-17137-minimax-h3-ref-adapter-sequencing",
-                ("epic-17137", "adapter", 2usize),
+                ("epic-17137", "adapter", 1usize),
             ),
             (
                 "epic-18803-eros-candle-operation-withdrawal",

@@ -5,9 +5,9 @@
     "modelCount": 94,
     "importedFamilyCount": 3,
     "cellCount": 918,
-    "mlxOnlyCellCount": 66,
+    "mlxOnlyCellCount": 58,
     "candleOnlyCellCount": 47,
-    "exceptionCount": 15
+    "exceptionCount": 12
   },
   "sources": {
     "apiContractEntry": "9475e0b8f63b96c7218a17549db8fce00144e693a47e3ae366526011439b209c",
@@ -17,15 +17,15 @@
     "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
     "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
     "descriptorCandleFacts": "e2b4448d0ee00cd84af113ee3367bc36b1d615f131779c0d53ce934bc47c7b90",
-    "descriptorCandleRuntime": "c03c5324b505a45d5a77f482704202b60ff3e5cddfeb9f0837557588b2ef18bb",
+    "descriptorCandleRuntime": "f83944b61b5fdf4960adad7003d931e65af773e7355b42632efce8427a380afb",
     "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
     "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
     "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
-    "exceptionRegister": "b42e80ca66d0baeee7653e327a456004471ed86f7f8b4fe624b6f7c828bf9d9a",
-    "manifest": "8f24860b46c0bd12a9886bd4ad6c5c7ca9552c6bb55be151e73ed29edab0da72",
+    "exceptionRegister": "53d13d8ab0ba263f639f72ffc034d0361f1890c662605e00931afac48d1984f5",
+    "manifest": "33dd984fd9667b0bc293e2d6b285eb0832db6570d444a018c92580fe0bbaddc6",
     "modelImportDefaults": "15e0d63df3dab20249f68a2e1954f930a6791cb9e1742eca559361a4f3672268",
-    "routerCandle": "deb0488a940ac1a34ddb04533f8c35b37dcdf3a29cd806e480318c728b607ac2",
-    "routerCatalog": "ff494c26163b87920165afb9b2056533125696033c174fb495a3b306aa5b33de",
+    "routerCandle": "846d7fdd0a1b080531b66f086561b9f1fba94484bbbd992141a4ccfa051bf765",
+    "routerCatalog": "dda0a5908be503aeb8f09873bdd8c2b011a80a0c5dc812a31d4846fa541745c8",
     "routerGaps": "f0f4fb5046e48ba5e5b3d4dac925ee6f25da721714f7e2f0641131f746c2c6bd",
     "routerMlx": "ba0b50925aadd5b63f2e95876a65c600f14507daf3e108fb8716407da09d04d6",
     "scheduler": "f88322ea51f8fbfd9452a95f477e54b591047b635cb02e8e7eb7b3d8cb6ad8b2",
@@ -3563,11 +3563,7 @@
         {
           "capability": "reference_to_video",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18481",
-            "url": "https://app.shortcut.com/trefry/story/18481"
-          }
+          "candle": true
         },
         {
           "capability": "reference_video_to_video",
@@ -3604,43 +3600,24 @@
         {
           "capability": "reference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "referenceAudio",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "referenceVideo",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         }
       ],
       "userAdapters": [
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18481",
-            "url": "https://app.shortcut.com/trefry/story/18481"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
@@ -3656,39 +3633,24 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
         "mlx": false,
-        "candle": null
+        "candle": false
       }
     },
     {
@@ -7525,63 +7487,16 @@
       ]
     },
     {
-      "id": "epic-17137-minimax-h3-ref-operation-sequencing",
-      "category": "operation",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. Candle generator support shipped in 06d853b68 (sc-17156), SC-20753 supplied the direct/replay executor, and SC-20754 supplied the accepted q4/q8/bf16 ceiling evidence. The exact remaining work is SC-20756: publish off-Mac transformer_ref rows and make the existing Ref2VA Candle executor scheduler-visible.",
-      "approver": "Michael Trefry",
-      "authority": "epic-17137",
-      "approvedDate": "2026-08-20",
-      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20756 makes the Ref2VA Candle route scheduler-visible with off-Mac transformer_ref rows and the generated matrix, routing tests and accepted runtime evidence prove the cell.",
-      "cells": [
-        "models/minimax_h3_ref/operationAndMode/reference_to_video"
-      ]
-    },
-    {
-      "id": "epic-17137-minimax-h3-ref-conditioning-sequencing",
-      "category": "conditioning",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying all three of these MLX-only cells under epic-17137, in session on 2026-08-20, in two separate answers on the same day. (1) `reference` and `referenceAudio` were approved alongside this family's operation, precision and adapter records, extending to the minimax_h3_ref twin the same rationale he approved for the minimax_h3 rows on 2026-08-16: sc-18650 activated the Ref2VA route, so the cells became visible to the generated matrix for the first time. (2) `referenceVideo` was approved separately and later the same day, in direct answer to a question naming `models/minimax_h3_ref/conditioningShape/referenceVideo` specifically. It is the NINTH residual MLX-only cell of this family and it did not exist as a residual until PR #2460, which fixed a `referenceVideo => videoClip` mis-mapping in the matrix generator: minimax_h3_ref's only mode is reference_to_video, whose requirement group carries no `videoClip`, so the probe set became six modes the model never routes and the cell read false with no error and owed no approval. Remapping it to `multiReference` in that PR moved `summary.mlxOnlyCellCount` 80 -> 81 and exposed it (`80c1ca842` 72 -> 80 for the Ref2VA activation, then `655939b11` 80 -> 81 for the remap). It joins this record rather than opening a new one because the rationale below already covers it verbatim, so approver, authority, approvedDate and revisitCondition are unchanged. Candle generator support shipped in 06d853b68 (sc-17156), SC-20753 supplied the direct/replay executor, and SC-20754 supplied the accepted q4/q8/bf16 ceiling evidence. The exact remaining work is SC-20756: publish off-Mac transformer_ref rows and make the existing Ref2VA Candle executor scheduler-visible. NOTE FOR AUDITORS: PR #2460's body states that no approval had been received for the ninth cell and that no record would be authored. That paragraph was overtaken by events — the approval arrived later in the same session and the body was never re-synced. See the PR's comment thread, and commit `6a9bc2856`, which added the cell.",
-      "approver": "Michael Trefry",
-      "authority": "epic-17137",
-      "approvedDate": "2026-08-20",
-      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20756 makes the Ref2VA Candle route scheduler-visible with off-Mac transformer_ref rows and the generated matrix, routing tests and accepted runtime evidence prove every named conditioning cell.",
-      "cells": [
-        "models/minimax_h3_ref/conditioningShape/reference",
-        "models/minimax_h3_ref/conditioningShape/referenceAudio",
-        "models/minimax_h3_ref/conditioningShape/referenceVideo"
-      ]
-    },
-    {
-      "id": "epic-17137-minimax-h3-ref-precision-sequencing",
-      "category": "precision",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. Candle generator support shipped in 06d853b68 (sc-17156), SC-20753 supplied the direct/replay executor, and SC-20754 supplied the accepted q4/q8/bf16 ceiling evidence. The exact remaining work is SC-20756: publish off-Mac transformer_ref rows and make the existing Ref2VA Candle executor scheduler-visible.",
-      "approver": "Michael Trefry",
-      "authority": "epic-17137",
-      "approvedDate": "2026-08-20",
-      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20756 makes the Ref2VA Candle route scheduler-visible with off-Mac transformer_ref rows and the generated matrix, routing tests and accepted runtime evidence prove every named precision cell.",
-      "cells": [
-        "models/minimax_h3_ref/precisionTier/bf16",
-        "models/minimax_h3_ref/precisionTier/q4",
-        "models/minimax_h3_ref/precisionTier/q8"
-      ]
-    },
-    {
       "id": "epic-17137-minimax-h3-ref-adapter-sequencing",
       "category": "adapter",
       "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. Candle generator support shipped in 06d853b68 (sc-17156), SC-20753 supplied the direct/replay executor, and SC-20754 supplied the accepted q4/q8/bf16 ceiling evidence. The exact remaining work is SC-20756: publish off-Mac transformer_ref rows and make the existing Ref2VA Candle executor scheduler-visible.",
+      "evidence": "Michael Trefry directly approved carrying the MiniMax-H3 Ref2VA adapter cells under epic-17137 on 2026-08-20. SC-20756 made operation, conditioning, q4/q8/bf16 precision and LoRA available on Candle. The pinned Candle provider still advertises no LoKr support; SC-20757 owns that concrete capability rather than treating it as a permanent exception.",
       "approver": "Michael Trefry",
       "authority": "epic-17137",
       "approvedDate": "2026-08-20",
       "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20756 makes the Ref2VA Candle route scheduler-visible with off-Mac transformer_ref rows and the generated matrix, routing tests and accepted runtime evidence prove the LoRA cell. LoKr remains independently owned by SC-20757.",
+      "revisitCondition": "Delete this sequencing record when SC-20757 implements Candle MiniMax-H3 LoKr and the generated matrix, routing tests and runtime evidence prove the cell.",
       "cells": [
-        "models/minimax_h3_ref/userAdapters/lora",
         "models/minimax_h3_ref/userAdapters/lokr"
       ]
     },

@@ -14633,8 +14633,8 @@ fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
     );
 }
 
-/// The base entry is scheduler-reachable and the reference entry remains direct/replay-only until
-/// sc-20756. Both must select the real provider rather than a procedural stub.
+/// Both catalog partitions are scheduler-reachable and select the real provider rather than a
+/// procedural stub.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_minimax_h3_resolves_the_real_route_not_stub() {
@@ -14656,15 +14656,11 @@ fn candle_minimax_h3_resolves_the_real_route_not_stub() {
             CandleVideoRoute::MiniMaxH3("minimax_h3"),
             "{model}/{mode} must dispatch to the real Candle MiniMax-H3 route, never Stub"
         );
-        let expected = if model == "minimax_h3" {
-            vec!["minimax_h3"]
-        } else {
-            Vec::new()
-        };
+        let expected = vec!["minimax_h3"];
         assert_eq!(
             runtime_descriptor_engine_ids(model, mode),
             expected,
-            "only the base partition's three modes become scheduler-reachable in sc-20755"
+            "each partition's shipped modes must be scheduler-reachable"
         );
     }
 }
@@ -14715,11 +14711,21 @@ fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
             .join("snapshots")
             .join(REVISION);
         std::fs::create_dir_all(&root).expect("snapshot dir");
-        std::fs::write(root.join("receipt-file"), b"installed").expect("snapshot sentinel");
+        std::fs::create_dir_all(root.join("text_encoder")).expect("upstream text encoder");
+        std::fs::write(root.join("text_encoder/config.json"), b"{}").expect("TE config");
         root
     };
     let upstream = stage(UPSTREAM);
     let rehost = stage(REHOST);
+    for tier in ["q4", "q8"] {
+        std::fs::create_dir_all(rehost.join(tier).join("transformer")).expect("packed transformer");
+        std::fs::write(rehost.join(tier).join("transformer/config.json"), b"{}")
+            .expect("transformer config");
+        std::fs::create_dir_all(rehost.join(tier).join("text_encoder"))
+            .expect("packed text encoder");
+        std::fs::write(rehost.join(tier).join("text_encoder/config.json"), b"{}")
+            .expect("TE config");
+    }
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
         ..offline_settings()
@@ -14791,6 +14797,95 @@ fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
             "missing exact LoadSpec mapping: {mapping}"
         );
     }
+}
+
+/// Ref2VA must select the hosted sibling DiT at all three tiers while preserving the base route's
+/// packed text-encoder split. A torn selected tier fails before provider construction.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_ref_resolves_hosted_partition_and_rejects_torn_tiers() {
+    use crate::video_jobs::minimax_h3::resolve_candle_minimax_h3_load;
+
+    const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
+    const REHOST: &str = "SceneWorks/minimax-h3-mlx";
+    const REVISION: &str = "2222222222222222222222222222222222222222";
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_minimax_h3_ref_roots_")
+        .tempdir()
+        .expect("temp dir");
+    let stage = |repo: &str| {
+        let root = huggingface_repo_cache_path(data.path(), repo)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&root).expect("snapshot dir");
+        root
+    };
+    let upstream = stage(UPSTREAM);
+    std::fs::create_dir_all(upstream.join("text_encoder")).expect("dense text encoder");
+    std::fs::write(upstream.join("text_encoder/config.json"), b"{}").expect("TE config");
+    let rehost = stage(REHOST);
+    for tier in ["q4", "q8", "bf16"] {
+        std::fs::create_dir_all(rehost.join(tier).join("transformer")).expect("base transformer");
+        std::fs::write(rehost.join(tier).join("transformer/config.json"), b"{}")
+            .expect("base transformer config");
+        std::fs::create_dir_all(rehost.join(tier).join("transformer_ref"))
+            .expect("reference transformer");
+        std::fs::write(rehost.join(tier).join("transformer_ref/config.json"), b"{}")
+            .expect("reference transformer config");
+    }
+    for tier in ["q4", "q8"] {
+        std::fs::create_dir_all(rehost.join(tier).join("text_encoder"))
+            .expect("packed text encoder");
+        std::fs::write(rehost.join(tier).join("text_encoder/config.json"), b"{}")
+            .expect("TE config");
+    }
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+
+    for (advanced, tier, quant) in [
+        (json!({}), "q4", Some(Quant::Q4)),
+        (json!({ "mlxQuantize": 8 }), "q8", Some(Quant::Q8)),
+        (json!({ "mlxQuantize": 0 }), "bf16", None),
+    ] {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "minimax_h3_ref",
+            "mode": "reference_to_video",
+            "prompt": "a lighthouse keeper hums",
+            "advanced": advanced
+        }));
+        let load = resolve_candle_minimax_h3_load(&settings, &req).expect("complete ref tier");
+        assert_eq!(load.root, upstream);
+        assert_eq!(load.tier, tier);
+        assert_eq!(load.quant, quant);
+        assert_eq!(load.dit_dir, Some(rehost.join(tier).join("transformer")));
+        assert_eq!(
+            load.dit_dir
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .map(|parent| parent.join("transformer_ref")),
+            Some(rehost.join(tier).join("transformer_ref"))
+        );
+        assert_eq!(
+            load.text_encoder_dir,
+            quant.map(|_| rehost.join(tier).join("text_encoder"))
+        );
+    }
+
+    std::fs::remove_dir_all(rehost.join("q8").join("transformer_ref"))
+        .expect("remove selected partition");
+    let torn = request(json!({
+        "projectId": "p",
+        "model": "minimax_h3_ref",
+        "mode": "reference_to_video",
+        "prompt": "a lighthouse keeper hums",
+        "advanced": { "mlxQuantize": 8 }
+    }));
+    let error = resolve_candle_minimax_h3_load(&settings, &torn).expect_err("torn tier refused");
+    assert!(error.to_string().contains("missing transformer_ref"));
 }
 
 /// The engine-presence check reads the REGISTRY, not a pinned revision string (sc-19508).
