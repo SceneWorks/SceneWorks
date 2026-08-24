@@ -653,7 +653,7 @@ def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
         ),
         (
             'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
-            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)?",
+            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)",
         ),
     ):
         assert declaration in production, f"missing exact MiniMax-H3 repo authority: {declaration}"
@@ -995,17 +995,19 @@ def test_measured_memory_rows_declare_their_workload_geometry():
             candle_rows.append((model["id"], candle))
 
     assert len(mlx_rows) == 16
-    assert len(candle_rows) == 37
+    assert len(candle_rows) == 38
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
     assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
 
     measured_rows = [row for row in candle_rows if row[1]["measured"]]
     unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
-    assert len(measured_rows) == 25
+    assert len(measured_rows) == 26
     assert len(unmeasured_rows) == 12
 
     measured_image_rows = [
-        row for row in measured_rows if row[0] not in {"scail2_14b", "minimax_h3"}
+        row
+        for row in measured_rows
+        if row[0] not in {"scail2_14b", "minimax_h3", "minimax_h3_ref"}
     ]
     assert all(
         row[1].get("vramMeasuredPixels") == 1024 * 1024
@@ -1014,9 +1016,11 @@ def test_measured_memory_rows_declare_their_workload_geometry():
     scail = [row for row in measured_rows if row[0] == "scail2_14b"]
     assert len(scail) == 1
     assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
-    minimax_h3 = [row for row in measured_rows if row[0] == "minimax_h3"]
-    assert len(minimax_h3) == 1
-    assert minimax_h3[0][1].get("vramMeasuredPixels") == 1344 * 768
+    minimax_h3 = [
+        row for row in measured_rows if row[0] in {"minimax_h3", "minimax_h3_ref"}
+    ]
+    assert {row[0] for row in minimax_h3} == {"minimax_h3", "minimax_h3_ref"}
+    assert all(row[1].get("vramMeasuredPixels") == 1344 * 768 for row in minimax_h3)
 
     # Unmeasured rows still declare the geometry of their estimate or conservative gate, but they
     # do not enter the calibrated 1024² set. FLUX.2-dev is deliberately the sole 256² gate: its
