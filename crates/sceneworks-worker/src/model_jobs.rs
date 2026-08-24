@@ -2046,9 +2046,11 @@ fn confined_renamed_hf_single_file(
 /// `componentId`), and this resolves each to a local [`gen_core::WeightsSource`].
 ///
 /// Driven PURELY by `descriptor.required_components`: for each declared id it finds the manifest
-/// `coRequisite` download whose `componentId` matches (never inferred from repo names, sc-13679),
-/// then resolves that repo's cached snapshot ENV-CORRECTLY, cache-only. A co-requisite that pins an
-/// immutable `revision` (F-029) reads that exact `snapshots/<sha>/` via
+/// hard `coRequisite` download whose `componentId` matches (never inferred from repo names,
+/// sc-13679), then resolves that repo's cached snapshot ENV-CORRECTLY, cache-only. A soft component
+/// is request-specific and must use [`resolve_optional_component`] or a stricter dedicated route;
+/// it can never satisfy a provider's unconditional `required_components` advertisement. A
+/// co-requisite that pins an immutable `revision` (F-029) reads that exact `snapshots/<sha>/` via
 /// [`huggingface_pinned_snapshot_dir`]; an unpinned one falls back to the `refs/main`-preferring
 /// [`huggingface_snapshot_dir`] — the same seams the PiD-gemma / Wan-Lightning co-requisites use, so
 /// a custom `HF_HOME`/hub is honored and nothing is fetched here.
@@ -2105,15 +2107,28 @@ pub(crate) fn resolve_co_requisites_for_tier(
             .filter(|download| {
                 download.get("coRequisite").and_then(Value::as_bool) == Some(true)
                     && download.get("componentId").and_then(Value::as_str) == Some(component_id)
+                    && download.get("required").and_then(Value::as_str) != Some("soft")
             })
             .collect();
         let download = match candidates.as_slice() {
             [] => {
+                if downloads.iter().any(|download| {
+                    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                        && download.get("componentId").and_then(Value::as_str) == Some(component_id)
+                        && download.get("required").and_then(Value::as_str) == Some("soft")
+                }) {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model_id} requires the model component '{component_id}', but its catalog \
+                         row is `required: soft` — optional components cannot satisfy \
+                         descriptor.required_components and must be resolved only by the \
+                         request-specific route"
+                    )));
+                }
                 return Err(WorkerError::InvalidPayload(format!(
                 "{model_id} requires the model component '{component_id}', but its catalog entry \
                      declares no `coRequisite` download tagged `componentId: \"{component_id}\"` — \
                      the model manifest entry is misconfigured"
-            )))
+            )));
             }
             [only] => *only,
             many => {
@@ -5925,6 +5940,58 @@ mod co_requisite_tests {
         }
     }
 
+    /// Soft co-requisites are install companions for request-specific features. Even when their
+    /// bytes are already cached, neither backend's generic descriptor resolver may reinterpret one
+    /// as an unconditional component and attach it to every ordinary job.
+    #[test]
+    fn resolve_co_requisites_rejects_soft_components_on_both_backends() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "xinsir/controlnet-openpose-sdxl-1.0";
+        let revision = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
+        stage_snapshot_file(
+            data_dir.path(),
+            repo,
+            revision,
+            "diffusion_pytorch_model.safetensors",
+        );
+        let manifest = json!({
+            "id": "sdxl_probe",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo,
+                "revision": revision,
+                "coRequisite": true,
+                "required": "soft",
+                "componentId": "controlnet_openpose",
+                "files": ["diffusion_pytorch_model.safetensors"]
+            }]
+        });
+        let settings = settings_at(data_dir.path().to_path_buf());
+
+        for backend in ["mlx", "candle"] {
+            let descriptor = gen_core::ModelDescriptor {
+                id: "sdxl_probe",
+                family: "sdxl",
+                backend,
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+                required_components: &["controlnet_openpose"],
+                control_kinds: None,
+            };
+            let error = resolve_co_requisites(&descriptor, &manifest, &settings)
+                .expect_err("a soft component cannot satisfy required_components");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(ref message)
+                    if message.contains("required: soft")
+                        && message.contains("request-specific route")),
+                "{backend}: an installed soft component must still be rejected by the generic seam, got {error:?}"
+            );
+        }
+    }
+
     /// sc-13583 / F-002 (co-requisite seam, 5th site): `revision` reaches
     /// [`huggingface_pinned_snapshot_dir`] straight from the payload `modelManifestEntry`. A `..`
     /// revision must NOT resolve to a directory OUTSIDE `snapshots/`, even when that directory exists
@@ -6391,6 +6458,29 @@ mod co_requisite_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_sdxl_descriptor_stages_none_of_the_carried_candle_components() {
+        let descriptor = crate::inference_runtime::media_descriptor("sdxl")
+            .expect("the macOS MLX SDXL provider is registered");
+        assert_eq!(descriptor.backend, "mlx");
+        assert!(
+            descriptor.required_components.is_empty(),
+            "the self-contained MLX SDXL provider requires no caller-staged components"
+        );
+
+        let components = resolve_co_requisites(
+            &descriptor,
+            &builtin_manifest_entry("realvisxl"),
+            &settings_at(PathBuf::from("/nonexistent/sc-20747-mlx-sdxl")),
+        )
+        .expect("an empty MLX descriptor ignores carried Candle-only component metadata");
+        assert!(
+            components.is_empty(),
+            "the generic resolver stages no components for self-contained MLX SDXL"
+        );
+    }
+
     // --- SDXL shared components (epic 13657, sc-13682) -----------------------------------------------
 
     /// The candle `sdxl` generator descriptor shape at the inference pin: it advertises the three
@@ -6458,8 +6548,9 @@ mod co_requisite_tests {
             stage_snapshot_file(data_dir.path(), repo, revision, file);
         }
 
-        // Every candle-SDXL base + InstantID declares the SAME three coRequisites by `componentId`, so
-        // resolving the candle `sdxl` descriptor against each live entry must map ALL THREE.
+        // Every Candle-SDXL base + InstantID declares the SAME three hard coRequisites by
+        // `componentId`. The five pose backbones also declare soft OpenPose, which this generic
+        // descriptor seam must ignore. Resolving against each live entry maps exactly the hard three.
         for model_id in [
             "sdxl",
             "realvisxl",

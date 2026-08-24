@@ -276,18 +276,39 @@ test("windows-candle rebuilds the exact Krea snapshot path from the generalized 
   assert.match(workflow, /if \(\$isKrea -and \$env:KREA_ROOT_OVERRIDE\) \{/);
 });
 
-// sc-18677: the provisioning branch's timeout is the whole point of the change (a 144 GB fetch
-// under the ordinary 45m cap dies mid-download), and the doc claims Krea's two dispatch shapes
-// keep their exact previous budgets. Pin the whole expression the way the macOS twin above pins
-// its lane's -- otherwise a revert to a flat `timeout-minutes: 45` passes every other test here.
-test("windows-candle keeps the provisioning and five-rung timeout budgets", async () => {
+// sc-18677/sc-20974: the provisioning and terminal timeout arms are load-bearing. Pin the whole
+// expression the way the macOS twin above pins its lane's -- otherwise either a revert to the
+// ordinary 45m cap or the terminal campaign's observed 360m cutoff passes every other test here.
+test("windows-candle keeps the terminal, provisioning, and five-rung timeout budgets", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
+  const runbook = await source("docs/epic-20738-terminal-cuda.md");
+  const timeoutContract =
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/;
   assert.match(
     workflow,
-    // The LTX Eros acceptance arm (SC-18902, from main) rides ahead of the provisioning budget;
-    // the provisioning / five-rung / default budgets keep their exact prior values behind it.
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+    // The LTX Eros arm (SC-18902, from main) keeps six hours, while the strictly serial
+    // 19-cell terminal campaign gets twelve. Provisioning, five-rung, and default stay fixed.
+    timeoutContract,
   );
+  assert.match(
+    runbook,
+    /one strictly serial job a 720-minute hard timeout[\s\S]*no step is\s+assigned a timeout above 360 minutes/,
+    "the runbook must bind the job-level 720-minute budget without widening a step",
+  );
+
+  const terminalArm =
+    "github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720";
+  for (const [name, mutated] of [
+    ["terminal timeout regressed to 360", workflow.replace(terminalArm, terminalArm.replace("720", "360"))],
+    ["terminal timeout arm removed", workflow.replace(` || ${terminalArm}`, "")],
+  ]) {
+    assert.notEqual(mutated, workflow, `${name} mutation must modify the workflow fixture`);
+    assert.throws(
+      () => assert.match(mutated, timeoutContract),
+      undefined,
+      `${name} must fail the exact timeout contract`,
+    );
+  }
 });
 
 test("windows-candle keeps the five-rung guards while decoupling provisioning", async () => {

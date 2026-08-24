@@ -97,6 +97,12 @@ EXPECTED_SHIPPED_CONTROL_WEIGHTS = frozenset(
             "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
         ),
         (
+            "sdxl",
+            "xinsir/controlnet-openpose-sdxl-1.0",
+            "diffusion_pytorch_model.safetensors",
+            "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+        ),
+        (
             "kolors_control",
             "Kwai-Kolors/Kolors-ControlNet-Pose",
             "diffusion_pytorch_model.safetensors",
@@ -455,6 +461,7 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         "image_jobs/krea_imported.rs",
         "image_jobs/qwen.rs",
         "image_jobs/qwen_control.rs",
+        "image_jobs/sdxl_control.rs",
         "image_jobs/zimage.rs",
         "image_jobs/zimage_control.rs",
     }
@@ -963,20 +970,29 @@ def test_measured_memory_rows_declare_their_workload_geometry():
 
 
 def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
-    """sc-18473: the installable shared package and its fail-closed gate share one exact row."""
+    """sc-20744: terminal receipts promote exact q4/q8 alongside the established bf16 row."""
     manifest = _load_builtin_models_manifest()
     scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
     candle = scail["candle"]
     assert candle == {
-        "minMemoryGb": 105,
-        "vramGbByTier": {"bf16": 102.115},
+        "minMemoryGb": 64,
+        "vramGbByTier": {"q4": 61.260, "q8": 64.928, "bf16": 102.115},
         "vramMeasuredPixels": 832 * 480,
         "measured": True,
     }
     assert candle["minMemoryGb"] == math.ceil(
-        candle["vramGbByTier"]["bf16"] + 2
+        candle["vramGbByTier"]["q4"] + 2
     )
-    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+    assert "64 GB for q4, 67 GB for q8, and 105 GB for bf16" in scail["ui"]["description"]
+
+    variants = {download["variant"]: download for download in scail["downloads"]}
+    assert set(variants) == {"q4", "q8", "bf16"}
+    for tier in ("q4", "q8"):
+        assert variants[tier]["files"] == [f"{tier}/*"]
+        assert variants[tier]["platforms"] == ["macos", "windows", "linux"]
+        assert variants[tier]["revision"] == "ce88cfdb1008f395e9c820e525e6db7b6695f7b3"
+    assert variants["bf16"]["platforms"] == ["macos", "windows", "linux"]
+    assert variants["q4"]["default"] is True
 
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(

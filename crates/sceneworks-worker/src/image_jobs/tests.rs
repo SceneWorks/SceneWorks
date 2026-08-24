@@ -5209,6 +5209,7 @@ fn every_generating_mlx_route_has_a_real_generation_set_adapter() {
             "instantid_realvisxl",
             "mlx_instantid",
         ),
+        (ImageRoute::SdxlControl, "sdxl", "sdxl_control"),
         (ImageRoute::PulidFlux, "pulid_flux_dev", "mlx_pulid_flux"),
         (ImageRoute::SdxlAdvanced, "sdxl", "mlx_sdxl"),
         (
@@ -9873,35 +9874,52 @@ fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
     }
 }
 
-// sc-11814 (sc-5968 parity): a strict-pose job on an MLX model with NO pose-control lane (a plain `sdxl`
-// pose job with no reference → no `sdxl` advanced sub-mode) that `mlx_available` would otherwise render as
-// plain txt2img must route to the loud `PoseReject` — the MLX twin of the candle `PoseReject`. `sdxl` is a
-// MODEL_TABLE id, so `mlx_available` matches it; without the reject arm the poses silently drop.
+// sc-20747: the three independently accepted SDXL-family model ids use the backend-neutral OpenPose
+// provider. The route is weight-blind so a missing base/control artifact fails in the handler instead
+// of falling through to plain MLX generation, and it wins over edit/reference routes so conflicts fail
+// closed in that handler.
 #[cfg(target_os = "macos")]
 #[test]
-fn image_route_rejects_pose_on_unwired_mlx_family() {
+fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = Settings::from_env();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
-    // Plain `sdxl` pose job, base weights present (`modelPath`), no reference → no sub-mode → `PoseReject`,
-    // never `Mlx`.
-    let sdxl_pose = request(json!({
-        "projectId": "p", "model": "sdxl", "count": 1,
-        "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
-    }));
-    let route = resolve_image_route(&sdxl_pose, &settings);
-    assert_eq!(route, Some(ImageRoute::PoseReject));
-    assert_ne!(
-        route,
-        Some(ImageRoute::Mlx),
-        "an unwired MLX pose family must NOT silently render plain txt2img",
-    );
-    // `sdxl` is not a wired family, so it is the sc-5968 no-lane reject, not the missing-base variant.
-    assert_ne!(route, Some(ImageRoute::PoseControlBaseMissing));
+    for model in SDXL_CONTROL_MODELS {
+        let pose = request(json!({
+            "projectId": "p", "model": model, "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
+        }));
+        assert_eq!(
+            resolve_image_route(&pose, &settings),
+            Some(ImageRoute::SdxlControl),
+            "{model} pose must use the shared MLX SDXL ControlNet route",
+        );
+    }
 
-    // Guard: the same `sdxl` job WITHOUT poses is unaffected — it routes to the generic MLX txt2img lane.
+    for conflict in [
+        json!({
+            "projectId": "p", "model": "sdxl", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
+        }),
+        json!({
+            "projectId": "p", "model": "realvisxl", "referenceAssetId": "reference",
+            "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
+        }),
+        json!({
+            "projectId": "p", "model": "sdxl",
+            "advanced": { "modelPath": model_path.clone(), "poses": "malformed" }
+        }),
+    ] {
+        assert_eq!(
+            resolve_image_route(&request(conflict), &settings),
+            Some(ImageRoute::SdxlControl),
+            "material pose conflicts and malformed carriers must remain in the rejecting control lane",
+        );
+    }
+
+    // Guard: the same job WITHOUT poses is unaffected — it routes to generic MLX txt2img.
     let sdxl_t2i = request(json!({
         "projectId": "p", "model": "sdxl", "count": 1,
         "advanced": { "modelPath": model_path }
@@ -10437,10 +10455,10 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
 // sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
 // `else if settings.backend_candle_enabled && <predicate>` ladder pulled out of `run_image_generate_job`
 // into a table (the candle sibling of `resolve_image_route`/`ImageRoute`). Locks the flag gate + the
-// no-pose-lane reject + the plain txt2img arm (the branches that route on model id, not staged weights).
+// SDXL control lane + the plain txt2img arm (the branches that route on model id, not staged weights).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
+fn candle_image_route_gates_on_flag_then_sdxl_control_then_txt2img() {
     let mut settings = Settings::from_env();
 
     // Candle disabled (default) → None (the job stubs), regardless of model.
@@ -10455,15 +10473,36 @@ fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
         Some(CandleImageRoute::CandleTxt2Img),
     );
 
-    // A strict-pose job on sdxl (a candle engine with NO pose lane) → the loud reject, never silent T2I.
-    let sdxl_pose = request(json!({
-        "projectId": "p", "model": "sdxl", "count": 1,
-        "advanced": { "poses": [{ "id": "a" }] }
-    }));
-    assert_eq!(
-        resolve_candle_image_route(&sdxl_pose, &settings),
-        Some(CandleImageRoute::PoseReject),
-    );
+    // Every shipped SDXL-family pose job uses the dedicated shared ControlNet route.
+    for model in SDXL_CONTROL_MODELS {
+        let pose = request(json!({
+            "projectId": "p", "model": model, "count": 1,
+            "advanced": { "poses": [{ "id": "a" }] }
+        }));
+        assert_eq!(
+            resolve_candle_image_route(&pose, &settings),
+            Some(CandleImageRoute::SdxlControl),
+            "{model} pose must use the shared Candle SDXL ControlNet route",
+        );
+    }
+
+    // Control wins before edit/IP and retains malformed carriers so the handler rejects conflicts.
+    for conflict in [
+        json!({
+            "projectId": "p", "model": "sdxl", "mode": "edit_image", "sourceAssetId": "source",
+            "advanced": { "poses": [{}] }
+        }),
+        json!({
+            "projectId": "p", "model": "realvisxl", "referenceAssetId": "reference",
+            "advanced": { "poses": [{}] }
+        }),
+        json!({ "projectId": "p", "model": "sdxl", "advanced": { "poses": "malformed" } }),
+    ] {
+        assert_eq!(
+            resolve_candle_image_route(&request(conflict), &settings),
+            Some(CandleImageRoute::SdxlControl),
+        );
+    }
 
     // A non-candle model → None (stubs / MLX-only elsewhere).
     let unknown = request(json!({ "projectId": "p", "model": "not_a_candle_engine", "count": 1 }));
@@ -11449,15 +11488,15 @@ fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
         Some(CandleImageRoute::CandleTxt2Img),
     );
 
-    // A non-wired candle family with poses (e.g. sdxl, which has no candle pose lane at all) still hits
-    // the sc-5968 `PoseReject`, not the missing-base variant.
+    // SDXL control is weight-blind at routing time: even with no installed artifacts it stays on the
+    // dedicated lane and lets the handler report the exact missing base/control error, never plain T2I.
     let sdxl_pose = request(json!({
         "projectId": "p", "model": "sdxl", "count": 1,
         "advanced": { "poses": [{ "id": "a" }] }
     }));
     assert_eq!(
         resolve_candle_image_route(&sdxl_pose, &settings),
-        Some(CandleImageRoute::PoseReject),
+        Some(CandleImageRoute::SdxlControl),
     );
 }
 
@@ -11697,6 +11736,7 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
     );
     // Every other strict-pose control lane counts the same way.
     for route in [
+        CandleImageRoute::SdxlControl,
         CandleImageRoute::QwenControl,
         CandleImageRoute::KolorsControl,
         CandleImageRoute::Flux2Control,
@@ -11718,6 +11758,7 @@ fn candle_strict_pose_route_image_count_is_pose_set_length() {
 fn sc18477_every_named_bespoke_lane_declares_real_adapter_application() {
     let request = request(json!({ "projectId": "p", "model": "z_image_turbo", "count": 1 }));
     for route in [
+        CandleImageRoute::SdxlControl,
         CandleImageRoute::SdxlEdit,
         CandleImageRoute::SdxlIpAdapter,
         CandleImageRoute::Flux2Edit,
@@ -11755,6 +11796,7 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
             "instantid_realvisxl",
             "candle_instantid",
         ),
+        (CandleImageRoute::SdxlControl, "sdxl", "sdxl_control"),
         (CandleImageRoute::SdxlEdit, "sdxl", "candle_sdxl_edit"),
         (
             CandleImageRoute::Flux2Edit,
@@ -14152,6 +14194,45 @@ fn validate_control_kind_accepts_and_rejects_per_table() {
     );
     // Unknown / non-Fun-Union engine id is rejected outright.
     assert!(validate_control_kind("sdxl_tile_control", &ControlKind::Pose).is_err());
+}
+
+/// The generic SDXL provider is deliberately narrower than the Fun-Union engines: it exposes only
+/// the pinned OpenPose checkpoint and must reject canny/depth even though the shared preprocessor can
+/// produce those kinds for other providers.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn sdxl_control_catalog_is_pose_only() {
+    let row = strict_control_engine(SDXL_CONTROL_ENGINE_ID).expect("sdxl control row");
+    assert_eq!(row.repo, SDXL_CONTROL_REPO);
+    assert_eq!(row.supported_kinds, &[ControlKind::Pose]);
+    assert!(validate_control_kind(SDXL_CONTROL_ENGINE_ID, &ControlKind::Pose).is_ok());
+    assert!(validate_control_kind(SDXL_CONTROL_ENGINE_ID, &ControlKind::Canny).is_err());
+    assert!(validate_control_kind(SDXL_CONTROL_ENGINE_ID, &ControlKind::Depth).is_err());
+}
+
+#[test]
+fn sdxl_control_bespoke_load_applies_fit_and_flash_state_before_allocation() {
+    let source = include_str!("sdxl_control.rs");
+    let finalized = source
+        .find("spec = attach_manifest_text_encoder(")
+        .expect("selected text encoder is attached to the final spec");
+    let mlx_gate = source
+        .find("let spec = apply_sdxl_control_mlx_residency(spec)?;")
+        .expect("the bespoke MLX route applies its residency/fit contract");
+    let candle_gate = source
+        .find("let (base, overlays) = sdxl_control_admission_paths(&spec)?;")
+        .expect("the bespoke Candle route derives admission from the final spec");
+    let flash = source
+        .find("apply_sdxl_control_flash_attn(flash_attn);")
+        .expect("the bespoke Candle route applies per-request flash attention");
+    let load = source
+        .find("crate::inference_runtime::load(SDXL_CONTROL_ENGINE_ID, &spec)")
+        .expect("the provider load remains explicit");
+    assert!(finalized < mlx_gate && finalized < candle_gate);
+    assert!(mlx_gate < load && candle_gate < load && flash < load);
 }
 
 /// `requested_control_kind`: default Pose (no `controlMode` → byte-preserved pose path); parse
@@ -19430,6 +19511,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "InstantId",
             "instantid.rs",
             include_str!("instantid.rs"),
+            "admit_conditioning_paths(",
+        ),
+        (
+            "SdxlControl",
+            "sdxl_control.rs",
+            include_str!("sdxl_control.rs"),
             "admit_conditioning_paths(",
         ),
         (

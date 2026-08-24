@@ -180,6 +180,8 @@ enum ImageRoute {
     /// conditioning and the fine-tuned entrypoint refuses adapters.
     MageFinetuned,
     InstantId,
+    /// Generic SDXL OpenPose ControlNet, shared by the five independently accepted model ids.
+    SdxlControl,
     PulidFlux,
     SdxlAdvanced,
     SensenovaEdit,
@@ -190,8 +192,7 @@ enum ImageRoute {
     /// falling through to `Mlx` (plain txt2img) and silently dropping the poses (sc-11796 generalized to
     /// every wired family, sc-11814) — the MLX twin of the candle `CandleImageRoute::PoseControlBaseMissing`.
     PoseControlBaseMissing,
-    /// A strict-pose job on an MLX model with NO pose-control lane (e.g. a plain `sdxl` pose job with no
-    /// reference — SDXL identity-pose ships via InstantID / IP-Adapter) that `mlx_available` would
+    /// A strict-pose job on an MLX model with NO pose-control lane that `mlx_available` would
     /// otherwise render as plain txt2img, dropping the poses. Reject loudly (sc-5968) — the MLX twin of
     /// the candle `CandleImageRoute::PoseReject`.
     PoseReject,
@@ -213,7 +214,7 @@ enum ImageRoute {
 ///   - `flux_dev`      → `flux1_dev_control_available` (Shakker Union-Pro-2.0)
 ///   - `flux2_dev`     → `flux2_dev_control_available` (Fun-Controlnet-Union)
 ///
-/// Distinct from a non-wired MLX pose family (e.g. `sdxl`), which reaches the sc-5968
+/// Distinct from a non-wired MLX pose family, which reaches the sc-5968
 /// [`ImageRoute::PoseReject`] instead. (sc-11814.)
 #[cfg(target_os = "macos")]
 const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
@@ -329,6 +330,11 @@ fn resolve_image_route_with_imported_availability(
         Some(ImageRoute::MageFinetuned)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
+    } else if sdxl_control_candidate(request) {
+        // Keep the generic SDXL ControlNet route after InstantID and before every SDXL edit,
+        // IP-Adapter, and generic route. The handler validates conflicts and malformed carriers,
+        // so a pose can never be silently discarded by a sibling conditioned path.
+        Some(ImageRoute::SdxlControl)
     } else if pulid_flux_available(request, settings) {
         Some(ImageRoute::PulidFlux)
     } else if sdxl_advanced_available(request, settings) {
@@ -356,8 +362,7 @@ fn resolve_image_route_with_imported_availability(
         //    `mlx_available` succeeds — for `krea_2_turbo` the control base (`resolve_krea_control_base`) diverges
         //    from the txt2img base (the reported sc-11796 silent-drop), and for `kolors` the lane additionally
         //    needs a `referenceAssetId`. Generalizes the sc-11796 krea-only reject to every wired family (sc-11814).
-        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img (e.g. a plain `sdxl`
-        //    pose job with no reference — SDXL identity-pose ships via InstantID / IP-Adapter, claimed above) →
+        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img →
         //    the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the generic `mlx_available` arm.
         if WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str()) {
@@ -460,6 +465,7 @@ impl ImageRoute {
             self,
             ImageRoute::ZImageControl
                 | ImageRoute::ZImageBaseControl
+                | ImageRoute::SdxlControl
                 | ImageRoute::QwenControl
                 | ImageRoute::KolorsControl
                 | ImageRoute::KreaControl
@@ -483,6 +489,7 @@ impl ImageRoute {
         match self {
             ImageRoute::ZImageControl
             | ImageRoute::ZImageBaseControl
+            | ImageRoute::SdxlControl
             | ImageRoute::QwenControl
             | ImageRoute::KolorsControl
             | ImageRoute::KreaControl
@@ -531,6 +538,7 @@ impl ImageRoute {
     /// descriptor label their stream resolves.
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
+            ImageRoute::SdxlControl => SDXL_CONTROL_ADAPTER_LABEL,
             ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
             ImageRoute::KreaImported | ImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
@@ -557,6 +565,8 @@ enum CandleImageRoute {
     /// InstantID identity (sc-5491) — the off-Mac sibling of `ImageRoute::InstantId`. Checked first
     /// because `instantid_realvisxl` is not an `is_candle_engine` txt2img id.
     InstantId,
+    /// Generic SDXL OpenPose ControlNet, shared with the macOS route through registry id `sdxl`.
+    SdxlControl,
     /// SDXL img2img / inpaint / outpaint edit (sc-5487).
     SdxlEdit,
     /// FLUX.2-klein reference / img2img edit (sc-5487).
@@ -844,6 +854,7 @@ impl CandleImageRoute {
     fn applies_request_loras(self, request: &ImageRequest) -> bool {
         match self {
             CandleImageRoute::InstantId
+            | CandleImageRoute::SdxlControl
             | CandleImageRoute::SdxlEdit
             | CandleImageRoute::SdxlIpAdapter
             | CandleImageRoute::KolorsIpAdapter
@@ -885,6 +896,7 @@ impl CandleImageRoute {
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
             CandleImageRoute::QwenControl
+            | CandleImageRoute::SdxlControl
             | CandleImageRoute::KolorsControl
             | CandleImageRoute::ZimageControl
             | CandleImageRoute::Flux2Control
@@ -916,6 +928,7 @@ impl CandleImageRoute {
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
             CandleImageRoute::InstantId => INSTANTID_ENGINE,
+            CandleImageRoute::SdxlControl => SDXL_CONTROL_ADAPTER_LABEL,
             CandleImageRoute::SdxlEdit => sdxl_edit_candle::SDXL_EDIT_CANDLE_ENGINE,
             CandleImageRoute::Flux2Edit => flux2_edit_candle::FLUX2_EDIT_CANDLE_ENGINE,
             CandleImageRoute::QwenEdit => qwen_edit_candle::QWEN_EDIT_CANDLE_ENGINE,
@@ -1018,6 +1031,10 @@ fn resolve_candle_image_route_with_prepared_availability(
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
     if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
+    } else if sdxl_control_candidate(request) {
+        // Same precedence as the core router: InstantID stays isolated, then generic SDXL control
+        // claims every material pose carrier before edit/IP/generic routes can discard it.
+        Some(CandleImageRoute::SdxlControl)
     } else if sdxl_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SdxlEdit)
     } else if matches!(
@@ -1157,7 +1174,7 @@ fn resolve_candle_image_route_with_prepared_availability(
         //    snapshot is absent (the lane's local weight-gate failed) → `PoseControlBaseMissing`
         //    ("control base snapshot not installed"). Previously this family was excluded from the reject
         //    entirely and fell through to `CandleTxt2Img`, silently dropping the poses (sc-11171, F-008).
-        //  - No candle pose lane (e.g. sdxl) → the sc-5968 no-silent-T2I `PoseReject`.
+        //  - No candle pose lane → the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the txt2img arm below.
         if WIRED_CANDLE_POSE_FAMILIES.contains(&request.model.as_str()) {
             Some(CandleImageRoute::PoseControlBaseMissing)
@@ -1900,6 +1917,108 @@ pub(crate) fn resolve_weights_dir(
     Ok(snapshot)
 }
 
+/// FLUX.1's generic Candle route reads only the hosted packed q4/q8 turnkeys. The shared resolver
+/// deliberately has a best-available fallback chain for ordinary matrix models; using it unchecked
+/// here could turn an explicit FLUX q4/q8 selection into a different tier (or a dense root). Probe the
+/// shared resolver with the exact requested tier, then accept its answer only when the resolved
+/// directory names that same tier.
+///
+/// This is intentionally limited to generic Candle text-to-image. The existing FLUX IP-Adapter and
+/// strict-control providers retain their own established weight-resolution and load contracts.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_flux1_packed_requested_tier(request: &ImageRequest) -> WorkerResult<&'static str> {
+    match request.advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => Ok("q4"),
+        Some(value) => match value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+        {
+            Some(4) => Ok("q4"),
+            Some(8) => Ok("q8"),
+            _ => Err(WorkerError::InvalidPayload(format!(
+                "{} on Candle supports only its hosted packed q4 or q8 tiers",
+                request.model
+            ))),
+        },
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_flux1_packed_resolution_is_exact(requested_tier: &str, resolved: &Path) -> bool {
+    resolved.file_name().and_then(|name| name.to_str()) == Some(requested_tier)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_flux1_packed_weights_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    let requested_tier = candle_flux1_packed_requested_tier(request)?;
+    let mut probe = request.clone();
+    probe.advanced.insert(
+        "mlxQuantize".to_owned(),
+        Value::from(if requested_tier == "q4" { 4 } else { 8 }),
+    );
+    let resolved = resolve_weights_dir(&probe, settings)?;
+    match resolved {
+        Some(dir) if candle_flux1_packed_resolution_is_exact(requested_tier, &dir) => Ok(Some(dir)),
+        Some(_) | None => Err(WorkerError::InvalidPayload(format!(
+            "{} requested Candle packed {requested_tier}, but that exact artifact is not installed; \
+             refusing to fall back to a different tier",
+            request.model
+        ))),
+    }
+}
+
+/// Whether completed-image telemetry must replay the Candle-only FLUX.1 exact-tier resolver.
+///
+/// The metrics consumer is shared by MLX and Candle builds, but the direct packed FLUX.1 route is
+/// not: macOS must keep using its ordinary MLX resolver and default-tier semantics. Keeping that
+/// distinction in a pure cfg-sensitive predicate makes the build boundary testable without making
+/// [`resolve_candle_flux1_packed_weights_dir`] (or any Candle production route) available on macOS.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn completed_image_metrics_use_candle_flux1_exact_resolution(model: &str) -> bool {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let exact = matches!(model, "flux_schnell" | "flux_dev");
+    #[cfg(target_os = "macos")]
+    let exact = {
+        let _ = model;
+        false
+    };
+    exact
+}
+
+/// Re-resolve the tier used by a completed image for telemetry only. The Candle-only FLUX.1 lane
+/// replays its exact q4/q8 resolver; macOS and all other families replay the ordinary resolver that
+/// selected their production weights. The cfg around the Candle call is intentional: a shared
+/// metrics helper must never make the off-Mac Candle route part of a macOS build.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_completed_image_metrics_tier_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<PathBuf> {
+    let _use_candle_exact =
+        completed_image_metrics_use_candle_flux1_exact_resolution(&request.model);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if _use_candle_exact {
+        return resolve_candle_flux1_packed_weights_dir(request, settings)
+            .ok()
+            .flatten();
+    }
+    #[cfg(target_os = "macos")]
+    debug_assert!(
+        !_use_candle_exact,
+        "macOS metrics must not select the Candle-only FLUX.1 resolver"
+    );
+    resolve_weights_dir(request, settings).ok().flatten()
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn resolved_mlx_artifact_tier(
     weights_dir: &Path,
@@ -2289,8 +2408,10 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "qwen_image_edit_2511_lightning",
     // FLUX.1 (sc-8669, Group-B): schnell + dev ship the standard q4/q8/bf16 turnkey. FLUX quantizes
     // all four components (DiT transformer + CLIP + T5 + VAE attention), so the TE is packed too —
-    // hence no `mlx.denseTextEncoderTier` (the q4/q8 load-quant is a harmless no-op on already-packed
-    // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
+    // hence no `mlx.denseTextEncoderTier`. The pinned Candle descriptor advertises no load-time
+    // quants and rejects a nonempty `LoadSpec.quantize`; its loader packed-detects q4/q8 directly
+    // from the selected directory while the worker records that resolved tier separately. Replaces
+    // the gated BFL download + install-time quantize.
     "flux_schnell",
     "flux_dev",
     // PuLID-FLUX (sc-9947, epic 8506): the MLX lane's FLUX.1-dev backbone now loads from the SAME
@@ -2315,8 +2436,8 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // SANA + SANA-Sprint (sc-8489/sc-8513, epic 8506): the `SceneWorks/Sana_1600M_1024px_mlx` /
     // `Sana_Sprint_1.6B_1024px_mlx` turnkeys ship standard q4/q8/bf16 tiers. mlx-gen #653 packs the
     // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
-    // dense in every tier. Like flux1/qwen (and UNLIKE the dense-TE klein class) the q4/q8 load-quant
-    // is a harmless no-op on the already-packed weights and bf16 resolves to Quant::None — so these do
+    // dense in every tier. Unlike the dense-TE klein class, the q4/q8 load-quant is an accepted no-op
+    // on the already-packed weights and bf16 resolves to Quant::None — so these do
     // NOT need a `mlx.denseTextEncoderTier` declaration (only `flux2_klein_9b` / `_kv` carry that flag;
     // the "NOT" was dropped by a rename, which left this block contradicting its own UNLIKE clause two
     // lines above). The SANA descriptor now advertises supported_quants
@@ -2326,9 +2447,9 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "sana_sprint_1600m",
     // Kolors (sc-9946, epic 8506): the `SceneWorks/kolors-mlx` turnkey ships standard q4/q8/bf16
     // tiers. mlx-gen #659 packs the SDXL-style UNet + the ChatGLM3-6B `ChatGlmLinear` projections
-    // and packed-detects on load; the SDXL VAE stays dense in every tier. Like flux1/sana (and
-    // UNLIKE the dense-TE klein class) the ChatGLM3 TE is packed, so the q4/q8 load-quant is a
-    // harmless no-op on the already-packed weights and bf16 resolves to Quant::None — no
+    // and packed-detects on load; the SDXL VAE stays dense in every tier. Unlike the dense-TE klein
+    // class, the ChatGLM3 TE is packed, so the q4/q8 load-quant is an accepted no-op on the
+    // already-packed weights and bf16 resolves to Quant::None — no
     // `mlx.denseTextEncoderTier` declaration. The kolors descriptor already advertises supported_quants Q4/Q8,
     // so it flows through the same resolve_quant + reconcile path as every other matrix model.
     "kolors",
@@ -5683,6 +5804,25 @@ mod metrics_settings_tests {
 
     fn request(value: serde_json::Value) -> ImageRequest {
         ImageRequest::from_payload(value.as_object().unwrap())
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn completed_metrics_replay_exact_flux1_tiers_only_on_the_candle_build() {
+        let candle_build = cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
+        for model in ["flux_schnell", "flux_dev"] {
+            assert_eq!(
+                completed_image_metrics_use_candle_flux1_exact_resolution(model),
+                candle_build,
+                "{model} must use Candle's q4-default exact resolver only on the Candle build"
+            );
+        }
+        assert!(!completed_image_metrics_use_candle_flux1_exact_resolution(
+            "qwen_image"
+        ));
     }
 
     #[test]
@@ -9181,6 +9321,15 @@ fn candle_quant_for_resolved_tier(
     if is_dense_te_tier(request) {
         return (None, resolved_bits);
     }
+    // The pinned candle-gen-flux descriptor advertises `supported_quants: []` and rejects a
+    // nonempty `LoadSpec.quantize`: its direct loader discovers the already-packed q4/q8 tensors
+    // from the selected directory. Keep the load instruction empty while retaining the resolved
+    // artifact bits for the recipe and later telemetry. This is deliberately narrower than
+    // `!supports_quant`: other descriptors with an empty list are dense-only and must not acquire
+    // a packed-tier receipt.
+    if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        return (None, resolved_bits);
+    }
     if force_dense || !supports_quant {
         return (None, None);
     }
@@ -9385,6 +9534,83 @@ mod candle_resolved_tier_contract_tests {
             }
         }
     }
+
+    fn flux1_request(model: &str, quantize: Option<Value>) -> ImageRequest {
+        let mut payload = json!({
+            "model": model,
+            "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+        });
+        if let Some(quantize) = quantize {
+            payload["advanced"] = json!({ "mlxQuantize": quantize });
+        }
+        ImageRequest::from_payload(payload.as_object().expect("request object"))
+    }
+
+    #[test]
+    fn flux1_candle_packed_tiers_are_exact_and_keep_the_load_receipt_truthful() {
+        for model_id in ["flux_dev", "flux_schnell"] {
+            let descriptor = mlx_model(model_id).expect("linked Candle FLUX.1 descriptor");
+            assert!(
+                !descriptor.supports_quant(),
+                "{model_id}'s pinned descriptor must keep supported_quants empty"
+            );
+
+            for (requested, expected) in
+                [(None, "q4"), (Some(json!(4)), "q4"), (Some(json!(8)), "q8")]
+            {
+                let request = flux1_request(model_id, requested);
+                assert_eq!(candle_flux1_packed_requested_tier(&request).unwrap(), expected);
+
+                let exact = Path::new("/models").join(model_id).join(expected);
+                let other = Path::new("/models").join(model_id).join(if expected == "q4" {
+                    "q8"
+                } else {
+                    "q4"
+                });
+                assert!(candle_flux1_packed_resolution_is_exact(expected, &exact));
+                assert!(
+                    !candle_flux1_packed_resolution_is_exact(expected, &other),
+                    "a requested {expected} must not fall back to {}",
+                    other.display()
+                );
+
+                let expected_bits = if expected == "q4" { Some(4) } else { Some(8) };
+                let (load_quant, receipt_bits) = candle_quant_for_resolved_tier(
+                    &request,
+                    expected,
+                    &exact,
+                    descriptor.supports_quant(),
+                    false,
+                );
+                assert_eq!((load_quant, receipt_bits), (None, expected_bits));
+                assert_eq!(
+                    load_spec(exact.clone(), load_quant, Vec::new(), None).quantize,
+                    None,
+                    "the prepacked FLUX.1 descriptor rejects a load-time quant instruction"
+                );
+                assert_eq!(
+                    mlx_raw_settings(&request, "SceneWorks/flux1-mlx", 28, receipt_bits, None)
+                        .get("mlxQuantize")
+                        .and_then(Value::as_i64),
+                    expected_bits,
+                    "the recipe must retain the exact packed artifact tier"
+                );
+                assert_eq!(
+                    effective_quant_label_gated(&request, false, Some(&exact)),
+                    (Some(expected.to_owned()), expected_bits),
+                    "asset telemetry must agree with the recipe's packed tier"
+                );
+            }
+        }
+
+        for unsupported in [json!(0), json!(6), json!(-1), json!(true), json!("4.0")] {
+            assert!(
+                candle_flux1_packed_requested_tier(&flux1_request("flux_dev", Some(unsupported)))
+                    .is_err(),
+                "bf16, q6, and malformed FLUX.1 selections must fail closed"
+            );
+        }
+    }
 }
 
 /// sc-13960 — the evict-then-reclaim gate driver the bespoke (non-cache-evicting) candle image lanes
@@ -9530,6 +9756,13 @@ async fn generate_candle_stream(
     // live VRAM budget is re-pointed at the highest installed tier that does, before the spec is built.
     let mut weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
         base_dir.clone()
+    } else if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        resolve_candle_flux1_packed_weights_dir(request, settings)?.ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Candle packed FLUX.1 weights snapshot not found for {}",
+                request.model
+            ))
+        })?
     } else {
         resolve_weights_dir(request, settings)?.ok_or_else(|| {
             let repo = model_repo(request, &model);
@@ -9853,11 +10086,13 @@ async fn generate_candle_stream(
     // `Keep`. Downtiering NVFP4 to q4/q8 would silently swap the numerics of an explicitly-picked tier —
     // exactly the creative-choice violation SC#5 forbids. Pinned by
     // `nvfp4_tier_is_never_downtiered_by_the_capability_clamp`.
-    let explicit_pick = request
-        .advanced
-        .get("mlxQuantizeExplicit")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let explicit_pick = (matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
+        && request.advanced.contains_key("mlxQuantize"))
+        || request
+            .advanced
+            .get("mlxQuantizeExplicit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if convrot.is_none() && !explicit_pick {
         let floor = capability_downtier_floor(
             krea_turbo_ladder,
@@ -10034,9 +10269,10 @@ async fn generate_candle_stream(
             }
         }
     }
-    // Reconcile only after the capability clamp has made its final directory/tier decision. The same
-    // resolved value now drives recipe bits, LoadSpec.quantize, MemoryNumericTier, active component
-    // floors, and the provider begin-request check.
+    // Reconcile only after the capability clamp has made its final directory/tier decision. The
+    // resolved artifact drives recipe bits, MemoryNumericTier, active component floors, and the
+    // provider begin-request check. `LoadSpec.quantize` remains descriptor-governed: in particular,
+    // FLUX.1 packed-detects q4/q8 and therefore receives `None` while its receipt keeps the tier bits.
     let (quant, quant_bits) = candle_quant_for_resolved_tier(
         request,
         tier,
@@ -10895,6 +11131,20 @@ fn effective_quant_label_gated(
             _ => (Some("bf16".to_owned()), None),
         };
     }
+    // FLUX.1's generic Candle route accepts only an exact packed q4/q8 directory. Its omitted
+    // selection defaults to q4 (rather than the shared resolver's q8 default), so derive the
+    // LoadSpec/asset telemetry from that resolved directory instead of re-deriving a different
+    // request default here.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        if let Some(tier) = tier_dir.and_then(tier_key_from_resolved_dir) {
+            return match tier {
+                "q4" => (Some("q4".to_owned()), Some(4)),
+                "q8" => (Some("q8".to_owned()), Some(8)),
+                _ => unreachable!("FLUX.1 generic Candle route resolves only q4/q8"),
+            };
+        }
+    }
     let (selected_quant, selected_bits) = resolve_quant_gated(request, nvfp4_host, tier_dir);
     let resolved = match (selected_quant, selected_bits) {
         // The distinct NVFP4 tier, matched on the VARIANT (see the note above): its bit count is
@@ -11431,7 +11681,7 @@ async fn consume_gen_events_with_disclosure(
     // `.ok().flatten()` because a metrics block must never fail a completed generation: an unresolvable
     // dir yields `None`, which conservatively reports the request-derived q4/q8/bf16 label exactly as
     // it did before this parameter existed.
-    let tier_dir = resolve_weights_dir(&plan.request, settings).ok().flatten();
+    let tier_dir = resolve_completed_image_metrics_tier_dir(&plan.request, settings);
     let mut metrics = build_image_metrics(
         &plan.request,
         effective_steps,

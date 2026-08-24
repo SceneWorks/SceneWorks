@@ -40,7 +40,10 @@ pub(super) fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool
 /// `notapalindrome/ltx23-mlx-av-q4` + `mlx-community/gemma-3-12b-it-bf16` mirrors). One repo with
 /// the LTX `q4/` (default) + `q8/` (opt-in) checkpoint subdirs — each the full audio+I2V component
 /// set — plus the bundled `gemma/` text encoder the engine reads via `$LTX_GEMMA_DIR`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
@@ -52,14 +55,20 @@ pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// Bumped again in sc-18853 to the direct-child revision that adds the dense `bf16/` tier. The old
 /// pin predates that directory, so its `bf16/*` fetch resolved no files. The newer revision changes
 /// no q4/q8/gemma paths and must stay aligned with every `ltx_2_3` manifest download row.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 
 /// The only older LTX bundle snapshot whose contents are allowed to complement the current pin.
 /// [`LTX_BUNDLE_REVISION`] is a proven strict superset of this direct parent: its only additions are
 /// the ten `bf16/` files. Keeping the parent explicit prevents an unrelated cached revision from
 /// bypassing the immutable product pin during the split-cache compatibility scan (sc-18853).
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const LTX_BUNDLE_PRE_BF16_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must

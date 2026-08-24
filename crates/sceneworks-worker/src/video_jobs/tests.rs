@@ -843,6 +843,18 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         3,
         "one owner function and exactly two production callers must exist"
     );
+    let plan = SOURCE
+        .split_once("pub(super) fn scail2_cold_load_plan(")
+        .expect("SCAIL-2 cold-load plan")
+        .1
+        .split_once("/// Windows/CUDA candle video path")
+        .expect("SCAIL-2 cold-load plan boundary")
+        .0;
+    assert!(
+        plan.contains("let tier_key = resolved.tier.key();")
+            && plan.contains("&manifest_entry,\n            tier_key,"),
+        "cold-load accounting must use the same resolved package tier as the model path"
+    );
     let animate = SOURCE
         .split_once("pub(super) async fn generate_candle_scail2(")
         .expect("animate arm")
@@ -861,8 +873,9 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         assert!(
             arm.contains("let Scail2ColdLoadPlan {")
                 && arm.contains("model_dir,")
+                && arm.contains("quant,")
                 && arm.contains("admission,"),
-            "{name} must keep the resolved model path and cold admission together"
+            "{name} must keep the resolved model path, exact quant tier, and cold admission together"
         );
         let input = arm
             .split_once("let input = VideoGenInput {")
@@ -871,6 +884,10 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         assert!(
             input.contains("model_dir,"),
             "{name} must use the planned model path"
+        );
+        assert!(
+            input.contains("quant,"),
+            "{name} must pass the planned q4/q8 LoadSpec quant through the shared video telemetry path"
         );
         assert!(
             input.contains("cold_load_admission: Some(admission),"),
@@ -890,6 +907,12 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
                 "with_cached_generator_for_request_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
             ),
         "the shared video path must bind SCAIL admission, request accounting, and the same cancel flag at the generator-cache seam"
+    );
+    assert!(
+        wan.contains("spec.quantize = input.quant;")
+            && wan.contains("quant: input.quant,")
+            && wan.contains("let video_settings = VideoSettingsSnapshot::from_input(&input);"),
+        "the exact planned quant must remain in LoadSpec and completion telemetry"
     );
     let cache = include_str!("../generator_cache.rs");
     assert!(
@@ -7486,11 +7509,11 @@ fn scail2_engine_id_maps_only_the_scail2_family() {
     assert_eq!(scail2_engine_id(""), None);
 }
 
-/// The off-Mac resolver must consume the exact pinned bf16 tier that Model Manager installs, and it
-/// must use the provider-owned completeness predicate rather than a weaker worker-side sentinel.
+/// The off-Mac resolver must consume the exact Model Manager q4/q8/bf16 directory, require both the
+/// provider-owned complete layout and the packed marker, and never fall back from the user's tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
+fn candle_scail2_resolves_exact_model_manager_tier_fail_closed() {
     let _env = crate::test_env::EnvVars::set(&[
         ("HF_HUB_CACHE", ""),
         ("HUGGINGFACE_HUB_CACHE", ""),
@@ -7505,36 +7528,92 @@ fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
         .prefix("sw_candle_scail2_shared_")
         .tempdir()
         .expect("temp dir");
-    let tier = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
+    let snapshot = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
         .expect("repo cache path")
         .join("snapshots")
-        .join(SCAIL2_REVISION)
-        .join("bf16");
-    std::fs::create_dir_all(&tier).unwrap();
+        .join(SCAIL2_REVISION);
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
         ..Settings::from_env()
     };
 
+    let write_complete_tier = |tier: Scail2CandleTier, marker: Value| {
+        let path = snapshot.join(tier.key());
+        std::fs::create_dir_all(&path).unwrap();
+        for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+            std::fs::write(path.join(file), b"").unwrap();
+        }
+        std::fs::write(
+            path.join("config.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        path
+    };
+
     // A directory or one plausible tensor is not an install. Missing any provider-required file
     // must keep routing closed and name Model Manager as the repair path.
-    std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
-    let error = resolve_managed_candle_scail2_model_dir(&settings)
+    let incomplete_q4 = snapshot.join("q4");
+    std::fs::create_dir_all(&incomplete_q4).unwrap();
+    std::fs::write(incomplete_q4.join("dit.safetensors"), b"").unwrap();
+    let error = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
         .unwrap_err()
         .to_string();
     assert!(error.contains("Model Manager"), "got: {error}");
-    assert!(error.contains("bf16"), "got: {error}");
+    assert!(error.contains("q4"), "got: {error}");
 
-    for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
-        std::fs::write(tier.join(file), b"").unwrap();
-    }
+    let q4 = write_complete_tier(
+        Scail2CandleTier::Q4,
+        json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+    );
     assert_eq!(
-        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
-        tier
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
+            .unwrap()
+            .model_dir,
+        q4
+    );
+    assert_eq!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
+            .unwrap()
+            .tier,
+        Scail2CandleTier::Q4
     );
 
-    std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
-    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+    let q8 = write_complete_tier(
+        Scail2CandleTier::Q8,
+        json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+    );
+    assert_eq!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+            .unwrap()
+            .model_dir,
+        q8
+    );
+
+    // q8 must not use a complete q4 tier. The selector's marker is checked independently of
+    // directory name so a mixed or copied package cannot be misreported as q8.
+    std::fs::write(
+        q8.join("config.json"),
+        serde_json::to_vec(&json!({ "quantization": { "bits": 4, "group_size": 64 } })).unwrap(),
+    )
+    .unwrap();
+    let mixed = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+        .unwrap_err()
+        .to_string();
+    assert!(mixed.contains("q8"), "got: {mixed}");
+    assert!(mixed.contains("No q4/q8 fallback"), "got: {mixed}");
+    std::fs::write(
+        q8.join("config.json"),
+        serde_json::to_vec(&json!({ "quantization": { "bits": 8, "group_size": 64 } })).unwrap(),
+    )
+    .unwrap();
+
+    std::fs::remove_file(q8.join("t5_encoder.safetensors")).unwrap();
+    let partial = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+        .unwrap_err()
+        .to_string();
+    assert!(partial.contains("q8"), "got: {partial}");
+    assert!(partial.contains("No q4/q8 fallback"), "got: {partial}");
 }
 
 /// Existing manually assembled candle snapshots remain a compatibility fallback, but only when the
@@ -7559,13 +7638,66 @@ fn candle_scail2_preserves_complete_legacy_layout_only() {
         data_dir: data.path().to_path_buf(),
         ..Settings::from_env()
     };
-    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+    assert!(resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Bf16).is_err());
 
     std::fs::write(legacy.join("tokenizer/tokenizer.json"), b"").unwrap();
     assert_eq!(
-        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Bf16)
+            .unwrap()
+            .model_dir,
         legacy
     );
+    assert!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4).is_err(),
+        "a legacy dense tree must never satisfy a packed q4 request"
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_tier_selector_is_exact_and_adapter_safe() {
+    let request_with = |advanced: Value| request(json!({ "projectId": "p", "advanced": advanced }));
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({})), false).unwrap(),
+        Scail2CandleTier::Bf16,
+        "the off-Mac default remains the established dense baseline"
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 4 })), false).unwrap(),
+        Scail2CandleTier::Q4
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": "8" })), false).unwrap(),
+        Scail2CandleTier::Q8
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 0 })), false).unwrap(),
+        Scail2CandleTier::Bf16
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({})), true).unwrap(),
+        Scail2CandleTier::Bf16,
+        "adapter-bearing default requests retain the valid dense flow"
+    );
+    for value in [json!(6), json!("q8"), json!(4.0)] {
+        let error =
+            resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": value })), false)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("exact hosted tier") || error.contains("must be exactly"),
+            "{error}"
+        );
+    }
+    let adapter_error =
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 8 })), true)
+            .unwrap_err()
+            .to_string();
+    assert!(
+        adapter_error.contains("cannot merge adapters"),
+        "{adapter_error}"
+    );
+    assert!(adapter_error.contains("bf16"), "{adapter_error}");
 }
 
 /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),
@@ -7744,6 +7876,166 @@ async fn scail2_conditioning_guards_fire_before_io() {
         replace_err.contains("person track"),
         "replace missing-track error: {replace_err}"
     );
+}
+
+/// One shared assembler is the parity boundary for both MLX and Candle. It must retain every
+/// reference's own mask and caller order, reject the missing-pair and seven-reference cases, and
+/// never substitute the image-only generic MultiReference carrier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
+    let image = |shade| Image {
+        width: 1,
+        height: 1,
+        pixels: vec![shade, shade, shade],
+    };
+    let driving = vec![image(200)];
+    let driving_mask = vec![image(201)];
+
+    for count in [1usize, 2, 6] {
+        let pairs: Vec<_> = (0..count)
+            .map(|index| (image(index as u8), image(index as u8 + 32)))
+            .collect();
+        let conditioning = super::scail2::scail2_animate_conditioning(
+            pairs,
+            driving.clone(),
+            driving_mask.clone(),
+        )
+        .expect("1–6 reference/mask pairs must be valid");
+        assert_eq!(conditioning.len(), count * 2 + 1);
+        for index in 0..count {
+            match &conditioning[index * 2] {
+                Conditioning::Reference { image, strength } => {
+                    assert_eq!(
+                        image.pixels[0], index as u8,
+                        "reference {index} keeps its order"
+                    );
+                    assert_eq!(*strength, None);
+                }
+                other => panic!("entry {} must be Reference, got {other:?}", index * 2),
+            }
+            match &conditioning[index * 2 + 1] {
+                Conditioning::Mask { image } => assert_eq!(
+                    image.pixels[0],
+                    index as u8 + 32,
+                    "reference {index} must retain its own mask"
+                ),
+                other => panic!("entry {} must be Mask, got {other:?}", index * 2 + 1),
+            }
+        }
+        assert!(matches!(
+            conditioning.last(),
+            Some(Conditioning::ControlClip { .. })
+        ));
+        assert!(
+            !conditioning
+                .iter()
+                .any(|item| matches!(item, Conditioning::MultiReference { .. })),
+            "SCAIL-2 must never emit bare image-only MultiReference conditioning"
+        );
+    }
+
+    let empty =
+        super::scail2::scail2_animate_conditioning(vec![], driving.clone(), driving_mask.clone())
+            .expect_err("a missing reference/mask pair must fail before engine dispatch")
+            .to_string();
+    assert!(
+        empty.contains("at least one reference character"),
+        "got: {empty}"
+    );
+    let seven = super::scail2::scail2_animate_conditioning(
+        (0..7)
+            .map(|index| (image(index), image(index + 32)))
+            .collect(),
+        driving,
+        driving_mask,
+    )
+    .expect_err("a seventh pair must not be silently dropped")
+    .to_string();
+    assert!(
+        seven.contains("at most 6 reference characters"),
+        "got: {seven}"
+    );
+}
+
+/// Cancellation is checked at each reference boundary, so a user cancellation after one masked
+/// reference cannot continue into later character segmentation.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_multi_reference_segmentation_stops_between_references_on_cancel() {
+    let image = |shade| Image {
+        width: 1,
+        height: 1,
+        pixels: vec![shade, shade, shade],
+    };
+    let cancel = CancelFlag::new();
+    let mut seen = Vec::new();
+    let result = super::scail2::segment_scail2_references(
+        vec![image(1), image(2)],
+        &cancel,
+        |reference, _| {
+            seen.push(reference.pixels[0]);
+            cancel.cancel();
+            Ok(image(reference.pixels[0] + 32))
+        },
+    );
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(_))),
+        "got: {result:?}"
+    );
+    assert_eq!(
+        seen,
+        vec![1],
+        "the second reference must not begin after cancellation"
+    );
+}
+
+/// Loading every requested reference fails closed before segmentation if one asset has disappeared;
+/// a missing second character must not result in the first character being rendered by itself.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_missing_reference_asset_fails_before_masking() {
+    let data_dir = tempfile::tempdir().expect("data dir creates");
+    let project_dir = tempfile::tempdir().expect("project dir creates");
+    let error = crate::image_jobs::load_reference_image(
+        data_dir.path(),
+        "project-scail2",
+        "missing-second-character",
+        project_dir.path(),
+    )
+    .expect_err("a missing ordered reference asset must stop the job")
+    .to_string();
+    assert!(
+        error.contains("reference asset missing-second-character"),
+        "missing asset error must identify the rejected reference, got: {error}"
+    );
+}
+
+/// Both backend-specific resolvers must enter the same paired-reference helper. This source-level
+/// contract runs even in a lightweight build that does not link MLX or Candle.
+#[test]
+fn scail2_multi_reference_resolvers_stay_backend_parity_twins() {
+    const MLX: &str = include_str!("scail2.rs");
+    const CANDLE: &str = include_str!("candle.rs");
+    for (backend, source) in [("MLX", MLX), ("Candle", CANDLE)] {
+        assert!(
+            source.contains("segment_scail2_references(references, &flag"),
+            "{backend} must independently segment every ordered reference through the shared helper"
+        );
+        assert!(
+            source.contains("MAX_SCAIL2_REFERENCE_CHARACTERS"),
+            "{backend} must reject a seventh reference even for legacy/retry payloads"
+        );
+    }
 }
 
 /// A SCAIL-2 MLX snapshot dir if present: env override (`SCENEWORKS_MLX_SCAIL2_DIR`), then the
@@ -8299,8 +8591,8 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
     assert_eq!(wan_tier_subdir(root, &req), Some(dir));
 }
 
-/// Write the six files that make a SCAIL-2 tier subdir COMPLETE ([`scail2_tier_is_complete`]), so
-/// [`scail2_tier_subdir`] treats it as present.
+/// Write the six files plus the tier-matching config marker that make a SCAIL-2 tier subdir COMPLETE
+/// ([`scail2_tier_is_complete`]), so [`scail2_tier_subdir`] treats it as present.
 #[cfg(target_os = "macos")]
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
@@ -8308,6 +8600,17 @@ fn write_complete_scail2_tier(root: &Path, tier: &str) {
     for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
+    let config = match tier {
+        "bf16" => json!({}),
+        "q4" => json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        "q8" => json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+        _ => panic!("unsupported SCAIL-2 test tier {tier}"),
+    };
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
 }
 
 /// `mlxQuantize` selects the preferred SCAIL-2 tier, then falls back to the always-smaller present
@@ -13075,15 +13378,30 @@ mod candle_video_label_tests {
     }
 
     #[test]
-    fn candle_ltx_resolves_the_shared_q4_turnkey_tier_only_for_the_base_model() {
+    fn candle_ltx_source_resolver_prepares_exact_tiers_without_promoting_q8() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let q4 = temp.path().join("q4");
+        let snapshots = temp.path().join("snapshots");
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        let q4 = current.join("q4");
+        let q8 = current.join("q8");
         std::fs::create_dir_all(&q4).expect("q4");
+        std::fs::create_dir_all(&q8).expect("q8");
         std::fs::write(q4.join("transformer.safetensors"), "x").expect("transformer");
         std::fs::write(q4.join("quantize_config.json"), "{}").expect("quant config");
+        std::fs::write(q8.join("transformer.safetensors"), "x").expect("transformer");
+        std::fs::write(q8.join("quantize_config.json"), "{}").expect("quant config");
 
-        let (resolved, quant) = candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3")
-            .expect("base LTX q4 tier");
+        let q4_request = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 4 }
+        }));
+        let q8_request = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 8 }
+        }));
+        let default_request = request(json!({ "projectId": "p", "model": "ltx_2_3" }));
+
+        let (resolved, quant) =
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q4_request)
+                .expect("base LTX q4 tier");
         assert_eq!(resolved, q4);
         assert_eq!(
             quant, None,
@@ -13105,15 +13423,197 @@ mod candle_video_label_tests {
             spec.quantize.is_none(),
             "production LTX provider spec must load the pre-packed q4 tier with quantize=None"
         );
+        // This directly exercises reusable source plumbing below the product router. The core route
+        // remains the authority that withholds q8 until terminal evidence advances its capability.
+        let (resolved_q8, q8_quant) =
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q8_request)
+                .expect("base LTX q8 tier");
+        assert_eq!(resolved_q8, q8, "an explicit q8 request must select q8");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3_eros").is_none(),
+            q8_quant.is_none(),
+            "the pre-packed q8 tier must not request a second load-time quantization"
+        );
+        assert_eq!(
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &default_request,)
+                .map(|(dir, _)| dir),
+            Some(q4.clone()),
+            "the no-override default remains q4"
+        );
+        for invalid_tier in [
+            json!(0),
+            json!(5),
+            json!(7),
+            json!(9),
+            json!("bf16"),
+            json!("8.0"),
+            Value::Null,
+            json!(8.0),
+            json!({ "bits": 8 }),
+        ] {
+            let invalid = request(json!({
+                "projectId": "p", "model": "ltx_2_3",
+                "advanced": { "mlxQuantize": invalid_tier.clone() }
+            }));
+            assert!(
+                candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &invalid)
+                    .is_none(),
+                "unsupported LTX Candle tier {invalid_tier} must fail closed"
+            );
+        }
+        assert!(
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3_eros", &q4_request,)
+                .is_none(),
             "Eros stays on its dense standalone checkpoint"
         );
 
+        std::fs::remove_file(q8.join("quantize_config.json")).expect("tear q8 tier");
+        assert!(
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q8_request,)
+                .is_none(),
+            "an explicit q8 request must never silently select q4"
+        );
         std::fs::remove_file(q4.join("quantize_config.json")).expect("tear tier");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3").is_none(),
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q4_request,)
+                .is_none(),
             "a partial q4 tier is never selected"
+        );
+
+        let split = tempfile::tempdir().expect("split cache");
+        let snapshots = split.path().join("snapshots");
+        let prior = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        for (dir, tier) in [(&prior, "q4"), (&current, "q8")] {
+            let tier_dir = dir.join(tier);
+            std::fs::create_dir_all(&tier_dir).expect("tier dir");
+            std::fs::write(tier_dir.join("transformer.safetensors"), "x").expect("transformer");
+            std::fs::write(tier_dir.join("quantize_config.json"), "{}").expect("quant marker");
+        }
+        assert_eq!(
+            candle_ltx_tier_subdir(&prior, "ltx_2_3_distilled", "ltx_2_3", &q8_request)
+                .map(|(dir, _)| dir),
+            Some(current.join("q8")),
+            "an on-demand q8 tier in the current revision must beat q4 in the selected prior revision"
+        );
+
+        let unapproved = tempfile::tempdir().expect("unapproved cache");
+        let unapproved_snapshots = unapproved.path().join("snapshots");
+        let arbitrary = unapproved_snapshots.join("arbitrary-revision");
+        for tier in ["q4", "q8"] {
+            let tier_dir = arbitrary.join(tier);
+            std::fs::create_dir_all(&tier_dir).expect("arbitrary tier dir");
+            std::fs::write(tier_dir.join("transformer.safetensors"), "x")
+                .expect("arbitrary transformer");
+            std::fs::write(tier_dir.join("quantize_config.json"), "{}")
+                .expect("arbitrary quant marker");
+        }
+        for request in [&q4_request, &q8_request, &default_request] {
+            assert!(
+                candle_ltx_tier_subdir(&arbitrary, "ltx_2_3_distilled", "ltx_2_3", request,)
+                    .is_none(),
+                "a complete tier selected from an unapproved revision must not satisfy Candle LTX"
+            );
+        }
+    }
+
+    #[test]
+    fn candle_ltx_q8_fetch_is_on_demand_and_never_required_when_complete() {
+        fn block_on<F: std::future::Future>(future: F) -> F::Output {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(future)
+        }
+
+        let hub = tempfile::tempdir().expect("hub");
+        let repo_cache = hub.path().join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("repo slug")
+        ));
+        let snapshots = repo_cache.join("snapshots");
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        let prior = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+        for (snapshot, tier) in [(&current, "q4"), (&prior, "q8")] {
+            let dir = snapshot.join(tier);
+            std::fs::create_dir_all(&dir).expect("tier dir");
+            std::fs::write(dir.join("transformer.safetensors"), "x").expect("transformer");
+            std::fs::write(dir.join("quantize_config.json"), "{}").expect("quant marker");
+        }
+        std::fs::create_dir_all(repo_cache.join("refs")).expect("refs");
+        std::fs::write(repo_cache.join("refs/main"), LTX_BUNDLE_REVISION).expect("refs/main");
+        let data = tempfile::tempdir().expect("data");
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-candle-ltx-q8", "type": "video_generate", "status": "running",
+            "projectId": "p", "projectName": "P", "payload": { "model": "ltx_2_3" },
+            "result": {}, "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0, "stage": "queued", "message": "", "error": null, "etaSeconds": null,
+            "attempts": 1, "cancelRequested": false,
+            "createdAt": "2026-08-13T00:00:00Z", "updatedAt": "2026-08-13T00:00:00Z"
+        }))
+        .expect("job snapshot");
+        let q8 = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 8 }
+        }));
+
+        let cached = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            cached.is_ok(),
+            "q8 cached only in the approved parent revision must skip the offline network: {cached:?}"
+        );
+
+        std::fs::remove_file(prior.join("q8/quantize_config.json")).expect("tear q8");
+        let arbitrary = snapshots.join("arbitrary-complete-revision").join("q8");
+        std::fs::create_dir_all(&arbitrary).expect("arbitrary q8");
+        std::fs::write(arbitrary.join("transformer.safetensors"), "x")
+            .expect("arbitrary transformer");
+        std::fs::write(arbitrary.join("quantize_config.json"), "{}")
+            .expect("arbitrary quant marker");
+        std::fs::write(repo_cache.join("refs/main"), "arbitrary-complete-revision")
+            .expect("mutable refs/main");
+        let missing = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            missing.is_err(),
+            "an arbitrary refs/main q8 must not suppress the fixed-revision q8/* fetch or load q4"
+        );
+
+        let current_q8 = current.join("q8");
+        std::fs::create_dir_all(&current_q8).expect("current q8");
+        std::fs::write(current_q8.join("transformer.safetensors"), "x")
+            .expect("current transformer");
+        std::fs::write(current_q8.join("quantize_config.json"), "{}")
+            .expect("current quant marker");
+        let current_cached = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            current_cached.is_ok(),
+            "q8 in the approved current revision must be accepted even when refs/main is arbitrary: \
+             {current_cached:?}"
         );
     }
 

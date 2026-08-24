@@ -37,14 +37,17 @@ describe("controlModes ↔ manifest parity (sc-8245)", () => {
 
   it("the manifest advertises strict control on the expected backbones", () => {
     const ids = manifestControlModels.map((model) => model.id).sort();
-    // The Fun-Union strict-control backbones (flux2_dev/flux_dev/qwen_image/z_image/z_image_turbo) plus
-    // krea_2_turbo — Krea's from-scratch pose-ControlNet (pose-only), driven by a registered trained
-    // overlay (sc-8464 inference lane / sc-10165 B4).
+    // Fun-Union/Krea plus the four generic SDXL OpenPose backbones accepted on both native providers.
+    // RealVisXL Lightning stays hidden until MLX supports ControlNet + Lightning together.
     expect(ids).toEqual([
       "flux2_dev",
       "flux_dev",
+      "illustrious_xl_v1",
+      "illustrious_xl_v2",
       "krea_2_turbo",
       "qwen_image",
+      "realvisxl",
+      "sdxl",
       "z_image",
       "z_image_turbo",
     ]);
