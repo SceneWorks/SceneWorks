@@ -1191,8 +1191,10 @@ jobs:
       # source-reviewed fixed cache root is censused from checked-in immutable download evidence
       # before transfer: there is no cache input,
       # snapshot/glob/ref-main fallback, matrix, child workflow, per-cell dispatch, or secret weight
-      # path. Exact archived 19-PASS artifact 9500244306 is revalidated under the final pinned
-      # 31e02510 provenance. Its authentic PASS cells 1-14 are imported while only the five OpenPose
+      # path. Exact archived 19-PASS artifact 9500244306 is revalidated under the capture-time
+      # inference provenance the artifact itself records -- never a second copy of the repository
+      # pin, which no `npm run bump:inference` would ever advance. Its authentic PASS cells 1-14
+      # are imported while only the five OpenPose
       # cells 15-19 are replaced with same-seed causal-control receipts after their complete source/disk
       # plan passes and network is forced
       # offline. Authorities are copied just in time, retained only through their exact last consumer,
@@ -1276,10 +1278,16 @@ jobs:
           New-Item -ItemType Directory -Path $evidence -Force | Out-Null
           gh run download $runId --name $artifactName --dir $evidence
           if ($LASTEXITCODE -ne 0) { throw "failed to download audited 19-PASS OpenPose recovery artifact $artifactId" }
+          # The archived campaign names its own inference revision; the artifact digest asserted
+          # above already pins that value, so read it back out of the evidence instead of carrying
+          # a second copy of the repository pin here.
+          $summary = Get-Content -LiteralPath (Join-Path $evidence 'campaign-summary.json') -Raw | ConvertFrom-Json
+          $inferenceSha = [string]$summary.repositories.inference.sha
+          if ($inferenceSha -notmatch '^[0-9a-f]{40}$') { throw 'archived 19-PASS campaign summary does not record an exact inference revision' }
           $metadata = [ordered]@{
             artifactId = $artifactId; artifactName = $artifactName; artifactSize = $artifactSize; artifactDigest = $artifactDigest
             runId = $runId; runAttempt = $runAttempt; headSha = $headSha
-            inferenceSha = '31e02510ad6e9e1a3c3d205058576329d724c60d'
+            inferenceSha = $inferenceSha
             profile = 'epic-20738-candle-cuda-terminal-v1'
             cellSemanticsSha256 = '2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1'
             artifactSemanticsSha256 = '1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255'

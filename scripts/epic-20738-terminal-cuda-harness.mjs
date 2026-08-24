@@ -54,7 +54,6 @@ const EXPECTED_ARTIFACT_SEMANTICS_SHA256 = "1e98392f71b1ad3d10d4bf18a6f23a497f5f
 const LEGACY_RECOVERY_ARTIFACT_SEMANTICS_SHA256 = "5b9ef60c18ab15caeca7ff0411b199618f0aa22cc051a70607aa7a0f7c6cd932";
 const LEGACY_ARTIFACT_SEMANTICS_SHA256 = "f2bb7a77b83ce11cc32c3a1f9639534a67a149bc464a9730fb5c0988b4a03f9e";
 const LEGACY_SCENEWORKS_HEAD = "8886a9e69f26beec05688c81b414859bd102f6d0";
-const FROZEN_INFERENCE_PIN = "31e02510ad6e9e1a3c3d205058576329d724c60d";
 const HISTORICAL_INFERENCE_PIN = "b646a6f89ba9f6b07efe53dd583d8a42e21e9871";
 const LTX_CURRENT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_APPROVED_PARENT_REVISION = "254989c3ca7ee691187647f350b112c0c448789d";
@@ -1045,6 +1044,34 @@ export function inferencePins(cargoToml) {
   const pins = [...cargoToml.matchAll(/git\s*=\s*"https:\/\/github\.com\/SceneWorks\/inference(?:\.git)?"[^}\n]*?rev\s*=\s*"([0-9a-f]{40})"/g)]
     .map((match) => match[1]);
   return [...new Set(pins)];
+}
+
+// Every SceneWorks manifest that carries a `SceneWorks/inference` git pin. `scripts/bump-inference.mjs`
+// rewrites exactly these three, so they are the repository's single inference-revision source.
+export const INFERENCE_PIN_MANIFESTS = [
+  "Cargo.toml",
+  "crates/sceneworks-worker/Cargo.toml",
+  "crates/sceneworks-memory-adapter/Cargo.toml",
+];
+
+// Derive the live inference revision from the checked-out manifests instead of restating it as a
+// harness constant. A second copy of the pin is a copy no `npm run bump:inference` touches, so it
+// goes stale silently and reds this controller for a reason that has nothing to do with the epic.
+export async function liveInferencePin(root = "") {
+  const perManifest = new Map();
+  for (const manifest of INFERENCE_PIN_MANIFESTS) {
+    const found = inferencePins(await readFile(path.join(root, manifest), "utf8"));
+    if (found.length !== 1) {
+      fail(`${manifest} must declare exactly one SceneWorks/inference revision; got ${found.join(",") || "none"}`);
+    }
+    perManifest.set(manifest, found[0]);
+  }
+  const distinct = new Set(perManifest.values());
+  if (distinct.size !== 1) {
+    fail(`SceneWorks manifests disagree on the inference revision: ${
+      [...perManifest].map(([manifest, pin]) => `${manifest}=${pin}`).join(", ")}`);
+  }
+  return [...distinct][0];
 }
 
 function assertOutsideRepository(candidate, repositories, label) {
@@ -2930,7 +2957,11 @@ function validateOpenPoseRecoveryMetadata(metadata) {
     || metadata.runId !== OPENPOSE_RECOVERY_RUN_ID
     || metadata.runAttempt !== OPENPOSE_RECOVERY_RUN_ATTEMPT
     || metadata.headSha !== OPENPOSE_RECOVERY_SCENEWORKS_HEAD
-    || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    // The capture revision belongs to the archived artifact, not to this repository: the artifact's
+    // own `sha256:` digest is already asserted above, so it pins the recorded revision far more
+    // tightly than a harness constant could. Require only the exact 40-hex shape here and bind the
+    // value by agreement with the artifact's own campaign summary and per-cell receipts below.
+    || !SHA40.test(metadata.inferenceSha)
     || metadata.profile !== PROFILE_NAME
     || metadata.cellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
     || metadata.artifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256) {
@@ -2942,7 +2973,7 @@ function validateOpenPoseRecoverySummary(summary, currentProfile, metadata) {
   if (summary?.schemaVersion !== 1 || summary.profile !== PROFILE_NAME
     || summary.repositories?.sceneworks?.sha !== metadata.headSha
     || summary.repositories?.sceneworks?.clean !== true
-    || summary.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || summary.repositories?.inference?.sha !== metadata.inferenceSha
     || summary.repositories?.inference?.clean !== true
     || summary.execution?.runId !== metadata.runId
     || summary.execution?.runAttempt !== metadata.runAttempt
@@ -3009,7 +3040,7 @@ export async function selectOpenPoseRecovery(prefixCandidates, currentProfile) {
         ? { headSha: RECOVERY_SCENEWORKS_HEAD, runId: RECOVERY_RUN_ID, runAttempt: RECOVERY_RUN_ATTEMPT }
         : ordinal <= 13
           ? { headSha: SPARSE_RECOVERY_SCENEWORKS_HEAD, runId: SPARSE_RECOVERY_RUN_ID, runAttempt: SPARSE_RECOVERY_RUN_ATTEMPT }
-          : { ...metadata, inferenceSha: FROZEN_INFERENCE_PIN };
+          : metadata;
     validateRecoveryReceiptProvenance(receipt, cell, provenance, `OpenPose recovery imported receipt ${ordinalName}`);
     if (ordinal <= IMPORTED_PREFIX_CELLS) {
       validateTrustedLegacyImportedReceiptDocument(receipt);
@@ -4141,9 +4172,9 @@ export async function runCampaign(args, options = {}) {
     const inference = repositoryIdentity(args.inference, "inference");
     if (sceneworks.sha !== args.sceneworksRevision) fail("SceneWorks HEAD does not match --sceneworks-revision");
     if (inference.sha !== args.inferenceRevision) fail("inference HEAD does not match --inference-revision");
-    const pins = inferencePins(await readFile(path.join(sceneworks.root, "Cargo.toml"), "utf8"));
-    if (pins.length !== 1 || pins[0] !== inference.sha) {
-      fail(`SceneWorks must have exactly one inference revision and it must equal checked-out inference HEAD; got ${pins.join(",")}`);
+    const pin = await liveInferencePin(sceneworks.root);
+    if (pin !== inference.sha) {
+      fail(`SceneWorks pins inference ${pin} but the checked-out inference HEAD is ${inference.sha}`);
     }
     const manifest = JSON.parse(stripJsoncComments(await readFile(
       path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
@@ -5228,17 +5259,14 @@ async function main() {
       offlineBeforeCells: false,
     });
     const profile = validateProfile(loadProfile(profilePath));
-    const pins = inferencePins(await readFile("Cargo.toml", "utf8"));
-    if (pins.length !== 1 || pins[0] !== FROZEN_INFERENCE_PIN) {
-      fail("terminal SceneWorks manifests do not bind the corrected frozen inference pin");
-    }
+    const pin = await liveInferencePin();
     const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
     validateManifestAuthorities(profile, manifest);
     const downloadEvidenceBytes = await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8");
     const { artifactExpectedFiles: expected } =
       expectedCurrentArtifactFilesFromEvidenceBytes(profile, downloadEvidenceBytes);
     if (Object.keys(expected).length !== 23) fail("terminal exact filename census is incomplete");
-    process.stdout.write(`${PROFILE_NAME}: exactly 19 serialized cells and immutable authorities OK\n`);
+    process.stdout.write(`${PROFILE_NAME}: exactly 19 serialized cells and immutable authorities OK (inference pin ${pin})\n`);
     return;
   }
   if (command === "run") {
