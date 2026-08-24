@@ -6292,28 +6292,116 @@ fn bernini_backends_share_engine_id_and_video_mode_mapping() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn stall_timeout_override_parses_or_falls_back() {
-    // A valid positive override wins.
+fn video_stall_timeout_operator_override_is_absolute() {
+    // A valid positive override wins even when it is below both the default and the H3 workload
+    // budget. This is the explicit operator escape hatch, not a lower bound.
     assert_eq!(
-        parse_stall_timeout(Some("120".to_owned())),
-        Duration::from_secs(120)
+        video_stall_timeout_policy(Some("120"), "minimax_h3", 768, 1344, 345),
+        VideoStallTimeoutPolicy {
+            timeout: Duration::from_secs(120),
+            basis: "operator_override",
+        }
     );
     assert_eq!(
-        parse_stall_timeout(Some("  90 ".to_owned())),
-        Duration::from_secs(90)
+        video_stall_timeout_policy(
+            Some("  90 "),
+            "wan2_2_ti2v_5b",
+            u32::MAX,
+            u32::MAX,
+            u32::MAX
+        ),
+        VideoStallTimeoutPolicy {
+            timeout: Duration::from_secs(90),
+            basis: "operator_override",
+        }
     );
-    // Unset, blank, non-numeric, or zero all fall back to the default.
-    assert_eq!(parse_stall_timeout(None), VIDEO_STALL_TIMEOUT);
+    // Invalid values are not overrides; H3 must still receive its request-derived budget.
+    for raw in [Some(""), Some("nope"), Some("0")] {
+        assert_eq!(
+            video_stall_timeout_policy(raw, "minimax_h3", 768, 1344, 243).timeout,
+            Duration::from_secs(1176)
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_non_h3_remains_the_global_default() {
+    for raw in [None, Some(""), Some("nope"), Some("0")] {
+        assert_eq!(
+            video_stall_timeout_policy(raw, "wan2_2_ti2v_5b", u32::MAX, u32::MAX, u32::MAX,),
+            VideoStallTimeoutPolicy {
+                timeout: VIDEO_STALL_TIMEOUT,
+                basis: "default",
+            },
+            "invalid or absent override {raw:?} must not make the generic timeout request-aware"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_baseline() {
+    for (width, height) in [(768, 1344), (1344, 768)] {
+        assert_eq!(
+            video_stall_timeout_policy(None, "minimax_h3", width, height, 124),
+            VideoStallTimeoutPolicy {
+                timeout: VIDEO_STALL_TIMEOUT,
+                basis: "minimax_h3_baseline",
+            }
+        );
+    }
+    // A long small-canvas request carries less packed pixel-frame work than the measured shortest
+    // full-canvas baseline, so it does not weaken genuine stall detection either.
     assert_eq!(
-        parse_stall_timeout(Some(String::new())),
+        video_stall_timeout_policy(None, "minimax_h3", 320, 576, 345).timeout,
         VIDEO_STALL_TIMEOUT
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_minimax_h3_243_frame_full_canvas_exceeds_the_false_stall_threshold() {
+    let portrait = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, 243);
+    let landscape = video_stall_timeout_policy(None, "minimax_h3", 1344, 768, 243);
+    assert_eq!(portrait, landscape, "orientation cannot change packed work");
+    assert_eq!(portrait.timeout, Duration::from_secs(1176));
+    assert_eq!(portrait.basis, "minimax_h3_pixel_frames");
+    assert!(portrait.timeout > Duration::from_secs(600));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lattice() {
+    use sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
+
+    let mut previous = VIDEO_STALL_TIMEOUT;
+    for frames in MINIMAX_H3_LEGAL_FRAME_COUNTS {
+        let policy = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, frames);
+        assert!(
+            policy.timeout >= previous,
+            "timeout regressed at legal frame count {frames}"
+        );
+        let expected_seconds = 600_u64
+            .saturating_mul(u64::from(frames))
+            .div_ceil(u64::from(MINIMAX_H3_LEGAL_FRAME_COUNTS[0]));
+        assert_eq!(
+            policy.timeout,
+            Duration::from_secs(expected_seconds),
+            "full-canvas policy must scale with the effective H3 frame lattice"
+        );
+        previous = policy.timeout;
+    }
+    assert_eq!(previous, Duration::from_secs(1670));
+
+    // Mutation/bound proof: out-of-contract dimensions and frame counts cannot expand the stall
+    // budget beyond the largest legal H3 request, and zeroes cannot lower the existing baseline.
     assert_eq!(
-        parse_stall_timeout(Some("nope".to_owned())),
-        VIDEO_STALL_TIMEOUT
+        video_stall_timeout_policy(None, "minimax_h3", u32::MAX, u32::MAX, u32::MAX,).timeout,
+        Duration::from_secs(1670)
     );
     assert_eq!(
-        parse_stall_timeout(Some("0".to_owned())),
+        video_stall_timeout_policy(None, "minimax_h3", 0, 0, 0).timeout,
         VIDEO_STALL_TIMEOUT
     );
 }

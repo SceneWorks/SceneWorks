@@ -1618,17 +1618,33 @@ pub(super) fn run_video_generation(
     run_loaded_video_generation(generator.as_ref(), input, cancel, on_progress)
 }
 
-/// Forward-progress watchdog: if the engine emits no progress event (no denoise `Step`, no
-/// `Decoding`) for this long — covering both the silent cold model-load phase and the gap
-/// between steps — the generation is treated as wedged and the job is failed with a clear
-/// error instead of heartbeating indefinitely. Tuned well above any legitimate single load or
-/// step on the current video models; override via `SCENEWORKS_VIDEO_STALL_SECS` for an
-/// unusually large/slow model or disk.
+/// Default forward-progress watchdog: if the engine emits no progress event (no denoise `Step`, no
+/// `Decoding`) for this long — covering both the silent cold model-load phase and the gap between
+/// steps — the generation is treated as wedged and the job is failed with a clear error instead of
+/// heartbeating indefinitely.
+///
+/// MiniMax-H3 is the one request-aware exception: one legitimate step grows with packed
+/// pixel-frames and can exceed this default on a legal long, full-canvas clip. See
+/// [`video_stall_timeout_policy`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
+/// override for every engine.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The timeout policy and its receipt-facing basis. Keeping the basis next to the duration makes a
+/// request-aware watchdog observable instead of leaving an unexplained, model-specific number in a
+/// later stall event.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VideoStallTimeoutPolicy {
+    pub(super) timeout: Duration,
+    pub(super) basis: &'static str,
+}
 
 /// Grace period granted after a stall is detected and engine cancellation is requested, before
 /// the still-running blocking task is abandoned. A cooperative engine bails between steps well
@@ -1641,27 +1657,82 @@ pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 ))]
 const VIDEO_STALL_GRACE: Duration = Duration::from_secs(60);
 
-/// The effective forward-progress stall timeout: `SCENEWORKS_VIDEO_STALL_SECS` (a positive
-/// integer number of seconds) when set, else [`VIDEO_STALL_TIMEOUT`].
+/// The effective forward-progress stall timeout for one resolved engine input.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn video_stall_timeout() -> Duration {
-    parse_stall_timeout(std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok())
+fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
+    video_stall_timeout_policy(
+        std::env::var("SCENEWORKS_VIDEO_STALL_SECS").ok().as_deref(),
+        input.engine_id,
+        input.width,
+        input.height,
+        input.frames,
+    )
 }
 
-/// Parse the `SCENEWORKS_VIDEO_STALL_SECS` override (a positive integer number of seconds),
-/// falling back to [`VIDEO_STALL_TIMEOUT`] when unset, blank, non-numeric, or zero.
+/// Resolve the forward-progress timeout without reading process-global state (the test seam).
+///
+/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute. Without one, every existing engine
+/// retains the 600-second default. MiniMax-H3 scales only when its effective packed pixel-frame
+/// workload exceeds the measured shortest/full-canvas baseline: `768 * 1344 * 124`. The scale is
+/// linear, rounded up, and bounded at the engine's largest legal workload (`768 * 1344 * 345`).
+/// Small canvases and the shortest full-canvas request therefore retain the existing watchdog,
+/// while a legal 243-frame full-canvas step is not misclassified as the Metal wedge this watchdog
+/// was introduced to catch.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) fn parse_stall_timeout(raw: Option<String>) -> Duration {
-    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+pub(super) fn video_stall_timeout_policy(
+    raw_override: Option<&str>,
+    engine_id: &str,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> VideoStallTimeoutPolicy {
+    if let Some(seconds) = raw_override
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(VIDEO_STALL_TIMEOUT)
+    {
+        return VideoStallTimeoutPolicy {
+            timeout: Duration::from_secs(seconds),
+            basis: "operator_override",
+        };
+    }
+
+    if engine_id != "minimax_h3" {
+        return VideoStallTimeoutPolicy {
+            timeout: VIDEO_STALL_TIMEOUT,
+            basis: "default",
+        };
+    }
+
+    let legal_frames = sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
+    let min_frames = u64::from(legal_frames[0]);
+    let max_frames = u64::from(legal_frames[legal_frames.len() - 1]);
+    let max_pixels = u64::from(super::minimax_h3::MINIMAX_H3_CANVAS_MAX_PIXELS);
+    let pixels = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .min(max_pixels);
+    let effective_frames = u64::from(frames).clamp(min_frames, max_frames);
+    let baseline_work = max_pixels.saturating_mul(min_frames);
+    let max_work = max_pixels.saturating_mul(max_frames);
+    let bounded_work = pixels
+        .saturating_mul(effective_frames)
+        .clamp(baseline_work, max_work);
+    let numerator = VIDEO_STALL_TIMEOUT.as_secs().saturating_mul(bounded_work);
+    let seconds = numerator.div_ceil(baseline_work);
+
+    VideoStallTimeoutPolicy {
+        timeout: Duration::from_secs(seconds),
+        basis: if bounded_work == baseline_work {
+            "minimax_h3_baseline"
+        } else {
+            "minimax_h3_pixel_frames"
+        },
+    }
 }
 
 /// First-detection handling for the in-loop video cancel poller (sc-5516): trip the engine
@@ -1969,8 +2040,20 @@ pub(super) async fn generate_video_using(
     .unwrap_or_else(|| crate::mlx_fit_gate::UNCALIBRATED_CLOSURE.to_owned());
 
     let cancel = CancelFlag::new();
-    let stall_timeout = video_stall_timeout();
+    let stall_policy = video_stall_timeout(&input);
+    let stall_timeout = stall_policy.timeout;
     let log_engine_id = input.engine_id;
+    tracing::info!(
+        event = "rust_worker_video_stall_budget_selected",
+        jobId = %job.id,
+        engine = %log_engine_id,
+        width = input.width,
+        height = input.height,
+        frames = input.frames,
+        stallSeconds = stall_timeout.as_secs(),
+        basis = stall_policy.basis,
+        "selected the request's forward-progress watchdog budget"
+    );
     // Snapshot the effective settings before `input` moves into the blocking task
     // (sc-10418), so the completion-time metrics POST reports exactly what reached
     // the engine (resolved quant / sampler / scheduler / guidance / dims / seed).
