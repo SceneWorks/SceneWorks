@@ -108,10 +108,10 @@ pub fn sana_tier_complete(dir: &Path) -> bool {
         && dir.join("text_encoder/tokenizer.json").is_file()
 }
 
-/// The exact files in one self-contained `SceneWorks/scail2-mlx` tier. The dense bf16 tier is shared
-/// by MLX and candle; q4/q8 carry the same file names but an MLX-packed DiT. This list is consumed by
-/// the MLX worker resolver and rust-api install-state predicate, while the candle worker asserts it is
-/// byte-for-byte identical to the pinned inference provider's `SHARED_TIER_FILES` contract.
+/// The exact files in one self-contained `SceneWorks/scail2-mlx` tier. The dense bf16 tier and the
+/// group-64 packed q4/q8 tiers are shared by MLX and candle. This list is consumed by the MLX worker
+/// resolver and rust-api install-state predicate, while the candle worker asserts it is byte-for-byte
+/// identical to the pinned inference provider's `SHARED_TIER_FILES` contract.
 pub const SCAIL2_TIER_FILES: &[&str] = &[
     "config.json",
     "dit.safetensors",
@@ -121,12 +121,43 @@ pub const SCAIL2_TIER_FILES: &[&str] = &[
     "vae.safetensors",
 ];
 
-/// Whether a SCAIL-2 tier is complete enough for either native provider to load. Exact paths make a
-/// hidden sidecar insufficient and prevent a partial `<tier>/*` download from appearing installed.
+/// Whether a named SCAIL-2 tier is complete enough for either native provider to load. Exact paths
+/// make a hidden sidecar insufficient and prevent a partial `<tier>/*` download from appearing
+/// installed. The directory name selects the package contract: q4/q8 must carry their exact
+/// group-64 `config.json` marker, while bf16 must be dense. This keeps Model Manager from reporting a
+/// complete but mixed q8-directory/q4-marker payload as installed or enabling it in the tier picker.
 pub fn scail2_tier_complete(dir: &Path) -> bool {
-    SCAIL2_TIER_FILES
+    if !SCAIL2_TIER_FILES
         .iter()
         .all(|file| dir.join(file).is_file())
+    {
+        return false;
+    }
+
+    let Some(tier) = dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read(dir.join("config.json")) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let marker = config.get("quantization");
+    match tier {
+        "bf16" => marker.is_none() || marker.is_some_and(serde_json::Value::is_null),
+        "q4" | "q8" => marker
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|quantization| {
+                quantization.get("bits").and_then(serde_json::Value::as_i64)
+                    == Some(if tier == "q4" { 4 } else { 8 })
+                    && quantization
+                        .get("group_size")
+                        .and_then(serde_json::Value::as_i64)
+                        == Some(64)
+            }),
+        _ => false,
+    }
 }
 
 /// Whether a Wan2.2 MLX turnkey tier `dir` is COMPLETE and loadable by the native MLX Wan trainer
@@ -554,10 +585,17 @@ mod tests {
         touch(&dir.join("text_encoder/tokenizer.json"));
     }
 
-    fn seed_scail2(dir: &Path) {
+    fn seed_scail2(dir: &Path, tier: &str) {
         for file in SCAIL2_TIER_FILES {
             touch(&dir.join(file));
         }
+        let config = match tier {
+            "bf16" => serde_json::json!({}),
+            "q4" => serde_json::json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+            "q8" => serde_json::json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+            _ => panic!("unsupported SCAIL-2 test tier {tier}"),
+        };
+        fs::write(dir.join("config.json"), config.to_string()).unwrap();
     }
 
     /// Write a COMPLETE dense (single-expert, TI2V-5B) Wan MLX tier tree.
@@ -690,19 +728,61 @@ mod tests {
     fn scail2_complete_true_each_provider_file_load_bearing() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("bf16");
-        seed_scail2(&dir);
+        seed_scail2(&dir, "bf16");
         assert!(scail2_tier_complete(&dir));
 
         for component in SCAIL2_TIER_FILES {
-            let torn = tmp.path().join("torn");
-            seed_scail2(&torn);
+            let torn = tmp.path().join("torn").join("bf16");
+            seed_scail2(&torn, "bf16");
             fs::remove_file(torn.join(component)).unwrap();
             assert!(
                 !scail2_tier_complete(&torn),
                 "removing {component} must read incomplete"
             );
-            fs::remove_dir_all(&torn).ok();
+            fs::remove_dir_all(tmp.path().join("torn")).ok();
         }
+    }
+
+    #[test]
+    fn scail2_packed_tier_marker_must_match_the_directory_and_group_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let q4 = tmp.path().join("q4");
+        let q8 = tmp.path().join("q8");
+        seed_scail2(&q4, "q4");
+        seed_scail2(&q8, "q8");
+        assert!(scail2_tier_complete(&q4));
+        assert!(scail2_tier_complete(&q8));
+
+        // Mixed install: every q8 file exists, but its config marker names q4. Model Manager and the
+        // shared resolver must both keep that tier disabled instead of treating filenames as enough.
+        fs::write(
+            q8.join("config.json"),
+            serde_json::json!({ "quantization": { "bits": 4, "group_size": 64 } }).to_string(),
+        )
+        .unwrap();
+        assert!(!scail2_tier_complete(&q8));
+
+        // The packing group is part of the loader contract too; correct bits with a different group
+        // size is not the hosted q4 package.
+        fs::write(
+            q4.join("config.json"),
+            serde_json::json!({ "quantization": { "bits": 4, "group_size": 32 } }).to_string(),
+        )
+        .unwrap();
+        assert!(!scail2_tier_complete(&q4));
+
+        let dense = tmp.path().join("bf16");
+        seed_scail2(&dense, "bf16");
+        assert!(scail2_tier_complete(&dense));
+        fs::write(
+            dense.join("config.json"),
+            serde_json::json!({ "quantization": { "bits": 8, "group_size": 64 } }).to_string(),
+        )
+        .unwrap();
+        assert!(
+            !scail2_tier_complete(&dense),
+            "a packed marker cannot masquerade as dense bf16"
+        );
     }
 
     #[test]

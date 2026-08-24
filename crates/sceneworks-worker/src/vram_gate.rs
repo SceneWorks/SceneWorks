@@ -2137,22 +2137,23 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
 }
 
-/// Fail-closed admission for the shared SCAIL-2 Candle bf16 package. Unlike the generic Wan gate,
-/// SCAIL has no lower-memory Candle tier and no sequential/offload lifecycle, so falling back to
-/// on-disk bytes or admitting an absent row would turn an incomplete catalog into a real OOM. The
-/// exact production render owns `candle.vramGbByTier.bf16`; [`HEADROOM_GB`] remains the common CUDA
-/// reserve added by every measured-peak gate.
+/// Fail-closed admission for the exact SCAIL-2 Candle package tier. The resolver selects the hosted
+/// payload first and forwards its tier here; a source-ready q4/q8 directory is still unavailable for
+/// production until the catalog carries its measured row. Falling back to on-disk bytes, another
+/// precision, or an absent row would turn incomplete evidence into a real OOM. [`HEADROOM_GB`]
+/// remains the common CUDA reserve added by every measured-peak gate.
 #[cfg(test)]
 pub(crate) fn scail2_video_fit_error(
     manifest_entry: &JsonObject,
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
-    scail2_video_fit_error_with_adapter_bytes(manifest_entry, 0, gpu_id, budget)
+    scail2_video_fit_error_with_adapter_bytes(manifest_entry, "bf16", 0, gpu_id, budget)
 }
 
 pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
     manifest_entry: &JsonObject,
+    tier_key: &str,
     adapter_bytes: u64,
     gpu_id: &str,
     budget: Option<VramBudget>,
@@ -2164,7 +2165,7 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
         .and_then(Value::as_bool);
     let peak_gb = candle
         .and_then(|value| value.get("vramGbByTier"))
-        .and_then(|tiers| tiers.get("bf16"))
+        .and_then(|tiers| tiers.get(tier_key))
         .and_then(json_f64)
         .filter(|value| value.is_finite() && *value > 0.0);
     let min_memory_gb = candle
@@ -2180,36 +2181,37 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
         measured_pixels,
     ) else {
         return Some(WorkerError::InvalidPayload(
-            "SCAIL-2 Candle admission is unavailable because the installed catalog has no complete \
-             measured bf16 CUDA row (positive peak, 832x480 geometry, and minMemoryGb floor). \
-             Refusing to load the 47.2 GB shared package; update SceneWorks before retrying."
-                .to_owned(),
+            format!(
+                "SCAIL-2 Candle admission is unavailable because the installed catalog has no complete \
+                 measured {tier_key} CUDA row (positive peak, 832x480 geometry, and minMemoryGb floor). \
+                 Refusing to load the selected {tier_key} package; update SceneWorks before retrying."
+            ),
         ));
     };
     let base_needed_gb = peak_gb + HEADROOM_GB;
     if (min_memory_gb as f64) + f64::EPSILON < base_needed_gb.ceil() {
         return Some(WorkerError::InvalidPayload(format!(
             "SCAIL-2 Candle admission is unavailable because catalog minMemoryGb={min_memory_gb} \
-             is below the measured bf16 CUDA peak plus reserve (~{} GB). Refusing to load the \
-             47.2 GB shared package; update SceneWorks before retrying.",
+             is below the measured {tier_key} CUDA peak plus reserve (~{} GB). Refusing to load the \
+             selected {tier_key} package; update SceneWorks before retrying.",
             base_needed_gb.ceil() as u64,
         )));
     }
     let needed_gb = base_needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
     let Some(budget) = budget else {
         return Some(WorkerError::InvalidPayload(
-            "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
-             load the 47.2 GB shared package without proving that the measured bf16 render peak \
-             fits; verify the NVIDIA driver/runtime and retry."
-                .to_owned(),
+            format!(
+                "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
+                 load the selected {tier_key} package without proving that its measured render peak \
+                 fits; verify the NVIDIA driver/runtime and retry."
+            ),
         ));
     };
     (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
         WorkerError::InvalidPayload(format!(
-            "SCAIL-2 shared bf16 needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
+            "SCAIL-2 shared {tier_key} needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
              81-frame render peak plus CUDA reserve), but GPU {gpu_id} has ~{available} GB \
-             available. Its Candle provider has no lower-memory tier or sequential offload; use a \
-             GPU with more free VRAM, or use the MLX q4/q8 tiers on macOS.",
+             available. Select a measured SCAIL-2 tier that fits, or use a GPU with more free VRAM.",
             needed = needed_gb.ceil() as i64,
             available = budget.free_gb.round() as i64,
         ))
@@ -5521,10 +5523,9 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("no lower-memory tier or sequential offload"),
+            message.contains("Select a measured SCAIL-2 tier"),
             "{message}"
         );
-        assert!(message.contains("MLX q4/q8"), "{message}");
 
         let high = apply_vram_cap(None, Some(105.0));
         assert!(
@@ -5533,6 +5534,7 @@ mod tests {
         );
         let adapter_message = scail2_video_fit_error_with_adapter_bytes(
             &entry,
+            "bf16",
             BYTES_PER_GIB as u64,
             "0",
             apply_vram_cap(None, Some(105.0)),
@@ -5619,6 +5621,37 @@ mod tests {
         assert!(message.contains("minMemoryGb=104"), "{message}");
         assert!(message.contains("~105 GB"), "{message}");
         assert!(message.contains("Refusing to load"), "{message}");
+    }
+
+    #[test]
+    fn scail2_source_ready_packed_tier_stays_closed_without_its_measured_fact_row() {
+        // Artifact availability is deliberately not enough to load q4/q8. This branch retains the
+        // current bf16-only catalog fact while the resolver and descriptor/pin promotion land in
+        // lockstep, so an off-Mac q4 directory can never be budgeted as dense or admitted by bytes.
+        let bf16_only = obj(json!({
+            "candle": {
+                "minMemoryGb": 105,
+                "measured": true,
+                "vramGbByTier": { "bf16": 102.115 },
+                "vramMeasuredPixels": 399360
+            }
+        }));
+        for tier in ["q4", "q8"] {
+            let message = scail2_video_fit_error_with_adapter_bytes(
+                &bf16_only,
+                tier,
+                0,
+                "0",
+                apply_vram_cap(None, Some(500.0)),
+            )
+            .expect("a source-ready packed tier needs its own measured catalog fact")
+            .to_string();
+            assert!(
+                message.contains(&format!("measured {tier} CUDA row")),
+                "{message}"
+            );
+            assert!(message.contains("Refusing to load"), "{message}");
+        }
     }
 
     /// The 5B's FORMER RESIDENT candle block (q4 46.1 / q8 48.7 / bf16 54.0), as sc-12402/sc-12631 shipped

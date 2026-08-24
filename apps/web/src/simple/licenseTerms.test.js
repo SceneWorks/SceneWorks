@@ -87,6 +87,25 @@ describe("modelLicenseRows", () => {
     expect(decoderRow?.license).toBe("Apache-2.0");
   });
 
+  it("keeps Tile primary while composing OpenPose terms with the exact five accepted backbones", () => {
+    const controlnet = bundledLicenses.find(
+      (component) => component.id === "controlnet-tile-sdxl",
+    );
+    expect(controlnet?.models).toEqual(["controlnet_tile_sdxl"]);
+    expect(controlnet?.appliesToModels).toEqual([
+      "sdxl",
+      "realvisxl",
+      "realvisxl_lightning",
+      "illustrious_xl_v1",
+      "illustrious_xl_v2",
+    ]);
+
+    const controlnetRow = modelLicenseRows(bundledLicenses).find(
+      (row) => row.id === "controlnet-tile-sdxl",
+    );
+    expect(controlnetRow?.license).toBe("Apache-2.0");
+  });
+
   it("tolerates an empty or absent corpus", () => {
     expect(modelLicenseRows([])).toEqual([]);
     expect(modelLicenseRows(undefined)).toEqual([]);

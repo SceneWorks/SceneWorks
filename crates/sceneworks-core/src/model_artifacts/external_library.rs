@@ -453,9 +453,11 @@ impl ExternalLibraryBindingStore {
     /// never loses installed state — it only re-points the durable identity at where the library
     /// now lives.
     ///
-    /// It fails CLOSED in both directions: a library missing any recorded install is refused, and
-    /// an installation with no evidence at all is refused outright rather than binding whatever
-    /// Hugging-Face-shaped directory it was handed.
+    /// It fails CLOSED for every installed model: a library missing any recorded install is refused.
+    /// An installation with no install evidence at all has nothing to protect and nothing to check a
+    /// candidate against, so it binds the chosen directory as-is (the Settings "change model
+    /// library" path for a user who has not downloaded anything yet) — the same choice the first-run
+    /// storage step makes, with the volume identity recorded so later installs are judged against it.
     pub fn relocate_binding(
         &self,
         library_root: &Path,
@@ -489,6 +491,15 @@ impl ExternalLibraryBindingStore {
         self.check_relocation_unlocked(library_root).map(|_| ())
     }
 
+    /// Whether this installation has any durable install evidence (validated closures or download
+    /// receipts). Decides which relocation shape applies: with evidence, the candidate must be a
+    /// library carrying every recorded model; without it, any directory is an acceptable fresh
+    /// cache home.
+    pub fn has_install_evidence(&self) -> Result<bool, ExternalLibraryError> {
+        let _lock = self.lock_shared()?;
+        Ok(!self.installed_evidence_closures()?.is_empty())
+    }
+
     fn check_relocation_unlocked(
         &self,
         library_root: &Path,
@@ -497,34 +508,22 @@ impl ExternalLibraryBindingStore {
         let closures = self
             .installed_evidence_closures()
             .map_err(LibraryRelocationError::Failed)?;
-        if closures.is_empty() {
-            return Err(LibraryRelocationError::Rejected(
-                LibraryRelocationRejection::NoInstalledModels,
-            ));
-        }
-        if !has_repository_layout(&canonical_before) {
-            return Err(LibraryRelocationError::Rejected(
-                LibraryRelocationRejection::NotAModelLibrary,
-            ));
-        }
-        let mut missing = Vec::new();
-        for closure in &closures {
-            if validate_requirements_at_root(&canonical_before, closure).is_err() {
-                missing.extend(
-                    closure
-                        .iter()
-                        .map(|requirement| requirement.repository.clone()),
-                );
+        // No evidence: nothing can be orphaned and there is nothing to check, so only the identity
+        // read below stands between the operator and the folder they chose.
+        if !closures.is_empty() {
+            if !has_repository_layout(&canonical_before) {
+                return Err(LibraryRelocationError::Rejected(
+                    LibraryRelocationRejection::NotAModelLibrary,
+                ));
             }
-        }
-        if !missing.is_empty() {
-            missing.sort();
-            missing.dedup();
-            return Err(LibraryRelocationError::Rejected(
-                LibraryRelocationRejection::MissingInstalledModels {
-                    repositories: missing,
-                },
-            ));
+            let missing = requirements_missing_for_relocation(&canonical_before, &closures);
+            if !missing.is_empty() {
+                return Err(LibraryRelocationError::Rejected(
+                    LibraryRelocationRejection::MissingInstalledModels {
+                        repositories: missing,
+                    },
+                ));
+            }
         }
         let identity_before = physical_identity(&canonical_before).map_err(|error| {
             LibraryRelocationError::Rejected(LibraryRelocationRejection::IdentityUnavailable {
@@ -923,10 +922,6 @@ pub enum LibraryRelocationRejection {
     /// The layout is right, but models this install recorded as present are not in that library.
     /// Accepting it would silently orphan installed weights, so it fails closed.
     MissingInstalledModels { repositories: Vec<String> },
-    /// This installation has no durable install evidence at all — no receipts, no validated
-    /// closures — so there is nothing to relocate and nothing to check a candidate against.
-    /// Binding an arbitrary Hugging-Face-shaped directory here would be a guess, not a relocation.
-    NoInstalledModels,
     /// The library validates, but the app cannot express it as a Hugging Face cache home: the
     /// configured root is always `<HF_HOME>/hub`, so the operator must choose the folder that
     /// CONTAINS `hub` (or the `hub` folder itself).
@@ -961,6 +956,39 @@ impl std::fmt::Display for LibraryRelocationError {
 pub struct RelocationTarget {
     pub library_root: PathBuf,
     pub hf_home: PathBuf,
+}
+
+/// Map a folder the operator picked to the pair of paths a FRESH cache home needs — the shape used
+/// when this installation has no install evidence (see
+/// [`ExternalLibraryBindingStore::has_install_evidence`]). No repository layout is required: the
+/// picked folder is the cache home (its `hub` child is the library root, created by the caller
+/// when it adopts), unless the folder is itself named `hub`, in which case its parent is the home.
+/// Everything else about the home/hub pairing matches [`resolve_relocation_target`].
+pub fn resolve_fresh_cache_home(
+    picked: &Path,
+) -> Result<RelocationTarget, LibraryRelocationRejection> {
+    let picked = absolute_lexical(picked).map_err(|_| LibraryRelocationRejection::NotADirectory)?;
+    let canonical =
+        std::fs::canonicalize(&picked).map_err(|_| LibraryRelocationRejection::NotADirectory)?;
+    if !canonical.is_dir() {
+        return Err(LibraryRelocationRejection::NotADirectory);
+    }
+    let is_hub = picked
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("hub"));
+    if is_hub {
+        return match picked.parent() {
+            Some(home) => Ok(RelocationTarget {
+                hf_home: home.to_path_buf(),
+                library_root: picked,
+            }),
+            None => Err(LibraryRelocationRejection::HubDirectoryExpected),
+        };
+    }
+    Ok(RelocationTarget {
+        library_root: picked.join("hub"),
+        hf_home: picked,
+    })
 }
 
 /// Map a folder the operator picked to the pair of paths relocation needs.
@@ -1003,6 +1031,135 @@ pub fn resolve_relocation_target(
         }),
         _ => Err(LibraryRelocationRejection::HubDirectoryExpected),
     }
+}
+
+/// How one evidence requirement reads at a candidate library root, for relocation only.
+///
+/// Availability and binding keep using [`validate_requirements_at_root`]'s exact rule; relocation
+/// needs the middle case: the per-tier delete (`remove_tier_artifacts`) reclaims a quant tier's
+/// bytes but never rewrites the download receipt or prunes the validated-closure ledger, so a real,
+/// healthy library legitimately lacks WHOLE variants its evidence still records. Demanding them
+/// byte-exactly makes every install that ever deleted a tier un-relocatable (the sc-21389 field
+/// failure: 18 repos refused, all deleted-`q4` tiers).
+enum RequirementPresence {
+    /// Some snapshot carries every file — the requirement is installed here.
+    Present,
+    /// Not a single one of the requirement's files exists in any candidate snapshot: the shape a
+    /// whole-tier delete leaves behind. Tolerated when the same repository proves itself through
+    /// another fully present requirement; refused otherwise (an entirely absent model is the
+    /// wrong-folder signal, not tier reclaim).
+    WhollyAbsent,
+    /// Partially present (or unreadable): torn content is never what tier reclaim produces, so it
+    /// stays a refusal regardless of siblings.
+    Missing,
+}
+
+fn requirement_presence_at_root(
+    canonical_root: &Path,
+    requirement: &ExternalArtifactRequirement,
+) -> RequirementPresence {
+    let Some(repo_name) = safe_repo_dir_name(&requirement.repository) else {
+        return RequirementPresence::Missing;
+    };
+    let repo_root = canonical_root.join(format!("models--{repo_name}"));
+    let Ok(canonical_repo) = std::fs::canonicalize(&repo_root) else {
+        return RequirementPresence::Missing;
+    };
+    if !canonical_repo.starts_with(canonical_root) {
+        return RequirementPresence::Missing;
+    }
+    // Same snapshot universe as `validate_requirements_at_root`: the receipted revision when
+    // pinned, every snapshot otherwise. A pinned revision whose snapshot directory is gone
+    // contributes zero files, i.e. reads WhollyAbsent — the same judgement as a deleted tier.
+    let snapshots: Vec<PathBuf> = if let Some(revision) = requirement.revision.as_deref() {
+        vec![canonical_repo.join("snapshots").join(revision)]
+    } else {
+        match std::fs::read_dir(canonical_repo.join("snapshots")) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    entry
+                        .file_type()
+                        .ok()
+                        .filter(|kind| kind.is_dir())
+                        .map(|_| entry.path())
+                })
+                .collect(),
+            Err(_) => return RequirementPresence::Missing,
+        }
+    };
+    let file_exists = |snapshot: &Path, relative: &Path| {
+        std::fs::canonicalize(snapshot.join(relative))
+            .map(|canonical| canonical.is_file() && canonical.starts_with(&canonical_repo))
+            .unwrap_or(false)
+    };
+    let mut any_file_present = false;
+    for snapshot in &snapshots {
+        let mut all = true;
+        for relative in &requirement.files {
+            if file_exists(snapshot, relative) {
+                any_file_present = true;
+            } else {
+                all = false;
+            }
+        }
+        if all {
+            return RequirementPresence::Present;
+        }
+    }
+    if any_file_present {
+        RequirementPresence::Missing
+    } else {
+        RequirementPresence::WhollyAbsent
+    }
+}
+
+/// The repositories a relocation candidate is judged to be missing, deleted-tier drift excluded.
+///
+/// A requirement that is [`RequirementPresence::WhollyAbsent`] is dropped when the SAME repository
+/// has a [`RequirementPresence::Present`] requirement anywhere in the evidence (its other quant
+/// tier, typically): after adoption that variant truthfully reads uninstalled, exactly as it does
+/// today. Everything else — a partially present requirement, a malformed closure, a repository
+/// whose every requirement is absent — still refuses, so a decoy or wrong folder fails closed.
+fn requirements_missing_for_relocation(
+    canonical_root: &Path,
+    closures: &[Vec<ExternalArtifactRequirement>],
+) -> Vec<String> {
+    let mut present_repositories = std::collections::HashSet::new();
+    let mut wholly_absent = Vec::new();
+    let mut missing = Vec::new();
+    for closure in closures {
+        if validate_requirements_shape(closure).is_err() {
+            missing.extend(
+                closure
+                    .iter()
+                    .map(|requirement| requirement.repository.clone()),
+            );
+            continue;
+        }
+        for requirement in closure {
+            match requirement_presence_at_root(canonical_root, requirement) {
+                RequirementPresence::Present => {
+                    present_repositories.insert(requirement.repository.clone());
+                }
+                RequirementPresence::WhollyAbsent => {
+                    wholly_absent.push(requirement.repository.clone());
+                }
+                RequirementPresence::Missing => missing.push(requirement.repository.clone()),
+            }
+        }
+    }
+    missing.extend(
+        wholly_absent
+            .into_iter()
+            .filter(|repository| !present_repositories.contains(repository)),
+    );
+    // Note the asymmetry: a torn (partially present) requirement refuses even when the same
+    // repository is fully present through another one — tier reclaim never leaves partial files,
+    // so torn content is never explainable as drift.
+    missing.sort();
+    missing.dedup();
+    missing
 }
 
 /// The relocation TOCTOU rule, pure so it can be asserted directly: the exact canonical path AND
