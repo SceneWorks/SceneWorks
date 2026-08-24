@@ -15108,8 +15108,8 @@
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
         },
-        // Same soft, untiered OpenPose component as `sdxl`. It is provisioned for the Candle
-        // Lightning route while remaining optional for the current-pin MLX refusal.
+        // Same soft, untiered OpenPose component as `sdxl`. Both native providers accept the
+        // CFG-free Lightning ControlNet route at the pinned inference revision.
         {
           "provider": "huggingface",
           "repo": "xinsir/controlnet-openpose-sdxl-1.0",

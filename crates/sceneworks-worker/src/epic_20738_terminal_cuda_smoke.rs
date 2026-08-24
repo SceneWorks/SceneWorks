@@ -23,6 +23,11 @@ const OUTPUT_ENV: &str = "SCENEWORKS_EPIC_20738_OUTPUT_DIR";
 /// tiny relative to the 0..255 pixel domain: it detects an ignored reference without inventing a
 /// quality or measured-memory floor.
 const SCAIL2_REFERENCE_DELTA_FLOOR: f64 = 1e-6;
+/// A different whole-body pose at the same seed must change the rendered image by more than
+/// serialization-level noise.  0.01 is a mean one-8-bit-level change across 1% of channels: small
+/// enough to avoid treating this as an aesthetic metric, but large enough that an ignored Control
+/// conditioning vector (which is bit-identical at the fixed seed) cannot pass.
+const OPENPOSE_CONTROL_DELTA_FLOOR: f64 = 0.01;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -283,7 +288,7 @@ fn pattern_image(width: u32, height: u32, salt: u8) -> Image {
     }
 }
 
-fn pose_control_image(width: u32, height: u32) -> Image {
+fn pose_control_image(width: u32, height: u32, mirrored: bool) -> Image {
     let mut pixels = vec![0_u8; width as usize * height as usize * 3];
     let mut line = |start: (i32, i32), end: (i32, i32), color: [u8; 3]| {
         let (mut x, mut y) = start;
@@ -317,7 +322,10 @@ fn pose_control_image(width: u32, height: u32) -> Image {
             }
         }
     };
-    let scale = |x: u32, y: u32| ((x * width / 512) as i32, (y * height / 512) as i32);
+    let scale = |x: u32, y: u32| {
+        let x = if mirrored { 512 - x } else { x };
+        ((x * width / 512) as i32, (y * height / 512) as i32)
+    };
     for (start, end, color) in [
         (scale(256, 82), scale(256, 138), [255, 255, 255]),
         (scale(190, 158), scale(322, 158), [255, 128, 0]),
@@ -339,6 +347,29 @@ fn pose_control_image(width: u32, height: u32) -> Image {
         height,
         pixels,
     }
+}
+
+fn mean_image_abs_delta(baseline: &Image, counterfactual: &Image) -> f64 {
+    assert_eq!(
+        (baseline.width, baseline.height, baseline.pixels.len()),
+        (
+            counterfactual.width,
+            counterfactual.height,
+            counterfactual.pixels.len()
+        ),
+        "OpenPose counterfactual changed image shape"
+    );
+    assert!(
+        !baseline.pixels.is_empty(),
+        "OpenPose counterfactual has no pixels"
+    );
+    baseline
+        .pixels
+        .iter()
+        .zip(&counterfactual.pixels)
+        .map(|(left, right)| (f64::from(*left) - f64::from(*right)).abs())
+        .sum::<f64>()
+        / baseline.pixels.len() as f64
 }
 
 fn mask_image(width: u32, height: u32, pair: usize) -> Image {
@@ -454,7 +485,7 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
     let generator = crate::inference_runtime::load("sdxl", &spec)
         .unwrap_or_else(|error| panic!("{} SDXL OpenPose load failed: {error}", cell.id));
     // Use an actual deterministic whole-body stick pose, not arbitrary pixels carrying Pose metadata.
-    let control_image = pose_control_image(cell.request.width, cell.request.height);
+    let control_image = pose_control_image(cell.request.width, cell.request.height, false);
     save_png(&control_image, &output.join("input-openpose.png"));
     let request = GenerationRequest {
         prompt: "a dancer holding the supplied pose, studio photograph".to_owned(),
@@ -479,6 +510,43 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
             .expect("terminal SDXL OpenPose generation"),
         &cell.id,
     );
+    // Keep every non-control request input, including seed, fixed.  Mirroring the complete
+    // skeleton makes the intervention materially different while exercising the same production
+    // ControlNet route, so ignoring `Conditioning::Control` yields a zero delta deterministically.
+    let counterfactual_control = pose_control_image(cell.request.width, cell.request.height, true);
+    save_png(
+        &counterfactual_control,
+        &output.join("input-openpose-counterfactual.png"),
+    );
+    let counterfactual_request = GenerationRequest {
+        prompt: "a dancer holding the supplied pose, studio photograph".to_owned(),
+        width: cell.request.width,
+        height: cell.request.height,
+        count: 1,
+        seed: Some(cell.request.seed),
+        steps: Some(cell.request.steps),
+        guidance: cell.request.guidance,
+        sampler: cell.request.sampler.clone(),
+        conditioning: vec![Conditioning::Control {
+            image: counterfactual_control,
+            kind: ControlKind::Pose,
+            scale: Some(1.0),
+        }],
+        memory: family_generation_memory(&cell.kind, &cell.engine_id),
+        ..Default::default()
+    };
+    let counterfactual = image_output(
+        generator
+            .generate(&counterfactual_request, &mut |_| {})
+            .expect("terminal SDXL OpenPose counterfactual generation"),
+        &cell.id,
+    );
+    let mean_abs_delta = mean_image_abs_delta(&image, &counterfactual);
+    assert!(
+        mean_abs_delta.is_finite() && mean_abs_delta > OPENPOSE_CONTROL_DELTA_FLOOR,
+        "{} ignored material same-seed OpenPose control (delta {mean_abs_delta})",
+        cell.id
+    );
     let std = image_std(&image);
     assert!(
         std > DEGENERATE_STD_FLOOR_DEFAULT,
@@ -486,7 +554,25 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
         cell.id
     );
     save_png(&image, &output.join("output.png"));
-    json!({ "kind": "sdxlOpenPose", "width": image.width, "height": image.height, "pixelStd": std })
+    save_png(&counterfactual, &output.join("counterfactual-output.png"));
+    json!({
+        "kind": "sdxlOpenPose",
+        "width": image.width,
+        "height": image.height,
+        "pixelStd": std,
+        "controlCounterfactual": {
+            "kind": "mirroredPose",
+            "sameSeed": true,
+            "meanAbsDelta": mean_abs_delta,
+            "deltaFloor": OPENPOSE_CONTROL_DELTA_FLOOR,
+            "witnesses": {
+                "baselineControl": "input-openpose.png",
+                "counterfactualControl": "input-openpose-counterfactual.png",
+                "baselineOutput": "output.png",
+                "counterfactualOutput": "counterfactual-output.png",
+            },
+        },
+    })
 }
 
 fn video_stats(frames: &[Image]) -> (f64, f64) {

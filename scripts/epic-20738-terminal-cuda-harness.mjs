@@ -126,6 +126,23 @@ const PASS18_REMAINING_ARTIFACT_IDS = ["ltx23-q8", "ltx23-gemma"];
 const PASS18_REMAINING_AUTHORITIES = 2;
 const PASS18_REMAINING_FILES = 28;
 const PASS18_REMAINING_SOURCE_BYTES = 56_156_615_634;
+// The final 19/19 artifact is immutable source evidence.  The five OpenPose receipts lack the
+// later causal-control witness, so the next continuation imports only 1..14 and replaces exactly
+// 15..19 at the corrected pin.
+const OPENPOSE_RECOVERY_ARTIFACT_ID = "9500244306";
+const OPENPOSE_RECOVERY_ARTIFACT_NAME = "sc-20945-epic-20738-7d7a3efa3088204311e3be01330f35702774feb6-32664618999-1";
+const OPENPOSE_RECOVERY_ARTIFACT_SIZE = 17_134_718;
+const OPENPOSE_RECOVERY_ARTIFACT_DIGEST = "sha256:9af191547befc7833f82f4d9057fff8abfe09b21eada2be2b4f252d73ae30818";
+const OPENPOSE_RECOVERY_RUN_ID = "32664618999";
+const OPENPOSE_RECOVERY_RUN_ATTEMPT = "1";
+const OPENPOSE_RECOVERY_SCENEWORKS_HEAD = "7d7a3efa3088204311e3be01330f35702774feb6";
+const OPENPOSE_RECOVERY_IMPORTED_ORDINALS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+const OPENPOSE_RECOVERY_EXECUTION_ORDINALS = [15, 16, 17, 18, 19];
+const OPENPOSE_RECOVERY_REMAINING_ARTIFACT_IDS = [
+  "sdxl-base-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+  "realvisxl-q4", "realvisxl-lightning-q4", "illustrious-v1-q4", "illustrious-v2-q4",
+];
+const OPENPOSE_CONTROL_DELTA_FLOOR = 0.01;
 const RECOVERY_ORIGINAL_ARTIFACT_ID = "9477529627";
 const RECOVERY_ORIGINAL_ARTIFACT_NAME = "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1";
 const RECOVERY_ORIGINAL_ARTIFACT_DIGEST = "sha256:f3164a32a485fdedd671f4e11f30038213d30a7eb2b541bda90bef30e63188f3";
@@ -469,6 +486,7 @@ export function validateRuntimeResult(runtimeResult, cell) {
   }
   validateRequestMemoryStrategy(runtimeResult.requestMemoryStrategy, cell);
   validateScail2ReferenceCounterfactuals(runtimeResult.metrics, cell, "runtime result");
+  validateOpenPoseControlCounterfactual(runtimeResult.metrics, cell, "runtime result");
   return runtimeResult;
 }
 
@@ -521,6 +539,47 @@ export function validateScail2ReferenceCounterfactuals(metrics, cell, label = "m
     }
   }
   return counterfactuals;
+}
+
+// The five OpenPose cells are causal tests, not merely nondegenerate-image checks. The candidate
+// keeps the seed and every non-control input fixed, swaps only to a mirrored whole-body pose, and
+// records both input and output witnesses. An implementation that drops Conditioning::Control
+// produces the same seeded bytes and fails the 0.01 mean-absolute-delta floor.
+export function validateOpenPoseControlCounterfactual(metrics, cell, label = "metrics") {
+  const isOpenPose = cell?.kind === "sdxlOpenPose";
+  if (!isOpenPose) {
+    if (metrics?.controlCounterfactual != null) {
+      fail(`${cell.id} ${label} carries unreviewed OpenPose control counterfactual evidence`);
+    }
+    return null;
+  }
+  object(metrics, `${cell.id} ${label}`);
+  const evidence = metrics.controlCounterfactual;
+  object(evidence, `${cell.id} ${label} OpenPose control counterfactual`);
+  exactKeys(
+    evidence,
+    ["kind", "sameSeed", "meanAbsDelta", "deltaFloor", "witnesses"],
+    `${cell.id} ${label} OpenPose control counterfactual`,
+  );
+  if (evidence.kind !== "mirroredPose" || evidence.sameSeed !== true
+    || evidence.deltaFloor !== OPENPOSE_CONTROL_DELTA_FLOOR
+    || !Number.isFinite(evidence.meanAbsDelta)
+    || evidence.meanAbsDelta <= OPENPOSE_CONTROL_DELTA_FLOOR) {
+    fail(`${cell.id} ${label} does not prove material same-seed OpenPose control influence`);
+  }
+  object(evidence.witnesses, `${cell.id} ${label} OpenPose witnesses`);
+  exactKeys(
+    evidence.witnesses,
+    ["baselineControl", "counterfactualControl", "baselineOutput", "counterfactualOutput"],
+    `${cell.id} ${label} OpenPose witnesses`,
+  );
+  if (evidence.witnesses.baselineControl !== "input-openpose.png"
+    || evidence.witnesses.counterfactualControl !== "input-openpose-counterfactual.png"
+    || evidence.witnesses.baselineOutput !== "output.png"
+    || evidence.witnesses.counterfactualOutput !== "counterfactual-output.png") {
+    fail(`${cell.id} ${label} OpenPose witnesses are not immutable position-bound files`);
+  }
+  return evidence;
 }
 
 function validateRequestMemoryStrategy(strategy, cell) {
@@ -1224,6 +1283,14 @@ function validateReceiptInternal(
   } else if (Object.hasOwn(receipt.cell, "referenceCounterfactuals")) {
     fail(`${receipt.cell.id} receipt carries counterfactual evidence outside the passed multi-reference cell`);
   }
+  if (receipt.status === "passed" && expectedCell.kind === "sdxlOpenPose") {
+    validateOpenPoseControlCounterfactual({
+      kind: "sdxlOpenPose",
+      controlCounterfactual: receipt.cell.controlCounterfactual,
+    }, expectedCell, "receipt");
+  } else if (Object.hasOwn(receipt.cell, "controlCounterfactual")) {
+    fail(`${receipt.cell.id} receipt carries OpenPose control evidence outside a passed OpenPose cell`);
+  }
   if (!receipt.repositories?.sceneworks?.clean || !receipt.repositories?.inference?.clean) {
     fail("receipt does not bind clean paired repositories");
   }
@@ -1715,10 +1782,12 @@ export async function importPrefixEvidence(prefix, output) {
   };
 }
 
-function validateRecoveryReceiptProvenance(receipt, cell, { headSha, runId, runAttempt }, label) {
+function validateRecoveryReceiptProvenance(
+  receipt, cell, { headSha, runId, runAttempt, inferenceSha = HISTORICAL_INFERENCE_PIN }, label,
+) {
   if (receipt.cell?.ordinal !== cell.ordinal || receipt.cell?.id !== cell.id
     || receipt.repositories?.sceneworks?.sha !== headSha || receipt.repositories?.sceneworks?.clean !== true
-    || receipt.repositories?.inference?.sha !== HISTORICAL_INFERENCE_PIN || receipt.repositories?.inference?.clean !== true
+    || receipt.repositories?.inference?.sha !== inferenceSha || receipt.repositories?.inference?.clean !== true
     || receipt.execution?.headSha !== headSha || receipt.execution?.runId !== runId
     || receipt.execution?.runAttempt !== runAttempt) {
     fail(`${label} is not bound to its exact audited provenance`);
@@ -2769,6 +2838,170 @@ export async function importPass18Recovery(prefix, output) {
     outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
       id: cell.id, status: "passed", receipt: `_imported-prefix/${ordinalName}/receipt.json`,
       error: null, emergencyReceiptError: null, source: "imported-pass18-recovery",
+    })),
+  };
+}
+
+function validateOpenPoseRecoveryMetadata(metadata) {
+  exactKeys(metadata, [
+    "artifactId", "artifactName", "artifactSize", "artifactDigest", "runId", "runAttempt", "headSha",
+    "inferenceSha", "profile", "cellSemanticsSha256", "artifactSemanticsSha256",
+  ], "OpenPose recovery source artifact metadata");
+  if (metadata.artifactId !== OPENPOSE_RECOVERY_ARTIFACT_ID
+    || metadata.artifactName !== OPENPOSE_RECOVERY_ARTIFACT_NAME
+    || metadata.artifactSize !== OPENPOSE_RECOVERY_ARTIFACT_SIZE
+    || metadata.artifactDigest !== OPENPOSE_RECOVERY_ARTIFACT_DIGEST
+    || metadata.runId !== OPENPOSE_RECOVERY_RUN_ID
+    || metadata.runAttempt !== OPENPOSE_RECOVERY_RUN_ATTEMPT
+    || metadata.headSha !== OPENPOSE_RECOVERY_SCENEWORKS_HEAD
+    || metadata.inferenceSha !== FROZEN_INFERENCE_PIN
+    || metadata.profile !== PROFILE_NAME
+    || metadata.cellSemanticsSha256 !== EXPECTED_CELL_SEMANTICS_SHA256
+    || metadata.artifactSemanticsSha256 !== EXPECTED_ARTIFACT_SEMANTICS_SHA256) {
+    fail("OpenPose recovery metadata does not bind exact artifact 9500244306");
+  }
+}
+
+function validateOpenPoseRecoverySummary(summary, currentProfile, metadata) {
+  if (summary?.schemaVersion !== 1 || summary.profile !== PROFILE_NAME
+    || summary.repositories?.sceneworks?.sha !== metadata.headSha
+    || summary.repositories?.sceneworks?.clean !== true
+    || summary.repositories?.inference?.sha !== FROZEN_INFERENCE_PIN
+    || summary.repositories?.inference?.clean !== true
+    || summary.execution?.runId !== metadata.runId
+    || summary.execution?.runAttempt !== metadata.runAttempt
+    || summary.execution?.headSha !== metadata.headSha
+    || summary.execution?.headRef !== "refs/heads/feature/sc-20738-candle-cuda-parity"
+    || summary.execution?.workflow !== "Windows Candle worker"
+    || summary.passed !== currentProfile.cells.length || summary.failed !== 0
+    || !Array.isArray(summary.campaignErrors) || summary.campaignErrors.length !== 0
+    || !Array.isArray(summary.receipts) || summary.receipts.length !== currentProfile.cells.length
+    || JSON.stringify(summary.lineage?.continuation?.executionOrdinals) !== JSON.stringify(PASS18_EXECUTION_ORDINALS)) {
+    fail("OpenPose recovery source summary does not bind the audited 19-PASS final run");
+  }
+  for (const [index, cell] of currentProfile.cells.entries()) {
+    const ordinal = index + 1;
+    const expectedPath = ordinal === 14
+      ? `14-${cell.id}/receipt.json`
+      : `_imported-prefix/${String(ordinal).padStart(2, "0")}-${cell.id}/receipt.json`;
+    const source = ordinal === 14 ? "continuation" : "imported-pass18-recovery";
+    const row = summary.receipts[index];
+    if (row?.id !== cell.id || row.status !== "passed" || row.receipt !== expectedPath
+      || row.source !== source || row.error !== null) {
+      fail(`OpenPose recovery source summary receipt ${ordinal} is not exact 19-PASS evidence`);
+    }
+  }
+}
+
+// Import the 14 non-OpenPose PASS receipts from the immutable 19/19 final artifact, then run
+// exactly the five cells whose old receipts lack causal ControlNet evidence.  The source OpenPose
+// receipts are intentionally quarantined rather than rewritten: the replacement campaign owns new
+// input/output hashes and a new receipt at its own immutable head.
+export async function selectOpenPoseRecovery(prefixCandidates, currentProfile) {
+  validateProfile(currentProfile);
+  const root = path.resolve(prefixCandidates);
+  const entries = await readdir(root, { withFileTypes: true });
+  if (entries.length !== 1 || !entries[0].isDirectory() || entries[0].isSymbolicLink()) {
+    fail("expected exactly one exact 19-PASS OpenPose recovery artifact candidate");
+  }
+  const candidate = path.join(root, entries[0].name);
+  const metadata = JSON.parse(await readFile(path.join(candidate, "artifact-metadata.json"), "utf8"));
+  validateOpenPoseRecoveryMetadata(metadata);
+  const evidenceRoot = path.join(candidate, "evidence");
+  const files = await ordinaryTreeFiles(evidenceRoot);
+  const allowedTop = new Set([
+    "_imported-prefix", `14-${EXPECTED_CELLS[13]}`,
+    "cache-preflight-initial.json", "cache-preflight.json", "campaign-summary.json",
+  ]);
+  if (files.some((file) => !allowedTop.has(path.relative(evidenceRoot, file).split(path.sep)[0]))) {
+    fail("OpenPose recovery source artifact contains evidence outside the exact audited campaign");
+  }
+  const summary = JSON.parse(await readFile(path.join(evidenceRoot, "campaign-summary.json"), "utf8"));
+  validateOpenPoseRecoverySummary(summary, currentProfile, metadata);
+
+  const receipts = [];
+  const compatibility = [];
+  for (const ordinal of OPENPOSE_RECOVERY_IMPORTED_ORDINALS) {
+    const index = ordinal - 1;
+    const cell = { ...currentProfile.cells[index], ordinal };
+    const ordinalName = `${String(ordinal).padStart(2, "0")}-${cell.id}`;
+    const cellDir = path.join(evidenceRoot, ...(ordinal === 14 ? [ordinalName] : ["_imported-prefix", ordinalName]));
+    const receipt = JSON.parse(await readFile(path.join(cellDir, "receipt.json"), "utf8"));
+    const provenance = ordinal <= IMPORTED_PREFIX_CELLS
+      ? { headSha: LEGACY_SCENEWORKS_HEAD, runId: "32570707303", runAttempt: "1" }
+      : ordinal <= RECOVERY_IMPORTED_PREFIX_CELLS
+        ? { headSha: RECOVERY_SCENEWORKS_HEAD, runId: RECOVERY_RUN_ID, runAttempt: RECOVERY_RUN_ATTEMPT }
+        : ordinal <= 13
+          ? { headSha: SPARSE_RECOVERY_SCENEWORKS_HEAD, runId: SPARSE_RECOVERY_RUN_ID, runAttempt: SPARSE_RECOVERY_RUN_ATTEMPT }
+          : { ...metadata, inferenceSha: FROZEN_INFERENCE_PIN };
+    validateRecoveryReceiptProvenance(receipt, cell, provenance, `OpenPose recovery imported receipt ${ordinalName}`);
+    if (ordinal <= IMPORTED_PREFIX_CELLS) {
+      validateTrustedLegacyImportedReceiptDocument(receipt);
+      const legacyProfile = legacyPrefixProfile(currentProfile);
+      validateReceiptInternal(receipt, { ...legacyProfile.cells[index], ordinal }, legacyProfile, null, TRUSTED_LEGACY_IMPORT_CONTEXT);
+    } else {
+      validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+      validateReceipt(receipt, cell, currentProfile);
+    }
+    const rehashed = await evidenceFiles(cellDir);
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`OpenPose recovery imported receipt ${ordinalName} failed ${field} rehash`);
+      }
+    }
+    if (receipt.status !== "passed") fail(`OpenPose recovery imported receipt ${ordinalName} is not PASS`);
+    compatibility.push({
+      ordinal, cellId: cell.id, cellSemanticsSha256: canonicalSha256(currentProfile.cells[index]),
+    });
+    receipts.push({ cell: currentProfile.cells[index], ordinalName, receipt, root: cellDir });
+  }
+  return { candidate, evidenceRoot, metadata, receipts, compatibility, sourceLineage: summary.lineage };
+}
+
+export async function importOpenPoseRecovery(prefix, output) {
+  const destination = path.join(output, "_imported-prefix");
+  await mkdir(destination);
+  for (const receipt of prefix.receipts) {
+    await cp(receipt.root, path.join(destination, receipt.ordinalName), {
+      recursive: true, errorOnExist: true, force: false, dereference: false,
+    });
+  }
+  await ordinaryTreeFiles(destination);
+  for (const { ordinalName, receipt } of prefix.receipts) {
+    const rehashed = await evidenceFiles(path.join(destination, ordinalName));
+    for (const field of ["inputs", "outputs", "logs"]) {
+      if (JSON.stringify(rehashed[field]) !== JSON.stringify(receipt[field])) {
+        fail(`copied OpenPose recovery ${ordinalName} failed ${field} rehash`);
+      }
+    }
+  }
+  const lineage = {
+    kind: "terminal-openpose-counterfactual-recovery",
+    sourceArtifactId: prefix.metadata.artifactId,
+    sourceArtifactName: prefix.metadata.artifactName,
+    sourceArtifactSize: prefix.metadata.artifactSize,
+    sourceArtifactDigest: prefix.metadata.artifactDigest,
+    sourceRunId: prefix.metadata.runId,
+    sourceRunAttempt: prefix.metadata.runAttempt,
+    sourceHeadSha: prefix.metadata.headSha,
+    sourceInferenceSha: prefix.metadata.inferenceSha,
+    sourceProfile: prefix.metadata.profile,
+    sourceCellSemanticsSha256: prefix.metadata.cellSemanticsSha256,
+    targetCellSemanticsSha256: EXPECTED_CELL_SEMANTICS_SHA256,
+    sourceArtifactSemanticsSha256: prefix.metadata.artifactSemanticsSha256,
+    importedOrdinals: OPENPOSE_RECOVERY_IMPORTED_ORDINALS,
+    executionOrdinals: OPENPOSE_RECOVERY_EXECUTION_ORDINALS,
+    compatibility: prefix.compatibility,
+    priorLineage: prefix.sourceLineage,
+  };
+  await writeFile(path.join(destination, "lineage.json"), `${JSON.stringify(lineage, null, 2)}\n`, {
+    encoding: "utf8", flag: "wx",
+  });
+  return {
+    lineage,
+    outcomes: prefix.receipts.map(({ cell, ordinalName }) => ({
+      id: cell.id, status: "passed", receipt: `_imported-prefix/${ordinalName}/receipt.json`,
+      error: null, emergencyReceiptError: null, source: "imported-openpose-recovery",
     })),
   };
 }
@@ -3899,10 +4132,14 @@ export async function runCampaign(args, options = {}) {
   const allOrdinals = profile.cells.map((_, index) => index + 1);
   const legacyContinuationOrdinals = allOrdinals.slice(IMPORTED_PREFIX_CELLS);
   const requestedOrdinals = options.executionOrdinals ?? (options.importedPrefix
-    ? legacyContinuationOrdinals : PASS18_EXECUTION_ORDINALS);
+    ? legacyContinuationOrdinals : OPENPOSE_RECOVERY_EXECUTION_ORDINALS);
   const executionOrdinals = exactExecutionOrdinals(profile, requestedOrdinals);
   let imported = { lineage: null, outcomes: [] };
-  if (JSON.stringify(executionOrdinals) === JSON.stringify(PASS18_EXECUTION_ORDINALS)) {
+  if (JSON.stringify(executionOrdinals) === JSON.stringify(OPENPOSE_RECOVERY_EXECUTION_ORDINALS)) {
+    const selected = options.prefixSelection
+      ?? await selectOpenPoseRecovery(prefixCandidates, profile);
+    imported = options.importedPrefix ?? await importOpenPoseRecovery(selected, output);
+  } else if (JSON.stringify(executionOrdinals) === JSON.stringify(PASS18_EXECUTION_ORDINALS)) {
     const selected = options.prefixSelection
       ?? await selectPass18Recovery(prefixCandidates, profile);
     imported = options.importedPrefix ?? await importPass18Recovery(selected, output);
@@ -3937,6 +4174,11 @@ export async function runCampaign(args, options = {}) {
   const remainingFileCount = remainingArtifactIds.reduce(
     (sum, id) => sum + artifactExpectedFiles[id].length, 0,
   );
+  if (downloadEvidenceSha256 === CURRENT_DOWNLOAD_EVIDENCE_SHA256
+    && JSON.stringify(executionOrdinals) === JSON.stringify(OPENPOSE_RECOVERY_EXECUTION_ORDINALS)
+    && JSON.stringify(remainingArtifactIds) !== JSON.stringify(OPENPOSE_RECOVERY_REMAINING_ARTIFACT_IDS)) {
+    fail("OpenPose recovery scope drifted from its exact five-cell authority set");
+  }
   if (downloadEvidenceSha256 === CURRENT_DOWNLOAD_EVIDENCE_SHA256
     && JSON.stringify(executionOrdinals) === JSON.stringify(SPARSE_EXECUTION_ORDINALS)
     && (JSON.stringify(remainingArtifactIds) !== JSON.stringify(SPARSE_REMAINING_ARTIFACT_IDS)
@@ -4419,6 +4661,9 @@ export async function runCampaign(args, options = {}) {
           receipt.cell.loadSpecQuantBits = runtimeResult.loadSpecQuantBits;
           if (cell.kind === "scail2" && cell.capability === "multiReference") {
             receipt.cell.referenceCounterfactuals = structuredClone(runtimeResult.metrics.referenceCounterfactuals);
+          }
+          if (cell.kind === "sdxlOpenPose") {
+            receipt.cell.controlCounterfactual = structuredClone(runtimeResult.metrics.controlCounterfactual);
           }
           lifecycle.requestMemoryStrategy = structuredClone(runtimeResult.requestMemoryStrategy);
         } catch (error) {
