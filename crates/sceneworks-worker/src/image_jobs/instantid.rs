@@ -77,6 +77,367 @@ const INSTANTID_ENGINE: &str = "mlx_instantid";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const INSTANTID_ENGINE: &str = "candle_instantid";
 
+// ---------------------------------------------------------------------------
+// Request-scoped memory admission (sc-20799, epic 15448)
+// ---------------------------------------------------------------------------
+//
+// Both InstantID engines ship the SAME bespoke admission surface — an
+// `instantid`-owned `MemoryProviderContract`, an `InstantIdMemoryIdentity` that
+// names the exact composition, `InstantId::load_with_memory_context`, and a
+// per-request `begin_memory_request` scope. Until this, the worker called the
+// unadmitted `InstantId::load` on both lanes, so the whole surface was
+// unreachable and the memory matrix reported InstantID `Missing` on both
+// backends. The candle-only sc-16069 `admit_conditioning_paths` floor stays: it
+// is a pre-load on-disk floor, complementary to (not a substitute for) the
+// provider's own request-scoped handshake.
+//
+// The two crates' `memory_strategy` modules are byte-identical in shape (the
+// route/identity/overlay-key/evidence-revision are deliberately backend-neutral
+// so cross-backend evidence is not split); only `provider_contract` differs — the
+// MLX one takes the numeric tier, the candle one is dense-only.
+#[cfg(target_os = "macos")]
+use runtime_macos::providers::instantid::memory_strategy as instantid_memory;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use runtime_cuda::providers::instantid::memory_strategy as instantid_memory;
+
+use instantid_memory::{InstantIdMemoryIdentity, InstantIdRoute};
+
+/// Bytes per binary gigabyte — the currency the GB-denominated worker probes
+/// (`gpu::total_unified_memory_gb`, `vram_gate::VramBudget`) are converted into for
+/// [`gen_core::MemoryBudget`], which is byte-denominated.
+const INSTANTID_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// GB → bytes. The float→int cast saturates (a negative reading lands on 0, an absurd one on
+/// `u64::MAX`), so a nonsense probe can never become a giant budget.
+fn instantid_gib_bytes(gb: f64) -> u64 {
+    (gb * INSTANTID_BYTES_PER_GIB).ceil() as u64
+}
+
+/// The single path inside a [`gen_core::WeightsSource`]. Local rather than
+/// `conditioning_fit::weights_source_path` because that module is candle-only and this seam runs on
+/// BOTH lanes.
+fn instantid_source_path(source: &WeightsSource) -> &Path {
+    match source {
+        WeightsSource::Dir(path) | WeightsSource::File(path) => path.as_path(),
+    }
+}
+
+/// The exact, ORDERED artifact set one InstantID load consumes, each tagged with the role it plays.
+///
+/// This is the input to BOTH the admission fingerprint and the priced floor, so the two can never
+/// describe different artifact sets. The role tag is part of the hashed stream, so swapping two
+/// files between roles changes the fingerprint even though the path multiset is unchanged.
+#[allow(clippy::too_many_arguments)]
+fn instantid_artifact_entries<'a>(
+    sdxl_base: &'a Path,
+    identitynet: &'a WeightsSource,
+    ip_adapter: &'a Path,
+    scrfd: &'a Path,
+    arcface: &'a Path,
+    openpose: Option<&'a WeightsSource>,
+    adapters: &'a [AdapterSpec],
+    pid: Option<&'a gen_core::PidWeights>,
+) -> Vec<(&'static str, &'a Path)> {
+    let mut entries: Vec<(&'static str, &Path)> = vec![
+        ("sdxl_base", sdxl_base),
+        ("identitynet", instantid_source_path(identitynet)),
+        ("ip_adapter", ip_adapter),
+        ("scrfd", scrfd),
+        ("arcface", arcface),
+    ];
+    if let Some(openpose) = openpose {
+        entries.push(("openpose", instantid_source_path(openpose)));
+    }
+    entries.extend(
+        adapters
+            .iter()
+            .map(|adapter| ("adapter", adapter.path.as_path())),
+    );
+    if let Some(pid) = pid {
+        entries.push(("pid_checkpoint", instantid_source_path(&pid.checkpoint)));
+        entries.push(("pid_gemma", instantid_source_path(&pid.gemma)));
+    }
+    entries
+}
+
+/// A deterministic digest of the exact artifact identities [`instantid_artifact_entries`] named.
+///
+/// It is the `artifact_fingerprint` axis of [`InstantIdMemoryIdentity`], so it lands verbatim inside
+/// the provider's `overlay_key()` — two different artifact sets therefore never share an overlay key
+/// and can never price each other. Hex, so it can never contain the `=` the shared safety gate
+/// rejects in an overlay.
+///
+/// The digest is over the ORDERED paths with a record separator between them. Order carries the
+/// role (each role sits at a fixed position in [`instantid_artifact_entries`]), so hashing the role
+/// name too would add nothing; the separator is what stops two different splits of the same
+/// concatenated text — `["a", "bc"]` and `["ab", "c"]` — from colliding.
+fn instantid_artifact_fingerprint(entries: &[(&'static str, &Path)]) -> String {
+    let mut hasher = Sha256::new();
+    for (_role, path) in entries {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(b"\x1e");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Drop every entry CONTAINED in an earlier-kept entry so a recursive directory scan and an explicit
+/// file inside it are not both counted. Same shortest-path-first containment rule (and same reason)
+/// as `conditioning_fit::dedupe_contained`, reimplemented here because that module is candle-only
+/// and this pricing must be identical on both lanes. An OVER-count is the one direction this must
+/// never have: it would refuse a render that fits.
+fn instantid_priced_entries<'a>(entries: &[(&'static str, &'a Path)]) -> Vec<&'a Path> {
+    let mut ordered: Vec<&Path> = entries.iter().map(|(_, path)| *path).collect();
+    ordered.sort_by_key(|path| path.as_os_str().len());
+    let mut kept: Vec<&Path> = Vec::with_capacity(ordered.len());
+    for path in ordered {
+        if kept.iter().any(|keeper| path.starts_with(keeper)) {
+            continue;
+        }
+        kept.push(path);
+    }
+    kept
+}
+
+/// On-disk bytes of the whole InstantID artifact set: a file's own length, a directory's recursive
+/// `.safetensors` sum. Missing/unreadable contributes 0 (less evidence, never a phantom
+/// requirement), so a fully unreadable set sums to 0 and the admission carries no floor at all.
+fn instantid_artifact_bytes(entries: &[(&'static str, &Path)]) -> u64 {
+    instantid_priced_entries(entries)
+        .into_iter()
+        .map(|path| match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => meta.len(),
+            Ok(meta) if meta.is_dir() => crate::mlx_fit_gate::sum_safetensors_bytes(path),
+            _ => 0,
+        })
+        .fold(0u64, u64::saturating_add)
+}
+
+/// The manifest's own memory declaration for this backend + tier, if it carries one:
+/// `<backend>.vramGbByTier[<tier>]` then `<backend>.minMemoryGb`. `instantid_realvisxl` declares
+/// NEITHER today (it has no `mlx` or `candle` memory block at all), so the caller falls back to the
+/// priced artifact bytes — this reader exists so a measured figure, once added, is honored rather
+/// than ignored. Never a constant of our own invention.
+fn instantid_manifest_peak_gb(
+    manifest_entry: &JsonObject,
+    backend_key: &str,
+    tier_key: &str,
+) -> Option<f64> {
+    let block = manifest_entry.get(backend_key)?;
+    block
+        .get("vramGbByTier")
+        .and_then(|tiers| tiers.get(tier_key))
+        .and_then(Value::as_f64)
+        .or_else(|| block.get("minMemoryGb").and_then(Value::as_f64))
+}
+
+/// The manifest block key + resolved tier key for THIS backend's InstantID load.
+///
+/// MLX honors the packed q4/q8 tiers ([`instantid_quant`] / [`instantid_tier_subdir`]); the candle
+/// stack is dense-only and always loads `bf16/`, which is exactly what the candle provider's
+/// `resolved_numeric_tier()` declares.
+#[cfg(target_os = "macos")]
+fn instantid_memory_backend_keys(request: &ImageRequest) -> (&'static str, &'static str) {
+    (
+        "mlx",
+        match instantid_quant(request).0 {
+            Some(4) => "q4",
+            Some(8) => "q8",
+            _ => "bf16",
+        },
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn instantid_memory_backend_keys(request: &ImageRequest) -> (&'static str, &'static str) {
+    let _ = request;
+    ("candle", "bf16")
+}
+
+/// The numeric tier this load actually materializes, in the provider's currency.
+///
+/// MLX: `Bf16` precision (the dense-default sentinel both crates use) with the packed quant the
+/// request selected, matching `provider_contract(tier)`'s per-request tier validation. Candle: the
+/// provider's own `resolved_numeric_tier()` (Bf16 / no quant).
+#[cfg(target_os = "macos")]
+fn instantid_memory_tier(request: &ImageRequest) -> gen_core::MemoryNumericTier {
+    gen_core::MemoryNumericTier {
+        quant: match instantid_quant(request).0 {
+            Some(4) => Some(Quant::Q4),
+            Some(8) => Some(Quant::Q8),
+            _ => None,
+        },
+        ..instantid_memory::dense_numeric_tier()
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn instantid_memory_tier(request: &ImageRequest) -> gen_core::MemoryNumericTier {
+    let _ = request;
+    instantid_memory::resolved_numeric_tier()
+}
+
+/// The worker-owned live memory budget for an InstantID admission.
+///
+/// macOS: total unified memory (`sysctl hw.memsize`) — the same reading the MLX fit gate sizes
+/// against; there is no per-process committed reading at this seam, so `committed_bytes` is 0.
+/// Candle: the live NVML total/free, through the same `apply_vram_cap` emulation knob the SenseNova
+/// direct-admission lane uses, with `total - free` charged as committed.
+///
+/// A host with NO readable budget yields a budget that admits exactly this request — the worker's
+/// standing "no evidence never blocks" convention (`FitDecision::Unknown`,
+/// `ConditioningFit::NoBudget`), not a refusal on an unread host.
+#[cfg(target_os = "macos")]
+async fn instantid_memory_budget(
+    _settings: &Settings,
+    predicted_peak_bytes: u64,
+) -> gen_core::MemoryBudget {
+    let total_bytes = crate::gpu::total_unified_memory_gb()
+        .await
+        .map(instantid_gib_bytes)
+        .unwrap_or(predicted_peak_bytes);
+    gen_core::MemoryBudget {
+        total_bytes,
+        committed_bytes: 0,
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: 0,
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn instantid_memory_budget(
+    settings: &Settings,
+    predicted_peak_bytes: u64,
+) -> gen_core::MemoryBudget {
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    match budget {
+        Some(budget) => gen_core::MemoryBudget {
+            total_bytes: instantid_gib_bytes(budget.total_gb),
+            committed_bytes: instantid_gib_bytes((budget.total_gb - budget.free_gb).max(0.0)),
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        None => gen_core::MemoryBudget {
+            total_bytes: predicted_peak_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+    }
+}
+
+/// Build the exact `MemoryRunContext` the InstantID provider admits.
+///
+/// Every field is pinned by the provider's own safety check: `character_image` mode, one reference,
+/// batch/frames 1, `use_pid` / `has_phases` equal to the identity's, `overlay` equal to the
+/// identity's `overlay_key()`, the contract's calibration handshake (abi + fingerprint +
+/// `EagerMaterialization` load shape), the loaded numeric tier, and a budget that fits the predicted
+/// peak. `Resident` is the honest strategy: this lane loads the whole stack up front (the provider's
+/// `StagedResidency` arm releases components between phases, which this worker does not drive), and
+/// `Resident` is not an "optimized" strategy, so `MemoryOptimizationAuthority::Resident` is the
+/// matching authority.
+///
+/// A contract with no calibration identity is an error, not a default: the InstantID contract
+/// declares one, and silently substituting a blank fingerprint would make the handshake vacuous.
+fn instantid_memory_context(
+    contract: &gen_core::MemoryProviderContract,
+    tier: gen_core::MemoryNumericTier,
+    identity: &InstantIdMemoryIdentity,
+    width: u32,
+    height: u32,
+    budget: gen_core::MemoryBudget,
+    predicted_peak_bytes: u64,
+) -> WorkerResult<gen_core::MemoryRunContext> {
+    let calibration = contract.calibration.as_ref().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "InstantID memory contract declares no calibration identity".to_owned(),
+        )
+    })?;
+    Ok(gen_core::MemoryRunContext {
+        selection: gen_core::MemorySelection {
+            strategy: gen_core::MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier,
+        },
+        optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
+        mode: gen_core::MemoryMode::Other("character_image".to_owned()),
+        has_reference: true,
+        use_pid: identity.use_pid,
+        has_phases: identity.face_restore,
+        geometry: gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        overlay: Some(identity.overlay_key()),
+        budget,
+        predicted_peak_bytes,
+        cache_state: gen_core::MemoryCacheState::Cold,
+        evidence_revision: instantid_memory::REQUEST_EVIDENCE_REVISION.to_owned(),
+    })
+}
+
+/// Fail-closed pre-load validation of the admission context, on the ASYNC side — so a refusal is a
+/// typed [`WorkerError::InvalidPayload`] raised before any weights are touched, rather than a
+/// stringified engine error from inside the blocking load. `load_with_memory_context` re-validates
+/// the same context inside the load (defense in depth); this call is what makes the refusal typed
+/// and pre-load. There is deliberately NO fallback to the unadmitted `InstantId::load` path.
+#[cfg(target_os = "macos")]
+fn instantid_validate_admission(
+    contract: &gen_core::MemoryProviderContract,
+    tier: gen_core::MemoryNumericTier,
+    identity: &InstantIdMemoryIdentity,
+    context: &gen_core::MemoryRunContext,
+) -> WorkerResult<()> {
+    instantid_memory::validate_context(contract, tier, identity, context)
+        .map_err(|error| WorkerError::InvalidPayload(format!("InstantID memory admission: {error}")))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn instantid_validate_admission(
+    contract: &gen_core::MemoryProviderContract,
+    tier: gen_core::MemoryNumericTier,
+    identity: &InstantIdMemoryIdentity,
+    context: &gen_core::MemoryRunContext,
+) -> WorkerResult<()> {
+    let _ = tier;
+    instantid_memory::validate_context(contract, identity, context)
+        .map_err(|error| WorkerError::InvalidPayload(format!("InstantID memory admission: {error}")))
+}
+
+/// The provider contract for this lane (MLX validates the request tier, candle is dense-only).
+#[cfg(target_os = "macos")]
+fn instantid_provider_contract(
+    tier: gen_core::MemoryNumericTier,
+) -> gen_core::MemoryProviderContract {
+    instantid_memory::provider_contract(tier)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn instantid_provider_contract(
+    tier: gen_core::MemoryNumericTier,
+) -> gen_core::MemoryProviderContract {
+    let _ = tier;
+    instantid_memory::provider_contract()
+}
+
+/// The provider route this job's iteration mode drives. The route is an admission IDENTITY axis
+/// (it lands in `overlay_key()`), so an angle set can never be priced by identity-mode evidence.
+fn instantid_memory_route(mode: &InstantIdMode) -> InstantIdRoute {
+    match mode {
+        InstantIdMode::Identity => InstantIdRoute::Identity,
+        InstantIdMode::AngleSet => InstantIdRoute::Angle,
+        InstantIdMode::PoseSet(_) => InstantIdRoute::Pose,
+    }
+}
+
 /// How an InstantID character job batches its iterations (torch-parity precedence: a pose set
 /// wins over an angle set, which wins over plain identity — `instantid_adapter.py:655`).
 enum InstantIdMode {
@@ -923,6 +1284,62 @@ async fn generate_instantid_stream(
         .await?;
     }
 
+    // ---- Request-scoped memory admission (sc-20799) --------------------------------------------
+    // The bespoke InstantID admission surface, driven identically on both backends. Built from the
+    // artifacts THIS job resolved (so the overlay key is bound to the exact artifact set) and
+    // validated here, before any weight file is opened.
+    let memory_route = instantid_memory_route(&mode);
+    let artifact_entries = instantid_artifact_entries(
+        &sdxl_base,
+        &controlnet,
+        &ip_adapter,
+        &scrfd_path,
+        &arcface_path,
+        openpose.as_ref(),
+        &adapters,
+        pid_weights.as_ref(),
+    );
+    let memory_identity = InstantIdMemoryIdentity {
+        route: memory_route,
+        adapter_count,
+        use_pid,
+        face_restore,
+        artifact_fingerprint: instantid_artifact_fingerprint(&artifact_entries),
+    };
+    // Predicted peak: the manifest's own measured figure when it declares one, else the priced
+    // on-disk bytes of exactly the artifact set the overlay key names. No invented constant, and no
+    // borrowed evidence from another provider.
+    let (manifest_backend_key, manifest_tier_key) = instantid_memory_backend_keys(request);
+    let predicted_peak_bytes = instantid_manifest_peak_gb(
+        &request.model_manifest_entry,
+        manifest_backend_key,
+        manifest_tier_key,
+    )
+    .map(instantid_gib_bytes)
+    .unwrap_or_else(|| instantid_artifact_bytes(&artifact_entries));
+    drop(artifact_entries);
+    let memory_tier = instantid_memory_tier(request);
+    let memory_contract = instantid_provider_contract(memory_tier);
+    let memory_context = instantid_memory_context(
+        &memory_contract,
+        memory_tier,
+        &memory_identity,
+        width,
+        height,
+        instantid_memory_budget(settings, predicted_peak_bytes).await,
+        predicted_peak_bytes,
+    )?;
+    instantid_validate_admission(
+        &memory_contract,
+        memory_tier,
+        &memory_identity,
+        &memory_context,
+    )?;
+    // The load closure needs its own copies; the originals are moved into the per-item drive closure
+    // below, which revalidates the SAME context against each request through `begin_memory_request`.
+    let load_memory_identity = memory_identity.clone();
+    let load_memory_context = memory_context.clone();
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "instantid",
@@ -941,8 +1358,25 @@ async fn generate_instantid_stream(
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 sdxl,
             };
-            let model = InstantId::load(&paths)
-                .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
+            // Admitted load (sc-20799): the provider revalidates the exact route/composition/budget
+            // handshake and RETAINS it, which is what makes `begin_memory_request` reachable per
+            // item. There is no unadmitted fallback — a refusal here fails the job. The MLX entry
+            // takes the numeric tier (its contract validates the tier request-by-request); the
+            // candle entry is dense-only and takes none.
+            #[cfg(target_os = "macos")]
+            let model = InstantId::load_with_memory_context(
+                &paths,
+                memory_tier,
+                load_memory_identity,
+                load_memory_context,
+            )
+            .map_err(|error| WorkerError::Engine(format!("InstantID load failed: {error}")))?;
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let model =
+                InstantId::load_with_memory_context(&paths, load_memory_identity, load_memory_context)
+                    .map_err(|error| {
+                        WorkerError::Engine(format!("InstantID load failed: {error}"))
+                    })?;
             // Attach OpenPose (pose mode) BEFORE quantize so it quantizes with the stack; quantize
             // before with_face (the engine's documented order). `with_openpose` is backend-neutral
             // (both engines take `&WeightsSource` and consume+return `self`).
@@ -1098,6 +1532,20 @@ async fn generate_instantid_stream(
                         scheduler: scheduler.clone(),
                         cancel: cancel.clone(),
                     };
+                    // ONE request scope per generated item, held across BOTH engine calls for that
+                    // item. The admitted identity carries `face_restore` as `has_phases`, i.e. the
+                    // context that was admitted already describes the restore pass — so the restore
+                    // re-render belongs INSIDE this scope, not in a second one it was never admitted
+                    // for. `begin_memory_request` re-checks the route/composition and the request's
+                    // own geometry + PiD route against the admitted context, so a request that
+                    // crossed its admission fails here rather than allocating.
+                    let mut scope = model
+                        .begin_memory_request(&memory_context, &memory_identity, &req, memory_route)
+                        .map_err(|error| {
+                            WorkerError::InvalidPayload(format!(
+                                "InstantID memory request refused: {error}"
+                            ))
+                        })?;
                     let result = match &action {
                         InstantIdAction::Identity => {
                             model.generate(&req, &reference, &mut *on_progress)
@@ -1112,12 +1560,20 @@ async fn generate_instantid_stream(
                     let mut out = match result {
                         Ok(out) => out,
                         // A cancel tripped mid-denoise surfaces as the engine's cancelled error —
-                        // stop cleanly (consume_gen_events posts the Canceled update).
-                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        // stop cleanly (consume_gen_events posts the Canceled update). The scope
+                        // still gets its terminal `finish`, which is what synchronizes the device and
+                        // releases the request-local allocations. A cleanup error on an already-
+                        // failing path is not allowed to mask the reason we are leaving.
+                        Err(_) if cancel.is_cancelled() => {
+                            let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
+                            return Ok(None);
+                        }
                         Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "InstantID generation failed: {error}"
-                            )));
+                            let message = format!("InstantID generation failed: {error}");
+                            let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                message: message.clone(),
+                            });
+                            return Err(WorkerError::Engine(message));
                         }
                     };
                     // Optional ADetailer-style face-restore re-render (sc-3380), imposing the
@@ -1151,14 +1607,31 @@ async fn generate_instantid_stream(
                             &mut *on_progress,
                         ) {
                             Ok(out) => out,
-                            Err(_) if cancel.is_cancelled() => return Ok(None),
+                            Err(_) if cancel.is_cancelled() => {
+                                let _ = scope.finish(gen_core::MemoryRunOutcome::Canceled);
+                                return Ok(None);
+                            }
                             Err(error) => {
-                                return Err(WorkerError::InvalidPayload(format!(
-                                    "InstantID face-restore failed: {error}"
-                                )))
+                                let message = format!("InstantID face-restore failed: {error}");
+                                let _ = scope.finish(gen_core::MemoryRunOutcome::Error {
+                                    message: message.clone(),
+                                });
+                                return Err(WorkerError::InvalidPayload(message));
                             }
                         };
                     }
+                    // Both engine calls for this item are done: run the scope's terminal cleanup
+                    // (synchronize + release the request-local allocations) and drop it, so the next
+                    // item begins from a released state. A cleanup failure fails the job — it means
+                    // the release the admission promised did not happen.
+                    scope
+                        .finish(gen_core::MemoryRunOutcome::Complete)
+                        .map_err(|error| {
+                            WorkerError::Engine(format!(
+                                "InstantID memory scope cleanup failed: {error}"
+                            ))
+                        })?;
+                    drop(scope);
                     // Identity-likeness post-pass (sc-4409 angles / sc-4410 poses / sc-4411 plain
                     // With-Character): score this finished image against the per-job cached source
                     // embedding, on this blocking thread (the `!Send` face stack lives here). CRITICAL
@@ -1226,6 +1699,465 @@ async fn generate_instantid_stream(
 // pipeline, the engine requires width/height ∈ [512, 2048] and multiples of 8, so a
 // tile is run at the nearest valid size and the result resized back before blending.
 // ---------------------------------------------------------------------------
+
+/// Request-scoped memory admission (sc-20799). Every assertion here is weights-free and
+/// host-independent: budgets and geometries are constructed literally, paths live under a
+/// `tempfile::tempdir()`, and no absolute host path or host RAM figure is ever asserted.
+#[cfg(test)]
+mod instantid_memory_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entry<'a>(role: &'static str, path: &'a Path) -> (&'static str, &'a Path) {
+        (role, path)
+    }
+
+    /// The dense tier each backend's provider declares. The two crates spell the same Bf16/no-quant
+    /// tier differently — MLX `dense_numeric_tier()`, candle `resolved_numeric_tier()` (candle is
+    /// dense-only, so it has no separate "dense" name) — so the tests name it once here.
+    #[cfg(target_os = "macos")]
+    fn dense_tier() -> gen_core::MemoryNumericTier {
+        instantid_memory::dense_numeric_tier()
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn dense_tier() -> gen_core::MemoryNumericTier {
+        instantid_memory::resolved_numeric_tier()
+    }
+
+    /// A composition identity whose fingerprint is a literal, so the assertions below never depend
+    /// on this machine's paths.
+    fn identity(
+        route: InstantIdRoute,
+        adapter_count: usize,
+        use_pid: bool,
+        face_restore: bool,
+    ) -> InstantIdMemoryIdentity {
+        InstantIdMemoryIdentity {
+            route,
+            adapter_count,
+            use_pid,
+            face_restore,
+            artifact_fingerprint: "fingerprint-a".to_owned(),
+        }
+    }
+
+    fn budget(total_bytes: u64) -> gen_core::MemoryBudget {
+        gen_core::MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        }
+    }
+
+    /// The exact context the production seam builds, plus the contract it is validated against.
+    fn admitted(
+        identity: &InstantIdMemoryIdentity,
+        predicted_peak_bytes: u64,
+        total_bytes: u64,
+    ) -> (
+        gen_core::MemoryProviderContract,
+        gen_core::MemoryNumericTier,
+        gen_core::MemoryRunContext,
+    ) {
+        let tier = dense_tier();
+        let contract = instantid_provider_contract(tier);
+        let context = instantid_memory_context(
+            &contract,
+            tier,
+            identity,
+            1024,
+            1024,
+            budget(total_bytes),
+            predicted_peak_bytes,
+        )
+        .expect("the InstantID contract declares a calibration identity");
+        (contract, tier, context)
+    }
+
+    /// The whole point of the change: the context the worker builds is the one the provider's own
+    /// bespoke safety check ACCEPTS — on this backend, for every route.
+    #[test]
+    fn worker_built_context_is_accepted_by_the_provider_on_every_route() {
+        for route in [
+            InstantIdRoute::Identity,
+            InstantIdRoute::Angle,
+            InstantIdRoute::Pose,
+        ] {
+            let identity = identity(route, 2, true, true);
+            let (contract, tier, context) = admitted(&identity, 8, 64);
+            instantid_validate_admission(&contract, tier, &identity, &context)
+                .unwrap_or_else(|error| panic!("{route:?} must be admitted, got {error}"));
+        }
+    }
+
+    /// Every axis the provider pins is really pinned by the context we build: crossing any one of
+    /// them fails CLOSED rather than admitting on a neighbour's evidence.
+    #[test]
+    fn every_crossed_admission_axis_fails_closed() {
+        let identity = identity(InstantIdRoute::Angle, 1, true, true);
+        let (contract, tier, accepted) = admitted(&identity, 8, 64);
+
+        let crossings: Vec<(&str, gen_core::MemoryRunContext)> = vec![
+            ("mode", {
+                let mut context = accepted.clone();
+                context.mode = gen_core::MemoryMode::TextToImage;
+                context
+            }),
+            ("reference_count", {
+                let mut context = accepted.clone();
+                context.geometry.reference_count = 2;
+                context
+            }),
+            ("batch", {
+                let mut context = accepted.clone();
+                context.geometry.batch = 2;
+                context
+            }),
+            ("frames", {
+                let mut context = accepted.clone();
+                context.geometry.frames = 2;
+                context
+            }),
+            ("use_pid", {
+                let mut context = accepted.clone();
+                context.use_pid = !context.use_pid;
+                context
+            }),
+            ("has_phases", {
+                let mut context = accepted.clone();
+                context.has_phases = !context.has_phases;
+                context
+            }),
+            ("overlay", {
+                let mut context = accepted.clone();
+                context.overlay = None;
+                context
+            }),
+            ("evidence_revision", {
+                let mut context = accepted.clone();
+                context.evidence_revision = "borrowed-sdxl-evidence".to_owned();
+                context
+            }),
+            ("calibration_fingerprint", {
+                let mut context = accepted.clone();
+                context.calibration_fingerprint = "some-other-provider".to_owned();
+                context
+            }),
+            ("calibration_abi", {
+                let mut context = accepted.clone();
+                context.calibration_abi = context.calibration_abi.wrapping_add(1);
+                context
+            }),
+            ("load_shape", {
+                let mut context = accepted.clone();
+                context.load_shape = gen_core::LoadShape::DeferredMaterialization;
+                context
+            }),
+            ("budget", {
+                let mut context = accepted.clone();
+                context.predicted_peak_bytes = context.budget.total_bytes + 1;
+                context
+            }),
+        ];
+        for (axis, context) in crossings {
+            assert!(
+                instantid_validate_admission(&contract, tier, &identity, &context).is_err(),
+                "crossing {axis} must fail closed"
+            );
+        }
+    }
+
+    /// The overlay key is the identity, so a job whose composition differs in ANY axis cannot be
+    /// admitted against another job's context.
+    #[test]
+    fn a_context_built_for_one_composition_rejects_another() {
+        let admitted_identity = identity(InstantIdRoute::Identity, 0, false, false);
+        let (contract, tier, context) = admitted(&admitted_identity, 8, 64);
+        for other in [
+            identity(InstantIdRoute::Pose, 0, false, false),
+            identity(InstantIdRoute::Identity, 1, false, false),
+            InstantIdMemoryIdentity {
+                artifact_fingerprint: "fingerprint-b".to_owned(),
+                ..identity(InstantIdRoute::Identity, 0, false, false)
+            },
+        ] {
+            assert!(
+                instantid_validate_admission(&contract, tier, &other, &context).is_err(),
+                "a context admitted for {admitted_identity:?} must reject {other:?}"
+            );
+        }
+    }
+
+    /// The iteration mode is what selects the route axis, so the three modes must not collapse.
+    #[test]
+    fn each_iteration_mode_maps_to_its_own_route() {
+        assert_eq!(
+            instantid_memory_route(&InstantIdMode::Identity),
+            InstantIdRoute::Identity
+        );
+        assert_eq!(
+            instantid_memory_route(&InstantIdMode::AngleSet),
+            InstantIdRoute::Angle
+        );
+        assert_eq!(
+            instantid_memory_route(&InstantIdMode::PoseSet(3)),
+            InstantIdRoute::Pose
+        );
+    }
+
+    /// The fingerprint keys the overlay to the EXACT artifact set: two different sets never share
+    /// one, and the digest is order- and role-sensitive (a path multiset alone is not the identity).
+    #[test]
+    fn artifact_fingerprint_separates_every_artifact_set() {
+        let a = PathBuf::from("/models/a.safetensors");
+        let b = PathBuf::from("/models/b.safetensors");
+        let base = |ip: &Path, scrfd: &Path| {
+            instantid_artifact_fingerprint(&[
+                entry("sdxl_base", Path::new("/models/bf16")),
+                entry("ip_adapter", ip),
+                entry("scrfd", scrfd),
+            ])
+        };
+        let reference = base(&a, &b);
+        assert_eq!(reference, base(&a, &b), "the digest must be deterministic");
+        assert_eq!(reference.len(), 64, "sha256 hex");
+        assert!(
+            reference.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "the digest lands inside the overlay key, which must never carry '='"
+        );
+        assert_ne!(
+            reference,
+            base(&b, &a),
+            "swapping two files between roles is a different artifact set"
+        );
+        // The record separator is load-bearing: without it these two entry lists concatenate to the
+        // same text and two different artifact sets would share one overlay key.
+        assert_ne!(
+            instantid_artifact_fingerprint(&[
+                entry("sdxl_base", Path::new("a")),
+                entry("ip_adapter", Path::new("bc")),
+            ]),
+            instantid_artifact_fingerprint(&[
+                entry("sdxl_base", Path::new("ab")),
+                entry("ip_adapter", Path::new("c")),
+            ]),
+            "artifact paths must be delimited, not concatenated"
+        );
+        assert_ne!(
+            reference,
+            instantid_artifact_fingerprint(&[
+                entry("sdxl_base", Path::new("/models/q4")),
+                entry("ip_adapter", &a),
+                entry("scrfd", &b),
+            ]),
+            "a different base tier is a different artifact set"
+        );
+        assert_ne!(
+            reference,
+            instantid_artifact_fingerprint(&[
+                entry("sdxl_base", Path::new("/models/bf16")),
+                entry("ip_adapter", &a),
+                entry("scrfd", &b),
+                entry("openpose", Path::new("/models/openpose")),
+            ]),
+            "an added branch is a different artifact set"
+        );
+    }
+
+    /// The entry list is what both the fingerprint and the priced floor read, so it must name every
+    /// optional artifact this job actually loads — and only those.
+    #[test]
+    fn artifact_entries_name_every_optional_branch_exactly_once() {
+        let identitynet = WeightsSource::Dir(PathBuf::from("/w/identitynet"));
+        let openpose = WeightsSource::Dir(PathBuf::from("/w/openpose"));
+        let pid = gen_core::PidWeights {
+            checkpoint: WeightsSource::File(PathBuf::from("/w/pid.safetensors")),
+            gemma: WeightsSource::Dir(PathBuf::from("/w/gemma")),
+        };
+        let adapters = vec![
+            AdapterSpec::new(PathBuf::from("/w/lora-a.safetensors"), 1.0, AdapterKind::Lora),
+            AdapterSpec::new(PathBuf::from("/w/lora-b.safetensors"), 1.0, AdapterKind::Lora),
+        ];
+        let bare = instantid_artifact_entries(
+            Path::new("/w/base"),
+            &identitynet,
+            Path::new("/w/ip.safetensors"),
+            Path::new("/w/scrfd.safetensors"),
+            Path::new("/w/arcface.safetensors"),
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(
+            bare.iter().map(|(role, _)| *role).collect::<Vec<_>>(),
+            vec!["sdxl_base", "identitynet", "ip_adapter", "scrfd", "arcface"]
+        );
+        let full = instantid_artifact_entries(
+            Path::new("/w/base"),
+            &identitynet,
+            Path::new("/w/ip.safetensors"),
+            Path::new("/w/scrfd.safetensors"),
+            Path::new("/w/arcface.safetensors"),
+            Some(&openpose),
+            &adapters,
+            Some(&pid),
+        );
+        assert_eq!(
+            full.iter().map(|(role, _)| *role).collect::<Vec<_>>(),
+            vec![
+                "sdxl_base",
+                "identitynet",
+                "ip_adapter",
+                "scrfd",
+                "arcface",
+                "openpose",
+                "adapter",
+                "adapter",
+                "pid_checkpoint",
+                "pid_gemma",
+            ]
+        );
+        assert_eq!(
+            full[6].1,
+            Path::new("/w/lora-a.safetensors"),
+            "adapters keep their declared order — a reorder is a different fingerprint"
+        );
+    }
+
+    /// An over-count is the one direction the floor must never have: on a fresh install the face
+    /// files live INSIDE the bundle directory, and a naive sum would charge them twice.
+    #[test]
+    fn priced_bytes_count_a_nested_artifact_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("scrfd.safetensors"), vec![7u8; 2048]).unwrap();
+        let nested = bundle.join("scrfd.safetensors");
+        let outside = tmp.path().join("ip.safetensors");
+        std::fs::write(&outside, vec![7u8; 1024]).unwrap();
+
+        let dir_only = instantid_artifact_bytes(&[entry("identitynet", &bundle)]);
+        assert_eq!(dir_only, 2048);
+        assert_eq!(
+            instantid_artifact_bytes(&[entry("identitynet", &bundle), entry("scrfd", &nested)]),
+            2048,
+            "a file inside a summed directory must not be charged twice"
+        );
+        assert_eq!(
+            instantid_artifact_bytes(&[
+                entry("identitynet", &bundle),
+                entry("scrfd", &nested),
+                entry("ip_adapter", &outside),
+            ]),
+            3072,
+            "an artifact outside the directory must still be charged"
+        );
+        assert_eq!(
+            instantid_artifact_bytes(&[entry("ip_adapter", &tmp.path().join("absent"))]),
+            0,
+            "an unreadable artifact contributes no evidence, never a phantom requirement"
+        );
+    }
+
+    /// The predicted peak comes from the manifest when the manifest declares one — the measured
+    /// per-tier row first, then the padded floor. Never a constant of ours.
+    #[test]
+    fn manifest_peak_prefers_the_measured_tier_row_then_min_memory() {
+        let declared = json!({
+            "candle": { "vramGbByTier": { "bf16": 21.5, "q4": 9.0 }, "minMemoryGb": 12.0 }
+        });
+        let declared = declared.as_object().unwrap();
+        assert_eq!(
+            instantid_manifest_peak_gb(declared, "candle", "bf16"),
+            Some(21.5)
+        );
+        assert_eq!(
+            instantid_manifest_peak_gb(declared, "candle", "q8"),
+            Some(12.0),
+            "an unmeasured tier falls back to the declared floor"
+        );
+        assert_eq!(
+            instantid_manifest_peak_gb(declared, "mlx", "bf16"),
+            None,
+            "another backend's block is not this backend's evidence"
+        );
+        let silent = json!({});
+        assert_eq!(
+            instantid_manifest_peak_gb(silent.as_object().unwrap(), "candle", "bf16"),
+            None,
+            "instantid_realvisxl declares nothing today, so the caller must price the artifacts"
+        );
+    }
+
+    /// GB→byte conversion is the currency bridge between the worker's GB-denominated probes and the
+    /// byte-denominated contract; getting the scale wrong silently mis-sizes every budget.
+    #[test]
+    fn gib_bytes_converts_in_binary_gigabytes() {
+        assert_eq!(instantid_gib_bytes(1.0), 1024 * 1024 * 1024);
+        assert_eq!(instantid_gib_bytes(0.5), 512 * 1024 * 1024);
+        assert_eq!(instantid_gib_bytes(0.0), 0);
+    }
+
+    /// The declared numeric tier must be the tier the lane actually loads, because the provider
+    /// rejects a selection whose tier differs from the loaded one.
+    #[test]
+    fn declared_tier_matches_the_tier_this_lane_loads() {
+        let request = |advanced: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "instantid_realvisxl", "advanced": advanced })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let dense = instantid_memory_tier(&request(json!({})));
+        assert_eq!(dense.quant, None);
+        assert_eq!(
+            instantid_memory_backend_keys(&request(json!({}))).1,
+            "bf16"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                instantid_memory_tier(&request(json!({ "mlxQuantize": 4 }))).quant,
+                Some(Quant::Q4)
+            );
+            assert_eq!(
+                instantid_memory_tier(&request(json!({ "mlxQuantize": 8 }))).quant,
+                Some(Quant::Q8)
+            );
+            assert_eq!(
+                instantid_memory_backend_keys(&request(json!({ "mlxQuantize": 4 }))),
+                ("mlx", "q4")
+            );
+            // The MLX contract validates the tier request-by-request: a context built for the dense
+            // tier must not admit a q4 load.
+            let identity = identity(InstantIdRoute::Identity, 0, false, false);
+            let (contract, _, context) = admitted(&identity, 8, 64);
+            let crossed = gen_core::MemoryNumericTier {
+                quant: Some(Quant::Q4),
+                ..instantid_memory::dense_numeric_tier()
+            };
+            assert!(
+                instantid_validate_admission(&contract, crossed, &identity, &context).is_err(),
+                "a dense-admitted context must not price a q4 load"
+            );
+        }
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            assert_eq!(
+                instantid_memory_tier(&request(json!({ "mlxQuantize": 4 }))).quant,
+                None,
+                "the candle InstantID stack is dense-only"
+            );
+            assert_eq!(
+                instantid_memory_backend_keys(&request(json!({ "mlxQuantize": 4 }))),
+                ("candle", "bf16")
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod instantid_tier_tests {
