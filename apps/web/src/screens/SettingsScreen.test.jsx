@@ -164,7 +164,12 @@ describe("SettingsScreen model library location", () => {
       (button) => button.textContent.trim() === "Change…",
     );
     await click(change[1]);
-    expect(container.textContent).toContain(
+    // The refusal renders INSIDE the model library row — the top-of-panel status line can be
+    // scrolled out of view, which made a refusal look like a silent no-op.
+    const row = [...container.querySelectorAll(".settings-row-title")]
+      .find((title) => title.textContent.includes("Model library"))
+      .closest("div").parentElement;
+    expect(row.querySelector('[role="status"]').textContent).toContain(
       "That folder does not contain a SceneWorks model library.",
     );
     expect(container.textContent).toContain("/Users/me/.cache/huggingface");

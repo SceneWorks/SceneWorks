@@ -282,8 +282,14 @@ export function SettingsScreen({
   const modelLibraryFromEnvironment = storageSetup?.hfHomeFromEnvironment === true;
   const modelLibraryPath =
     storageSetup?.hfHomeActive ?? settings?.hfHome ?? storageSetup?.hfHomeDefault ?? null;
+  // Outcome of the last Change…/Reveal, rendered INLINE at the row. The screen's shared status
+  // line sits at the top of the panel — off-screen when the user is scrolled down at the Storage
+  // group — so a relocation refusal there reads as a silent no-op (the sc-21389 field failure:
+  // the API refused with a typed 409 and the user saw "nothing happened").
+  const [modelLibraryNotice, setModelLibraryNotice] = useState("");
 
   async function changeModelLibrary() {
+    setModelLibraryNotice("");
     try {
       const adopted = await onChangeModelLibrary?.();
       if (adopted?.hfHome) {
@@ -294,10 +300,10 @@ export function SettingsScreen({
         ]);
         setSettings(reloaded);
         setStorageSetup(storage);
-        setStatus("Model library updated — restart SceneWorks to apply.");
+        setModelLibraryNotice("Model library updated — restart SceneWorks to apply.");
       }
     } catch (error) {
-      setStatus(error?.message || String(error));
+      setModelLibraryNotice(error?.message || String(error));
     }
   }
 
@@ -307,7 +313,7 @@ export function SettingsScreen({
       await invoke("reveal_in_os", { path: modelLibraryPath });
     } catch (error) {
       // Most likely: the default cache home was never created because nothing was downloaded yet.
-      setStatus(error?.message || String(error));
+      setModelLibraryNotice(error?.message || String(error));
     }
   }
 
@@ -768,6 +774,11 @@ export function SettingsScreen({
                       Set by the <code>HF_HOME</code> environment variable, which overrides
                       anything chosen here. Unset it to change the location from Settings.
                     </div>
+                  ) : null}
+                  {modelLibraryNotice ? (
+                    <p aria-live="polite" className="settings-status" role="status">
+                      {modelLibraryNotice}
+                    </p>
                   ) : null}
                   <div className="settings-button-row">
                     <button

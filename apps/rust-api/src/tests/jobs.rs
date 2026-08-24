@@ -422,6 +422,123 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
     assert_eq!(claimed["job"]["id"], job["id"]);
 }
 
+/// The OpenPose co-requisite belongs to Model Manager install/repair authority, not the generic
+/// image worker payload. A normal no-pose SDXL request must carry only the provider's unconditional
+/// hard components (three on Candle; none for the self-contained MLX package), and retry/duplicate
+/// must preserve that projection at their shared canonicalization boundary.
+#[tokio::test]
+async fn ordinary_sdxl_txt2img_never_forwards_the_soft_openpose_component() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "realvisxl",
+            "count": 1,
+            "advanced": { "steps": 20 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "txt2img enqueues: {original}");
+    let job_id = original["id"].as_str().expect("job id");
+    let mut boundary_jobs = vec![("create", original.clone())];
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "advanced": { "steps": 21 } } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        boundary_jobs.push((operation, replay));
+    }
+
+    for (boundary, job) in boundary_jobs {
+        assert!(
+            job["payload"]["advanced"].get("poses").is_none(),
+            "{boundary}: the ordinary request must remain a no-pose job"
+        );
+        let co_requisites: Vec<&Value> = job["payload"]["modelManifestEntry"]["downloads"]
+            .as_array()
+            .expect("authoritative downloads array")
+            .iter()
+            .filter(|download| download["coRequisite"] == json!(true))
+            .collect();
+        let component_ids: std::collections::BTreeSet<&str> = co_requisites
+            .iter()
+            .filter_map(|download| download["componentId"].as_str())
+            .collect();
+        assert!(
+            !component_ids.contains("controlnet_openpose"),
+            "{boundary}: a no-pose job must not forward the soft OpenPose component: {component_ids:?}"
+        );
+        let hard_sdxl_components = std::collections::BTreeSet::from([
+            "tokenizer_clip_l",
+            "tokenizer_clip_bigg",
+            "vae_fp16_fix",
+        ]);
+        assert_eq!(
+            component_ids, hard_sdxl_components,
+            "{boundary}: the authoritative payload carries only the exact hard SDXL metadata rows"
+        );
+        for download in &co_requisites {
+            let platforms = download["platforms"]
+                .as_array()
+                .expect("hard SDXL co-requisites declare their platforms")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                platforms,
+                std::collections::BTreeSet::from(["windows", "linux"]),
+                "{boundary}: carried hard SDXL metadata is Candle-only: {download}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        let target_platform = "macos";
+        #[cfg(target_os = "windows")]
+        let target_platform = "windows";
+        #[cfg(target_os = "linux")]
+        let target_platform = "linux";
+        let applicable_component_ids = co_requisites
+            .iter()
+            .filter(|download| {
+                download["platforms"].as_array().is_some_and(|platforms| {
+                    platforms
+                        .iter()
+                        .any(|platform| platform.as_str() == Some(target_platform))
+                })
+            })
+            .filter_map(|download| download["componentId"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        #[cfg(target_os = "macos")]
+        assert!(
+            applicable_component_ids.is_empty(),
+            "{boundary}: carried Candle metadata is inapplicable to self-contained MLX SDXL: \
+             {applicable_component_ids:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            applicable_component_ids, hard_sdxl_components,
+            "{boundary}: Candle receives exactly its three descriptor-required components"
+        );
+    }
+}
+
 #[tokio::test]
 async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -1192,6 +1309,43 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         }
     }
 
+    // The one shipped SDXL OpenPose tuple is accepted at every alternate create boundary, while
+    // caller-forged authorization/revision fields are removed and never persisted.
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": {
+                        "controlWeights": {
+                            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                            "filename": "diffusion_pytorch_model.safetensors",
+                            "revision": "0123456789abcdef0123456789abcdef01234567",
+                            "_catalogAuthorized": true
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        let weights = body["payload"]["advanced"]["controlWeights"]
+            .as_object()
+            .expect("canonical controlWeights");
+        assert_eq!(
+            weights.get("repo").and_then(Value::as_str),
+            Some("xinsir/controlnet-openpose-sdxl-1.0")
+        );
+        assert_eq!(
+            weights.get("filename").and_then(Value::as_str),
+            Some("diffusion_pytorch_model.safetensors")
+        );
+        assert!(!weights.contains_key("revision"));
+        assert!(!weights.contains_key("_catalogAuthorized"));
+    }
+
     // Legitimate operations retain their existing success semantics after the merged payload is
     // canonicalized; rejected injections above must not have persisted hidden jobs.
     for operation in ["retry", "duplicate"] {
@@ -1212,8 +1366,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
-        3,
-        "only the original and two clean operations may persist"
+        5,
+        "only the original, two shipped-control operations, and two clean operations may persist"
     );
 }
 
@@ -7160,6 +7314,401 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_reference: bool) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string_pretty(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "scail2_14b",
+                "name": "SCAIL-2 14B",
+                "family": "scail2",
+                "type": "video",
+                "capabilities": ["image_to_video"],
+                "ui": { "scail2MultiReference": multi_reference }
+            }]
+        }))
+        .expect("multi-reference manifest serializes"),
+    )
+    .expect("multi-reference manifest writes");
+    write_empty_sibling_manifests(config_dir);
+}
+
+/// The paired SCAIL-2 provider has six source-position slots: the first character plus five
+/// ordered extras. The API owns the public boundary, while the worker keeps the same backstop for
+/// retry/legacy payloads; neither is permitted to silently retain only the first six. The source
+/// implementation must also stay behind the resolved descriptor gate until the final inference
+/// pin carries the paired layout. This pins that gate and the canonical empty-array payload shape
+/// used by recipes, replay, retry, and duplicate.
+#[tokio::test]
+async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 multi-reference" }),
+    )
+    .await;
+
+    let base = || {
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving"
+        })
+    };
+
+    // 0 references without the legacy source fallback remains incomplete. The one-reference
+    // path remains available while the current engine descriptor has not yet proven the paired
+    // layout.
+    let (status, _) = request(app.clone(), "POST", "/api/v1/video/jobs", base()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut padded_model = base();
+    padded_model
+        .as_object_mut()
+        .unwrap()
+        .insert("model".to_owned(), json!(" scail2_14b "));
+    padded_model
+        .as_object_mut()
+        .unwrap()
+        .insert("referenceAssetIds".to_owned(), json!(["character-primary"]));
+    let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", padded_model).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"].as_str().is_some_and(
+            |detail| detail.contains("model must not contain leading or trailing whitespace")
+        ),
+        "submit must reject a padded model id rather than letting the worker trim it: {error}"
+    );
+    let mut padded_reference = base();
+    padded_reference.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!([" character-primary "]),
+    );
+    let (status, error) =
+        request(app.clone(), "POST", "/api/v1/video/jobs", padded_reference).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("leading or trailing whitespace")),
+        "submit must reject a padded reference id rather than letting the worker trim it: {error}"
+    );
+    let single_reference = vec!["character-0"];
+    let mut single = base();
+    single.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!(single_reference.clone()),
+    );
+    let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", single).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["referenceAssetIds"], json!(single_reference));
+
+    // A direct API caller is held to the same honest gate as the Studio. This prevents the
+    // source-ready worker path from making today's older inference pin claim multi-reference
+    // support before the descriptor flag is shipped with the final paired pin.
+    for count in [2usize, 6] {
+        let references: Vec<String> = (0..count)
+            .map(|index| format!("character-{index}"))
+            .collect();
+        let mut body = base();
+        body.as_object_mut()
+            .unwrap()
+            .insert("referenceAssetIds".to_owned(), json!(references));
+        let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_string()
+                .contains("multi-reference is unavailable until the paired inference descriptor"),
+            "{count} references must stay behind the current descriptor gate, got: {error}"
+        );
+    }
+
+    // A sourceAssetId remains the old single-reference fallback. Whether referenceAssetIds was
+    // absent or explicitly [], the stored/replayable shape must canonicalize to [] rather than
+    // accidentally serializing null or dropping the field on a retry/duplicate.
+    for reference_ids in [None, Some(json!([]))] {
+        let mut body = base();
+        let object = body.as_object_mut().unwrap();
+        object.insert("sourceAssetId".to_owned(), json!("legacy-reference"));
+        if let Some(reference_ids) = reference_ids {
+            object.insert("referenceAssetIds".to_owned(), reference_ids);
+        }
+        let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["payload"]["referenceAssetIds"], json!([]));
+    }
+
+    let mut seven = base();
+    seven.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!([
+            "character-0",
+            "character-1",
+            "character-2",
+            "character-3",
+            "character-4",
+            "character-5",
+            "character-6"
+        ]),
+    );
+    let (status, error) = request(app, "POST", "/api/v1/video/jobs", seven).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.to_string().contains("at most 6 reference characters"),
+        "seven references must be rejected explicitly, got: {error}"
+    );
+
+    // The exact same endpoint becomes source-ready when the resolved, server-owned manifest
+    // carries the paired-descriptor gate. Use an isolated miniature catalog rather than changing
+    // the real builtin manifest before inference-main and terminal evidence exist.
+    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
+    let config_dir = enabled_temp_dir.path().join("config/manifests");
+    write_scail2_reference_test_manifest(&config_dir, true);
+    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 paired descriptor" }),
+    )
+    .await;
+    for count in [2usize, 6] {
+        let references: Vec<String> = (0..count)
+            .map(|index| format!("character-{index}"))
+            .collect();
+        let mut body = base();
+        body.as_object_mut()
+            .unwrap()
+            .insert("referenceAssetIds".to_owned(), json!(references.clone()));
+        let (status, job) = request(enabled_app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{count} references must be accepted"
+        );
+        assert_eq!(
+            job["payload"]["referenceAssetIds"],
+            json!(references),
+            "{count} references must stay ordered for the paired worker contract"
+        );
+    }
+}
+
+/// Retry and duplicate rebuild `modelManifestEntry` from current server state, so the exact merged
+/// reference array must be re-authorized against that rebuilt entry before either operation creates
+/// work. This protects both directions of the descriptor transition: a current-pin replay cannot
+/// bypass the missing flag, while an enabled pin keeps every accepted id in caller order.
+#[tokio::test]
+async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
+    let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
+    let current_app = create_app(test_settings(&current_temp_dir)).expect("current app creates");
+    request(
+        current_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 current descriptor replay" }),
+    )
+    .await;
+    let (status, current_original) = request(
+        current_app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["character-primary"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{current_original}");
+    let current_job_id = current_original["id"].as_str().expect("current job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "model": " scail2_14b ",
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail
+                    .contains("model must not contain leading or trailing whitespace")),
+            "{operation} must reject the padded-model capability bypass: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "mode": " animate_character ",
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail
+                    .contains("mode must not contain leading or trailing whitespace")),
+            "{operation} must reject the padded-mode capability bypass: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": [" character-primary "]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"].as_str().is_some_and(|detail| detail
+                .contains("referenceAssetIds must not contain leading or trailing whitespace")),
+            "{operation} must reject a padded id rather than letting VideoRequest trim it: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"].as_str().is_some_and(|detail| detail
+                .contains("multi-reference is unavailable until the paired inference descriptor")),
+            "{operation} must enforce the current-pin refusal: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": ["r0", "r1", "r2", "r3", "r4", "r5", "r6"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("at most 6 reference characters")),
+            "{operation} must reject seven before descriptor dispatch: {error}"
+        );
+
+        for (malformed, expected) in [
+            (json!("not-an-array"), "must be an array of string ids"),
+            (
+                json!(["character-primary", 7]),
+                "must contain only string ids",
+            ),
+            (
+                json!(["character-primary", "  "]),
+                "must not contain blank ids",
+            ),
+        ] {
+            let (status, error) = request(
+                current_app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+                json!({ "payloadChanges": { "referenceAssetIds": malformed } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(expected)),
+                "{operation} must reject malformed referenceAssetIds ({expected}): {error}"
+            );
+        }
+    }
+
+    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
+    write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
+    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 enabled descriptor replay" }),
+    )
+    .await;
+    let (status, enabled_original) = request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["character-primary"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{enabled_original}");
+    let enabled_job_id = enabled_original["id"].as_str().expect("enabled job id");
+    let ordered = json!([
+        "character-4",
+        "character-1",
+        "character-5",
+        "character-0",
+        "character-3",
+        "character-2"
+    ]);
+    for operation in ["retry", "duplicate"] {
+        let (status, replayed) = request(
+            enabled_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{enabled_job_id}/{operation}"),
+            json!({ "payloadChanges": { "referenceAssetIds": ordered.clone() } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replayed}");
+        assert_eq!(
+            replayed["payload"]["referenceAssetIds"], ordered,
+            "{operation} must preserve the exact six-reference order"
+        );
+    }
 }
 
 #[tokio::test]

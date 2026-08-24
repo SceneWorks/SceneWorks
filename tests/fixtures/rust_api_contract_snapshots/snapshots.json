@@ -2000,6 +2000,26 @@
                   "provider": "huggingface",
                   "repo": "madebyollin/sdxl-vae-fp16-fix",
                   "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd"
+                },
+                {
+                  "coRequisite": true,
+                  "componentId": "controlnet_openpose",
+                  "estimatedSizeBytes": 2500000000,
+                  "files": [
+                    "diffusion_pytorch_model.safetensors"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 2500000000
+                  },
+                  "platforms": [
+                    "macos",
+                    "windows",
+                    "linux"
+                  ],
+                  "provider": "huggingface",
+                  "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                  "required": "soft",
+                  "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7"
                 }
               ],
               "family": "sdxl",
@@ -2925,11 +2945,23 @@
               },
               "type": "image",
               "ui": {
+                "controlModes": [
+                  "pose"
+                ],
+                "controlScale": {
+                  "default": 1.0,
+                  "label": "Control strength",
+                  "max": 2.0,
+                  "min": 0.0,
+                  "step": 0.05
+                },
                 "description": "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL \u2014 the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable for general photoreal work. openrail++ (commercial use OK, ungated). Drop-in SDXL: same UNet, same dual-CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness \u2014 see InstantID).",
                 "label": "RealVisXL (photoreal SDXL)",
                 "pid": {
                   "checkpointId": "pid_sdxl"
                 },
+                "poseControlScale": true,
+                "poseLibrary": true,
                 "promptGuide": {
                   "path": "/prompt-guides/realvisxl.md",
                   "sources": [
