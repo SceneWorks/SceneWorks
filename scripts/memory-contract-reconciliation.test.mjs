@@ -385,6 +385,9 @@ test("survey and engine scope mismatches carry exact coordinates in both directi
       overlay: "none",
       rung: "bounded_transformer_residency",
       selectorDigest: contractValue.selectorDigest,
+      // sc-21505: the survey names every axis here, so the over-claim is an assertion it made
+      // outright rather than a wildcard expansion. `memory-contract-triage.mjs` reads this.
+      cause: "survey_scope_overclaims",
     }],
   );
 
@@ -404,6 +407,7 @@ test("survey and engine scope mismatches carry exact coordinates in both directi
       overlay: "none",
       rung: "bounded_transformer_residency",
       selectorDigest: missingSurvey.engineFacts[1].memoryContracts[0].selectorDigest,
+      cause: "survey_scope_underclaims",
     }],
   );
 });

@@ -24,6 +24,7 @@
 //   node scripts/report-memory-contract-reconciliation.mjs
 //   node scripts/report-memory-contract-reconciliation.mjs --json
 //   node scripts/report-memory-contract-reconciliation.mjs --leg engine_manifest
+//   node scripts/report-memory-contract-reconciliation.mjs --drift   # only what two sources disagree on
 //
 // It also carries the FRESHNESS signal for the manifest's engine-projected memory declarations
 // (sc-20246): whether `config/manifests/builtin.models.jsonc` is still the projection of the committed
@@ -35,13 +36,17 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { projectManifestBody } from "./lib/manifest-memory-declarations.mjs";
+import { planProjection, projectManifestBody } from "./lib/manifest-memory-declarations.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { reconciliationMismatchKey } from "./lib/memory-contract-reconciliation.mjs";
+import { triageMemoryContractMismatches } from "./lib/memory-contract-triage.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
 const asJson = argv.includes("--json");
 const legAt = argv.indexOf("--leg");
 const legFilter = legAt >= 0 ? argv[legAt + 1] : null;
+const driftOnly = argv.includes("--drift");
 
 /**
  * Is the committed manifest still the projection of the committed dumps? (sc-20246)
@@ -80,6 +85,35 @@ function manifestFixedPoint() {
     return { current: projected.body === body };
   } catch (error) {
     return { error: (error?.message ?? String(error)).split("\n")[0] };
+  }
+}
+
+/**
+ * The projection plan, for the triage join (sc-21505).
+ *
+ * The engine_manifest leg reports that the manifest carries no declaration; the projector is what
+ * knows WHY it could not write one. Degrades to an empty plan on any input problem, exactly like
+ * `manifestFixedPoint` — an unavailable explanation must not turn a report into a failure, and an
+ * empty plan classifies those findings `unclassified`, which is visible rather than silent.
+ */
+function projectionPlan() {
+  const read = (relative) => readFileSync(path.join(ROOT, relative), "utf8");
+  try {
+    return planProjection({
+      manifest: JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
+      engineFacts: ["mlx", "candle"].map((backend) =>
+        JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
+      ),
+      enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
+      strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
+      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/base.rs"),
+      routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
+    });
+  } catch (error) {
+    // Same degrade-never-throw contract as `manifestFixedPoint`, but the reason travels with it: an
+    // empty plan reclassifies every engine_manifest finding as `unclassified`, and a reader must not
+    // have to guess whether that means "genuinely unexplained" or "the projection would not load".
+    return { unhosted: [], skipped: [], error: (error?.message ?? String(error)).split("\n")[0] };
   }
 }
 
@@ -130,13 +164,39 @@ function main() {
     return;
   }
 
-  const findings = (result.findings ?? []).filter(
-    (entry) => !legFilter || entry.leg === legFilter,
-  );
+  // Triage BEFORE the leg/drift filters, so every finding is classified against the whole
+  // enumeration and a filter narrows what is printed rather than what was reasoned about.
+  const plan = projectionPlan();
+  const triage = triageMemoryContractMismatches(result.findings ?? [], plan);
+  const classOf = new Map();
+  for (const group of triage.classes) {
+    for (const entry of group.findings) classOf.set(reconciliationMismatchKey(entry), group);
+  }
+  const findings = (result.findings ?? [])
+    .map((entry) => ({ ...entry, triageClass: classOf.get(reconciliationMismatchKey(entry))?.name ?? null }))
+    .filter((entry) => !legFilter || entry.leg === legFilter)
+    .filter(
+      (entry) =>
+        !driftOnly || classOf.get(reconciliationMismatchKey(entry))?.disposition === "drift",
+    );
 
   if (asJson) {
     console.log(
-      JSON.stringify({ ...result, manifestProjection: manifestFixedPoint(), findings }, null, 2),
+      JSON.stringify(
+        {
+          ...result,
+          manifestProjection: manifestFixedPoint(),
+          triage: {
+            total: triage.total,
+            byDisposition: triage.byDisposition,
+            // Findings are already on `findings`; the summary carries only the counts and the rule.
+            classes: triage.classes.map(({ findings: _findings, ...group }) => group),
+          },
+          findings,
+        },
+        null,
+        2,
+      ),
     );
     return;
   }
@@ -174,7 +234,8 @@ function main() {
       `${plural(result.bespokeWaivers ?? 0, "engine-declared bespoke route")}.`,
   );
   console.log(
-    `  ${plural(findings.length, "mismatch", "mismatches")}${legFilter ? ` on leg ${legFilter}` : ""}.`,
+    `  ${plural(findings.length, "mismatch", "mismatches")}${legFilter ? ` on leg ${legFilter}` : ""}` +
+      `${driftOnly ? " that are genuine drift" : ""}.`,
   );
 
   // Derived from the FILTERED findings rather than `result.byLeg`, so the breakdown and the headline
@@ -185,6 +246,29 @@ function main() {
   for (const leg of [...legTotals.keys()].sort()) {
     console.log(`    ${leg}: ${legTotals.get(leg)}`);
   }
+
+  // The triage split (sc-21505). Printed BEFORE the per-leg enumeration, because the first question
+  // a reader has about a four-hundred-item list is how much of it is work.
+  if (plan.error) {
+    console.log(
+      `\n  NOTE: the declaration projection could not be read (${plan.error}), so every\n` +
+        "  engine_manifest finding below is classified `unclassified` for want of a reason, not\n" +
+        "  because it is unexplained.",
+    );
+  }
+  console.log(
+    `\n  Triage: ${triage.byDisposition.drift} genuine drift, ` +
+      `${triage.byDisposition["by-construction"]} by construction.`,
+  );
+  for (const group of triage.classes) {
+    console.log(`    [${group.disposition}] ${group.count} — ${group.title}`);
+  }
+  console.log(
+    "\n  by-construction: the coordinate cannot carry a declaration, or the two sides are keyed at\n" +
+      "  different grains. Writing declarations here would claim unreachable capability. Count of work: 0.\n" +
+      "  drift: the two sides make contradictory claims about the same fact, so one of them is wrong.\n" +
+      "  Run with --drift for just those. Rationale per class: scripts/lib/memory-contract-triage.mjs.",
+  );
 
   const byLegThenDirection = new Map();
   for (const entry of findings) {
