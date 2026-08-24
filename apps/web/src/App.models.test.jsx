@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
-import { withModelManagerContext, FakeEventSource, response, settle, field, loraPanel, modelImportPanel, buttonInside, changeField, changeFile, selectModelTab, familyFilter } from "./main.testSupport.jsx";
+import { withModelManagerContext, FakeEventSource, response, settle, field, loraPanel, modelImportPanel, openModelImportPanel, checkpointImportSection, buttonInside, changeField, changeFile, selectModelTab, familyFilter } from "./main.testSupport.jsx";
 
 // sc-12068: model / LoRA deletes confirm through the shared desktop-safe appConfirm dialog
 // rather than the raw window.confirm, which silently no-ops inside the Tauri WebView. Mock it
@@ -1277,10 +1277,13 @@ describe("SceneWorks app shell", () => {
     // sc-14069: a base checkpoint is an image model, so the import affordance lives on the
     // Image Models tab where a user looks for it — no longer the LoRAs tab scaffold home.
     await selectModelTab("Image");
-    const panel = modelImportPanel(container);
+    // sc-20650: the affordance is now the unified checkpoint-import panel, collapsed by default on
+    // this busy page. Opening it and choosing "Add to SceneWorks" reaches the managed form, whose
+    // Upload source still leads with the "Model File" picker and a fixed image Type.
+    expect(checkpointImportSection(container)).not.toBeNull();
+    expect(modelImportPanel(container)).toBeNull();
+    const panel = await openModelImportPanel(container, act);
     expect(panel).not.toBeNull();
-    expect(panel.textContent).toContain("Import model");
-    // File mode leads: the "Model File" picker is mounted, not a Source URL input.
     expect(field(panel, "Model File")).toBeTruthy();
     expect(field(panel, "Source URL")).toBeFalsy();
     expect(field(panel, "Type").value).toBe("image");
@@ -1308,11 +1311,11 @@ describe("SceneWorks app shell", () => {
     });
 
     await selectModelTab("Image");
-    expect(modelImportPanel(container)).not.toBeNull();
+    expect(checkpointImportSection(container)).not.toBeNull();
     // The LoRAs tab keeps its own "Import LoRA" panel but no longer hosts the model importer.
     await selectModelTab("LoRAs");
     expect(loraPanel(container)).not.toBeNull();
-    expect(modelImportPanel(container)).toBeNull();
+    expect(checkpointImportSection(container)).toBeNull();
   });
 
   it("POSTs the pointed-at checkpoint as an image import, leaving family to auto-detect (sc-14020)", async () => {
@@ -1336,7 +1339,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await selectModelTab("Image");
-    const panel = modelImportPanel(container);
+    const panel = await openModelImportPanel(container, act);
     const file = new File([new Uint8Array([1, 2, 3])], "krea2-checkpoint.safetensors");
     await changeFile(field(panel, "Model File"), file);
     await act(async () => {
@@ -1353,6 +1356,10 @@ describe("SceneWorks app shell", () => {
     expect(payload.modelType).toBeUndefined();
     // No family override — the backend detector classifies the file (Krea 2 today).
     expect(payload.family).toBeUndefined();
+    // sc-20650: the request now STATES its ownership and its source instead of leaving the server
+    // to infer them from whichever flat field happened to be set.
+    expect(payload.ownershipMode).toBe("managed");
+    expect(payload.source).toEqual({ kind: "upload" });
   });
 
   it("surfaces the detected Krea 2 family on a successful checkpoint import (sc-14020)", async () => {
@@ -1376,7 +1383,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await selectModelTab("Image");
-    const panel = modelImportPanel(container);
+    const panel = await openModelImportPanel(container, act);
     await changeFile(field(panel, "Model File"), new File([new Uint8Array([1])], "krea2.safetensors"));
     await act(async () => {
       buttonInside(panel, "Queue Import").click();
@@ -1414,7 +1421,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await selectModelTab("Image");
-    const panel = modelImportPanel(container);
+    const panel = await openModelImportPanel(container, act);
     await changeFile(field(panel, "Model File"), new File([new Uint8Array([1])], "qwen.safetensors"));
     await act(async () => {
       buttonInside(panel, "Queue Import").click();
@@ -1511,7 +1518,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await selectModelTab("Image");
-    expect(container.textContent).toContain("Model imports in progress");
+    expect(container.textContent).toContain("Imports in progress");
     expect(container.textContent).toContain("Model Import");
     expect(container.textContent).toContain("Downloading");
   });

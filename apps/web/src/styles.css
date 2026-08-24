@@ -17936,3 +17936,208 @@ button.audio-wave {
 .workflow-fix-inputs > .workflow-fix-detail {
   margin: 0;
 }
+
+/* ---------- Unified checkpoint import (epic 20398, sc-20650) -----------------
+   One panel for both ownerships — "Use existing model library" (linked, the
+   files stay where they are) and "Add to SceneWorks" (managed, SceneWorks owns
+   the copy). It opens COLLAPSED on the Model Manager, which is a busy page, so
+   the catalog stays the screen's subject until the user asks to add something. */
+.checkpoint-import {
+  display: grid;
+  gap: 12px;
+}
+
+.checkpoint-import-heading {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.checkpoint-import-toggle {
+  justify-self: start;
+}
+
+.checkpoint-import-body {
+  display: grid;
+  gap: 14px;
+}
+
+/* The ownership choice is the panel's first decision, so it reads as two cards
+   rather than a segmented micro-control: each carries a sentence saying what
+   happens to the user's files, which is the whole basis for choosing. */
+.checkpoint-ownership {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.checkpoint-ownership-choice {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.checkpoint-ownership-choice.active {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+  background: color-mix(in oklch, var(--accent) 8%, var(--surface));
+}
+
+.checkpoint-ownership-label {
+  font-weight: 600;
+}
+
+.checkpoint-ownership-summary,
+.checkpoint-source-hint {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.checkpoint-linked,
+.checkpoint-managed,
+.checkpoint-scan {
+  display: grid;
+  gap: 12px;
+}
+
+.checkpoint-linked-add {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) auto minmax(140px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.checkpoint-linked-add label {
+  display: grid;
+  gap: 7px;
+}
+
+.checkpoint-root-list,
+.checkpoint-candidate-list,
+.checkpoint-diagnostics {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.checkpoint-root,
+.checkpoint-candidate {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.checkpoint-root-head,
+.checkpoint-candidate-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.checkpoint-root-label,
+.checkpoint-candidate-path {
+  font-weight: 600;
+}
+
+.checkpoint-root-path,
+.checkpoint-candidate-meta,
+.checkpoint-candidate-unselectable {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.checkpoint-root-actions,
+.checkpoint-root-rename {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: end;
+}
+
+/* Needs Relink / Needs Rescan. Warning-toned, never danger-toned: nothing is
+   lost and nothing was uninstalled — there is one action to take. */
+.checkpoint-scan-unavailable,
+.checkpoint-unmatched,
+.checkpoint-candidate-correction,
+.model-card-linked-fix {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklch, var(--warning, #d08700) 35%, var(--border));
+  background: color-mix(in oklch, var(--warning, #d08700) 7%, var(--surface));
+}
+
+.checkpoint-scan-unavailable button,
+.checkpoint-unmatched button,
+.checkpoint-candidate-correction button,
+.model-card-linked-fix button {
+  justify-self: start;
+}
+
+.checkpoint-state-headline {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* The store's own `[checkpoint-plan:<code>] …` sentence. Monospaced because it
+   carries digests and paths the user may need to read exactly. */
+.checkpoint-import-detail {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.checkpoint-unmatched ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.checkpoint-unmatched li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.checkpoint-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.checkpoint-import-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.model-card-provenance {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* Simple shell: the same panel, tightened to the reduced shell's rhythm. */
+.checkpoint-import.compact {
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.checkpoint-import.compact .checkpoint-linked-add,
+.checkpoint-import.compact .models-import-grid {
+  grid-template-columns: 1fr;
+}
