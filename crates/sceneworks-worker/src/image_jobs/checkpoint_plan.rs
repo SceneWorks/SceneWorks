@@ -1074,6 +1074,53 @@ fn prepare_checkpoint_plan_sources(
     ))
 }
 
+/// Whether an entry's DECLARED family routes it to `family`'s lane at all.
+///
+/// The question every bespoke plan-source helper must ask FIRST, and the distinction that keeps
+/// `family-mismatch` meaningful. A lane is offered every plan-backed request whose shape the plan
+/// route declined, including requests belonging to other families — a plan-backed `krea_2` entry
+/// carrying Hires.fix is offered to the Mage-Flow lane on its way past. That is not a corrupt plan
+/// and not an error; it is simply not that lane's request, so the lane declines.
+///
+/// Without this the store was opened for every such request and the plan's own family compared
+/// against the asking lane's, so a perfectly good Krea checkpoint raised a FATAL
+/// `[checkpoint-plan:family-mismatch]` from the Mage-Flow lane — and `prepare_image_route`
+/// propagates that with `?`, so the job died instead of being served by Krea's lane.
+///
+/// An entry with NO declared family is offered to every lane, exactly as it is today: the plan is
+/// then the only authority, and [`checkpoint_plan_family_matches`] is what decides.
+fn checkpoint_plan_entry_routes_to(entry: &JsonObject, family: &str) -> bool {
+    entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|declared| !declared.is_empty())
+        // `is_none_or` is stable only since 1.82; this workspace's MSRV is 1.80.
+        .map_or(true, |declared| declared == family)
+}
+
+/// Refuse a plan whose family is not the one the asking lane loads.
+///
+/// Reached only for an entry whose DECLARED family already routes here
+/// ([`checkpoint_plan_entry_routes_to`]), so a mismatch at this point means the entry claims one
+/// family and its compiled plan says another — a corrupt or edited entry. That stays FATAL: handing
+/// a mislabelled checkpoint to the wrong family's loader is the silent substitution E8 forbids.
+fn checkpoint_plan_family_matches(
+    resolved: &ResolvedCheckpointV1,
+    checkpoint_id: &str,
+    family: &str,
+) -> WorkerResult<()> {
+    if resolved.family() == family {
+        return Ok(());
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "[checkpoint-plan:family-mismatch] checkpoint {checkpoint_id:?} compiles to the {:?} \
+         family, but this entry declares {family:?} and routes to that lane; a plan is never \
+         loaded by another family's loader",
+        resolved.family()
+    )))
+}
+
 /// The verified plan layer a family's BESPOKE lane must load, for a plan-backed entry whose request
 /// this route does not claim.
 ///
@@ -1101,6 +1148,8 @@ fn prepare_checkpoint_plan_sources(
 ///   `vae` / `text_encoder`) refuses through the SAME [`checkpoint_plan_unconsumed_layers`] the plan
 ///   route uses, because loading the plan's transformer while quietly substituting the resident base
 ///   tier's encoder and VAE would consume the plan only partly while claiming it fully.
+/// * routing — an entry whose DECLARED family is another lane's is DECLINED, not refused; see
+///   [`checkpoint_plan_entry_routes_to`].
 pub(crate) fn checkpoint_plan_bespoke_primary_pin(
     request: &ImageRequest,
     settings: &Settings,
@@ -1262,19 +1311,17 @@ pub(crate) fn checkpoint_plan_bespoke_tree(
     let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
         return Ok(None);
     };
+    // Same first question as every other bespoke source helper: is this lane the one being asked?
+    // (review blocker 1 — the ComfyUI-tree lanes are on the reviewer's list too.)
+    if !checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family) {
+        return Ok(None);
+    }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
     let resolved = store
         .resolve(&checkpoint_id)
         .map_err(checkpoint_plan_refusal)?;
-    if resolved.family() != family {
-        return Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:family-mismatch] checkpoint {checkpoint_id:?} compiles to the {:?} \
-             family, but this entry routes to the {family:?} lane; a plan is never loaded by \
-             another family's loader",
-            resolved.family()
-        )));
-    }
+    checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
     checkpoint_plan_backend_eligible(adapter, &checkpoint_id)?;
     let source = checkpoint_plan_source_shape(adapter, &checkpoint_id)?;
@@ -1418,19 +1465,18 @@ fn checkpoint_plan_bespoke_primary(
     let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
         return Ok(None);
     };
+    // FIRST, before the store is even opened: is this lane the one being asked? A lane is offered
+    // every plan-backed request whose shape the plan route declined, other families' included, and
+    // one of those is not an error (review blocker 1).
+    if !checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family) {
+        return Ok(None);
+    }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
     let resolved = store
         .resolve(&checkpoint_id)
         .map_err(checkpoint_plan_refusal)?;
-    if resolved.family() != family {
-        return Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:family-mismatch] checkpoint {checkpoint_id:?} compiles to the {:?} \
-             family, but this entry routes to the {family:?} lane; a plan is never loaded by another \
-             family's loader",
-            resolved.family()
-        )));
-    }
+    checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
     checkpoint_plan_backend_eligible(adapter, &checkpoint_id)?;
     let source = checkpoint_plan_source_shape(adapter, &checkpoint_id)?;

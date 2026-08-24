@@ -20319,6 +20319,45 @@ impl CheckpointPlanFixture {
         }
         request(payload)
     }
+
+    /// Install the pose ControlNet overlay into the isolated hub at the pinned revision the lane
+    /// resolves against, so a POSE row measures the routing rule rather than a missing install.
+    ///
+    /// Same reason as [`Self::installed_lora`]: once conformance runs through the production seam,
+    /// a legitimately-absent install surfaces as the typed refusal it is, and the row stops
+    /// measuring the claim.
+    fn install_pose_overlay(&self) {
+        let snapshot = self
+            .settings
+            .data_dir
+            .join("hub")
+            .join("models--SceneWorks--krea2-pose-controlnet-beta")
+            .join("snapshots")
+            .join(KREA_CONTROL_OVERLAY_REVISION);
+        write_tiny_safetensors(
+            &snapshot.join("control_step5000.safetensors"),
+            &[("control.0.weight", "F32")],
+            0x33,
+        );
+    }
+
+    /// Install a real adapter file under the app-managed LoRA root and return the payload entry
+    /// that resolves to it.
+    ///
+    /// A LoRA row in a claim matrix must carry bytes that actually resolve. Without one,
+    /// `resolve_prepared_adapters` fails with "LoRA is missing a usable path" and the row stops
+    /// measuring the routing rule it exists to measure — which the old `matches!(…, Ok(Some(_)))`
+    /// probe silently absorbed into "declined" (review blocker 1 / major 4).
+    fn installed_lora(&self, name: &str) -> Value {
+        let path = self
+            .settings
+            .data_dir
+            .join("loras")
+            .join(name)
+            .join("adapter.safetensors");
+        write_tiny_safetensors(&path, &[("lora_A.weight", "F32")], 0x77);
+        json!({ "name": name, "weight": 0.4, "installedPath": path.to_str().unwrap() })
+    }
 }
 
 /// Single-claim conformance (sc-20634): a plan-backed entry is claimed by the plan-driven route and
@@ -20596,7 +20635,7 @@ fn the_krea_full_surface_loads_the_plans_verified_layer_for_linked_and_managed_c
     let lora_request = |checkpoint_id: &str| {
         fx.plan_backed_request(
             checkpoint_id,
-            json!({ "loras": [{ "name": "style", "weight": 0.4 }] }),
+            json!({ "loras": [fx.installed_lora("style")] }),
         )
     };
     for (checkpoint_id, expected) in [
@@ -20673,6 +20712,83 @@ fn the_krea_full_surface_loads_the_plans_verified_layer_for_linked_and_managed_c
     assert_eq!(seeds(&legacy).len(), 3);
 }
 
+/// sc-20644 review blocker 1 — a bespoke plan-source helper DECLINES a request belonging to another
+/// family, and `family-mismatch` stays fatal only for the case it was written for.
+///
+/// Every bespoke lane is offered every plan-backed request whose shape the plan route declined,
+/// including requests belonging to other families. Before the declared-family gate, each helper
+/// opened the plan store for all of them and compared the PLAN's family against the ASKING lane's,
+/// so a perfectly good `krea_2` checkpoint raised a FATAL `[checkpoint-plan:family-mismatch]` the
+/// moment any other family's lane was offered it. `prepare_image_route` propagates that with `?`,
+/// so the job died rather than being served by the lane that owns it.
+///
+/// The two halves are distinguished here because collapsing them is exactly the bug:
+///   * DECLARED family is another lane's → `Ok(None)`. Not this lane's request.
+///   * DECLARED family is THIS lane's but the PLAN disagrees → still fatal. That is a corrupt or
+///     edited entry, and loading it through the wrong family's loader is the silent substitution
+///     E8 forbids.
+///
+/// Failing mutations: delete the `checkpoint_plan_entry_routes_to` guard (the foreign-family probe
+/// raises instead of declining); make `checkpoint_plan_family_matches` return `Ok(())` (the
+/// mislabelled entry loads through the wrong loader).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bespoke_plan_source_declines_another_familys_request_and_still_refuses_a_mislabelled_entry() {
+    let fx = CheckpointPlanFixture::new("family-gate", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    let entry_declaring = |family: &str| {
+        let mut request = fx.plan_backed_request(
+            &checkpoint_id,
+            json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+        );
+        request
+            .model_manifest_entry
+            .insert("family".to_owned(), Value::String(family.to_owned()));
+        request
+    };
+
+    // The reproduction: a plan-backed krea_2 entry the plan route declines (Hires.fix), offered to
+    // a lane that is not its own. It must DECLINE, not raise.
+    let krea_entry = entry_declaring("krea_2");
+    assert!(
+        !request_is_checkpoint_plan_backed(&krea_entry),
+        "fixture check: the plan route declines Hires.fix, which is what offers this request to          every other lane"
+    );
+    for foreign in ["mage-flow", "sdxl", "z-image", "qwen-image", "flux2"] {
+        assert!(
+            matches!(
+                checkpoint_plan_bespoke_primary_pin(&krea_entry, &fx.settings, foreign),
+                Ok(None)
+            ),
+            "the {foreign} lane must DECLINE a krea_2 request, not raise family-mismatch"
+        );
+    }
+    // And the lane that DOES own it still resolves it.
+    assert!(
+        checkpoint_plan_bespoke_primary_pin(&krea_entry, &fx.settings, "krea_2")
+            .expect("the owning lane resolves")
+            .is_some()
+    );
+
+    // The other half: an entry DECLARING a family its plan does not match is still fatal. This is
+    // the corrupt/edited-entry case `family-mismatch` exists for.
+    let mislabelled = entry_declaring("sdxl");
+    let error = checkpoint_plan_bespoke_primary_pin(&mislabelled, &fx.settings, "sdxl")
+        .expect_err("an entry whose declared family its plan contradicts must refuse")
+        .to_string();
+    assert!(
+        error.contains("[checkpoint-plan:family-mismatch]") && error.contains("krea_2"),
+        "the refusal must name the plan's real family: {error}"
+    );
+
+    // End to end through the PRODUCTION seam: the reproduced case is served, not fatal.
+    let prepared = prepare_image_route(&krea_entry, &fx.settings)
+        .expect("the reproduced case must not die in route preparation")
+        .expect("a plan-backed Hires.fix request is served by the family's own lane");
+    assert_eq!(prepared.kind(), ImageRoute::KreaImported);
+}
+
 /// sc-20644 Krea row, AC2 — per-request single-claim conformance across the FULL surface, plus the
 /// exact bespoke surface sc-20651 deletes, pinned by name.
 ///
@@ -20690,6 +20806,7 @@ fn the_krea_full_surface_loads_the_plans_verified_layer_for_linked_and_managed_c
 #[test]
 fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
     let fx = CheckpointPlanFixture::new("krea-single-claim", true);
+    fx.install_pose_overlay();
     let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
 
     // Each lane's OWN claim answer, in the same terms the lane's production preparation uses: the
@@ -20727,7 +20844,7 @@ fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
             "lora",
             fx.plan_backed_request(
                 &checkpoint_id,
-                json!({ "loras": [{ "name": "style", "weight": 0.4 }] }),
+                json!({ "loras": [fx.installed_lora("style")] }),
             ),
         ),
         (
@@ -20777,17 +20894,30 @@ fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
             1,
             "{label}: exactly one lane may claim a plan-backed request, got {claimants:?}"
         );
+        // Through the PRODUCTION seam, which propagates a lane's `Err` with `?` rather than
+        // discarding it. `resolve_image_route` consults the `*_available` probes, and those
+        // `matches!(…, Ok(Some(_)))` a production error into `false` — so a request that KILLS the
+        // job in production reads here as "declined, some other lane has it". That is exactly how
+        // the fatal cross-family `family-mismatch` hid behind a green conformance test (review
+        // blocker 1), so the assertion now runs where the error can reach it.
         assert!(
-            resolve_image_route(request, &fx.settings).is_some(),
+            prepare_image_route(request, &fx.settings)
+                .unwrap_or_else(|error| panic!(
+                    "{label}: route preparation must not fail for a plan-backed request: {error}"
+                ))
+                .is_some(),
             "{label}: a plan-backed request must never fall through to the procedural stub"
         );
     }
 
     // The route the claim resolves to, named, so a mutation that moves a shape to the wrong lane is
-    // caught even when the count stays at one.
+    // caught even when the count stays at one. Also through the production seam, for the reason
+    // above.
     let route_of = |label: &str| {
         let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
-        resolve_image_route(request, &fx.settings)
+        prepare_image_route(request, &fx.settings)
+            .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
+            .map(|prepared| prepared.kind())
     };
     assert_eq!(route_of("t2i"), Some(ImageRoute::CheckpointPlan));
     assert_eq!(route_of("lora"), Some(ImageRoute::KreaImported));
@@ -20873,7 +21003,7 @@ fn a_krea_plan_with_layers_the_bespoke_lane_cannot_source_refuses_during_plannin
 
     let request = fx.plan_backed_request(
         &compiled.checkpoint_id,
-        json!({ "loras": [{ "name": "style", "weight": 0.4 }] }),
+        json!({ "loras": [fx.installed_lora("style")] }),
     );
     let error = resolve_imported_krea_dit_pin(&request, &fx.settings)
         .expect_err("a plan the lane cannot fully consume must refuse, not load its backbone")
@@ -20910,6 +21040,61 @@ fn sdxl_ldm_entries() -> Vec<(&'static str, &'static str)> {
         ("first_stage_model.encoder.conv_in.weight", "F16"),
         ("first_stage_model.decoder.conv_out.weight", "F16"),
     ]
+}
+
+/// sc-20644 review blocker 1, for the three CANDLE-ONLY ComfyUI-tree lanes.
+///
+/// The three tree lanes are on the reviewer's blocker-1 list too: each reaches
+/// `checkpoint_plan_bespoke_tree` for any plan-backed entry whose shape the plan route declined,
+/// including another family's. `cargo test` cannot link those lanes on macOS, but the guard they
+/// all funnel through IS linkable here, so the behaviour is asserted directly on the shared helper
+/// for each of the three family spellings — which is where the fix lives and where a regression
+/// would land.
+///
+/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
+/// `checkpoint_plan_bespoke_tree` (the shared helper the three lanes call).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_tree_source_helper_declines_another_familys_request() {
+    let fx = CheckpointPlanFixture::new("tree-cross-family", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+    );
+    assert!(
+        !request_is_checkpoint_plan_backed(&request),
+        "fixture check: the plan route declines Hires.fix, which offers this to every other lane"
+    );
+    // The tree helper is candle-gated, so assert through the shared entry point every tree lane
+    // funnels through — `checkpoint_plan_bespoke_primary`, which carries the same guard and IS
+    // linkable on this config. The tree helper's own copy of the guard is pinned as source text
+    // below, in the ordering test.
+    for foreign in ["z-image", "qwen-image", "flux2"] {
+        assert!(
+            matches!(
+                checkpoint_plan_bespoke_primary_pin(&request, &fx.settings, foreign),
+                Ok(None)
+            ),
+            "the {foreign} lane must DECLINE a krea_2 request rather than raise family-mismatch"
+        );
+    }
+    // And the guard is live code in the TREE helper too, not only in the primary one.
+    let source = include_str!("checkpoint_plan.rs");
+    let tree_at = source
+        .find("pub(crate) fn checkpoint_plan_bespoke_tree(")
+        .expect("the tree helper must exist");
+    let tree_body = &source[tree_at..tree_at + 1400.min(source.len() - tree_at)];
+    let guard_at = tree_body
+        .find("checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family)")
+        .expect("the tree helper must ask the declared-family question");
+    let store_at = tree_body
+        .find("CheckpointPlanStore::open(")
+        .expect("the tree helper opens the store");
+    assert!(
+        guard_at < store_at,
+        "the declared-family gate must precede opening the plan store: another family's request          must not even resolve a plan"
+    );
 }
 
 /// sc-20644 Wan row — the video lane sources a plan-backed entry by NAMED EXPERT ROLE, claims it
@@ -20974,23 +21159,55 @@ fn the_wan_video_lane_sources_a_plan_backed_entry_by_expert_role() {
         source.contains("&[\"text_encoder\", \"vae\"],"),
         "the in-place UMT5 encoder and VAE stay OPTIONAL on the plan route"
     );
-    let gate_at = source
-        .find("if wan_expert_in_channels(&high) != Some(WAN_T2V_IN_CHANNELS) {")
-        .expect("the T2V-only channel gate must exist");
+    // The T2V-only channel gate lives INSIDE the plan-sourced resolver and REFUSES by name.
+    //
+    // The previous form of this assertion was an `a || b` over two positions and was vacuous —
+    // worse, the branch it accepted pinned the very `Ok(None)` that sent a plan-backed I2V pair to
+    // `CandleVideoRoute::Stub` (review blocker 3 / minor 9). One fact is asserted now: the gate is
+    // inside the plan resolver, and it produces a typed refusal rather than a decline.
+    let resolver_at = source
+        .find("fn resolve_plan_backed_wan_comfyui_paths(")
+        .expect("the plan-sourced resolver must exist");
+    let resolver_end = source[resolver_at..]
+        .find("\n}\n")
+        .map(|offset| resolver_at + offset)
+        .expect("the resolver has an end");
+    let resolver = &source[resolver_at..resolver_end];
     assert!(
-        source[plan_source_at..].contains("wan_expert_in_channels(&high)")
-            || gate_at > plan_source_at,
-        "a plan-backed I2V pair must decline for the same reason a scanned one does"
+        resolver.contains("wan_expert_in_channels(&high)"),
+        "the T2V-only channel gate must be applied to the PLAN's own high expert"
+    );
+    assert!(
+        resolver.contains("[checkpoint-plan:unsupported-operation]")
+            && resolver.contains("WAN_I2V_IN_CHANNELS"),
+        "a plan-backed I2V pair must REFUSE by name, naming the channel count — declining sends it \
+         to the catalog gates a linked entry can never satisfy, and from there to Stub:\n{resolver}"
     );
 
-    // The claim no longer rests on the `external_base_` id prefix alone.
-    let available_at = source
-        .find("pub(super) fn wan_comfyui_available(")
-        .expect("the Wan claim predicate must exist");
-    let available = &source[available_at..available_at + 900.min(source.len() - available_at)];
+    // The claim propagates a refusal instead of answering a bool, and no longer rests on the
+    // `external_base_` id prefix alone.
+    let claims_at = source
+        .find("pub(super) fn wan_comfyui_claims(")
+        .expect("the Wan claim predicate must exist and must be the fallible one");
+    let claims = &source[claims_at..claims_at + 900.min(source.len() - claims_at)];
     assert!(
-        available.contains("checkpoint_plan_checkpoint_id(&request.model_manifest_entry)"),
-        "a plan-backed Wan entry must be claimable without an `external_base_` id:\n{available}"
+        claims.contains("checkpoint_plan_checkpoint_id(&request.model_manifest_entry)"),
+        "a plan-backed Wan entry must be claimable without an `external_base_` id:\n{claims}"
+    );
+    assert!(
+        claims.contains("resolve_wan_comfyui_paths(request, settings)?"),
+        "the claim must PROPAGATE a refusal; answering a bool is how every Wan refusal became a \
+         successful stub render:\n{claims}"
+    );
+    assert!(
+        !source.contains("fn wan_comfyui_available("),
+        "the bool probe must be gone entirely — leaving it invites the router back onto it"
+    );
+    // And the router consults the fallible form with `?`.
+    let router = include_str!("../video_jobs/mod.rs");
+    assert!(
+        router.contains("wan_comfyui_claims(request, settings)?"),
+        "the candle video router must propagate the Wan lane's refusal rather than fall to Stub"
     );
 
     // ---- the bespoke surface sc-20651 deletes, pinned BY NAME -------------------------------
@@ -21191,6 +21408,66 @@ fn mage_flow_entries() -> Vec<(String, &'static str)> {
         }
     }
     entries
+}
+
+/// sc-20644 review blocker 1, REPRODUCED against the Mage-Flow lane end to end.
+///
+/// The reviewer's exact case: a plan-backed `krea_2` entry carrying Hires.fix. The plan route
+/// declines the shape, which offers the request to every other lane, and
+/// `prepare_mage_finetuned_transformer` reached its plan-source resolver for it. That resolver
+/// opened the plan store and compared the PLAN's family (`krea_2`) against the ASKING lane's
+/// (`mage-flow`), raising a FATAL `[checkpoint-plan:family-mismatch]` — which
+/// `prepare_image_route` propagates with `?`, killing a job the Krea lane was about to serve.
+///
+/// Asserted at BOTH levels, because either alone is weaker than it looks: the Mage resolver must
+/// return `Ok(None)` (not raise), and the whole route preparation must reach `KreaImported`. The
+/// second is the one that would have caught this in the first place.
+///
+/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
+/// `checkpoint_plan_bespoke_primary` — the Mage resolver raises and route preparation dies.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_backed_krea_hires_request_is_declined_by_the_mage_lane_not_fatal() {
+    let fx = CheckpointPlanFixture::new("mage-cross-family", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+    );
+    assert_eq!(
+        request
+            .model_manifest_entry
+            .get("family")
+            .and_then(Value::as_str),
+        Some("krea_2"),
+        "fixture check: the entry declares krea_2, which is what makes this a CROSS-family probe"
+    );
+    assert!(
+        !request_is_checkpoint_plan_backed(&request),
+        "fixture check: the plan route declines Hires.fix, which is what offers this request to          the Mage-Flow lane at all"
+    );
+
+    // The Mage-Flow lane declines rather than raising.
+    assert!(
+        matches!(
+            resolve_plan_backed_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "the Mage-Flow plan-source resolver must DECLINE a krea_2 request"
+    );
+    assert!(
+        matches!(
+            prepare_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "and so must the lane's whole preparation"
+    );
+
+    // End to end: the job is served by the lane that owns it, not killed in route preparation.
+    let prepared = prepare_image_route(&request, &fx.settings)
+        .expect("route preparation must not fail: this is the reviewer's reproduced crash")
+        .expect("a plan-backed Hires.fix request is served by the Krea lane");
+    assert_eq!(prepared.kind(), ImageRoute::KreaImported);
 }
 
 /// sc-20644 Mage-Flow row — a plan-backed Mage-Flow fine-tune loads from the plan's verified
@@ -21419,7 +21696,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
         ),
         (
             "lora",
-            sdxl_request(json!({ "loras": [{ "name": "style", "weight": 0.4 }] })),
+            sdxl_request(json!({ "loras": [fx.installed_lora("sdxl-style")] })),
         ),
         (
             "hires",
@@ -21439,14 +21716,23 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
             1,
             "{label}: exactly one lane may claim a plan-backed SDXL request, got {claimants:?}"
         );
+        // Through the PRODUCTION seam, which propagates a lane's `Err` with `?`. The
+        // `*_available` probes `resolve_image_route` consults turn a production error into
+        // `false`, so a request that KILLS the job would read here as "declined" (review major 4).
         assert!(
-            resolve_image_route(request, &fx.settings).is_some(),
+            prepare_image_route(request, &fx.settings)
+                .unwrap_or_else(|error| panic!(
+                    "{label}: route preparation must not fail for a plan-backed request: {error}"
+                ))
+                .is_some(),
             "{label}: a plan-backed request must never fall through to the procedural stub"
         );
     }
     let route_of = |label: &str| {
         let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
-        resolve_image_route(request, &fx.settings)
+        prepare_image_route(request, &fx.settings)
+            .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
+            .map(|prepared| prepared.kind())
     };
     assert_eq!(route_of("t2i"), Some(ImageRoute::CheckpointPlan));
     assert_eq!(route_of("edit"), Some(ImageRoute::SdxlImported));

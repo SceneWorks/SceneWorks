@@ -1946,22 +1946,39 @@ fn refine_multi_expert_role(
 
 /// The expert a ComfyUI Wan file name declares, or `None`.
 ///
-/// ComfyUI publishes the pair as `wan2.2_t2v_high_noise_14B_*.safetensors` /
-/// `wan2.2_t2v_low_noise_14B_*.safetensors`. The marker is matched as a DELIMITED token rather than
-/// a bare substring so a checkpoint merely *mentioning* one of the words in some other position
-/// cannot be reclassified, and a name carrying BOTH markers is refused (`None`) rather than resolved
-/// to whichever appears first — an ambiguous name is not evidence.
+/// The three spellings the shipped redistributions actually use, all of which must be recognized:
+///
+/// | publisher | example | normalized token |
+/// |---|---|---|
+/// | ComfyUI | `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors` | `_high_noise_` |
+/// | QuantStack GGUF | `Wan2.2-T2V-A14B-HighNoise-Q4_K_S.gguf` | `_highnoise_` |
+/// | Kijai scaled-fp8 | `Wan2_2_T2V_HIGH_14B_fp8_e4m3fn_scaled.safetensors` | `_high_` |
+///
+/// The first form alone was matched originally, so a QuantStack or Kijai pair kept the plain
+/// `transformer` role — two anonymous backbones, a missing-expert-role refusal, and (before the
+/// video router propagated) a procedural stub render (sc-20644 review major 5).
+///
+/// Matching stays DELIMITED rather than substring: `_high_` matches, `_highest_` does not, and
+/// `wan_highlights_14B` cannot be reclassified. A name carrying BOTH markers is still refused
+/// (`None`) rather than resolved to whichever appears first — an ambiguous name is not evidence,
+/// and a merged single-file `high_noise_and_low_noise` checkpoint is exactly that case.
 fn expert_marker(relative_path: &str) -> Option<&'static str> {
     let name = Path::new(relative_path)
         .file_name()
         .and_then(|name| name.to_str())?
         .to_ascii_lowercase();
-    // Normalize the separators ComfyUI and its mirrors use interchangeably, then match a token that
-    // is bounded on both sides, so `high_noise` matches and `highest_noise` does not.
+    // Normalize the separators these publishers use interchangeably, then match tokens bounded on
+    // both sides.
     let normalized = format!("_{}_", name.replace(['-', '.', ' '], "_"));
-    let high = normalized.contains("_high_noise_");
-    let low = normalized.contains("_low_noise_");
-    match (high, low) {
+    let marks = |side: &str| {
+        // `_high_` / `_highnoise_` / `_high_noise_`, and the `low` equivalents. The optional
+        // `noise` suffix is what covers QuantStack's concatenation and Kijai's omission without
+        // loosening the boundary on either end.
+        normalized.contains(&format!("_{side}_"))
+            || normalized.contains(&format!("_{side}noise_"))
+            || normalized.contains(&format!("_{side}_noise_"))
+    };
+    match (marks("high"), marks("low")) {
         (true, false) => Some(TRANSFORMER_HIGH_ROLE),
         (false, true) => Some(TRANSFORMER_LOW_ROLE),
         _ => None,
