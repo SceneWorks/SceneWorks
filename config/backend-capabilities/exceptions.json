@@ -279,7 +279,7 @@
       "id": "epic-18803-eros-candle-conditioning-withdrawal",
       "category": "conditioning",
       "decisionType": "product_decision",
-      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312. NO NEW DECISION was taken for multiReference (added sc-20644, epic-20398): the approved decision is route-level -- the whole Eros Candle route is withdrawn -- and this cells[] list is the derivation-tracking enumeration of the conditioning surface that decision covers. At inference 725c6bc59 the MLX ltx_2_3 engine gained multiReference, and models/engines.rs maps ltx_2_3_eros to exactly that MLX engine and to NO candle engine, so Eros's MLX conditioning surface became [reference, multiReference, keyframe, videoClip, controlClip] and the four cells already listed here became four of five. The fifth is listed for the same reason as the other four, with no change to approver, authority, approvedDate, or user-facing outcome: Eros has no Candle route at all, so no Candle control becomes newly hidden.",
       "approver": "Michael Trefry",
       "authority": "epic-18803",
       "approvedDate": "2026-08-14",
@@ -288,6 +288,7 @@
       "cells": [
         "models/ltx_2_3_eros/conditioningShape/controlClip",
         "models/ltx_2_3_eros/conditioningShape/keyframe",
+        "models/ltx_2_3_eros/conditioningShape/multiReference",
         "models/ltx_2_3_eros/conditioningShape/reference",
         "models/ltx_2_3_eros/conditioningShape/videoClip"
       ]

@@ -1227,14 +1227,20 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         });
         MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "krea_2".to_owned(),
                 resolved_route: "krea_2_turbo".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
                 load_shape: provider_contract.load_shape,
                 mode: gen_core::MemoryMode::TextToImage,
-                // The existing measurements cover ordinary T2I only.
+                // The existing measurements cover ordinary T2I only — no references, no temporal
+                // output, so both new axes take their identity values.
+                reference_shape: crate::memory_strategy::reference_shape_for_count(
+                    at_geometry.reference_count,
+                ),
                 overlay: None,
                 geometry: at_geometry,
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition,
                 parameters: selection.parameters,
@@ -1446,13 +1452,18 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             *selection,
             MemoryEvidence {
                 key: MemoryEvidenceKey {
+                    model_family: "krea_2".to_owned(),
                     resolved_route: "krea_2_turbo".to_owned(),
                     backend: gen_core::MemoryBackend::Candle,
                     tier: numeric_tier,
                     load_shape: provider_contract.load_shape,
                     mode: gen_core::MemoryMode::TextToImage,
+                    reference_shape: crate::memory_strategy::reference_shape_for_count(
+                        geometry.reference_count,
+                    ),
                     overlay: None,
                     geometry,
+                    frames_per_second: None,
                     strategy: selection.strategy,
                     engaged_composition: provider_contract.engaged_composition(selection.strategy),
                     parameters: selection.parameters,

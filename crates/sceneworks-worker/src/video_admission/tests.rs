@@ -433,6 +433,7 @@ fn select_once(
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            frames_per_second: 24,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -490,6 +491,7 @@ fn selector_with_curves<'a>(
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            frames_per_second: 24,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -1012,6 +1014,7 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            frames_per_second: 24,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -1196,6 +1199,7 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
     let evidence = crate::mlx_fit_gate::estimate_evidence(
         &contract,
         gen_core::MemoryBackend::Mlx,
+        "ltx-video",
         tier(),
         "text_to_image",
         None,
@@ -1206,18 +1210,26 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
             frames: 1,
             reference_count: 0,
         },
+        None,
         selection,
         1,
         None,
     );
     assert_eq!(evidence.key.backend, gen_core::MemoryBackend::Mlx);
     assert_eq!(evidence.key.geometry.frames, 1);
+    // A still cell carries the non-temporal identity, not a nominal rate.
+    assert_eq!(evidence.key.frames_per_second, None);
+    assert_eq!(
+        evidence.key.reference_shape,
+        gen_core::MemoryReferenceShape::None
+    );
 
     // ...and the video lane can key to Candle, so the parameter is genuinely load-bearing rather
     // than a constant with extra steps.
     let candle = crate::mlx_fit_gate::estimate_evidence(
         &contract,
         gen_core::MemoryBackend::Candle,
+        "ltx-video",
         tier(),
         "text_to_video",
         None,
@@ -1228,12 +1240,37 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
             frames: 241,
             reference_count: 0,
         },
+        Some(24),
         selection,
         1,
         None,
     );
     assert_eq!(candle.key.backend, gen_core::MemoryBackend::Candle);
     assert_eq!(candle.key.geometry.frames, 241);
+    assert_eq!(candle.key.frames_per_second, Some(24));
+    // The rate is a SEPARATE axis from the frame count: the same 241-frame request at another rate
+    // is a different memory cell, and a key that dropped the rate could not say so.
+    let faster = crate::mlx_fit_gate::estimate_evidence(
+        &contract,
+        gen_core::MemoryBackend::Candle,
+        "ltx-video",
+        tier(),
+        "text_to_video",
+        None,
+        MemoryGeometry {
+            width: 1280,
+            height: 704,
+            batch: 1,
+            frames: 241,
+            reference_count: 0,
+        },
+        Some(30),
+        selection,
+        1,
+        None,
+    );
+    assert_eq!(faster.key.geometry, candle.key.geometry);
+    assert_ne!(faster.key, candle.key);
 }
 
 /// End-to-end through core's gate with the real selector: an unrouted family never reaches it.
@@ -1247,6 +1284,7 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            frames_per_second: 24,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1364,6 +1402,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            frames_per_second: 24,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1399,6 +1438,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
                 route: "ltx_2_3",
                 mode: "text_to_video",
                 reference_count: 0,
+                frames_per_second: 24,
                 overlay: None,
                 lane: VideoLane::Candle,
                 tier: tier(),
@@ -1425,6 +1465,7 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
+            frames_per_second: 24,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1465,6 +1506,7 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
                 route: "ltx_2_3",
                 mode: "text_to_video",
                 reference_count: 0,
+                frames_per_second: 24,
                 overlay: None,
                 lane,
                 tier: tier(),

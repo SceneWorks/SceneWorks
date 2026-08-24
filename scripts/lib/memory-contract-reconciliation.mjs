@@ -318,13 +318,24 @@ const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
 // check COVERS; it does not widen what satisfies a manifest declaration — `MANIFEST_ROUTE_PROFILES`
 // below is deliberately left alone, so a bare `identity` cell is still served only by the plain
 // identity profiles and never by `lora_ip_adapter`.
+//
+// sc-20799: the two PiD-composed CONTROL profiles were the same gap one lane later. The epic's
+// Kolors control work made `candle_kolors_control` emit them, and the first authoritative candle
+// dump at pin ebcdc7da carries 9 `single_control_pid` and 9 `lora_single_control_pid` witnesses.
+// Both map to `control` here because that is what `MemoryRouteLoadProfile::overlay()` — the
+// authority this map exists to CHECK against — returns for them; the witnesses independently
+// declare `control` too, so the equality assertion below still does real work rather than being
+// satisfied by construction. This map now covers all 14 registry profiles, so a composed profile
+// can no longer blank the whole reconciliation.
 const ROUTE_LOAD_PROFILES = new Map([
   ["plain", "none"],
   ["lora", "lora"],
   ["lora_pid", "lora"],
   ["single_control", "control"],
+  ["single_control_pid", "control"],
   ["multi_control", "control"],
   ["lora_single_control", "control"],
+  ["lora_single_control_pid", "control"],
   ["ip_adapter", "identity"],
   ["ip_adapter_pid", "identity"],
   ["lora_ip_adapter", "identity"],

@@ -4744,7 +4744,16 @@ fn write_complete_krea_tier(root: &Path, tier: &str) {
     for file in files {
         let path = root.join(tier).join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"x").unwrap();
+        // Placeholder bytes are enough for the files this fixture only needs to EXIST, but the
+        // pinned inference revision now parses the tier's `config.json` to resolve the
+        // provider-owned numeric tier instead of merely checking for it. `b"x"` is not JSON, so a
+        // `.json` row gets an empty object — still a placeholder, but a readable one.
+        let contents: &[u8] = if path.extension().is_some_and(|ext| ext == "json") {
+            b"{}"
+        } else {
+            b"x"
+        };
+        std::fs::write(path, contents).unwrap();
     }
 }
 

@@ -1844,3 +1844,83 @@ fn one_corrupt_plan_document_does_not_unlist_the_library() {
         .expect("the damaged checkpoint is still visible as a candidate");
     assert!(!broken_candidate.selectable);
 }
+
+/// A Wan 2.2 ComfyUI tree carrying an in-place UMT5 encoder compiles to THREE named roles.
+///
+/// This is the macOS/Linux-executable half of a premise the candle-only Wan worker tests rest on.
+/// `video_jobs::candle::plan_backed_wan_tests` is gated
+/// `cfg(all(not(target_os = "macos"), feature = "backend-candle"))`, so it FIRST runs on the
+/// windows-candle lane — and its fixture was writing a transformer tensor surface at a
+/// `text_encoder/` path. `reconcile_role` refuses precisely that (`AmbiguousComponentRole`: "path
+/// implies role 'text_encoder' but its descriptor implies 'transformer'"), so the tree never
+/// compiled and the worker refusal under test was never reached. Nothing outside that one CUDA
+/// lane could see it.
+///
+/// Asserting it here means the shape a fixture has to write to get a `text_encoder` layer is
+/// pinned on a lane that actually executes, rather than being rediscovered a dispatch at a time.
+///
+/// Failing mutations: give the UMT5 file `write_wan_expert`'s tensor surface (compile refuses with
+/// `AmbiguousComponentRole`); drop `shared.weight` from it (refuses with the same code, now
+/// because the descriptor half goes silent and cannot corroborate the path).
+#[test]
+fn a_wan_tree_with_an_in_place_umt5_encoder_compiles_to_named_expert_and_encoder_roles() {
+    let fx = fixture("wan-roles");
+    let write_wan_expert = |relative: &str| {
+        write_safetensors(
+            &fx.library_dir.join(relative),
+            &[
+                ("blocks.0.self_attn.q.weight", "BF16"),
+                ("blocks.0.cross_attn.q.weight", "BF16"),
+                ("blocks.0.ffn.0.weight", "BF16"),
+                ("blocks.0.modulation", "BF16"),
+                ("patch_embedding.weight", "BF16"),
+            ],
+            0x5a,
+        );
+    };
+    write_wan_expert("tree/unet/wan2.2_t2v_high_noise_14B.safetensors");
+    write_wan_expert("tree/unet/wan2.2_t2v_low_noise_14B.safetensors");
+    // The UMT5 encoder's OWN surface: the exact `shared.weight` embedding key plus an
+    // `encoder.block.` / `SelfAttention` stack. It carries no transformer marker, so the
+    // descriptor AGREES with the `text_encoder/` path instead of contradicting it.
+    write_safetensors(
+        &fx.library_dir.join("tree/text_encoder/umt5.safetensors"),
+        &[
+            ("shared.weight", "BF16"),
+            ("encoder.block.0.layer.0.SelfAttention.q.weight", "BF16"),
+            ("encoder.block.0.layer.1.DenseReluDense.wi.weight", "BF16"),
+        ],
+        0x5a,
+    );
+
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let compiled = fx
+        .store
+        .compile_linked(&root.root_id, "tree")
+        .unwrap_or_else(|error| {
+            panic!("a Wan tree with an in-place UMT5 encoder compiles: {error}")
+        });
+
+    assert_eq!(compiled.plan.family, "wan-video");
+    let mut roles: Vec<&str> = compiled
+        .plan
+        .layers
+        .iter()
+        .map(|layer| layer.role.as_str())
+        .collect();
+    roles.sort_unstable();
+    assert_eq!(
+        roles,
+        vec!["text_encoder", "transformer_high", "transformer_low"],
+        "the two experts resolve to their named expert roles and the encoder to its own"
+    );
+    // And the encoder role landed on the ENCODER file, not on whichever layer happened to sort
+    // there — a roles-only resolution looks each component up by name.
+    let encoder = compiled
+        .plan
+        .layers
+        .iter()
+        .find(|layer| layer.role == "text_encoder")
+        .expect("the compiled plan carries a text_encoder layer");
+    assert_eq!(encoder.target_path, "tree/text_encoder/umt5.safetensors");
+}

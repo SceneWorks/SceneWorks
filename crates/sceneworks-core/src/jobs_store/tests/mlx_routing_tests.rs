@@ -1039,6 +1039,57 @@ fn wan5_mlx_routing_requires_an_exact_source_shape_for_each_base_mode() {
     }
 }
 
+/// SCAIL-2's `replace_person` lane must not depend on a `multiReference` declaration.
+///
+/// At the inference revision this branch pins, BOTH engines stop advertising
+/// `ConditioningKind::MultiReference` for SCAIL-2 — the candle descriptor goes further and pins the
+/// absence with `assert!(!d.capabilities.accepts(ConditioningKind::MultiReference))`
+/// (`candle-gen-scail2/src/pipeline.rs`). That is epic 20762's exact-identity work: sc-20778
+/// re-derived `replace_person` as the ordered `Reference + Mask + ControlClip` carriers, and the
+/// generic declaration that predated it went away on both sides.
+///
+/// Ingesting those facts is a separate step (it needs a paired Candle dump), but the user-visible
+/// invariant can and should be pinned now, because it is the thing such an ingest could quietly
+/// break: routing keys on model + mode, never on the retired declaration, so losing that
+/// declaration must not cost the mode its lane. `animate_character` rides the same engine and the
+/// same arm, so a change that dropped one would very likely drop both.
+///
+/// Mutation-checked: deleting the `scail2_14b` arm in `video_mode_is_mlx_eligible` reds this.
+#[test]
+fn scail2_replace_person_still_routes_to_mlx_without_a_multireference_declaration() {
+    for mode in ["replace_person", "animate_character"] {
+        assert!(
+            video_mode_is_mlx_eligible("scail2_14b", mode),
+            "scail2_14b/{mode} must stay MLX-eligible after the MultiReference declaration retired"
+        );
+    }
+    // ...and the modes it genuinely does not serve stay refused, so the assertion above is not
+    // passing because the arm went permissive.
+    for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+        assert!(
+            !video_mode_is_mlx_eligible("scail2_14b", mode),
+            "scail2_14b has no {mode} surface"
+        );
+    }
+    // The whole job shape, not just the mode predicate: a real replace-person request carries the
+    // reference character image, the driving clip and the person-track masks — the exact carriers
+    // sc-20778 pinned — and must still be admitted to the MLX lane.
+    assert!(
+        video_job_is_mlx_eligible(&video_job(
+            "video_generate",
+            json!({
+                "model": "scail2_14b",
+                "mode": "replace_person",
+                "prompt": "replace the tracked person",
+                "referenceImage": "asset_reference_character",
+                "sourceVideo": "asset_driving_clip",
+                "personTrackId": "track_1",
+            }),
+        )),
+        "a scail2_14b replace_person job must remain MLX-eligible end to end"
+    );
+}
+
 #[test]
 fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its

@@ -33,7 +33,7 @@
 // THE EXTRACTOR FAILS CLOSED
 //
 // Reading Rust with regular expressions is only sound if every shape it does not understand is an
-// ERROR rather than a zero. `additionalPrerequisiteEdges` therefore recognises a closed set of four
+// ERROR rather than a zero. `additionalPrerequisiteEdges` therefore recognises a closed set of five
 // construction shapes and throws on any other occurrence of the field. A provider that starts
 // building its prerequisite vector some new way fails the derivation instead of silently recording
 // "no edges" — which is the fail-open direction, and the one that would put this module back where
@@ -524,12 +524,13 @@ export function blankLiterals(source) {
 /**
  * The strategies receiving a rung-1 edge from a crate's `additional_prerequisites` constructions.
  *
- * Returns `[{ strategy, conditional }]`. Four shapes are recognised, which is every shape present at
+ * Returns `[{ strategy, conditional }]`. Five shapes are recognised, which is every shape present at
  * the pinned revision:
  *
  *   1. `additional_prerequisites: Vec::new()`                                   — no edges.
  *   2a. `additional_prerequisites: [A, B].into_iter().map(|s| (s, EDGE)).collect()` — field INIT.
  *   2b. `contract.additional_prerequisites = [A, B]…collect()`                  — ASSIGNMENT.
+ *   2c. either of the above with a `.filter(|s| PRED)` between `into_iter()` and `map` — see below.
  *   3. `contract.additional_prerequisites.push((STRATEGY, EDGE))`
  *   4. `additional_prerequisites: COND.then_some((STRATEGY, EDGE)).into_iter().collect()`
  *
@@ -560,6 +561,16 @@ export function blankLiterals(source) {
  * test))]`). Both are marked rather than presented as unconditional declarations. The GATE still
  * treats a conditional edge as present, because for an admission gate "this provider may demand
  * rung 1" is the fail-closed reading of a prerequisite that holds on some builds.
+ *
+ * Shape 2c is that same case reached a third way. `candle-gen-sana/src/memory_strategy.rs:482` (new
+ * at this pin) assigns `[BoundedDecode, BoundedAttention, BoundedTransformerResidency]` and then
+ * filters the transformer rung out unless the load is streamable, so the listed strategies are a
+ * CEILING rather than a declaration. EVERY strategy in a filtered list is marked conditional, not
+ * just the ones a predicate reader believes are removable: the extractor does not interpret the
+ * predicate, `conditional` already keeps an edge PRESENT for the gate, so marking the whole list
+ * costs the gate nothing and never claims an unconditional edge the filter can strip. The filter
+ * body is required to be paren-free, so a future predicate this shape cannot see through falls to
+ * the throw below rather than being silently read as an unfiltered list.
  *
  * The limit this cannot represent, stated rather than hidden: a `.push` inside an `if` BLOCK (as
  * opposed to a `then_some` expression) is recorded unconditionally. That is the over-restrictive
@@ -619,17 +630,27 @@ export function additionalPrerequisiteEdges(source, where) {
     }
 
     const arrayMap =
-      /^\s*([:=])\[((?:MemoryStrategy::\w+,?)+)\]\.into_iter\(\)\.map\(\|(\w+)\|\{?\((\w+),(MemoryStrategyPrerequisite::Rung\{[^}]*\},?)\)\}?\)\.collect\(\)/.exec(
+      /^\s*([:=])\[((?:MemoryStrategy::\w+,?)+)\]\.into_iter\(\)(?:\.filter\(\|(\w+)\|([^()]*)\))?\.map\(\|(\w+)\|\{?\((\w+),(MemoryStrategyPrerequisite::Rung\{[^}]*\},?)\)\}?\)\.collect\(\)/.exec(
         rest,
       );
     if (arrayMap) {
-      const [, operator, list, binder, applied, edge] = arrayMap;
+      const [, operator, list, filterBinder, filterBody, binder, applied, edge] = arrayMap;
       if (binder !== applied) {
         throw new Error(`${where}: ${field} maps ${binder} but pairs ${applied}`);
       }
+      // A filter the extractor cannot tie to the list it narrows is not a filter it may read past.
+      if (filterBinder !== undefined && !filterBody.includes(filterBinder)) {
+        throw new Error(
+          `${where}: ${field} filters on |${filterBinder}| but the predicate ` +
+            `${JSON.stringify(filterBody)} never mentions it — the extractor will not guess which ` +
+            "strategies survive (sc-19542)",
+        );
+      }
       assertRecognisedEdge(edge, where);
+      // Shape 2c: a filtered list is a CEILING, so every listed strategy is conditional. See the
+      // doc comment — `conditional` still reads as present at the gate, so this cannot under-admit.
       add(list.split(",").filter(Boolean).map(stripStrategy), {
-        conditional: false,
+        conditional: filterBinder !== undefined,
         resets: operator === "=",
       });
       continue;
