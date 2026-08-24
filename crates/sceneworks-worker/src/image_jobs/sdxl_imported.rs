@@ -51,6 +51,14 @@ fn resolve_imported_sdxl_pin(
     {
         return Ok(None);
     }
+    // A plan-backed entry whose request the plan route does NOT claim (edit, LoRA, Hires.fix,
+    // reference-guided init) still runs here, on the plan's verified FUSED layer rather than a
+    // directory scan — the same inputs the plan route would hand the same provider, so a fixed seed
+    // renders equal on either route, and a LINKED fused checkpoint reaches those shapes at all
+    // (sc-20644 SDXL row).
+    if let Some(pin) = checkpoint_plan_bespoke_primary_pin(request, settings, "sdxl")? {
+        return Ok(Some(pin));
+    }
     let Some(raw_path) = request
         .advanced
         .get("modelPath")
@@ -364,9 +372,118 @@ async fn stage_sdxl_tokenizer(
     Ok(root)
 }
 
+/// The `ldm_tokenizer` directory a fused SDXL checkpoint pairs with, resolved **cache-only** for the
+/// plan-driven route: a root whose `tokenizer/` subdir holds CLIP-L's `vocab.json` + `merges.txt`
+/// (`mlx-gen-sdxl`'s `loader::load_tokenizer` joins `tokenizer` onto whatever directory it is
+/// handed).
+///
+/// Lives in THIS file, not in the plan route, for two reasons: the staging root and the pinned
+/// CLIP-L revision are this lane's, so both routes hand the loader one directory rather than two
+/// copies; and `<data>/cache/sdxl-imported-components` is a destination epic 17625's guard already
+/// attributes to `image_jobs/sdxl_imported.rs` — a second file naming the same literal would count
+/// as a second weights destination against a ratchet that only goes down, for no new destination.
+///
+/// This never DOWNLOADS. It mirrors two ~1 MB model-agnostic assets that are already in the
+/// app-managed Hugging Face cache, and refuses with an actionable install-it-from-the-Model-Manager
+/// diagnostic when they are not — during PLANNING, not inside a loader (epic 17625 AC9 / E7).
+///
+/// Without it the plan route CLAIMED a plan-backed fused SDXL text-to-image request — the SDXL
+/// adapter binds `FusedCheckpoint`/`Generate` on this backend — and then refused it with
+/// `[checkpoint-plan:missing-component] … 'ldm_tokenizer'`, so the family had no servable shape at
+/// all on the universal route (sc-20644 SDXL row).
+fn resolve_sdxl_ldm_tokenizer_root_cache_only(
+    settings: &Settings,
+    checkpoint_id: &str,
+) -> WorkerResult<PathBuf> {
+    let root = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components");
+    let tokenizer_dir = root.join("tokenizer");
+    let staging_failed = |path: &Path, error: std::io::Error| {
+        WorkerError::Engine(format!(
+            "Checkpoint plan source preparation failed: {} ({error})",
+            path.display()
+        ))
+    };
+    for file in ["vocab.json", "merges.txt"] {
+        let destination = tokenizer_dir.join(file);
+        if destination.is_file() {
+            continue;
+        }
+        let cached = crate::downloads::resolve_hf_component_file(
+            settings,
+            SDXL_CLIP_L_REPO,
+            SDXL_CLIP_L_REVISION,
+            file,
+        )
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:missing-component] checkpoint {checkpoint_id:?} (sdxl family) \
+                 requires the fused-checkpoint tokenizer assets, and {SDXL_CLIP_L_REPO}/{file} is \
+                 not installed — install it from the Model Manager, then run this checkpoint \
+                 again. A fused SDXL checkpoint carries its own UNet, encoders and VAE; only the \
+                 model-agnostic CLIP tokenizer vocabulary comes from outside it."
+            ))
+        })?;
+        std::fs::create_dir_all(&tokenizer_dir)
+            .map_err(|error| staging_failed(&tokenizer_dir, error))?;
+        // Copy to a pid-keyed sibling and rename, so two concurrent jobs can never observe a
+        // half-written vocabulary at the destination path.
+        let staging = tokenizer_dir.join(format!("{file}.{}.partial", std::process::id()));
+        std::fs::copy(&cached, &staging)
+            .and_then(|_| std::fs::rename(&staging, &destination))
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&staging);
+                staging_failed(&destination, error)
+            })?;
+    }
+    Ok(root)
+}
+
+/// Where each SDXL component id's bytes come from: `(component id, repo, revision, file, subdir)`.
+///
+/// Catalog data only. WHICH of these the imported fused route actually needs is the registered
+/// provider's `required_components`, never this table: a fused LDM checkpoint carries its own VAE,
+/// so the candle binding declares `LDM_REQUIRED_COMPONENTS` — the two model-agnostic tokenizers —
+/// while the ordinary snapshot route additionally requires the fp16-fix VAE. Staging all three
+/// regardless downloaded ~335 MB from `madebyollin/sdxl-vae-fp16-fix` on every imported render and
+/// handed the loader a component it drops: `SdxlComponents::from_spec` makes `vae_fp16_fix` optional
+/// for a fused source and `load_components` takes the VAE from `ldm.vae`. A pure dead download,
+/// removed by asking the descriptor (sc-20644 SDXL row).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SDXL_IMPORTED_COMPONENT_SOURCES: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "tokenizer_clip_l",
+        SDXL_CLIP_L_REPO,
+        SDXL_CLIP_L_REVISION,
+        "tokenizer.json",
+        "clip-l",
+    ),
+    (
+        "tokenizer_clip_bigg",
+        SDXL_CLIP_BIGG_REPO,
+        SDXL_CLIP_BIGG_REVISION,
+        "tokenizer.json",
+        "clip-bigg",
+    ),
+    (
+        "vae_fp16_fix",
+        SDXL_VAE_REPO,
+        SDXL_VAE_REVISION,
+        "diffusion_pytorch_model.safetensors",
+        "vae-fp16-fix",
+    ),
+];
+
+/// Stage exactly the components the RESOLVED provider declares, in its declared order.
+///
+/// A declared id this build cannot source refuses by name rather than being skipped: skipping would
+/// hand the loader an incomplete spec and turn a staging gap into a mid-load failure (E7).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn attach_imported_sdxl_components(
     spec: LoadSpec,
+    descriptor: &gen_core::ModelDescriptor,
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -375,29 +492,19 @@ async fn attach_imported_sdxl_components(
         .data_dir
         .join("cache")
         .join("sdxl-imported-components");
-    let clip_l = root.join("clip-l");
-    let clip_bigg = root.join("clip-bigg");
-    let vae = root.join("vae-fp16-fix");
-    for (repo, revision, file, destination) in [
-        (
-            SDXL_CLIP_L_REPO,
-            SDXL_CLIP_L_REVISION,
-            "tokenizer.json",
-            clip_l.join("tokenizer.json"),
-        ),
-        (
-            SDXL_CLIP_BIGG_REPO,
-            SDXL_CLIP_BIGG_REVISION,
-            "tokenizer.json",
-            clip_bigg.join("tokenizer.json"),
-        ),
-        (
-            SDXL_VAE_REPO,
-            SDXL_VAE_REVISION,
-            "diffusion_pytorch_model.safetensors",
-            vae.join("diffusion_pytorch_model.safetensors"),
-        ),
-    ] {
+    let mut spec = spec;
+    for component in descriptor.required_components {
+        let Some((_, repo, revision, file, subdir)) = SDXL_IMPORTED_COMPONENT_SOURCES
+            .iter()
+            .find(|(id, ..)| id == component)
+        else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "The registered imported SDXL provider {:?} declares required component \
+                 {component:?}, which this build cannot stage",
+                descriptor.id
+            )));
+        };
+        let destination_dir = root.join(subdir);
         stage_sdxl_component_file(
             api,
             settings,
@@ -405,23 +512,12 @@ async fn attach_imported_sdxl_components(
             repo,
             revision,
             file,
-            &destination,
+            &destination_dir.join(file),
         )
         .await?;
+        spec = spec.with_component(*component, WeightsSource::Dir(destination_dir));
     }
-    Ok(spec
-        .with_component(
-            "tokenizer_clip_l",
-            WeightsSource::Dir(clip_l),
-        )
-        .with_component(
-            "tokenizer_clip_bigg",
-            WeightsSource::Dir(clip_bigg),
-        )
-        .with_component(
-            "vae_fp16_fix",
-            WeightsSource::Dir(vae),
-        ))
+    Ok(spec)
 }
 
 async fn generate_sdxl_imported_stream(
@@ -559,7 +655,7 @@ async fn generate_sdxl_imported_stream(
         WeightsSource::Dir(stage_sdxl_tokenizer(api, settings, job).await?),
     );
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let spec = attach_imported_sdxl_components(spec, api, settings, job).await?;
+    let spec = attach_imported_sdxl_components(spec, &descriptor, api, settings, job).await?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     admit_candle_load_spec_floor(&request.model, "SDXL imported", settings, &spec).await?;
 
