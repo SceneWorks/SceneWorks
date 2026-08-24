@@ -464,6 +464,24 @@ const seededFallbackModels = [
     },
   },
   {
+    // Distilled RealVisXL sibling: five-step Lightning sampling with CFG off at the default
+    // guidance 1.0. The native MLX and Candle lanes also accept the shared SDXL OpenPose control.
+    id: "realvisxl_lightning",
+    name: "RealVisXL Lightning (fast photoreal SDXL)",
+    family: "sdxl",
+    type: "image",
+    capabilities: ["text_to_image"],
+    defaults: { resolution: "1024x1024", steps: 5, guidanceScale: 1.0, count: 4 },
+    ui: {
+      description: "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. CFG-free by default at guidance 1.0; the negative prompt becomes active only if guidance is raised toward 2.0. Text-to-image and OpenPose control only; use standard RealVisXL for edits, reference identity, inpaint, or detail-refine.",
+      promptGuide: { title: "RealVisXL Lightning Prompt Guide", path: "/prompt-guides/realvisxl-lightning.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
+    },
+  },
+  {
     id: "illustrious_xl_v1",
     name: "Illustrious-XL v1.0 (anime)",
     type: "image",

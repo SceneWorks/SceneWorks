@@ -15011,18 +15011,19 @@
       // renders photoreal images in ~5 steps with CFG off, ~6x faster than the 30-step
       // base. Same SDXL UNet / dual-CLIP / VAE, so it runs on the shared `sdxl` engine;
       // the worker pins the engine's `lightning` (Euler-trailing) few-step sampler — no
-      // acceleration LoRA, since the distillation lives in the checkpoint itself. txt2img
-      // ONLY: the few-step accel sampler is engine-incompatible with img2img / reference /
-      // mask conditioning, so edit / inpaint / reference / detail stay on the 30-step base
-      // `realvisxl`. openrail++ (commercial use OK, ungated), same license as the base.
+      // acceleration LoRA, since the distillation lives in the checkpoint itself. The regular
+      // edit / inpaint / reference / detail lanes stay on the 30-step `realvisxl`; the one
+      // accepted conditioned shape is text-to-image with the shared SDXL OpenPose ControlNet.
+      // openrail++ (commercial use OK, ungated), same license as the base.
       "capabilities": ["text_to_image"],
       // Cross-platform (sc-7176): the few-step `lightning` (Euler-trailing, CFG-off) sampler now runs on
       // BOTH the macOS mlx-gen `sdxl` engine (sc-6075) AND the Windows/CUDA candle `sdxl` engine
       // (candle-gen #121 / sc-6128). The worker forces `sampler="lightning"` for this id on both backends
       // (MLX `generate_stream` + candle `generate_candle_stream`), so the distilled checkpoint renders at
-      // its native ~5-step schedule everywhere — no wrong 30-step result. txt2img only on candle; its
-      // edit / reference / mask / pose shapes fall back to the Python torch worker. Was `macOnly: true`
-      // until the candle lightning lane landed + was GPU-validated (~5-step render) on the RTX PRO 6000.
+      // its native ~5-step schedule everywhere — no wrong 30-step result. Plain edit / reference / mask
+      // shapes remain unsupported, while the shared OpenPose ControlNet is accepted on both native
+      // providers. Was `macOnly: true` until the candle lightning lane landed + was GPU-validated
+      // (~5-step render) on the RTX PRO 6000.
       // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
       // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
       // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
@@ -15954,6 +15955,10 @@
       },
       "ui": {
         "label": "RealVisXL Lightning (fast photoreal SDXL)",
+        "poseLibrary": true,
+        "poseControlScale": true,
+        "controlModes": ["pose"],
+        "controlScale": { "label": "Control strength", "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05 },
         "description": "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. A standalone SDXL-Lightning checkpoint (openrail++, commercial-OK, ungated) tuned for the same photoreal look as RealVisXL_V5.0. Runs CFG-free by default (the negative prompt is inert unless you raise guidance toward 2.0). Text-to-image only; for edits, reference identity, masked inpaint, or detail-refine use the standard RealVisXL. Accepts sdxl-family LoRAs.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_sdxl" },
