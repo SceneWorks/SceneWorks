@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::memory_calibration::StrategyRung;
 
-pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 3;
+pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 4;
 pub const PACKAGED_VIDEO_MEMORY_CURVES: &str =
     include_str!("../../../docs/generated/video-memory-curves.json");
 /// Immutable evidence sources compiled alongside the promoted curve bundle. Paths and record ids
@@ -46,7 +46,24 @@ pub struct VideoMemoryCurveBundle {
     pub generated_by: String,
     pub source_fit: String,
     pub source_catalog: Vec<VideoCurveSourceCatalogEntry>,
+    /// Source records the producer deliberately did not model, each with the reason. Required, so
+    /// a regeneration that sheds evidence has to say so instead of dropping it silently
+    /// (sc-20799); an empty list is the normal, fully-modeled case.
+    pub unmodeled_records: Vec<VideoCurveUnmodeledRecords>,
     pub curves: Vec<VideoMemoryCurve>,
+}
+
+/// One group of source records the fit did not model, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VideoCurveUnmodeledRecords {
+    /// Producer-side reason token, e.g. `insufficient_geometries`.
+    pub reason: String,
+    /// The complete-selector key whose group was dropped.
+    pub selector_key: String,
+    /// How many distinct geometries the group actually had.
+    pub distinct_geometries: u32,
+    pub sources: Vec<VideoCurveEvidenceSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,6 +423,68 @@ fn validate_video_memory_curve_bundle_ref(
                 }
             }
         }
+    }
+    // sc-20799: the compiled source catalog must PARTITION exactly into modeled and explicitly
+    // declared-unmodeled records. The original consumption check was deleted when sealing
+    // `outputFps` split the q8 group and left fps24 under the fitter's three-geometry floor —
+    // which is precisely the regression class it existed to catch: a regeneration that sheds
+    // sealed evidence then validated silently. Restored as a PARTITION rather than a total
+    // consumption rule, so a legitimately under-sampled cell stays representable, but only when
+    // the producer names it and says why.
+    //
+    // Deliberately no counts and no thresholds: this is a frozen-corpus-safe shape assertion, so
+    // it holds as the corpus grows.
+    let mut declared_unmodeled = BTreeSet::new();
+    for entry in &bundle.unmodeled_records {
+        if entry.reason.trim().is_empty() {
+            return Err(format!(
+                "unmodeled video-memory record group {:?} declares no reason",
+                entry.selector_key
+            ));
+        }
+        for source in &entry.sources {
+            for record_id in &source.record_ids {
+                if !declared_unmodeled.insert((source.path.clone(), record_id.clone())) {
+                    return Err(format!(
+                        "video-memory evidence record {:?} from {:?} is declared unmodeled twice",
+                        record_id, source.path
+                    ));
+                }
+            }
+        }
+    }
+    if let Some((path, record_id)) = referenced_records.intersection(&declared_unmodeled).next() {
+        return Err(format!(
+            "video-memory evidence record {record_id:?} from {path:?} is both modeled and \
+             declared unmodeled"
+        ));
+    }
+    let expected_records = sources
+        .iter()
+        .flat_map(|(path, source)| {
+            source.records.iter().filter_map(move |record| {
+                record
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| (path.clone(), id.to_owned()))
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    let accounted = referenced_records
+        .union(&declared_unmodeled)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if let Some((path, record_id)) = expected_records.difference(&accounted).next() {
+        return Err(format!(
+            "video-memory source record {record_id:?} from {path:?} is neither modeled by a curve \
+             nor declared unmodeled"
+        ));
+    }
+    if let Some((path, record_id)) = accounted.difference(&expected_records).next() {
+        return Err(format!(
+            "video-memory curves reference record {record_id:?} from {path:?}, which is not in \
+             the compiled source catalog"
+        ));
     }
     Ok(())
 }
@@ -939,7 +1018,17 @@ mod tests {
     fn packaged_curve_is_strict_and_evaluates_all_three_phases() {
         let bundle = load_video_memory_curves(PACKAGED_VIDEO_MEMORY_CURVES)
             .unwrap_or_else(|error| panic!("packaged curve bundle parses: {error}"));
-        assert_eq!(bundle.curves.len(), 1);
+        // SHAPE, not population: `assert_eq!(bundle.curves.len(), 1)` was a frozen-corpus gate that
+        // reds the moment a legitimate new curve is promoted (sc-20799). What must hold forever is
+        // that the bundle is non-empty and that its curve ids are unique — the identity property
+        // the selector depends on.
+        assert!(!bundle.curves.is_empty());
+        let ids = bundle
+            .curves
+            .iter()
+            .map(|curve| curve.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), bundle.curves.len(), "curve ids must be unique");
         let evaluation = bundle
             .evaluate(packaged_query())
             .expect("q8 LTX curve matches");
@@ -950,6 +1039,79 @@ mod tests {
         assert!(evaluation.phases.conditioning > evaluation.phases.denoise);
         assert!(evaluation.phases.denoise > evaluation.phases.decode);
         assert_eq!(evaluation.phases.peak(), evaluation.phases.conditioning);
+    }
+
+    /// sc-20799: the compiled source catalog must partition into modeled ∪ declared-unmodeled,
+    /// with an empty intersection. This is the check that was deleted in `e84c7b219`, which is how
+    /// sealing `outputFps` shed the fps24 records with nothing recording that it happened.
+    #[test]
+    fn the_packaged_bundle_partitions_its_whole_source_catalog() {
+        let bundle = load_video_memory_curves(PACKAGED_VIDEO_MEMORY_CURVES)
+            .unwrap_or_else(|error| panic!("packaged curve bundle parses: {error}"));
+        let sources = packaged_source_handshakes().expect("packaged sources");
+        let families = packaged_model_families().expect("model-family catalog");
+
+        let modeled = bundle
+            .curves
+            .iter()
+            .flat_map(|curve| &curve.evidence.sources)
+            .flat_map(|source| {
+                source
+                    .record_ids
+                    .iter()
+                    .map(move |id| (source.path.clone(), id.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        let declared = bundle
+            .unmodeled_records
+            .iter()
+            .flat_map(|entry| &entry.sources)
+            .flat_map(|source| {
+                source
+                    .record_ids
+                    .iter()
+                    .map(move |id| (source.path.clone(), id.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        let catalog = sources
+            .iter()
+            .flat_map(|(path, source)| {
+                source.records.iter().filter_map(move |record| {
+                    record
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(|id| (path.clone(), id.to_owned()))
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            modeled.intersection(&declared).next().is_none(),
+            "a record cannot be both modeled and declared unmodeled"
+        );
+        assert_eq!(
+            modeled.union(&declared).cloned().collect::<BTreeSet<_>>(),
+            catalog,
+            "modeled ∪ declared-unmodeled must equal the compiled source catalog exactly"
+        );
+        assert!(
+            bundle
+                .unmodeled_records
+                .iter()
+                .all(|entry| !entry.reason.trim().is_empty()),
+            "every unmodeled group must say why"
+        );
+
+        // Shedding a declared group — the exact shape of the regression — must fail validation.
+        let mut shed = bundle.clone();
+        assert!(
+            !shed.unmodeled_records.is_empty(),
+            "the packaged bundle must exercise the unmodeled half; the fps24 split created it"
+        );
+        shed.unmodeled_records.remove(0);
+        assert!(
+            validate_video_memory_curve_bundle(shed, sources, families).is_err(),
+            "dropping a declared unmodeled group must not validate"
+        );
     }
 
     #[test]
@@ -1163,6 +1325,46 @@ mod tests {
             curve("q8", StrategyRung::BoundedDecode, "q8-bounded"),
         ];
         curves.sort_by(|left, right| left.id.cmp(&right.id));
+        // sc-20799: whatever these curves do not consume has to be DECLARED. The fps24 records in
+        // the packaged sweep are exactly that case — under-sampled, deliberately not modeled — and
+        // the partition check below refuses the bundle until they are named. Derive the list from
+        // the leftover rather than hand-listing ids, so it tracks the fixture.
+        let modeled = curves
+            .iter()
+            .flat_map(|curve| &curve.evidence.sources)
+            .flat_map(|source| {
+                source
+                    .record_ids
+                    .iter()
+                    .map(move |id| (source.path.clone(), id.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        let unmodeled_records = sources
+            .iter()
+            .filter_map(|(path, source)| {
+                let record_ids = source
+                    .records
+                    .iter()
+                    .filter_map(|record| record.get("id").and_then(Value::as_str))
+                    .filter(|id| !modeled.contains(&(path.clone(), (*id).to_owned())))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                (!record_ids.is_empty()).then(|| VideoCurveUnmodeledRecords {
+                    reason: "insufficient_geometries".to_owned(),
+                    selector_key: format!("synthetic-under-sampled:{path}"),
+                    distinct_geometries: 1,
+                    sources: vec![VideoCurveEvidenceSource {
+                        path: path.clone(),
+                        sha256: source.evidence_sha256.clone(),
+                        record_ids,
+                    }],
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !unmodeled_records.is_empty(),
+            "this fixture must exercise the unmodeled half of the partition"
+        );
         let bundle = VideoMemoryCurveBundle {
             schema_version: VIDEO_MEMORY_CURVE_SCHEMA_VERSION,
             generated_by: PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR.to_owned(),
@@ -1174,6 +1376,7 @@ mod tests {
                     sha256: source.evidence_sha256.clone(),
                 })
                 .collect(),
+            unmodeled_records,
             curves,
         };
         let wire = serde_json::to_string(&bundle).expect("multi-curve bundle serializes");

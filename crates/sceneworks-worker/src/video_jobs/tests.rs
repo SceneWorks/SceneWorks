@@ -60,32 +60,40 @@ fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
 #[test]
 fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     let mut input = VideoGenInput::default();
-    assert_eq!(video_admission_overlay(&input, None).unwrap(), None);
+    assert_eq!(video_admission_overlay(&input, "", None).unwrap(), None);
 
     input.video_mode = Some("no_audio".to_owned());
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("provider_video_mode:no_audio"),
         "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
     );
 
     input.enhance_prompt = true;
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("enhancer:standard+provider_video_mode:no_audio"),
         "standard prompt enhancement and provider mode remain exact identity axes"
     );
 
     input.use_uncensored_enhancer = true;
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("enhancer:uncensored+provider_video_mode:no_audio"),
         "uncensored enhancement must not borrow standard prompt-enhancement evidence"
     );
 
     input.video_mode = None;
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("enhancer:uncensored"),
         "removing the request-only mode must not erase the loaded enhancer axis"
     );
@@ -100,7 +108,9 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         strength: Some(1.0),
     }];
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("enhancer:uncensored+reference:image:768x512:strength:3f800000"),
         "the fitted LTX image and exact strength bits must reach the evidence identity"
     );
@@ -114,7 +124,9 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         strength: Some(1.0),
     });
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("enhancer:uncensored"),
         "a multi-reference request must not mint the single-reference receipt"
     );
@@ -140,7 +152,7 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         },
     ];
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
         Some(
             "enhancer:uncensored+keyframe:first:image:768x512:frame:0:strength:3f800000+keyframe:last:image:768x512:frame:-1:strength:3f800000"
         ),
@@ -149,7 +161,9 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
 
     input.conditioning.swap(0, 1);
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("enhancer:uncensored"),
         "reordered keyframes must not mint the ordered first/last receipt"
     );
@@ -167,7 +181,7 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         strength: 1.0,
     }];
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
         Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000"),
         "the one IC-LoRA clip's source-frame count, image shape, appended-token anchor, and strength must be sealed"
     );
@@ -199,14 +213,16 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
         },
     ];
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
         Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000+clip:append:frames:153:image:768x512:frame:-1:strength:3f800000"),
         "the bridge must preserve both ordered endpoint clips, source-frame domains, latent anchors, and strengths"
     );
 
     input.conditioning.swap(0, 1);
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
         Some("enhancer:uncensored"),
         "reordered bridge clips must not mint the ordered endpoint receipt"
     );
@@ -255,9 +271,276 @@ fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
     input.width = 704;
     input.height = 512;
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
         Some("enhancer:uncensored+replace_person:control:frames:1:shapes:0:768x512@768x512:frame:0:mode:FaceOnly:strength:3f400000:references:ordered_grid:2x1:count:2:shapes:0:256x512,1:512x256:composite:704x512"),
         "LTX replacement must seal the ordered control/reference carrier rather than borrowing I2V evidence"
+    );
+}
+
+/// sc-20799. Outside Bernini and LTX every video carrier was keyed shape-`"other"` plus
+/// `conditioning.len()`, and adapters were keyed `adapters:{N}`. Two physically different payloads
+/// therefore shared one admission identity and could borrow each other's admitted peak. These are
+/// the sealed replacements, asserted as SHAPE — distinct payloads differ, equal payloads are
+/// stable, unpriceable shapes refuse — never as digest literals.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
+    let image = |width: u32, height: u32, fill: u8| gen_core::Image {
+        width,
+        height,
+        pixels: vec![fill; (width as usize) * (height as usize) * 3],
+    };
+    let control = |frames: usize, fill: u8, strength: f32| Conditioning::ControlClip {
+        frames: vec![image(64, 64, fill); frames],
+        mask: vec![image(64, 64, 0); frames],
+        masking_strength: strength,
+        start_frame: 0,
+        mode: Default::default(),
+    };
+    let overlay_for = |engine: &'static str, mode: &str, conditioning: Vec<Conditioning>| {
+        let input = VideoGenInput {
+            engine_id: engine,
+            width: 512,
+            height: 512,
+            conditioning,
+            ..Default::default()
+        };
+        video_admission_overlay(&input, mode, None)
+    };
+
+    // --- Wan-VACE replace_person: reference CARDINALITY was erased by `"other"`. ---
+    let one_reference = vec![
+        control(4, 1, 1.0),
+        Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        },
+    ];
+    let eight_references = {
+        let mut entries = vec![control(4, 1, 1.0)];
+        for index in 0..8 {
+            entries.push(Conditioning::Reference {
+                image: image(32, 32, 9 + index),
+                strength: None,
+            });
+        }
+        entries
+    };
+    let single = overlay_for(
+        "wan_2_2_vace_fun_14b",
+        "replace_person",
+        one_reference.clone(),
+    )
+    .unwrap()
+    .expect("sealed Wan-VACE carrier");
+    let many = overlay_for(
+        "wan_2_2_vace_fun_14b",
+        "replace_person",
+        eight_references.clone(),
+    )
+    .unwrap()
+    .expect("sealed Wan-VACE carrier");
+    assert!(single.starts_with(crate::video_admission::WAN_VACE_REPLACE_RECEIPT_DOMAIN));
+    assert_ne!(single, many, "one reference is not eight references");
+    // The load-bearing half: curve lookup STRIPS the request seal, so the cardinality has to live
+    // in the evidence axis. If it only reached the seal, one reference and eight would resolve to
+    // the same curve key — exactly the borrow this seals shut.
+    let strip = |overlay: &str| {
+        crate::video_admission::video_curve_overlay_for_test(Some(overlay)).expect("curve overlay")
+    };
+    assert_ne!(
+        strip(&single),
+        strip(&many),
+        "reference cardinality must survive seal-stripping, or the curve key is borrowable"
+    );
+    assert_eq!(
+        single,
+        overlay_for("wan_2_2_vace_fun_14b", "replace_person", one_reference)
+            .unwrap()
+            .unwrap(),
+        "the same assembly must seal to the same identity"
+    );
+    // The masking strength changes the working set and is an evidence axis, not just a seal input.
+    let looser = vec![
+        control(4, 1, 0.5),
+        Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        },
+    ];
+    assert_ne!(
+        single,
+        overlay_for("wan_2_2_vace_fun_14b", "replace_person", looser)
+            .unwrap()
+            .unwrap()
+    );
+    // Different driving BYTES at the same shapes change only the seal, not the evidence axis.
+    let other_bytes = vec![
+        control(4, 2, 1.0),
+        Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        },
+    ];
+    let other_bytes = overlay_for("wan_2_2_vace_fun_14b", "replace_person", other_bytes)
+        .unwrap()
+        .unwrap();
+    assert_ne!(single, other_bytes, "content mutation must change the seal");
+    assert_eq!(
+        crate::video_admission::video_curve_overlay_for_test(Some(&single)),
+        crate::video_admission::video_curve_overlay_for_test(Some(&other_bytes)),
+        "curve lookup strips only the request seal, so same-shape carriers share memory evidence"
+    );
+    // Fails CLOSED on a shape it cannot price, rather than minting a borrowable token.
+    assert!(overlay_for(
+        "wan_2_2_vace_fun_14b",
+        "replace_person",
+        vec![Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        }],
+    )
+    .is_err());
+
+    // --- SCAIL-2: animation and replacement share one physical assembly, two working sets. ---
+    let scail2 = |fill: u8| {
+        vec![
+            Conditioning::Reference {
+                image: image(48, 48, fill),
+                strength: None,
+            },
+            Conditioning::Mask {
+                image: image(48, 48, 0),
+            },
+            control(6, 3, 1.0),
+        ]
+    };
+    let animation = overlay_for("scail2_14b", "animate_character", scail2(1))
+        .unwrap()
+        .expect("sealed SCAIL-2 carrier");
+    let replacement = overlay_for("scail2_14b", "replace_person", scail2(1))
+        .unwrap()
+        .expect("sealed SCAIL-2 carrier");
+    assert!(animation.contains(crate::video_admission::SCAIL2_CARRIER_RECEIPT_DOMAIN));
+    assert_ne!(
+        animation, replacement,
+        "the two SCAIL-2 tasks must not share one admission identity"
+    );
+    assert_ne!(
+        animation,
+        overlay_for("scail2_14b", "animate_character", scail2(2))
+            .unwrap()
+            .unwrap(),
+        "a different identity still must change the receipt"
+    );
+    // SCAIL-2's advertised overlay spelling at the seam is the literal `adapter`.
+    let with_adapter = VideoGenInput {
+        engine_id: "scail2_14b",
+        width: 512,
+        height: 512,
+        adapters: vec![AdapterSpec::new(
+            std::path::PathBuf::from("lightning.safetensors"),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )],
+        conditioning: scail2(1),
+        ..Default::default()
+    };
+    assert!(
+        video_admission_overlay(&with_adapter, "animate_character", None)
+            .unwrap()
+            .unwrap()
+            .starts_with("adapter+")
+    );
+
+    // --- Krea Realtime v2v: the clip length and strength are the working set. ---
+    let clip = |frames: usize, strength: f32| {
+        vec![Conditioning::VideoClip {
+            frames: vec![image(64, 64, 5); frames],
+            frame_idx: 0,
+            strength,
+        }]
+    };
+    let short = overlay_for("krea_realtime_14b", "video_to_video", clip(8, 1.0))
+        .unwrap()
+        .expect("sealed Krea v2v carrier");
+    assert!(short.starts_with(crate::video_admission::KREA_V2V_RECEIPT_DOMAIN));
+    assert_ne!(
+        short,
+        overlay_for("krea_realtime_14b", "video_to_video", clip(64, 1.0))
+            .unwrap()
+            .unwrap(),
+        "an 8-frame init is not a 64-frame init"
+    );
+    assert_ne!(
+        short,
+        overlay_for("krea_realtime_14b", "video_to_video", clip(8, 0.4))
+            .unwrap()
+            .unwrap(),
+        "the v2v strength is its own axis"
+    );
+    assert!(overlay_for("krea_realtime_14b", "video_to_video", vec![])
+        .unwrap_err()
+        .to_string()
+        .contains("exactly one VideoClip"));
+
+    // --- Adapters: cardinality -> exact ordered content receipt. ---
+    let with_adapters = |paths: &[&str]| VideoGenInput {
+        engine_id: "wan_2_2",
+        adapters: paths
+            .iter()
+            .map(|path| {
+                AdapterSpec::new(
+                    std::path::PathBuf::from(path),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let a = video_admission_overlay(&with_adapters(&["a.safetensors"]), "text_to_video", None)
+        .unwrap()
+        .expect("adapter overlay");
+    let b = video_admission_overlay(&with_adapters(&["b.safetensors"]), "text_to_video", None)
+        .unwrap()
+        .expect("adapter overlay");
+    assert!(
+        a.starts_with("adapters:"),
+        "the seam spells it `adapters:<sha256>`"
+    );
+    assert_ne!(
+        a, b,
+        "two different single-adapter stacks are two identities"
+    );
+    assert_ne!(
+        a,
+        video_admission_overlay(
+            &with_adapters(&["a.safetensors", "b.safetensors"]),
+            "text_to_video",
+            None
+        )
+        .unwrap()
+        .unwrap()
+    );
+
+    // --- MultiReference count: 1 image and 8 images were both `conditioning.len() == 1`. ---
+    let multi = |count: usize| {
+        vec![Conditioning::MultiReference {
+            images: vec![image(32, 32, 4); count],
+        }]
+    };
+    assert_eq!(
+        video_admission_reference_count("wan_2_2", "reference_to_video", &multi(1)),
+        1
+    );
+    assert_eq!(
+        video_admission_reference_count("wan_2_2", "reference_to_video", &multi(8)),
+        8,
+        "a MultiReference of eight is eight reference images, not one entry"
     );
 }
 
@@ -303,14 +586,14 @@ fn bernini_adapter_overlay_records_exact_artifact_identity() {
     };
 
     assert_eq!(
-        video_admission_overlay(&input, Some(&contract))
+        video_admission_overlay(&input, "", Some(&contract))
             .unwrap()
             .as_deref(),
         Some(crate::video_admission::bernini_adapter_receipt_axis(RECEIPT).as_str()),
         "the worker must bind the opaque request axis to the provider's load-exact receipt"
     );
     assert_eq!(
-        video_admission_overlay(&input, None).unwrap().as_deref(),
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
         Some("bernini-adapter-unverified"),
         "missing provider receipt must fail closed, never trigger a second filesystem reconstruction"
     );
@@ -339,6 +622,9 @@ fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
         video_admission_reference_shape("bernini", "video_to_video", &[]),
         "none"
     );
+    // sc-20799: a carrier admission cannot name exactly resolves to "none", the emitters' own
+    // spelling for an absent reference surface. The old literal "other" was never produced by any
+    // evidence record, so it matched nothing while still pooling every unnamed carrier into one key.
     assert_eq!(
         video_admission_reference_shape(
             "bernini",
@@ -352,7 +638,7 @@ fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
                 strength: Some(1.0),
             }],
         ),
-        "other"
+        "none"
     );
 }
 
@@ -433,7 +719,7 @@ fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
     );
     assert_eq!(
         video_admission_reference_shape("bernini", "reference_video_to_video", &two_images),
-        "other",
+        "none",
         "zero clips plus two images must not borrow the clip-plus-image surface"
     );
 }
@@ -464,7 +750,7 @@ fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
     );
     assert_eq!(
         video_admission_reference_shape("bernini", "multi_video_to_video", &[clip(1)]),
-        "other"
+        "none"
     );
 }
 
@@ -513,7 +799,7 @@ fn bernini_ads2v_admission_keeps_two_clip_roles_and_flattened_images() {
     crossed.swap(1, 2);
     assert_eq!(
         video_admission_reference_shape("bernini", "ads2v", &crossed),
-        "other"
+        "none"
     );
 }
 
@@ -12198,7 +12484,7 @@ fn advanced_numeric_helpers_parse_flf_keyframe_knobs() {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
-fn ltx_i2v_strength_is_fixed_to_the_calibrated_identity() {
+fn ltx_i2v_strength_is_accepted_and_keyed_as_its_own_admission_axis() {
     let defaulted = request(json!({
         "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
         "mode": "image_to_video"
@@ -12211,16 +12497,47 @@ fn ltx_i2v_strength_is_fixed_to_the_calibrated_identity() {
     }));
     assert_eq!(ltx_i2v_conditioning_strength(&explicit).unwrap(), 1.0);
 
-    for value in [json!(0.8), json!("0.8"), json!(0.0)] {
-        let crossed = request(json!({
+    // sc-20799: a previously-valid non-1.0 strength must still RUN. It is resolved, not refused.
+    for (value, expected) in [
+        (json!(0.8), 0.8_f32),
+        (json!("0.8"), 0.8_f32),
+        (json!(0.0), 0.0_f32),
+    ] {
+        let permissive = request(json!({
             "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
             "mode": "image_to_video", "advanced": { "imageConditioningStrength": value }
         }));
-        let error = ltx_i2v_conditioning_strength(&crossed)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("requires imageConditioningStrength 1.0"));
+        assert_eq!(
+            ltx_i2v_conditioning_strength(&permissive).unwrap(),
+            expected
+        );
     }
+
+    // What actually keeps the 1.0 receipt un-borrowable is the admission overlay, not a refusal:
+    // every distinct strength is a distinct key, so no two strengths share an evidence identity.
+    let overlay_for = |strength: f32| {
+        let mut input = VideoGenInput {
+            engine_id: "ltx_2_3",
+            ..VideoGenInput::default()
+        };
+        input.conditioning = vec![Conditioning::Reference {
+            image: gen_core::Image {
+                width: 512,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            strength: Some(strength),
+        }];
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .expect("LTX reference overlay")
+    };
+    let pinned = overlay_for(1.0);
+    let loosened = overlay_for(0.8);
+    let other = overlay_for(0.5);
+    assert_ne!(pinned, loosened);
+    assert_ne!(loosened, other);
+    assert_eq!(pinned, overlay_for(1.0));
 }
 
 /// `resolve_keyframe_conditioning` fails clearly when an FLF source/last-frame asset id is

@@ -52,6 +52,225 @@ pub(crate) const BERNINI_MV2V_SEAL_DOMAIN: &str = "bernini-mv2v-request-seal-v1"
 pub(crate) const BERNINI_ADS2V_RECEIPT_DOMAIN: &str = "bernini-ads2v-sources-v1";
 pub(crate) const BERNINI_ADS2V_SEAL_DOMAIN: &str = "bernini-ads2v-request-seal-v1";
 pub(crate) const BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN: &str = "bernini-adapter-receipt-v1";
+// sc-20799. Outside Bernini and LTX the video carriers were keyed by SHAPE ALONE — a bare `"other"`
+// plus `conditioning.len()` — so a one-image `MultiReference` and an eight-image one, or two
+// different driving clips and masks, shared a single admission identity and could borrow each
+// other's admitted peak. These seal the carriers the way Bernini's do: a content-INDEPENDENT
+// evidence axis (order, counts, native shapes, and the exact knobs that change the working set)
+// plus a request-only byte seal appended after `+`, which `video_curve_overlay` strips before curve
+// lookup. Sealed BEFORE any fitted curve exists for these cells, so no curve can be fitted against
+// a borrowable identity.
+pub(crate) const WAN_VACE_REPLACE_RECEIPT_DOMAIN: &str = "wan-vace-replace-person-carrier-v1";
+pub(crate) const WAN_VACE_REPLACE_SEAL_DOMAIN: &str = "wan-vace-replace-person-request-seal-v1";
+pub(crate) const SCAIL2_CARRIER_RECEIPT_DOMAIN: &str = "scail2-carrier-v1";
+pub(crate) const SCAIL2_CARRIER_SEAL_DOMAIN: &str = "scail2-carrier-request-seal-v1";
+pub(crate) const KREA_V2V_RECEIPT_DOMAIN: &str = "krea-realtime-v2v-clip-v1";
+pub(crate) const KREA_V2V_SEAL_DOMAIN: &str = "krea-realtime-v2v-request-seal-v1";
+
+fn backend_axis(lane: VideoLane) -> &'static str {
+    match lane {
+        VideoLane::Mlx => "mlx",
+        VideoLane::Candle => "candle",
+    }
+}
+
+/// Seal one ordered image list into the evidence axis (native shapes) and the byte seal.
+fn seal_images(role: &str, images: &[gen_core::Image], seal: &mut sha2::Sha256) -> String {
+    seal.update((role.len() as u64).to_le_bytes());
+    seal.update(role.as_bytes());
+    let shapes = images
+        .iter()
+        .enumerate()
+        .map(|(ordinal, image)| {
+            seal.update((ordinal as u32).to_le_bytes());
+            seal.update(image.width.to_le_bytes());
+            seal.update(image.height.to_le_bytes());
+            seal.update(&image.pixels);
+            format!("{ordinal}:{}x{}", image.width, image.height)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{role}-{}:{shapes}", images.len())
+}
+
+/// Worker seal for the single-expert Wan-VACE `replace_person` carrier
+/// (`video_jobs::vace::build_vace_conditioning`): one `ControlClip` of driving frames plus its
+/// per-frame mask, then one `Reference` per character image. The frame/mask cardinality, the
+/// per-frame geometry, the masking strength and the replacement mode all move the working set, and
+/// the reference ORDER is load order, so all of them are evidence axes.
+pub(crate) fn wan_vace_replace_person_receipt(
+    lane: VideoLane,
+    width: u32,
+    height: u32,
+    conditioning: &[Conditioning],
+) -> Result<String, String> {
+    let [Conditioning::ControlClip {
+        frames,
+        mask,
+        masking_strength,
+        start_frame,
+        mode,
+    }, references @ ..] = conditioning
+    else {
+        return Err(
+            "Wan-VACE replace_person admission requires a leading ControlClip carrier".to_owned(),
+        );
+    };
+    if frames.len() != mask.len() || frames.is_empty() {
+        return Err(format!(
+            "Wan-VACE replace_person admission requires equal non-empty frame/mask counts, got {} and {}",
+            frames.len(),
+            mask.len()
+        ));
+    }
+    if *start_frame != 0 {
+        return Err(format!(
+            "Wan-VACE replace_person admission requires a frame-0 control clip, got {start_frame}"
+        ));
+    }
+    let mut reference_images: Vec<gen_core::Image> = Vec::with_capacity(references.len());
+    for entry in references {
+        let Conditioning::Reference { image, strength } = entry else {
+            return Err(
+                "Wan-VACE replace_person admission accepts only Reference entries after its \
+                 ControlClip"
+                    .to_owned(),
+            );
+        };
+        if strength.is_some() {
+            return Err(
+                "Wan-VACE replace_person references carry no strength; a populated one is a \
+                 different workload"
+                    .to_owned(),
+            );
+        }
+        reference_images.push(image.clone());
+    }
+    let mut seal = sha2::Sha256::new();
+    seal.update(WAN_VACE_REPLACE_SEAL_DOMAIN.as_bytes());
+    seal.update(masking_strength.to_bits().to_le_bytes());
+    let frames_axis = seal_images("control-frames", frames, &mut seal);
+    let mask_axis = seal_images("control-mask", mask, &mut seal);
+    let reference_axis = seal_images("references", &reference_images, &mut seal);
+    Ok(format!(
+        "{WAN_VACE_REPLACE_RECEIPT_DOMAIN}:backend-{}:composite-{width}x{height}:{frames_axis}:{mask_axis}:strength-{:08x}:mode-{mode:?}:frame-0:{reference_axis}+{WAN_VACE_REPLACE_SEAL_DOMAIN}-{:x}",
+        backend_axis(lane),
+        masking_strength.to_bits(),
+        seal.finalize()
+    ))
+}
+
+/// Worker seal for both SCAIL-2 carriers (`animate_character` and `replace_person`), which share
+/// one physical assembly built by `video_jobs::scail2`: a `Reference` identity still, its painted
+/// `Mask`, and a `ControlClip` of driving frames plus per-frame color masks. The engine TASK is a
+/// separate axis because animation and replacement are different working sets over the same shapes.
+pub(crate) fn scail2_carrier_receipt(
+    lane: VideoLane,
+    mode: &str,
+    width: u32,
+    height: u32,
+    conditioning: &[Conditioning],
+) -> Result<String, String> {
+    let task = match mode {
+        "animate_character" => "animation",
+        "replace_person" => "replacement",
+        other => return Err(format!("SCAIL-2 admission has no carrier for mode {other}")),
+    };
+    let [Conditioning::Reference {
+        image: reference,
+        strength: reference_strength,
+    }, Conditioning::Mask {
+        image: reference_mask,
+    }, Conditioning::ControlClip {
+        frames,
+        mask,
+        masking_strength,
+        start_frame,
+        mode: replacement_mode,
+    }] = conditioning
+    else {
+        return Err(
+            "SCAIL-2 admission requires exactly one Reference, one Mask, and one ControlClip, in \
+             that order"
+                .to_owned(),
+        );
+    };
+    if reference_strength.is_some() {
+        return Err(
+            "the SCAIL-2 identity reference carries no strength; a populated one is a different \
+             workload"
+                .to_owned(),
+        );
+    }
+    if frames.len() != mask.len() || frames.is_empty() {
+        return Err(format!(
+            "SCAIL-2 admission requires equal non-empty driving frame/mask counts, got {} and {}",
+            frames.len(),
+            mask.len()
+        ));
+    }
+    if *start_frame != 0 {
+        return Err(format!(
+            "SCAIL-2 admission requires a frame-0 driving clip, got {start_frame}"
+        ));
+    }
+    let mut seal = sha2::Sha256::new();
+    seal.update(SCAIL2_CARRIER_SEAL_DOMAIN.as_bytes());
+    seal.update(task.as_bytes());
+    seal.update(masking_strength.to_bits().to_le_bytes());
+    let reference_axis = seal_images("reference", std::slice::from_ref(reference), &mut seal);
+    let reference_mask_axis = seal_images(
+        "reference-mask",
+        std::slice::from_ref(reference_mask),
+        &mut seal,
+    );
+    let frames_axis = seal_images("driving-frames", frames, &mut seal);
+    let mask_axis = seal_images("driving-mask", mask, &mut seal);
+    Ok(format!(
+        "{SCAIL2_CARRIER_RECEIPT_DOMAIN}:backend-{}:task-{task}:composite-{width}x{height}:{reference_axis}:{reference_mask_axis}:{frames_axis}:{mask_axis}:strength-{:08x}:mode-{replacement_mode:?}:frame-0+{SCAIL2_CARRIER_SEAL_DOMAIN}-{:x}",
+        backend_axis(lane),
+        masking_strength.to_bits(),
+        seal.finalize()
+    ))
+}
+
+/// Worker seal for the Krea Realtime video-to-video carrier
+/// (`video_jobs::krea_realtime::krea_realtime_conditioning`): one `VideoClip` whose frame count and
+/// per-frame geometry set the autoregressive init working set, plus the v2v strength — the one knob
+/// that distinguishes v2v from the i2v cache warm, which drops strength entirely.
+pub(crate) fn krea_v2v_clip_receipt(
+    lane: VideoLane,
+    width: u32,
+    height: u32,
+    conditioning: &[Conditioning],
+) -> Result<String, String> {
+    let [Conditioning::VideoClip {
+        frames,
+        frame_idx,
+        strength,
+    }] = conditioning
+    else {
+        return Err(
+            "Krea Realtime video_to_video admission requires exactly one VideoClip".to_owned(),
+        );
+    };
+    if *frame_idx != 0 || frames.is_empty() {
+        return Err(format!(
+            "Krea Realtime v2v admission requires a non-empty frame-0 clip, got {} frames at {frame_idx}",
+            frames.len()
+        ));
+    }
+    let mut seal = sha2::Sha256::new();
+    seal.update(KREA_V2V_SEAL_DOMAIN.as_bytes());
+    seal.update(strength.to_bits().to_le_bytes());
+    let frames_axis = seal_images("clip", frames, &mut seal);
+    Ok(format!(
+        "{KREA_V2V_RECEIPT_DOMAIN}:backend-{}:composite-{width}x{height}:{frames_axis}:frame-0:strength-{:08x}+{KREA_V2V_SEAL_DOMAIN}-{:x}",
+        backend_axis(lane),
+        strength.to_bits(),
+        seal.finalize()
+    ))
+}
 
 pub(crate) fn bernini_adapter_receipt_axis(component_id: &str) -> String {
     let mut digest = sha2::Sha256::new();
@@ -503,9 +722,19 @@ fn video_curve_overlay(overlay: Option<&str>) -> Option<String> {
             !axis.starts_with(BERNINI_R2V_SEAL_DOMAIN)
                 && !axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN)
                 && !axis.starts_with(BERNINI_ADS2V_SEAL_DOMAIN)
+                && !axis.starts_with(WAN_VACE_REPLACE_SEAL_DOMAIN)
+                && !axis.starts_with(SCAIL2_CARRIER_SEAL_DOMAIN)
+                && !axis.starts_with(KREA_V2V_SEAL_DOMAIN)
         })
         .collect::<Vec<_>>();
     (!axes.is_empty()).then(|| axes.join("+"))
+}
+
+/// Test-only view of [`video_curve_overlay`], so the sealed-carrier tests can assert that curve
+/// lookup strips exactly the request seal and keeps every evidence axis.
+#[cfg(test)]
+pub(crate) fn video_curve_overlay_for_test(overlay: Option<&str>) -> Option<String> {
+    video_curve_overlay(overlay)
 }
 
 type VideoDecodeProfileResolver = fn(

@@ -1403,6 +1403,9 @@ export function buildVideoMemoryCurveBundle(
     reportedFits.set(key, entry);
   }
 
+  // Every source record the fit does not model, and WHY. A dropped group used to vanish with no
+  // trace, so a regeneration that quietly stopped modeling a cell still validated (sc-20799).
+  const unmodeled = [];
   const curves = [...groups.entries()].flatMap(([selectorKey, { selector, records: scopedRecords }]) => {
     scopedRecords.sort((left, right) => compareText(left.id, right.id));
     const {
@@ -1433,8 +1436,29 @@ export function buildVideoMemoryCurveBundle(
       observations.map(({ geometry }) => `${geometry.width}x${geometry.height}:f${geometry.frames}`),
     );
     // A distinct output FPS is a distinct measured surface. Keep an under-measured rate out of
-    // the runtime bundle rather than borrowing the other rate's fit or hull.
-    if (distinctGeometries.size < 3) return [];
+    // the runtime bundle rather than borrowing the other rate's fit or hull. The drop is DECLARED
+    // (sc-20799): the runtime partition check requires every source record to be either modeled by
+    // a curve or named here, so shedding evidence can no longer validate silently.
+    if (distinctGeometries.size < 3) {
+      const droppedGroups = new Map();
+      for (const record of scopedRecords) {
+        const source = sourceByRecord.get(record.id);
+        const key = `${source.path}\0${source.sha256}`;
+        if (!droppedGroups.has(key)) {
+          droppedGroups.set(key, { path: source.path, sha256: source.sha256, recordIds: [] });
+        }
+        droppedGroups.get(key).recordIds.push(record.id);
+      }
+      unmodeled.push({
+        reason: "insufficient_geometries",
+        selectorKey,
+        distinctGeometries: distinctGeometries.size,
+        sources: [...droppedGroups.values()]
+          .map((source) => ({ ...source, recordIds: source.recordIds.sort() }))
+          .sort((left, right) => compareText(left.path, right.path)),
+      });
+      return [];
+    }
     const reported = reportedFits.get(selectorKey);
     if (
       !reported ||
@@ -1545,12 +1569,14 @@ export function buildVideoMemoryCurveBundle(
     }];
   });
   curves.sort((left, right) => compareText(left.id, right.id));
+  unmodeled.sort((left, right) => compareText(left.selectorKey, right.selectorKey));
 
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
     sourceFit,
     sourceCatalog,
+    unmodeledRecords: unmodeled,
     curves,
   };
 }
