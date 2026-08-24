@@ -3895,6 +3895,147 @@ export function assertCalibrationPlanTargetsResolvedCoordinates(
   );
 }
 
+// MiniMax-H3 is deliberately outside the published matrix while its video route is promoted, but
+// its terminal receipts still need a closed, executable plan.  The provider contract at this pin
+// makes rung support a load-shape property (not a tier property): resident, staged residency and
+// bounded decode are implemented eagerly; transformer residency is implemented only deferred;
+// bounded attention is structurally unavailable.  Keep that declaration beside the plan so a row
+// cannot silently schedule an impossible engaged composition before it reaches the real-weight host.
+const MINIMAX_H3_PLAN = Object.freeze({
+  tiers: ["q4", "q8", "bf16"],
+  frames: [124, 209, 294],
+  areas: ["576x320", "1344x768"],
+  rungs: {
+    resident: {
+      loadShape: "eager_materialization",
+      engagedRungs: ["resident"],
+      parameters: {},
+    },
+    staged_residency: {
+      loadShape: "eager_materialization",
+      engagedRungs: ["resident", "staged_residency"],
+      parameters: {},
+    },
+    bounded_decode: {
+      loadShape: "eager_materialization",
+      engagedRungs: ["resident", "bounded_decode"],
+      parameters: { decodeTileEdge: 256, decodeOverlap: 64 },
+    },
+    bounded_transformer_residency: {
+      loadShape: "deferred_materialization",
+      engagedRungs: ["resident", "bounded_decode", "bounded_transformer_residency"],
+      parameters: {
+        decodeTileEdge: 256,
+        decodeOverlap: 64,
+        transformerWindowSize: 1,
+        transformerWindowComponent: "both",
+      },
+    },
+  },
+});
+
+function minimaxPlanError(detail) {
+  throw new Error(`MiniMax-H3 calibration plan: ${detail}`);
+}
+
+function minimaxPlanRank(entries) {
+  // Columns are [1, pixels, pixels*frames].  Search exact integer determinants so a near-singular
+  // temporal design cannot become a fit merely because a floating-point elimination rounded it.
+  const points = entries.map((entry) => {
+    const { width, height, frames } = entry.target.geometry;
+    return [1n, BigInt(width * height), BigInt(width * height * frames)];
+  });
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      for (let k = j + 1; k < points.length; k += 1) {
+        const [a, b, c] = [points[i], points[j], points[k]];
+        const determinant =
+          a[0] * (b[1] * c[2] - b[2] * c[1]) -
+          a[1] * (b[0] * c[2] - b[2] * c[0]) +
+          a[2] * (b[0] * c[1] - b[1] * c[0]);
+        if (determinant !== 0n) return 3;
+      }
+    }
+  }
+  return 0;
+}
+
+/**
+ * Validate the terminal MiniMax-H3 video grid while that family remains out of matrix.
+ *
+ * One exact 2-area x 3-frame grid per implemented (tier, rung) family is the smallest surface
+ * that can identify the video affine form.  It deliberately replaces the superseded 14-duration
+ * cross-product: frames are regressors (`pixels * frames`), not a per-duration matrix identity.
+ */
+export function assertMinimaxH3CalibrationPlan(calibrationPlan) {
+  const rows = calibrationPlan.providers.filter((entry) => entry.target?.modelId === "minimax_h3");
+  const expectedRungs = Object.keys(MINIMAX_H3_PLAN.rungs);
+  const expectedCount = MINIMAX_H3_PLAN.tiers.length * expectedRungs.length *
+    MINIMAX_H3_PLAN.areas.length * MINIMAX_H3_PLAN.frames.length;
+  if (rows.length !== expectedCount) {
+    minimaxPlanError(`requires exactly ${expectedCount} spanning-grid rows, found ${rows.length}`);
+  }
+  const byFamily = new Map();
+  for (const row of rows) {
+    const { target = {} } = row;
+    const expected = MINIMAX_H3_PLAN.rungs[row.rung];
+    const family = `${target.tier}:${row.rung}`;
+    if (!expected || !MINIMAX_H3_PLAN.tiers.includes(target.tier)) {
+      minimaxPlanError(`${row.name}: ${family} is not an implemented MiniMax-H3 tier/rung family`);
+    }
+    if (
+      row.evidenceScope !== "authoritative" ||
+      row.backend !== "mlx" ||
+      target.provider !== "minimax_h3" ||
+      target.mode !== "text_to_video" ||
+      target.overlay !== "none" ||
+      target.geometry?.batch !== 1 ||
+      row.calibrationFingerprint !== "minimax-h3-mlx-staged-joint-av-eager-abi3-v1"
+    ) minimaxPlanError(`${row.name}: does not name the capturable MLX MiniMax-H3 t2va lane`);
+    if (row.loadShape !== expected.loadShape) {
+      minimaxPlanError(`${row.name}: ${row.rung} requires ${expected.loadShape}`);
+    }
+    if (JSON.stringify(row.engagedRungs) !== JSON.stringify(expected.engagedRungs)) {
+      minimaxPlanError(`${row.name}: declares engaged rungs ${JSON.stringify(row.engagedRungs)} but ${row.rung} implements ${JSON.stringify(expected.engagedRungs)}`);
+    }
+    const cases = row.cases;
+    if (
+      !Array.isArray(cases) || cases.length !== 1 || cases[0].expectedResult !== "passed" ||
+      JSON.stringify(cases[0].parameters) !== JSON.stringify(expected.parameters)
+    ) minimaxPlanError(`${row.name}: must carry the exact implemented ${row.rung} parameters`);
+    const resolution = `${target.geometry?.width}x${target.geometry?.height}`;
+    if (!MINIMAX_H3_PLAN.areas.includes(resolution) || !MINIMAX_H3_PLAN.frames.includes(target.geometry?.frames)) {
+      minimaxPlanError(`${row.name}: is outside the corrected two-area, three-frame grid`);
+    }
+    const expectedFixture = `minimax-h3-mlx-${target.tier}-${resolution}-f${target.geometry.frames}-fps24-seed17137`;
+    if (row.fixture !== expectedFixture) minimaxPlanError(`${row.name}: fixture must bind its exact tier, geometry, cadence, and seed`);
+    if (!byFamily.has(family)) byFamily.set(family, []);
+    byFamily.get(family).push(row);
+  }
+  for (const tier of MINIMAX_H3_PLAN.tiers) {
+    for (const rung of expectedRungs) {
+      const family = `${tier}:${rung}`;
+      const entries = byFamily.get(family) ?? [];
+      if (entries.length !== MINIMAX_H3_PLAN.areas.length * MINIMAX_H3_PLAN.frames.length) {
+        minimaxPlanError(`${family} requires one row for every area/frame grid point`);
+      }
+      const coordinates = new Set(entries.map((entry) => {
+        const { width, height, frames } = entry.target.geometry;
+        return `${width}x${height}xf${frames}`;
+      }));
+      const expectedCoordinates = new Set(
+        MINIMAX_H3_PLAN.areas.flatMap((resolution) =>
+          MINIMAX_H3_PLAN.frames.map((frames) => `${resolution}xf${frames}`),
+        ),
+      );
+      if (coordinates.size !== expectedCoordinates.size || [...coordinates].some((point) => !expectedCoordinates.has(point))) {
+        minimaxPlanError(`${family} does not carry the complete measured-spanning grid`);
+      }
+      if (minimaxPlanRank(entries) !== 3) minimaxPlanError(`${family} is collinear in (pixels, pixels*frames)`);
+    }
+  }
+}
+
 /**
  * The per-(entry, backend, rung) census over the FULL resolved cross-product.
  *
@@ -4236,6 +4377,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const calibrationPlan = activeCalibrationPlan(JSON.parse(bodies.calibrationPlan));
+  assertMinimaxH3CalibrationPlan(calibrationPlan);
   // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
   // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
   const inferenceClosureDigests = validatedInferenceClosures(
