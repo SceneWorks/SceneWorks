@@ -131,10 +131,9 @@ const IDLE = Object.freeze({
   relocated: null,
 });
 
-/// A blocked-action gate: at most one pending action, resumed at most once.
+// Adopt a different model library root — the ONE relocation sequence, shared by the blocked-action
+// prompt below and the Settings "Model library" control (which has no blocked action to resume).
 //
-// Injected so the state machine is testable without a transport:
-//   `probe`    — the seam's library status; a retry gates on its `available`.
 //   `validate` — check a candidate root, writing nothing anywhere.
 //   `adopt`    — re-bind the server's durable identity to that root.
 //   `persist`  — store the client's own copy of the location. It must either return an undo that
@@ -144,7 +143,61 @@ const IDLE = Object.freeze({
 // Relocation has TWO durable writes in different places (the shell's `HF_HOME` and the server's
 // binding ledger) and they must not be allowed to disagree: `validate` first so every ordinary
 // refusal happens before either, then `persist`, then `adopt`, and if `adopt` fails the persist is
-// undone. What the user is told always matches what actually happened.
+// undone. Resolves to the adopted target; rejects with an Error whose message says what actually
+// happened (and nothing else — a raw transport/filesystem message never reaches the user alone).
+export async function adoptModelLibrary({ validate, adopt, persist } = {}, path) {
+  // 1. Validate. Nothing is written, so a refusal here leaves everything as it was and the user
+  //    simply picks again.
+  let target = null;
+  try {
+    target = (await validate?.(path)) ?? { hfHome: path, libraryRoot: path };
+  } catch (error) {
+    throw new Error(error?.message || "That library could not be used.");
+  }
+
+  // 2. Persist the client's copy, then 3. re-bind the server's. If the re-bind fails, undo the
+  //    persist so the two cannot disagree — and say what actually happened either way.
+  let undoPersist = null;
+  // Whether `persist` got far enough to have written anything. A `persist` that THREW wrote
+  // nothing (it is required to fail before its own durable write), so the previous location
+  // really is still in use; one that returned is the only case where restoring is in question.
+  let persisted = false;
+  try {
+    if (persist) {
+      undoPersist = (await persist(target)) ?? null;
+      persisted = true;
+    }
+    await adopt?.(path);
+  } catch (error) {
+    let restored = true;
+    if (persisted) {
+      if (typeof undoPersist === "function") {
+        try {
+          await undoPersist();
+        } catch {
+          restored = false;
+        }
+      } else {
+        // Persisted, but handed back no undo: the client's copy has changed and cannot be put
+        // back. Claiming "the previous location is still in use" here would be a lie, and the
+        // two copies would be left disagreeing with the user told otherwise.
+        restored = false;
+      }
+    }
+    throw new Error(
+      restored
+        ? `SceneWorks could not finish moving the model library, so the previous location is still in use. ${error?.message ?? ""}`.trim()
+        : "SceneWorks could not finish moving the model library, and could not restore the previous location. Set the model library folder in Settings.",
+    );
+  }
+  return target;
+}
+
+/// A blocked-action gate: at most one pending action, resumed at most once.
+//
+// Injected so the state machine is testable without a transport:
+//   `probe`    — the seam's library status; a retry gates on its `available`.
+//   `validate` / `adopt` / `persist` — the relocation sequence, see `adoptModelLibrary`.
 export function createModelLibraryGate({ probe, validate, adopt, persist } = {}) {
   let state = IDLE;
   // The single pending action. It is REMOVED from this slot before it runs, so no second caller —
@@ -229,61 +282,15 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
       const action = takePending();
       const attempt = ++epoch;
       emit({ status: "relocating", hint: "", error: "" });
-
-      // 1. Validate. Nothing is written, so a refusal here leaves the blocked action intact and
-      //    the user simply picks again.
       let target = null;
       try {
-        target = (await validate?.(path)) ?? { hfHome: path, libraryRoot: path };
+        target = await adoptModelLibrary({ validate, adopt, persist }, path);
       } catch (error) {
+        // A refusal (validate) or a failed write (persist/adopt, already undone where possible)
+        // leaves the blocked action intact and reports what happened; the user simply picks again.
         if (attempt !== epoch) return null;
         pending = action;
-        emit({
-          status: "blocked",
-          hint: "",
-          error: error?.message || "That library could not be used.",
-        });
-        return null;
-      }
-
-      // 2. Persist the client's copy, then 3. re-bind the server's. If the re-bind fails, undo the
-      //    persist so the two cannot disagree — and say what actually happened either way.
-      let undoPersist = null;
-      // Whether `persist` got far enough to have written anything. A `persist` that THREW wrote
-      // nothing (it is required to fail before its own durable write), so the previous location
-      // really is still in use; one that returned is the only case where restoring is in question.
-      let persisted = false;
-      try {
-        if (persist) {
-          undoPersist = (await persist(target)) ?? null;
-          persisted = true;
-        }
-        await adopt?.(path);
-      } catch (error) {
-        let restored = true;
-        if (persisted) {
-          if (typeof undoPersist === "function") {
-            try {
-              await undoPersist();
-            } catch {
-              restored = false;
-            }
-          } else {
-            // Persisted, but handed back no undo: the client's copy has changed and cannot be put
-            // back. Claiming "the previous location is still in use" here would be a lie, and the
-            // two copies would be left disagreeing with the user told otherwise.
-            restored = false;
-          }
-        }
-        if (attempt !== epoch) return null;
-        pending = action;
-        emit({
-          status: "blocked",
-          hint: "",
-          error: restored
-            ? `SceneWorks could not finish moving the model library, so the previous location is still in use. ${error?.message ?? ""}`.trim()
-            : "SceneWorks could not finish moving the model library, and could not restore the previous location. Set the model library folder in Settings.",
-        });
+        emit({ status: "blocked", hint: "", error: error.message });
         return null;
       }
       if (attempt !== epoch) return null;
