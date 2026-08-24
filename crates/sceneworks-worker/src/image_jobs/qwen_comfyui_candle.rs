@@ -108,20 +108,7 @@ pub(super) fn resolve_qwen_comfyui_paths(
     };
     // The dense TE/VAE/tokenizer come from a resident Qwen-Image snapshot tier; if none is installed
     // there is nothing to encode/decode with, so this is not (yet) runnable.
-    let Some(snapshot_root) =
-        huggingface_snapshot_dir(&settings.data_dir, QWEN_COMFYUI_SNAPSHOT_REPO)
-    else {
-        return Ok(None);
-    };
-    let Some(snapshot_dir) = QWEN_COMFYUI_SNAPSHOT_TIERS
-        .iter()
-        .map(|tier| snapshot_root.join(tier))
-        .find(|dir| {
-            dir.join("text_encoder").is_dir()
-                && dir.join("vae").is_dir()
-                && dir.join("tokenizer").join("tokenizer.json").is_file()
-        })
-    else {
+    let Some(snapshot_dir) = qwen_comfyui_snapshot_dir(settings) else {
         return Ok(None);
     };
     // sc-10830: the tree's VAE (native WAN-VAE keys), read in place when the API folded it into the
@@ -171,23 +158,98 @@ pub(super) fn prepare_qwen_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiQwenPaths>> {
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) whose REQUEST the plan-driven
+    // route claims belongs to that route; this lane never also claims it, so one request has exactly
+    // one owner. Explicit rather than left to the `external_base_` id prefix below: that prefix is
+    // an incidental property of how the catalog names a scanned row, and an incidental condition is
+    // not a claim (sc-20634 review; sc-20644 Qwen-Image row).
+    if super::request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
     let descriptor = super::imported_generate_request_supported(
         request,
         "qwen-image",
         gen_core::ImportedModelSource::ComfyUiTree,
     );
-    if !request.model.starts_with("external_base_")
-        || descriptor.as_ref().map_or(true, |descriptor| {
-            super::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image").is_err()
-        })
-    {
+    if descriptor.as_ref().map_or(true, |descriptor| {
+        super::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image").is_err()
+    }) {
         return Ok(None);
     }
-    let Some(mut paths) = resolve_qwen_comfyui_paths(request, settings)? else {
-        return Ok(None);
+    // A plan-backed entry whose request the plan route does NOT claim runs here on the plan's own
+    // verified layers rather than a live `external_base_*` catalog scan — the only source a LINKED
+    // ComfyUI tree has (sc-20644 Qwen-Image row).
+    let mut paths = match resolve_plan_backed_qwen_comfyui_paths(request, settings)? {
+        Some(paths) => paths,
+        None => {
+            if !request.model.starts_with("external_base_") {
+                return Ok(None);
+            }
+            let Some(paths) = resolve_qwen_comfyui_paths(request, settings)? else {
+                return Ok(None);
+            };
+            paths
+        }
     };
     paths.adapters = super::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
+}
+
+/// The PLAN-sourced counterpart of [`resolve_qwen_comfyui_paths`].
+///
+/// Qwen-Image's tree is a transformer plus an OPTIONAL in-place VAE (sc-10830); its dense text
+/// encoder and tokenizer always come from a resident `SceneWorks/qwen-image-mlx` tier, because the
+/// tree's own TE is scaled-fp8 (sc-10671). So `vae` is declared optional and `text_encoder` is
+/// declared neither — which means a plan carrying a text encoder REFUSES here rather than having it
+/// silently replaced by the snapshot's, exactly as it should.
+fn resolve_plan_backed_qwen_comfyui_paths(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiQwenPaths>> {
+    let Some(tree) =
+        super::checkpoint_plan_bespoke_tree(request, settings, "qwen-image", &[], &["vae"])?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ComfyuiQwenPaths {
+        vae: tree.optional_sidecar("vae").cloned(),
+        transformer: tree.primary,
+        snapshot_dir: resolve_qwen_comfyui_snapshot_dir(settings)?,
+        adapters: PreparedAdapters {
+            specs: Vec::new(),
+            pins: Vec::new(),
+        },
+    }))
+}
+
+/// The resident Qwen-Image tier supplying the dense TE / VAE / tokenizer, or a typed refusal.
+///
+/// The same probe [`resolve_qwen_comfyui_paths`] makes, lifted so both routes ask one question. The
+/// scan answers `Ok(None)` ("not runnable, fall through") because a catalog row that is not runnable
+/// is simply not this lane's; the plan route answers with a REFUSAL, because a plan-backed
+/// checkpoint has already been claimed and silently declining it would reach the stub.
+fn resolve_qwen_comfyui_snapshot_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    qwen_comfyui_snapshot_dir(settings).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] a compiled Qwen-Image checkpoint needs the dense \
+             text encoder, VAE and tokenizer from a resident {QWEN_COMFYUI_SNAPSHOT_REPO} tier, \
+             which a ComfyUI tree does not ship — install Qwen-Image from the Model Manager, then \
+             run this checkpoint again"
+        ))
+    })
+}
+
+/// The first fully-present `SceneWorks/qwen-image-mlx` tier, or `None`.
+fn qwen_comfyui_snapshot_dir(settings: &Settings) -> Option<PathBuf> {
+    let root = huggingface_snapshot_dir(&settings.data_dir, QWEN_COMFYUI_SNAPSHOT_REPO)?;
+    QWEN_COMFYUI_SNAPSHOT_TIERS
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| {
+            dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+                && dir.join("tokenizer").join("tokenizer.json").is_file()
+        })
 }
 
 /// Flat telemetry recorded on candle ComfyUI Qwen-Image assets. Qwen-Image base is non-distilled, so

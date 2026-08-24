@@ -21129,6 +21129,211 @@ fn sdxl_ldm_entries() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// sc-20644 review blocker 1, for the three CANDLE-ONLY ComfyUI-tree lanes.
+///
+/// The three tree lanes are on the reviewer's blocker-1 list too: each reaches
+/// `checkpoint_plan_bespoke_tree` for any plan-backed entry whose shape the plan route declined,
+/// including another family's. `cargo test` cannot link those lanes on macOS, but the guard they
+/// all funnel through IS linkable here, so the behaviour is asserted directly on the shared helper
+/// for each of the three family spellings — which is where the fix lives and where a regression
+/// would land.
+///
+/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
+/// `checkpoint_plan_bespoke_tree` (the shared helper the three lanes call).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_tree_source_helper_declines_another_familys_request() {
+    let fx = CheckpointPlanFixture::new("tree-cross-family", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+    );
+    assert!(
+        !request_is_checkpoint_plan_backed(&request),
+        "fixture check: the plan route declines Hires.fix, which offers this to every other lane"
+    );
+    // The tree helper is candle-gated, so assert through the shared entry point every tree lane
+    // funnels through — `checkpoint_plan_bespoke_primary`, which carries the same guard and IS
+    // linkable on this config. The tree helper's own copy of the guard is pinned as source text
+    // below, in the ordering test.
+    for foreign in ["z-image", "qwen-image", "flux2"] {
+        assert!(
+            matches!(
+                checkpoint_plan_bespoke_primary_pin(&request, &fx.settings, foreign),
+                Ok(None)
+            ),
+            "the {foreign} lane must DECLINE a krea_2 request rather than raise family-mismatch"
+        );
+    }
+    // And the guard is live code in the TREE helper too, not only in the primary one.
+    let source = include_str!("checkpoint_plan.rs");
+    let tree_at = source
+        .find("pub(crate) fn checkpoint_plan_bespoke_tree(")
+        .expect("the tree helper must exist");
+    let tree_body = &source[tree_at..tree_at + 1400.min(source.len() - tree_at)];
+    let guard_at = tree_body
+        .find("checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family)")
+        .expect("the tree helper must ask the declared-family question");
+    let store_at = tree_body
+        .find("CheckpointPlanStore::open(")
+        .expect("the tree helper opens the store");
+    assert!(
+        guard_at < store_at,
+        "the declared-family gate must precede opening the plan store: another family's request          must not even resolve a plan"
+    );
+}
+
+/// sc-20644 ComfyUI-tree rows (Z-Image, Qwen-Image, FLUX.2) — single-claim conformance and the
+/// bespoke surface sc-20651 deletes, for the three families whose lanes are CANDLE-ONLY.
+///
+/// These three lanes are `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]`, so
+/// `cargo test` cannot link them here and their behavioural tests first RUN on the windows-candle CI
+/// lane. What IS checkable on every lane, and what this test checks, is that the guards are live
+/// code in the right ORDER — the same posture sc-20636 already took for the Z-Image lane, widened to
+/// all three because two of them did not have the guard at all.
+///
+/// The gap this closes: Qwen-Image and FLUX.2 had no `request_is_checkpoint_plan_backed` decline.
+/// They did not double-claim in practice, because both additionally require an `external_base_*`
+/// model id that a plan-backed entry never has — but an incidental property of how the catalog names
+/// a scanned row is not a claim, and it is exactly the "arm ordering decides" posture the sc-20634
+/// review rejected. Both now decline explicitly, before any source resolution.
+///
+/// Failing mutations: delete the decline from any of the three; move a decline after its lane's
+/// first source resolution; delete a plan-sourced resolver call.
+#[test]
+fn every_comfyui_tree_lane_declines_a_plan_backed_request_before_resolving_anything() {
+    // `(file, source, the lane's catalog-scan CALL SITE, its plan-sourced resolver CALL SITE)`.
+    //
+    // Both markers are the full call site, not the bare function name: `resolve_<f>_comfyui_paths`
+    // is a SUBSTRING of `resolve_plan_backed_<f>_comfyui_paths`, so matching on the short name makes
+    // "the plan source comes first" trivially true. That is not hypothetical — the mutation that
+    // moved the Z-Image plan source behind the `external_base_` gate passed against the short
+    // markers, which is what turned this into a real assertion.
+    let lanes: [(&str, &str, &str, &str); 3] = [
+        (
+            "zimage_comfyui_candle.rs",
+            include_str!("zimage_comfyui_candle.rs"),
+            "let Some(paths) = resolve_zimage_comfyui_paths(request, settings)? else {",
+            "match resolve_plan_backed_zimage_comfyui_paths(request, settings)? {",
+        ),
+        (
+            "qwen_comfyui_candle.rs",
+            include_str!("qwen_comfyui_candle.rs"),
+            "let Some(paths) = resolve_qwen_comfyui_paths(request, settings)? else {",
+            "match resolve_plan_backed_qwen_comfyui_paths(request, settings)? {",
+        ),
+        (
+            "flux2_comfyui_candle.rs",
+            include_str!("flux2_comfyui_candle.rs"),
+            "let Some(paths) = resolve_flux2_comfyui_paths(request, settings)? else {",
+            "match resolve_plan_backed_flux2_comfyui_paths(request, settings)? {",
+        ),
+    ];
+    for (name, source, scan, plan_source) in lanes {
+        let decline = source
+            .find("if super::request_is_checkpoint_plan_backed(request) {")
+            .unwrap_or_else(|| {
+                panic!("{name}: the lane must explicitly decline a plan-backed request")
+            });
+        let plan_source_at = source.find(plan_source).unwrap_or_else(|| {
+            panic!(
+                "{name}: the lane must source a plan-backed entry's bytes from the plan at the \
+                 call site {plan_source}"
+            )
+        });
+        let scan_at = source
+            .find(scan)
+            .unwrap_or_else(|| panic!("{name}: fixture check — the catalog scan must still exist"));
+        // The `external_base_` id prefix gate belongs to the SCAN, and nothing may stand between a
+        // plan-backed entry and the plan source — least of all a catalog-id shape that a linked
+        // checkpoint never has.
+        let prefix_at = source
+            .find("!request.model.starts_with(\"external_base_\")")
+            .unwrap_or_else(|| {
+                panic!("{name}: fixture check — the scan's id gate must still exist")
+            });
+        assert!(
+            decline < plan_source_at,
+            "{name}: the plan-backed decline must precede the plan-sourced resolution"
+        );
+        assert!(
+            plan_source_at < prefix_at,
+            "{name}: the plan source must precede the `external_base_` id gate — a LINKED tree has \
+             no catalog row and no such id, so gating on it first makes the plan source unreachable"
+        );
+        assert!(
+            prefix_at < scan_at,
+            "{name}: fixture check — the id gate guards the catalog scan, which is what makes the \
+             assertion above meaningful"
+        );
+    }
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME, per family ------------------
+    for (name, source, symbols) in [
+        (
+            "zimage_comfyui_candle.rs",
+            include_str!("zimage_comfyui_candle.rs"),
+            &[
+                "pub(super) fn resolve_zimage_comfyui_paths(",
+                "entry.get(\"usable\").and_then(Value::as_bool)",
+                "entry.get(\"components\").and_then(Value::as_array)",
+                "ZIMAGE_COMFYUI_TOKENIZER_REPO",
+            ][..],
+        ),
+        (
+            "qwen_comfyui_candle.rs",
+            include_str!("qwen_comfyui_candle.rs"),
+            &[
+                "pub(super) fn resolve_qwen_comfyui_paths(",
+                "entry.get(\"usable\").and_then(Value::as_bool)",
+                "entry.get(\"components\").and_then(Value::as_array)",
+                "QWEN_COMFYUI_SNAPSHOT_TIERS",
+            ][..],
+        ),
+        (
+            "flux2_comfyui_candle.rs",
+            include_str!("flux2_comfyui_candle.rs"),
+            &[
+                "pub(super) fn resolve_flux2_comfyui_paths(",
+                "entry.get(\"usable\").and_then(Value::as_bool)",
+                "entry.get(\"components\").and_then(Value::as_array)",
+                "FLUX2_COMFYUI_SNAPSHOT_TIERS",
+            ][..],
+        ),
+    ] {
+        for symbol in symbols {
+            assert!(
+                source.contains(symbol),
+                "{name}: the surface sc-20651 deletes must be live code: {symbol}"
+            );
+        }
+    }
+
+    // And the migration table names exactly the families whose rows have landed, so sc-20651 has one
+    // list to read rather than six files to grep.
+    let plan_source = include_str!("checkpoint_plan.rs");
+    for family in [
+        "\"krea_2\"",
+        "\"sdxl\"",
+        "\"mage-flow\"",
+        "\"z-image\"",
+        "\"qwen-image\"",
+        "\"flux2\"",
+    ] {
+        let table_at = plan_source
+            .find("const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES:")
+            .expect("the migration table must exist");
+        let table_end = plan_source[table_at..]
+            .find("];")
+            .expect("the migration table is a slice literal");
+        assert!(
+            plan_source[table_at..table_at + table_end].contains(family),
+            "the migration table must name {family}, whose row has landed"
+        );
+    }
+}
+
 /// The tensor surface a Mage-Flow transformer directory is recognized by: exactly the published
 /// twelve `transformer_blocks`, each carrying the Mage-specific modulation and dual-stream MLP
 /// names. The exact block count is load-bearing in `detect_transformer_family` — it is what keeps

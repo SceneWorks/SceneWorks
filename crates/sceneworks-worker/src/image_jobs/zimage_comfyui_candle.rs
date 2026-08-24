@@ -148,18 +148,74 @@ pub(super) fn prepare_zimage_comfyui_sources(
         "z-image",
         gen_core::ImportedModelSource::ComfyUiTree,
     );
-    if !request.model.starts_with("external_base_")
-        || descriptor.as_ref().map_or(true, |descriptor| {
-            super::imported_model_quant(request, descriptor, "ComfyUI Z-Image").is_err()
-        })
-    {
+    if descriptor.as_ref().map_or(true, |descriptor| {
+        super::imported_model_quant(request, descriptor, "ComfyUI Z-Image").is_err()
+    }) {
         return Ok(None);
     }
-    let Some(mut paths) = resolve_zimage_comfyui_paths(request, settings)? else {
-        return Ok(None);
+    // A plan-backed entry whose request the plan route does NOT claim (a LoRA today) is served here,
+    // and its THREE artifacts all come from the plan's own verified layers rather than from a live
+    // `external_base_*` catalog scan — the only source a LINKED ComfyUI tree has, and the only one
+    // the inspector hashed and the store re-checked (sc-20644 Z-Image row).
+    let mut paths = match resolve_plan_backed_zimage_comfyui_paths(request, settings)? {
+        Some(paths) => paths,
+        None => {
+            if !request.model.starts_with("external_base_") {
+                return Ok(None);
+            }
+            let Some(paths) = resolve_zimage_comfyui_paths(request, settings)? else {
+                return Ok(None);
+            };
+            paths
+        }
     };
     paths.adapters = super::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
+}
+
+/// The PLAN-sourced counterpart of [`resolve_zimage_comfyui_paths`].
+///
+/// Z-Image's ComfyUI tree is a transformer + text encoder + VAE, and the lane declares all three as
+/// consumed, so a plan carrying a fourth artifact refuses rather than having it silently replaced.
+/// The tokenizer is NOT one of them: `tokenizer/tokenizer.json` is a model-agnostic asset a ComfyUI
+/// tree never ships, so it keeps coming from the resident diffusers snapshot on both routes.
+///
+/// Pins come from the plan store, never from `paths::pin_app_managed_model_file`: a linked library
+/// root is an APPROVED root of the plan store rather than an app-managed root, so app-managed
+/// confinement would reject every linked tree by construction.
+fn resolve_plan_backed_zimage_comfyui_paths(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiZImagePaths>> {
+    let Some(tree) = super::checkpoint_plan_bespoke_tree(
+        request,
+        settings,
+        "z-image",
+        &["text_encoder", "vae"],
+        &[],
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(tokenizer_dir) =
+        huggingface_snapshot_dir(&settings.data_dir, ZIMAGE_COMFYUI_TOKENIZER_REPO)
+    else {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] a compiled Z-Image checkpoint needs the \
+             {ZIMAGE_COMFYUI_TOKENIZER_REPO} tokenizer, which a ComfyUI tree does not ship — \
+             install Z-Image from the Model Manager, then run this checkpoint again"
+        )));
+    };
+    Ok(Some(ComfyuiZImagePaths {
+        text_encoder: tree.sidecar("text_encoder").clone(),
+        vae: tree.sidecar("vae").clone(),
+        transformer: tree.primary,
+        tokenizer_dir,
+        adapters: PreparedAdapters {
+            specs: Vec::new(),
+            pins: Vec::new(),
+        },
+    }))
 }
 
 /// Flat telemetry recorded on candle ComfyUI Z-Image assets. No guidance — Z-Image-Turbo is distilled.
