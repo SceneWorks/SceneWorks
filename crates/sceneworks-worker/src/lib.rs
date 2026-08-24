@@ -20,8 +20,8 @@ use sceneworks_core::jobs_store::NATIVE_CONVERTERS;
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
     apply_adapter_metadata_to_manifest_entry, apply_model_manifest_defaults, detect_model_family,
-    first_safetensors_path, inspect_adapter_in_dir, reconcile_detected_family, FamilyMismatch,
-    SafetensorsHeaderError,
+    first_safetensors_path, inspect_adapter_in_dir, reconcile_detected_family,
+    validate_minimax_h3_trainer_header, FamilyMismatch, SafetensorsHeaderError,
 };
 // Only the cfg-gated adapter resolvers (image `resolve_adapters` / `classify_adapter`, video
 // `resolve_lora_file`) use these, so gate the import identically or the parity

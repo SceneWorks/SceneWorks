@@ -16817,6 +16817,58 @@ fn a_selected_turbo_variant_changes_the_job_that_reaches_the_engine() {
     );
 }
 
+/// The built-in accelerator and a community trainer LoRA are a STACK, not mutually exclusive
+/// modes: both files reach the engine in payload order while only the built-in id supplies the
+/// sampling recipe. This is the plumbing shape used by sc-21028 (Turbo + Civitai/Kohya style).
+#[cfg(target_os = "macos")]
+#[test]
+fn built_in_turbo_and_community_lora_reach_the_engine_as_one_stack() {
+    let tiers = minimax_h3_tier_root("mm_stacked_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_stacked_base_");
+    let probe = ArmProbe::default();
+    let turbo = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_4step_768p");
+    let community = minimax_h3_turbo_lora(tiers.path(), "community_kohya_style_rank16");
+    let expected_paths = [&turbo, &community]
+        .map(|lora| {
+            std::fs::canonicalize(lora["path"].as_str().expect("staged adapter path"))
+                .expect("staged adapter canonicalizes")
+        })
+        .to_vec();
+    let request = minimax_h3_request("minimax_h3", json!({ "loras": [turbo, community] }));
+
+    let (_decoded, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("Turbo plus a community LoRA runs as one adapter stack");
+    let engine_request = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        (engine_request.steps, engine_request.scheduler_shift),
+        (Some(4), Some(6.0)),
+        "the built-in id must still drive its non-default recipe"
+    );
+    let load = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        load.adapters
+            .iter()
+            .map(|adapter| adapter.path.clone())
+            .collect::<Vec<_>>(),
+        expected_paths,
+        "neither adapter may be dropped or reordered before the engine load"
+    );
+    assert_eq!(
+        load.adapters
+            .iter()
+            .map(|adapter| adapter.scale)
+            .collect::<Vec<_>>(),
+        vec![1.0, 1.0],
+        "the community residual and built-in residual keep independent runtime scales"
+    );
+    assert_eq!(raw["minimaxH3Turbo"], json!("minimax_h3_turbo_4step_768p"));
+}
+
 /// Each published variant carries its OWN recipe to the engine — the property a single constant, a
 /// format sniff, or a `role: accelerator` boolean could not have.
 ///
