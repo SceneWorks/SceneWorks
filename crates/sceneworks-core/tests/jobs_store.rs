@@ -4195,7 +4195,15 @@ fn platform_sweep_fires_even_with_a_live_candle_worker_that_will_never_claim() {
     let job = job_of(
         &store,
         JobType::VideoGenerate,
-        json!({ "model": "minimax_h3", "mode": "text_to_video", "prompt": "p" }),
+        // The base partition gained a Candle lane in sc-20755. Keep this regression on the
+        // reference partition, which remains MLX-only until sc-20756, so it still proves that a
+        // live Candle worker cannot rescue a request outside that worker's capability surface.
+        json!({
+            "model": "minimax_h3_ref",
+            "mode": "reference_to_video",
+            "referenceAssetIds": ["img-1"],
+            "prompt": "p"
+        }),
     );
     backdate_job_created_at(&store, &job.id);
 
