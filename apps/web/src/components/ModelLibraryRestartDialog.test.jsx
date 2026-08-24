@@ -7,6 +7,8 @@ const RELOCATION = {
   libraryRoot: "/Volumes/Models 1/hf/hub",
   hfHome: "/Volumes/Models 1/hf",
   status: { available: true },
+  // The prompt path: the user was submitting something when the library was found unavailable.
+  droppedSubmission: true,
 };
 
 describe("ModelLibraryRestartDialog (sc-19709)", () => {
@@ -66,6 +68,17 @@ describe("ModelLibraryRestartDialog (sc-19709)", () => {
     expect(dialog.querySelector('[role="status"]').getAttribute("aria-live")).toBe(
       "polite",
     );
+  });
+
+  // A relocation started from Settings → Storage dropped nothing: telling that user a generation
+  // "was not queued" would invent a job they never started.
+  it("omits the dropped-submission line for a relocation that had no submission", async () => {
+    const dialog = await render({
+      relocation: { ...RELOCATION, droppedSubmission: false },
+    });
+    expect(dialog.textContent).toContain("after it restarts");
+    expect(dialog.textContent).toContain("/Volumes/Models 1/hf");
+    expect(dialog.textContent).not.toContain("was not queued");
   });
 
   it("invokes the relaunch exactly once, however many times the button is clicked", async () => {

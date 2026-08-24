@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-use crate::setup::{default_data_dir, settings_file, shared_huggingface_home};
+use crate::setup::{
+    default_data_dir, huggingface_home_selection, settings_file, shared_huggingface_home,
+};
 
 const KEYRING_SERVICE: &str = "SceneWorks";
 /// Pre-migration account that held the single Hugging Face token. Retained only so
@@ -866,6 +868,14 @@ pub struct StorageSetup {
     data_dir_default: String,
     hf_home: Option<String>,
     hf_home_default: String,
+    /// The cache home the sidecars will actually receive at their next spawn — ambient `HF_HOME`
+    /// first (e.g. `tauri dev`, a shell-profile export), then the persisted override, then the
+    /// platform default. This is what Settings displays: the row exists to tell the user where
+    /// SceneWorks is really reading from.
+    hf_home_active: String,
+    /// True when an ambient `HF_HOME` is what decides `hf_home_active`; the persisted override is
+    /// then inert and Settings says so instead of offering a change that would not take effect.
+    hf_home_from_environment: bool,
     storage_configured: bool,
     setup_completed: bool,
 }
@@ -873,11 +883,14 @@ pub struct StorageSetup {
 #[tauri::command]
 pub fn get_storage_setup() -> StorageSetup {
     let settings = load_settings();
+    let (hf_home_active, hf_home_from_environment) = huggingface_home_selection();
     StorageSetup {
         data_dir: settings.data_dir,
         data_dir_default: default_data_dir().to_string_lossy().into_owned(),
         hf_home: settings.hf_home,
         hf_home_default: shared_huggingface_home().to_string_lossy().into_owned(),
+        hf_home_active: hf_home_active.to_string_lossy().into_owned(),
+        hf_home_from_environment,
         storage_configured: settings.storage_configured,
         setup_completed: settings.setup_completed,
     }

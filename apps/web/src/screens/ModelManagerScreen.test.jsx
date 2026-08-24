@@ -1589,6 +1589,30 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(q8Row.querySelector(".status-badge").textContent).toBe("installed");
   });
 
+  it("keeps every complete SCAIL-2 package tier visible and installed in Model Manager", async () => {
+    const scail = {
+      ...matrixModel({ installed: ["q4", "q8", "bf16"] }),
+      id: "scail2_14b",
+      name: "SCAIL-2",
+      type: "video",
+      family: "scail2",
+    };
+    await render([scail]);
+    await selectTab(container, "Video Models");
+
+    const rows = tierRows();
+    expect(rows.map((row) => row.querySelector(".model-tier-label").textContent)).toEqual([
+      expect.stringContaining("bf16"),
+      expect.stringContaining("Q8"),
+      expect.stringContaining("Q4"),
+    ]);
+    expect(rows.map((row) => row.querySelector(".status-badge").textContent)).toEqual([
+      "installed",
+      "installed",
+      "installed",
+    ]);
+  });
+
   // sc-12279 (issue #850): a TORN tier — some of its files cached, some not — used to render as "not
   // installed", indistinguishable from one that was never downloaded. It will fail at load, and the
   // model-level Fix button is suppressed whenever a complete sibling tier exists (sc-9907), so this row
