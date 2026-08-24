@@ -49,6 +49,8 @@ const CANDLE_SVD_ADAPTER: &str = "candle_svd";
 /// `candle_wan`/`mlx_wan` and `candle_ltx`/`mlx_ltx` pairs.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_MOCHI_ADAPTER: &str = "candle_mochi";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) const CANDLE_MINIMAX_H3_ADAPTER: &str = "candle_minimax_h3";
 
 /// Default HuggingFace repos the candle video providers load (overridable via the manifest `repo`).
 /// The candle wan providers read a Wan2.2 diffusers snapshot — the TI2V-5B, or the T2V-A14B /
@@ -103,6 +105,7 @@ pub(super) fn candle_video_engine_id(model: &str) -> Option<&'static str> {
         // handing the user a PROCEDURAL FAKE VIDEO instead of an error. B1 already routed Windows
         // (`candle_video_routed = true`), so that promise must be served here.
         "mochi_1" => Some("mochi_1"),
+        "minimax_h3" | "minimax_h3_ref" => Some("minimax_h3"),
         _ => None,
     }
 }
@@ -123,6 +126,7 @@ pub(super) fn candle_video_adapter_label(engine_id: &str) -> &'static str {
         "ltx_2_3_distilled" => CANDLE_LTX_ADAPTER,
         "svd_xt" => CANDLE_SVD_ADAPTER,
         "mochi_1" => CANDLE_MOCHI_ADAPTER,
+        "minimax_h3" => CANDLE_MINIMAX_H3_ADAPTER,
         _ => CANDLE_WAN_ADAPTER,
     }
 }
@@ -143,6 +147,7 @@ pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
         // published. No manifest entry carries a top-level `repo`, so this default is what the candle
         // lane actually resolves.
         "mochi_1" => MOCHI_REPO,
+        "minimax_h3" => "MiniMaxAI/MiniMax-H3",
         // `wan2_2_ti2v_5b` (and any other wan id) → the 5B TI2V snapshot.
         _ => CANDLE_WAN_5B_REPO,
     }
@@ -225,7 +230,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
 /// Resolve the candle weights snapshot dir for `repo`. Errors loudly (no procedural-stub fallback)
 /// when the snapshot is absent, so a missing model surfaces a re-download error.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<PathBuf> {
+pub(super) fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<PathBuf> {
     huggingface_snapshot_dir(&settings.data_dir, repo).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "candle video weights snapshot not found for {repo}"

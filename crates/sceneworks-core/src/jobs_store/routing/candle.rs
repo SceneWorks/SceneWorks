@@ -683,9 +683,33 @@ pub(crate) fn video_mode_is_candle_eligible(model: &str, mode: &str) -> bool {
     video_request_is_candle_eligible(&job_type, &payload)
 }
 
+/// The MiniMax-H3 Candle executor's exact mode surface. This is intentionally separate from
+/// [`video_request_candle_eligible`]: the executor is wired so replayed/direct off-Mac jobs cannot
+/// fall through to a procedural stub, while the catalog's `candle_video_routed` column remains
+/// false until a measured VRAM ceiling authorizes user routing.
+pub(crate) fn minimax_h3_video_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    match model {
+        "minimax_h3" => matches!(
+            payload.get("mode").and_then(Value::as_str),
+            Some("text_to_video" | "image_to_video" | "first_last_frame")
+        ),
+        "minimax_h3_ref" => {
+            payload.get("mode").and_then(Value::as_str) == Some("reference_to_video")
+        }
+        _ => false,
+    }
+}
+
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
 /// synthetic payloads (parity with `image_request_candle_eligible`).
 pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if matches!(model, "minimax_h3" | "minimax_h3_ref") {
+        // The executor surface is ready before the product lane. Keeping the existing capability
+        // column as this final gate makes the later measured-routing decision a one-line flip,
+        // without letting this implementation change scheduler claims today.
+        return CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
+            && minimax_h3_video_candle_eligible(model, payload);
+    }
     if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
         return false;
     }
