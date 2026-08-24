@@ -142,6 +142,18 @@ const OPENPOSE_RECOVERY_REMAINING_ARTIFACT_IDS = [
   "sdxl-base-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix",
   "realvisxl-q4", "realvisxl-lightning-q4", "illustrious-v1-q4", "illustrious-v2-q4",
 ];
+const OPENPOSE_RECOVERY_REMAINING_AUTHORITIES = 9;
+const OPENPOSE_RECOVERY_REMAINING_FILES = 101;
+// The failed 32679720253 candidate is diagnostic only. Its frozen census establishes this exact
+// five-cell recovery plan; it must never be treated as accepted terminal evidence.
+const OPENPOSE_RECOVERY_SOURCE_BYTES = 21_191_060_168;
+const OPENPOSE_RECOVERY_PEAK_ORDINAL = 17;
+const OPENPOSE_RECOVERY_PEAK_ARTIFACT_IDS = [
+  "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+  "realvisxl-lightning-q4",
+];
+const OPENPOSE_RECOVERY_PEAK_STAGED_BYTES = 14_576_195_187;
+const OPENPOSE_RECOVERY_FREE_FLOOR_BYTES = 106_929_602_242;
 const OPENPOSE_CONTROL_DELTA_FLOOR = 0.01;
 const RECOVERY_ORIGINAL_ARTIFACT_ID = "9477529627";
 const RECOVERY_ORIGINAL_ARTIFACT_NAME = "sc-20945-epic-20738-8886a9e69f26beec05688c81b414859bd102f6d0-32570707303-1";
@@ -330,6 +342,8 @@ export function estimateJitDiskPlan(
   persistentMissingBytes = 0,
   nonModelPaths = [],
   reviewedAllAtOnceSourceBytes = REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
+  reviewedJitSourcePeakBytes = REVIEWED_JIT_SOURCE_PEAK_BYTES,
+  reviewedFreeFloorBytes = REVIEWED_FREE_FLOOR_BYTES,
 ) {
   if (!Number.isSafeInteger(freeBytes) || freeBytes < 0
     || !Number.isSafeInteger(persistentMissingBytes) || persistentMissingBytes < 0
@@ -373,14 +387,14 @@ export function estimateJitDiskPlan(
       modelAndSidecarBytes,
       requiredAdditionalBytes: Math.max(
         modelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
-        REVIEWED_FREE_FLOOR_BYTES,
+        reviewedFreeFloorBytes,
       ),
     };
   });
   const peak = cells.reduce((highest, row) => (
     row.modelAndSidecarBytes > highest.modelAndSidecarBytes ? row : highest
   ), { ordinal: 0, artifactIds: [], stagedBytes: 0, sidecarReserveBytes: 0,
-    modelAndSidecarBytes: 0, requiredAdditionalBytes: REVIEWED_FREE_FLOOR_BYTES });
+    modelAndSidecarBytes: 0, requiredAdditionalBytes: reviewedFreeFloorBytes });
   const allPhysical = new Map();
   for (const file of lifetimes.flatMap((row) => row.physicalFiles)) {
     const existing = allPhysical.get(file.key);
@@ -404,9 +418,10 @@ export function estimateJitDiskPlan(
   const modeledJitPeakBytes = PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES
     + currentIllustriousHydrationBytes;
   const allAtOnceSidecarReserveBytes = Math.max(FLUX_Q4_SIDECAR_BYTES, FLUX_Q8_SIDECAR_BYTES);
-  if (logicalSourceBytes === reviewedAllAtOnceSourceBytes
+  if (reviewedAllAtOnceSourceBytes === REVIEWED_ALL_AT_ONCE_SOURCE_BYTES
+    && logicalSourceBytes === reviewedAllAtOnceSourceBytes
     && (allAtOnceSourceBytes !== reviewedAllAtOnceSourceBytes
-      || modeledJitPeakBytes > REVIEWED_JIT_SOURCE_PEAK_BYTES
+      || modeledJitPeakBytes > reviewedJitSourcePeakBytes
       || peak.modelAndSidecarBytes !== modeledJitPeakBytes)) {
     fail(`reviewed disk census drifted: all=${allAtOnceSourceBytes}, peak=${peak.modelAndSidecarBytes}`);
   }
@@ -418,7 +433,7 @@ export function estimateJitDiskPlan(
     legacyNaiveLinkLengthSourceBytes: LEGACY_NAIVE_LINK_LENGTH_SOURCE_BYTES,
     reviewedAllAtOnceSourceBytes,
     preHydrationJitSourcePeakBytes: PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES,
-    reviewedJitSourcePeakBytes: REVIEWED_JIT_SOURCE_PEAK_BYTES,
+    reviewedJitSourcePeakBytes,
     logicalSourceBytes,
     allAtOnceSourceBytes,
     allAtOnceRequiredBytes: allAtOnceSourceBytes + allAtOnceSidecarReserveBytes
@@ -430,14 +445,63 @@ export function estimateJitDiskPlan(
     peakModelAndSidecarBytes: peak.modelAndSidecarBytes,
     peakRequiredAdditionalBytes: Math.max(
       peak.modelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
-      REVIEWED_FREE_FLOOR_BYTES,
+      reviewedFreeFloorBytes,
     ),
     admitted: freeBytes >= Math.max(
       peak.modelAndSidecarBytes + NON_MODEL_DISK_RESERVE_BYTES,
-      REVIEWED_FREE_FLOOR_BYTES,
+      reviewedFreeFloorBytes,
     ),
     cells,
   };
+}
+
+function isExactOrdinals(actual, expected) {
+  return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function reviewedRecoveryDiskPlan(executionOrdinals) {
+  if (isExactOrdinals(executionOrdinals, OPENPOSE_RECOVERY_EXECUTION_ORDINALS)) {
+    return {
+      sourceBytes: OPENPOSE_RECOVERY_SOURCE_BYTES,
+      jitPeakBytes: OPENPOSE_RECOVERY_PEAK_STAGED_BYTES,
+      freeFloorBytes: OPENPOSE_RECOVERY_FREE_FLOOR_BYTES,
+    };
+  }
+  return {
+    sourceBytes: REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
+    jitPeakBytes: REVIEWED_JIT_SOURCE_PEAK_BYTES,
+    freeFloorBytes: REVIEWED_FREE_FLOOR_BYTES,
+  };
+}
+
+// The OpenPose continuation is deliberately a closed selector, not a permissive small-campaign
+// mode. Every byte and authority below is bound to the diagnostic census from run 32679720253.
+export function assertExactOpenPoseRecoveryPreflight({
+  executionOrdinals, remainingArtifactIds, artifactExpectedFiles, lifetimePlan, diskPlan,
+}) {
+  if (!isExactOrdinals(executionOrdinals, OPENPOSE_RECOVERY_EXECUTION_ORDINALS)) {
+    fail("OpenPose recovery execution vector is not the exact reviewed [15,16,17,18,19] selector");
+  }
+  if (JSON.stringify(remainingArtifactIds) !== JSON.stringify(OPENPOSE_RECOVERY_REMAINING_ARTIFACT_IDS)
+    || remainingArtifactIds.length !== OPENPOSE_RECOVERY_REMAINING_AUTHORITIES
+    || remainingArtifactIds.reduce((sum, id) => sum + artifactExpectedFiles[id].length, 0)
+      !== OPENPOSE_RECOVERY_REMAINING_FILES
+    || JSON.stringify(lifetimePlan.map((row) => row.artifactId))
+      !== JSON.stringify(OPENPOSE_RECOVERY_REMAINING_ARTIFACT_IDS)) {
+    fail("OpenPose recovery authority set drifted from the exact five-cell plan");
+  }
+  if (diskPlan.reviewedAllAtOnceSourceBytes !== OPENPOSE_RECOVERY_SOURCE_BYTES
+    || diskPlan.logicalSourceBytes !== OPENPOSE_RECOVERY_SOURCE_BYTES
+    || diskPlan.allAtOnceSourceBytes !== OPENPOSE_RECOVERY_SOURCE_BYTES
+    || diskPlan.peakOrdinal !== OPENPOSE_RECOVERY_PEAK_ORDINAL
+    || JSON.stringify(diskPlan.peakArtifactIds) !== JSON.stringify(OPENPOSE_RECOVERY_PEAK_ARTIFACT_IDS)
+    || diskPlan.peakStagedBytes !== OPENPOSE_RECOVERY_PEAK_STAGED_BYTES
+    || diskPlan.peakSidecarReserveBytes !== 0
+    || diskPlan.peakModelAndSidecarBytes !== OPENPOSE_RECOVERY_PEAK_STAGED_BYTES
+    || diskPlan.reviewedJitSourcePeakBytes !== OPENPOSE_RECOVERY_PEAK_STAGED_BYTES
+    || diskPlan.peakRequiredAdditionalBytes !== OPENPOSE_RECOVERY_FREE_FLOOR_BYTES) {
+    fail("OpenPose recovery disk/JIT plan drifted from the exact five-cell census");
+  }
 }
 
 export function cellSemanticsSha256(cells) {
@@ -1111,6 +1175,18 @@ export async function safeRemoveTree(candidate, guard, label = "cleanup target")
   // This confinement/reparse check intentionally sits immediately beside the only recursive remove.
   await rm(target, { recursive: true, force: false });
   await assertPathAbsent(target, label);
+}
+
+// A downloaded authority can release its own persistent store at its lifetime boundary. The final
+// store sweep therefore treats only an already-absent store as success; every other cleanup error
+// remains a campaign failure and final lifecycle inventory still proves the absence.
+export async function cleanupMissingFileStore(operations, missingStore, guard, label) {
+  try {
+    await operations.cleanup(missingStore, guard, label);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await assertPathAbsent(missingStore, label);
 }
 
 async function assertPathAbsent(target, label) {
@@ -3711,7 +3787,12 @@ export function validateCachePreflightEvidence(document, {
   derivedSidecarRoot, missingStore, expectedNonModelPaths, profile, executionOrdinals = null,
 }) {
   validateDocumentWithSchema(CACHE_PREFLIGHT_SCHEMA_PATH, document);
+  const plannedOrdinals = executionOrdinals ?? document.diskPlan?.cells.map((cell) => cell.ordinal);
+  const exactOpenPoseRecovery = isExactOrdinals(
+    plannedOrdinals, OPENPOSE_RECOVERY_EXECUTION_ORDINALS,
+  );
   if (document.diskPlan
+    && !exactOpenPoseRecovery
     && document.diskPlan.preHydrationJitSourcePeakBytes
       !== PRE_HYDRATION_JIT_SOURCE_PEAK_BYTES) {
     fail("current cache preflight disk plan omitted or drifted from the pre-hydration JIT peak");
@@ -3844,13 +3925,16 @@ export function validateCachePreflightEvidence(document, {
     if (JSON.stringify(document.lifetimePlan) !== JSON.stringify(expectedLifetimePlan)) {
       fail("cache preflight authority lifetime plan drifted from the frozen census");
     }
+    const reviewedPlan = reviewedRecoveryDiskPlan(plannedExecutionOrdinals);
     const expectedDiskPlan = estimateJitDiskPlan(
       expectedLifetimePlan,
       document.diskPlan.freeBytes,
       document.downloadedFiles.reduce((sum, file) => sum + file.bytes, 0),
       document.diskPlan.nonModelPaths,
       downloadEvidenceSha256 === LEGACY_DOWNLOAD_EVIDENCE_SHA256
-        ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : REVIEWED_ALL_AT_ONCE_SOURCE_BYTES,
+        ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : reviewedPlan.sourceBytes,
+      reviewedPlan.jitPeakBytes,
+      reviewedPlan.freeFloorBytes,
     );
     if (JSON.stringify(document.diskPlan) !== JSON.stringify(expectedDiskPlan)) {
       fail("cache preflight disk plan drifted from exact target-byte census");
@@ -3873,8 +3957,17 @@ export function validateCachePreflightEvidence(document, {
       || document.diskPlan.freeBytes < document.diskPlan.peakRequiredAdditionalBytes) {
       fail("passed cache preflight did not prove sufficient JIT disk capacity");
     }
+    if (exactOpenPoseRecovery) {
+      assertExactOpenPoseRecoveryPreflight({
+        executionOrdinals: plannedExecutionOrdinals,
+        remainingArtifactIds,
+        artifactExpectedFiles,
+        lifetimePlan: document.lifetimePlan,
+        diskPlan: document.diskPlan,
+      });
+    }
     if (new Set([CURRENT_DOWNLOAD_EVIDENCE_SHA256, LEGACY_DOWNLOAD_EVIDENCE_SHA256])
-      .has(downloadEvidenceSha256)) {
+      .has(downloadEvidenceSha256) && !exactOpenPoseRecovery) {
       const expectedRemainingIds = [...new Set(plannedExecutionOrdinals.flatMap(
         (ordinal) => profile.cells[ordinal - 1].artifactIds,
       ))];
@@ -4179,6 +4272,9 @@ export async function runCampaign(args, options = {}) {
     && JSON.stringify(remainingArtifactIds) !== JSON.stringify(OPENPOSE_RECOVERY_REMAINING_ARTIFACT_IDS)) {
     fail("OpenPose recovery scope drifted from its exact five-cell authority set");
   }
+  const exactOpenPoseRecovery = isExactOrdinals(
+    executionOrdinals, OPENPOSE_RECOVERY_EXECUTION_ORDINALS,
+  );
   if (downloadEvidenceSha256 === CURRENT_DOWNLOAD_EVIDENCE_SHA256
     && JSON.stringify(executionOrdinals) === JSON.stringify(SPARSE_EXECUTION_ORDINALS)
     && (JSON.stringify(remainingArtifactIds) !== JSON.stringify(SPARSE_REMAINING_ARTIFACT_IDS)
@@ -4286,6 +4382,7 @@ export async function runCampaign(args, options = {}) {
       }
       lifetimePlan = authorityLifetimePlan(profile, executionOrdinals, sourceAudits);
       const freeBytes = await operations.diskFreeBytes(scratch);
+      const reviewedPlan = reviewedRecoveryDiskPlan(executionOrdinals);
       diskPlan = estimateJitDiskPlan(
         lifetimePlan,
         freeBytes,
@@ -4293,7 +4390,16 @@ export async function runCampaign(args, options = {}) {
           (subtotal, file) => subtotal + file.bytes, 0,
         ), 0),
         expectedNonModelPaths,
+        downloadEvidenceSha256 === LEGACY_DOWNLOAD_EVIDENCE_SHA256
+          ? LEGACY_REVIEWED_ALL_AT_ONCE_SOURCE_BYTES : reviewedPlan.sourceBytes,
+        reviewedPlan.jitPeakBytes,
+        reviewedPlan.freeFloorBytes,
       );
+      if (exactOpenPoseRecovery) {
+        assertExactOpenPoseRecoveryPreflight({
+          executionOrdinals, remainingArtifactIds, artifactExpectedFiles, lifetimePlan, diskPlan,
+        });
+      }
       if (!diskPlan.admitted) {
         fail(`JIT staging disk admission refused: requires ${diskPlan.peakRequiredAdditionalBytes} bytes at cell ${diskPlan.peakOrdinal}, only ${diskPlan.freeBytes} free`);
       }
@@ -4955,8 +5061,7 @@ export async function runCampaign(args, options = {}) {
 
   if (missingDownloads.length) {
     try {
-      await operations.cleanup(missingStore, guard, "reviewed missing-file store");
-      await assertPathAbsent(missingStore, "reviewed missing-file store");
+      await cleanupMissingFileStore(operations, missingStore, guard, "reviewed missing-file store");
     } catch (error) {
       const message = `reviewed missing-file store cleanup failed: ${errorText(error)}`;
       campaignErrors.push(message);

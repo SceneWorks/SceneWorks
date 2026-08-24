@@ -11,9 +11,11 @@ import {
   PROFILE_SCHEMA_PATH,
   RECEIPT_SCHEMA_PATH,
   CACHE_PREFLIGHT_SCHEMA_PATH,
+  assertExactOpenPoseRecoveryPreflight,
   assertExactDownloadedFilePartition,
   authorityLifetimePlan,
   cellSemanticsSha256,
+  cleanupMissingFileStore,
   directoryInventory,
   expectedB646DerivedNamespace,
   expectedArtifactFilesFromEvidence,
@@ -1831,6 +1833,85 @@ test("OpenPose recovery imports only 1 through 14 and replaces exactly the five 
     assert.equal((await readdir(path.join(output, "_imported-prefix"))).includes("15-sdxl-openpose"), false);
     await writeFile(path.join(fixture.candidate, "artifact-metadata.json"), "{}\n");
     await assert.rejects(() => selectOpenPoseRecovery(validRoot, profile()), /metadata|artifact 9500244306/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("OpenPose recovery preflight is an exact five-cell byte, peak, floor, and authority plan", () => {
+  const authorityIds = [
+    "sdxl-base-q4", "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+    "realvisxl-q4", "realvisxl-lightning-q4", "illustrious-v1-q4", "illustrious-v2-q4",
+  ];
+  const artifactExpectedFiles = Object.fromEntries(authorityIds.map((id, index) => [
+    id, Array.from({ length: [20, 1, 1, 1, 1, 19, 20, 19, 19][index] }, (_, file) => `${id}-${file}`),
+  ]));
+  const valid = () => ({
+    executionOrdinals: [15, 16, 17, 18, 19],
+    remainingArtifactIds: [...authorityIds],
+    artifactExpectedFiles,
+    lifetimePlan: authorityIds.map((artifactId) => ({ artifactId })),
+    diskPlan: {
+      reviewedAllAtOnceSourceBytes: 21_191_060_168,
+      logicalSourceBytes: 21_191_060_168,
+      allAtOnceSourceBytes: 21_191_060_168,
+      peakOrdinal: 17,
+      peakArtifactIds: [
+        "sdxl-openpose", "sdxl-tokenizer-l", "sdxl-tokenizer-bigg", "sdxl-vae-fix",
+        "realvisxl-lightning-q4",
+      ],
+      peakStagedBytes: 14_576_195_187,
+      peakSidecarReserveBytes: 0,
+      peakModelAndSidecarBytes: 14_576_195_187,
+      reviewedJitSourcePeakBytes: 14_576_195_187,
+      peakRequiredAdditionalBytes: 106_929_602_242,
+    },
+  });
+  assert.doesNotThrow(() => assertExactOpenPoseRecoveryPreflight(valid()));
+
+  for (const [label, mutate, pattern] of [
+    ["source total", (plan) => { plan.diskPlan.logicalSourceBytes += 1; }, /disk\/JIT plan/],
+    ["staged peak", (plan) => { plan.diskPlan.peakStagedBytes += 1; }, /disk\/JIT plan/],
+    ["JIT floor", (plan) => { plan.diskPlan.peakRequiredAdditionalBytes += 1; }, /disk\/JIT plan/],
+    ["authority set", (plan) => { plan.remainingArtifactIds.pop(); }, /authority set/],
+  ]) {
+    const mutated = valid();
+    mutate(mutated);
+    assert.throws(() => assertExactOpenPoseRecoveryPreflight(mutated), pattern, label);
+    assert.doesNotThrow(() => assertExactOpenPoseRecoveryPreflight(valid()), `${label} restore`);
+  }
+  for (const selector of [
+    [14], [14, 18, 19], Array.from({ length: 19 }, (_, index) => index + 1),
+    [16, 15, 17, 18, 19], [15, 16, 17, 18, 18], [15, 16, 17, 18],
+  ]) {
+    const mutated = valid();
+    mutated.executionOrdinals = selector;
+    assert.throws(() => assertExactOpenPoseRecoveryPreflight(mutated), /exact reviewed/, JSON.stringify(selector));
+    assert.doesNotThrow(() => assertExactOpenPoseRecoveryPreflight(valid()), `${JSON.stringify(selector)} restore`);
+  }
+});
+
+test("final missing-file store cleanup tolerates only already-absent ENOENT", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-20739-missing-store-cleanup-"));
+  try {
+    const missingStore = path.join(temporary, "already-absent");
+    await cleanupMissingFileStore({
+      cleanup: async () => {
+        const error = new Error("already absent");
+        error.code = "ENOENT";
+        throw error;
+      },
+    }, missingStore, {}, "already absent fixture");
+    await assert.rejects(
+      cleanupMissingFileStore({
+        cleanup: async () => {
+          const error = new Error("permission denied");
+          error.code = "EACCES";
+          throw error;
+        },
+      }, missingStore, {}, "non-ENOENT fixture"),
+      /permission denied/,
+    );
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
