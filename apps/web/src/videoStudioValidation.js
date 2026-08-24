@@ -45,6 +45,7 @@ export function videoGenerateValidation({
   requiresLtxIcLora,
   hasLtxIcLora,
   replaceReady,
+  scail2ReferenceOverflow = false,
   // sc-17161: the refusal from `referenceLimitError` for a reference selection past what the model
   // declares (`limits.max{Reference,SourceClip,ReferenceAudio,CombinedReference}Assets`), or null.
   // An ERROR, not a silent requirement: the pickers all look satisfied — MiniMax-H3 Ref2VA's
@@ -58,6 +59,10 @@ export function videoGenerateValidation({
   // because an audio reference never reaches the visual conditioner — and both the API and the
   // worker refuse the same shape, so saying it here is where the user finds out first.
   audioOnlyReferenceSet = false,
+  // A backend/model execution tier can be intentionally narrower than Model Manager's installable
+  // package set. The studio derives the actionable reason from the exact active lane and passes it
+  // here so the visible summary and Generate gate remain one authority.
+  executionTierBlockMessage = null,
   modelName,
   // sc-13136: the COMPOSED outgoing prompt (Subject:/Style: wrap + preset fold) and whether a
   // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
@@ -111,6 +116,9 @@ export function videoGenerateValidation({
   if (!replaceReady) {
     issues.push(issue.error(null, "No live GPU worker can run person replacement yet."));
   }
+  if (scail2ReferenceOverflow) {
+    issues.push(issue.error(null, "SCAIL-2 Animate Character supports at most 6 reference characters."));
+  }
   if (referenceLimitMessage) {
     issues.push(issue.error(null, referenceLimitMessage));
   }
@@ -121,6 +129,9 @@ export function videoGenerateValidation({
         "An audio reference can't be the only reference — add a reference image or video clip. Audio conditions the soundtrack, not the picture.",
       ),
     );
+  }
+  if (executionTierBlockMessage) {
+    issues.push(issue.error(null, executionTierBlockMessage));
   }
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   return issues;

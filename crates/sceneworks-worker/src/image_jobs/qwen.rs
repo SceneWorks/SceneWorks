@@ -539,7 +539,7 @@ async fn ensure_distill_lora_cached(
     }
     let mut progress = DownloadProgress::new(
         repo,
-        directory_size(&repo_dir.join("blobs")).await,
+        0,
         snapshot.total_bytes(),
         progress_report_interval(settings),
     );

@@ -4005,7 +4005,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     }
     // No-silent-T2I / no-fallback (sc-5968, epic 5483): any non-candle, non-mlx GPU descriptor must
     // DECLINE the unsupported-pose shapes the candle worker owns-to-reject (an `advanced.poses` job
-    // on a candle model with no pose lane, e.g. sdxl), so no generic claimant can silently render an
+    // on a candle model with no pose lane), so no generic claimant can silently render an
     // unconditioned T2I image and the candle worker reliably wins
     // them (then rejects with a typed error). Mac is unaffected: those shapes are MLX-served there
     // (model_mac_support pose), so the `mlx` worker still claims them and other descriptors decline.
@@ -4025,8 +4025,8 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if worker_is_candle(worker) {
         // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
         // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
-        // worker must OWN to reject (a `advanced.poses` job on a candle model with no pose lane, e.g.
-        // sdxl) — so those fail loudly on candle instead of silently rendering an unconditioned T2I
+        // worker must OWN to reject (an `advanced.poses` job on a candle model with no pose lane) — so
+        // those fail loudly on candle instead of silently rendering an unconditioned T2I
         // image (sc-5968, the no-fallback / no-silent-T2I directive). Every other unsupported shape is
         // declined and remains queued. `image_edit` is gated
         // here too (mirroring the mlx `JobType::ImageGenerate | JobType::ImageEdit` claim arm): without
