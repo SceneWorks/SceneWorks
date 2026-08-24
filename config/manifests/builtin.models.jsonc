@@ -4135,7 +4135,23 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // SC-20799: the pinned candle-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly." }
+            ]
+          }
+        }
       },
       "mlx": {
         // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
@@ -4156,7 +4172,23 @@
         // turnkey routing. SenseNova-U1 is a unified MoT — the WHOLE backbone packs, no separate TE,
         // so NO denseTextEncoderTier (contrast: dense-TE crates keep the TE bf16 and pack only the
         // transformer). packed-load is via mlx-gen #623 (0108fe6).
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-20799: the pinned mlx-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "SenseNova-U1 8B",
@@ -4276,7 +4308,23 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // SC-20799: the pinned candle-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly." }
+            ]
+          }
+        }
       },
       "mlx": {
         // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
@@ -4291,7 +4339,23 @@
         // the default here is already q8, so nothing else moves.
         "minQualityTier": "q8",
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-20799: the pinned mlx-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "SenseNova-U1 8B Infographic V2",
@@ -4404,7 +4468,23 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // SC-20799: the pinned candle-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly." }
+            ]
+          }
+        }
       },
       "mlx": {
         // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
@@ -4419,7 +4499,23 @@
         // the default here is already q8, so nothing else moves.
         "minQualityTier": "q8",
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-20799: the pinned mlx-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "SenseNova-U1 8B Infographic V3",
@@ -4536,7 +4632,23 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // SC-20799: the pinned candle-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly." }
+            ]
+          }
+        }
       },
       "mlx": {
         // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
@@ -4556,7 +4668,23 @@
         // TE, so NO denseTextEncoderTier. The distill LoRA is baked in at convert time (sc-8775), so
         // load is via the engine's `load_fast` marker-skip path, not a load-time merge.
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-20799: the pinned mlx-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "SenseNova-U1 8B Fast",
@@ -4681,7 +4809,23 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // SC-20799: the pinned candle-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly." }
+            ]
+          }
+        }
       },
       "mlx": {
         // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
@@ -4696,7 +4840,23 @@
         // the default here is already q8, so nothing else moves.
         "minQualityTier": "q8",
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-20799: the pinned mlx-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "SenseNova-U1 8B Infographic V2 Fast",
@@ -4818,7 +4978,23 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // SC-20799: the pinned candle-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one fused dual-path transformer with no separable conditioning component, so there is no phase boundary to release." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE decode phase; its FM head emits RGB patches directly." }
+            ]
+          }
+        }
       },
       "mlx": {
         // sc-14249: FLOOR THE CAPABILITY DOWNTIER AT q8. Without this `downtier_candidate_tiers`
@@ -4833,7 +5009,23 @@
         // the default here is already q8, so nothing else moves.
         "minQualityTier": "q8",
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-20799: the pinned mlx-gen-sensenova contract classifies these rungs
+        // StructurallyNotApplicable — a truth about the architecture, not undelivered work.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: SenseNova is one flat fused dual-path checkpoint; no independently releasable conditioning component exists." }
+            ]
+          },
+          "bounded_decode": {
+            "overlays": ["none", "identity"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: SenseNova has no VAE/decoder phase; the FM head emits RGB patches and unpatchify only reshapes them." }
+            ]
+          }
+        }
       },
       "ui": {
         "label": "SenseNova-U1 8B Infographic V3 Fast",
@@ -5796,6 +5988,30 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
+      // sc-20799 gap 7: Turbo serves user LoRA/LoKr exactly as `ideogram_4` does, so it carries the
+      // SAME `loraCompatibility` offer. It was omitted here while the entry's candle
+      // `memoryStrategyContract` already shipped nine `overlays:["lora"]` rows (loadProfiles `lora`
+      // and `lora_pid`) — the round-1 review read that asymmetry as an inert overstatement in the
+      // declarations. It is the opposite: the declarations match the engine and the routing catalog,
+      // and this block was the missing half.
+      //   - Engine (pinned inference 42cab15ba, candle-gen-ideogram/src/memory_strategy.rs):
+      //     `capture_adapters(spec, provider_id == MODEL_ID)` captures user adapters for
+      //     `MODEL_ID_TURBO` too — the `base` flag only changes the adapter target count (2 -> 1),
+      //     it is not a refusal. The bundled TurboTime adapter lives in its own identity domain
+      //     (`TURBO_ADAPTER_PREFIX`) from the user stack (`USER_ADAPTER_PREFIX`), so they compose.
+      //   - Routing catalog (jobs_store/routing/catalog.rs): `ModelCaps::new("ideogram_4_turbo",
+      //     .., candle_quant_lora: true)` — a LoRA request already STAYS on candle for this id, and
+      //     that row's own comment states "User LoRA/LoKr stacks after the bundled TurboTime adapter
+      //     when Turbo is selected."
+      // Deleting the nine rows instead would have been a live regression, not a doc fix: the matrix
+      // overlay axis comes from `loraCompatibility` (scripts/generate-memory-matrix.mjs
+      // `overlaysFor`), but the RUNTIME lane reads the same rows through
+      // `declared_candle_request_strategy_contract`, so a routed LoRA render would have lost its
+      // memory declaration and fallen back to no evaluation.
+      "loraCompatibility": {
+        "families": ["ideogram"],
+        "types": ["style", "enhance"]
+      },
       // Same packed turnkey + quant resolution as the base (resolve_ideogram_model_dir picks the
       // q4/q8 subdir, which carries the bundled LoRA). MEASURED Q4 @1024²/8-step: peak ACTIVE ~24 GiB
       // (one DiT + the bf16 LoRA residuals) — the true RAM floor; the ~52 GiB phys_footprint is mostly
@@ -5974,7 +6190,75 @@
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 31.7, "q8": 42.0, "bf16": 54.4 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // sc-20799 gap 1: the Candle/CUDA Boogu memory ladder, previously absent (no registry rule,
+        // no declaration, an all-Missing matrix column). `boogu_image` is a generic
+        // `is_candle_engine` txt2img id, so `image_jobs/base.rs` already routes it through
+        // `candle_memory_strategy::evaluate_shared_image`; these rows are the declaration that call
+        // was missing. No worker code change is required or made.
+        //
+        // Engine truth at pinned inference 42cab15ba4d84b6356a475c9957bea12f4ecf6c7,
+        // crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs:
+        //  - `build_contract` marks Resident Implemented unconditionally, StagedResidency
+        //    Implemented ONLY when the load is `canonical`, and EVERY other rung Missing. So the
+        //    Candle Boogu ladder is resident + staged, full stop — bounded_decode /
+        //    bounded_attention / bounded_transformer_residency are absent here rather than declared.
+        //  - `canonical` requires `spec.pid.is_none()`, `spec.resolved_route == Some(provider)`, and
+        //    a weights dir whose components end with
+        //    ["models--SceneWorks--boogu-image-mlx", "snapshots", CANONICAL_REVISION, <variant>].
+        //    All three hold on this lane: `base.rs` `pinned_turnkey_snapshot_for_request` resolves
+        //    `BOOGU_MLX_TURNKEY_REVISION` (the same a459e614… as the `downloads` row above) through
+        //    `model_artifacts` `models--<owner>--<name>/snapshots/<rev>` + `boogu_model_subdir`,
+        //    `base.rs` sets `.with_resolved_route(request.model)` (sceneworks id == engine id here),
+        //    and boogu has no PiD backbone so `spec.pid` stays None. Hence the staged row.
+        //  - `validate_load_spec` requires bf16 precision with quantize in {None, Q4, Q8} — the
+        //    `base-bf16/` `base/` `base-q4/` turnkey subdirs — and REFUSES any adapters, control,
+        //    extra controls, IP-adapter, identity or external text encoder. That is why every row
+        //    below is `overlays: ["none"]` / `loadProfiles: ["plain"]` despite the entry carrying a
+        //    `loraCompatibility` block: that block is a reserved family placeholder with an EMPTY
+        //    `types` list (no Boogu LoRA is wired, the engine descriptor reports supports_lora:
+        //    false). NOTE the lora matrix AXIS still exists for this entry — the generator's
+        //    `overlaysFor` adds it whenever `loraCompatibility` is present at all, regardless of
+        //    `types` — so the lora cells are recorded as structural exemptions below rather than
+        //    left as unexplained holes in an `exhaustive` declaration.
+        //  - `validate_route` admits base/turbo at reference_count 0 as text_to_image with no
+        //    overlay, and at reference_count 1 as image_to_image with a `reference_inert` /
+        //    `reference_active` provider overlay. Only the first is declared here: this entry's
+        //    `capabilities` is ["text_to_image"] alone, so the i2i coordinate has no catalog axis to
+        //    ride and declaring it would be an unreachable claim. (The `ui.img2img` flag drives the
+        //    MLX reference-guided path, not a catalog `capabilities` mode.)
+        //  - The contract carries `calibration: None`; `validate_route` enforces a structural-estimate
+        //    handshake that REQUIRES the runtime `calibration_fingerprint` to be empty and
+        //    `calibration_abi` to be 0. There is therefore no calibration identity to quote. The
+        //    fingerprint below is the engine's own `evidence_revision` for that handshake
+        //    ("boogu-structural-estimate"), naming these rows as structural estimates rather than
+        //    fabricating a calibration id the provider would reject.
+        // Staged residency is the sequential-offload lever: `lifecycle.synchronized_phase_release`
+        // is set to `canonical`, i.e. true exactly on the load shape declared here.
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "boogu_image", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "boogu-structural-estimate", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "boogu-structural-estimate", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs" }
+          ]
+        },
+        // NOTE only `staged_residency` is recorded. The authoring schema does not admit `resident`
+        // as a structural-exemption key — resident is the base rung, it cannot be "inapplicable" —
+        // so the resident x lora cell has no exemption slot even though the SAME engine refusal
+        // covers it: `validate_load_spec` rejects any Boogu load whose spec carries adapters, on
+        // every rung, before a contract is ever built.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs",
+                "reason": "validate_load_spec refuses the load outright when spec.adapters is non-empty, so staged residency is unreachable with a LoRA overlay for the same structural reason as resident."
+              }
+            ]
+          }
+        }
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
       "ui": {
@@ -6100,7 +6384,39 @@
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 31.6, "q8": 42.1, "bf16": 54.5 },
         "vramMeasuredPixels": 1048576,
-        "measured": true
+        "measured": true,
+        // sc-20799 gap 1 — the Candle/CUDA Boogu ladder. Identical derivation to `boogu_image` (see
+        // that entry's block for the full engine evidence from pinned inference 42cab15ba
+        // candle-gen-boogu/src/memory_strategy.rs): the Turbo route shares `build_contract`,
+        // `validate_load_spec` and `validate_route`, so it is resident + staged residency only, over
+        // the bf16/q4/q8 turnkey subdirs, at text_to_image with reference_count 0 and no overlay.
+        // The only per-route difference is the canonical variant folder ("turbo" / "turbo-q4" /
+        // "turbo-bf16" instead of "base…"), which does not move any coordinate declared here.
+        // The Turbo DMD student is CFG-free, which is a sampling property and not a memory one.
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "boogu_image_turbo", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "boogu-structural-estimate", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "boogu-structural-estimate", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs" }
+          ]
+        },
+        // NOTE only `staged_residency` is recorded. The authoring schema does not admit `resident`
+        // as a structural-exemption key — resident is the base rung, it cannot be "inapplicable" —
+        // so the resident x lora cell has no exemption slot even though the SAME engine refusal
+        // covers it: `validate_load_spec` rejects any Boogu load whose spec carries adapters, on
+        // every rung, before a contract is ever built.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs",
+                "reason": "validate_load_spec refuses the load outright when spec.adapters is non-empty, so staged residency is unreachable with a LoRA overlay for the same structural reason as resident."
+              }
+            ]
+          }
+        }
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
@@ -6194,6 +6510,51 @@
         "minMemoryGb": 64,
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
+      },
+      // sc-20799 gap 1 — the Candle/CUDA Boogu ladder. Same derivation as `boogu_image` (see that
+      // entry's block for the full engine evidence from pinned inference 42cab15ba
+      // candle-gen-boogu/src/memory_strategy.rs): one `build_contract` for all three routes, so
+      // resident + staged residency only, bf16/q4/q8, no overlay of any kind. The `loraCompatibility`
+      // block above is the same reserved-family placeholder with an EMPTY `types` list, and
+      // `validate_load_spec` refuses adapters outright. The lora matrix axis nonetheless exists
+      // (the generator keys it on the mere presence of `loraCompatibility`), so both rungs record a
+      // structural exemption for it, exactly as `boogu_image` does.
+      //
+      // The Edit route differs from base/turbo only in `validate_route`'s mode arm: `Route::Edit`
+      // admits `MemoryMode::Edit` at reference_count 1..=5 with NO overlay (base/turbo instead admit
+      // text_to_image at 0 refs and image_to_image at 1). That matches this entry's `capabilities`
+      // ["edit_image"] exactly. `providerMode: "edit_image"` is what `expected_provider_mode` returns
+      // for `MemoryRouteMode::EditImage` at every one of those reference counts, and
+      // `candle_memory_strategy::request_mode` maps that spelling to the `MemoryMode::Edit` the
+      // provider requires.
+      // Canonical staged residency is reachable here for the same reason as base: the `edit/`
+      // subfolder resolves under models--SceneWorks--boogu-image-mlx/snapshots/a459e614…, the lane
+      // sets `resolved_route`, and boogu has no PiD backbone.
+      "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "boogu_image_edit", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "boogu-structural-estimate", "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "boogu-structural-estimate", "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs" }
+          ]
+        },
+        // NOTE only `staged_residency` is recorded. The authoring schema does not admit `resident`
+        // as a structural-exemption key — resident is the base rung, it cannot be "inapplicable" —
+        // so the resident x lora cell has no exemption slot even though the SAME engine refusal
+        // covers it: `validate_load_spec` rejects any Boogu load whose spec carries adapters, on
+        // every rung, before a contract is ever built.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs",
+                "reason": "validate_load_spec refuses the load outright when spec.adapters is non-empty, so staged residency is unreachable with a LoRA overlay for the same structural reason as resident."
+              }
+            ]
+          }
+        }
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Edit",
       "ui": {
@@ -9252,13 +9613,19 @@
             "rung": "resident", "parameters": {}
           }
         ],
-        // This provider implements only eager, all-resident generation at the pinned inference
-        // revision. `exhaustive` prevents the matrix's generic route fallback from widening those
-        // real q4/q8 T2I captures into BF16, edit/reference/ControlNet, or staged claims.
+        // SC-20799: at the pinned inference revision (42cab15ba4) the three FLUX.2 Dev MLX
+        // providers (`flux2_dev`, `flux2_dev_edit`, `flux2_dev_control`) all implement selectable
+        // StagedResidency (Sequential offload on the eager load; the control route additionally
+        // requires its ControlNet artifact). The SC-18218 resident-only reading described an older
+        // pin, so `exhaustive` is retired: staged/resident census now follows the registered-engine
+        // sweep like the Klein siblings, and the rows below carry the `requestContexts` that drive
+        // the non-legacy request-scoped declaration path (`memory_route_registry.rs`). Deeper rungs
+        // (decode/attention/transformer) remain undeclared: the pinned providers do not implement
+        // them ("activation/decode/transformer rungs remain Missing until route-specific evidence
+        // exists" — mlx-gen-flux2/src/memory_strategy.rs).
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "flux2_dev",
-          "exhaustive": true,
           "implementations": [
             {
               "rung": "resident",
@@ -9269,6 +9636,64 @@
               "engagedRungs": ["resident"],
               "parameters": {},
               "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "resident", "runtimeProvider": "flux2_dev_edit", "fingerprint": "sc-16593-flux2-dev-edit-evidence-v2",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [2, 3, 4, 5, 6, 7, 8], "pid": [false], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "runtimeProvider": "flux2_dev_edit", "fingerprint": "sc-16593-flux2-dev-edit-evidence-v2", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [2, 3, 4, 5, 6, 7, 8], "pid": [false], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              // The control rows carry a STATIC registry-behavior identity (the klein/pulid
+              // "static-registry-behavior" convention), NOT a provider calibration id: the pinned
+              // provider publishes no calibration and its safety gate REQUIRES the explicit empty
+              // calibration handshake at admission (dev_control_safety_check).
+              "rung": "resident", "runtimeProvider": "flux2_dev_control", "fingerprint": "flux2-dev-control-static-registry-behavior-v1",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["control"],
+              "loadProfiles": ["single_control"], "sourceKinds": ["dir"], "providerOverlay": "control",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "runtimeProvider": "flux2_dev_control", "fingerprint": "flux2-dev-control-static-registry-behavior-v1", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["control"],
+              "loadProfiles": ["single_control"], "sourceKinds": ["dir"], "providerOverlay": "control",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
             }
           ]
@@ -12755,6 +13180,71 @@
           ]
         }
       },
+      // sc-20799 gap 1: the Candle/CUDA Anima memory ladder, which had no registry rule, no manifest
+      // declaration and an all-Missing matrix column. Declaration-driven only — `anima_base` /
+      // `anima_aesthetic` / `anima_turbo` are generic `is_candle_engine` txt2img ids, so
+      // `image_jobs/base.rs` ALREADY hands them to
+      // `candle_memory_strategy::evaluate_shared_image`; these rows are the declaration that call was
+      // missing. No worker code change is required or made.
+      //
+      // Engine truth at the pinned inference rev 42cab15ba4d84b6356a475c9957bea12f4ecf6c7,
+      // crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs:
+      //  - One `contract()` builder serves all three ids (`IDS`), but each gets its OWN calibration
+      //    identity `anima-candle-request-scoped-conditioning-v1-<id with '_' -> '-'>`, precisely so a
+      //    base calibration can never admit aesthetic/turbo just because their component layout
+      //    happens to match. That is why the three entries carry three different fingerprints.
+      //  - Resident: Implemented. StagedResidency: Implemented — Qwen3 + the bundled conditioner
+      //    produce immutable conditioning, are synchronized and dropped, then the DiT + VAE load
+      //    (`MemoryLifecycleCapabilities { synchronized_phase_release: true, .. }`).
+      //  - bounded_decode / bounded_attention / bounded_transformer_residency are NOT implemented:
+      //    the same lifecycle sets `decode_tiling`, `attention_chunking` and
+      //    `transformer_window_materialization` all false, and the crate's own
+      //    `all_three_exact_plain_routes_publish_only_staged_residency` test asserts none of those
+      //    three rungs ever reads Implemented. They are therefore ABSENT here rather than declared —
+      //    the Candle Anima ladder genuinely stops at staged residency.
+      //  - Route gate (`loaded_safety_check`): exactly single-phase text_to_image, reference_count 0,
+      //    no reference, no PiD, no phases. That is also this entry's entire `capabilities` list, so
+      //    the modes/referenceCounts below are the engine-and-catalog INTERSECTION, not a narrowing.
+      //  - Tier: `resolved_numeric_tier` refuses any precision but bf16 ("Candle/CUDA memory
+      //    residency supports only the native bf16 precision"). Off-Mac there is also no other tier
+      //    to select at all — the windows/linux `downloads` row pulls the raw dense `split_files/`
+      //    tree and the `anima_quant` converter that packs q4/q8/bf16 is macOS-only. So bf16 is the
+      //    only reachable Candle tier, which is why this block's `tiers` is narrower than the mlx
+      //    contract's ["bf16","q4","q8"] above.
+      "candle": {
+        // Staged residency IS the sequential-offload lever on this family: the conditioning phase is
+        // released and synchronized before the DiT phase allocates.
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "anima_base", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-base", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-base", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" },
+            // Resident KEEPS the adapter-bearing surface: `loaded_safety_check` accepts a LoRA/LoKr
+            // overlay on Resident and only refuses it once staged residency is engaged. There is
+            // deliberately NO staged x lora row — see memoryStrategyStructuralExemptions below.
+            { "rung": "resident", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-base", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "lora", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" }
+          ]
+        },
+        // The staged x lora coordinate is refused BY THE ENGINE — it is structurally inapplicable,
+        // not merely unmeasured — so it is recorded here rather than left as an unexplained hole in
+        // an `exhaustive` declaration.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs",
+                "reason": "contract() classifies the staged-residency capability as StructurallyNotApplicable whenever the LoadSpec carries adapters: Anima adapter overlays span the conditioner and DiT load boundary, so staged residency refuses them rather than applying a partial overlay."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs",
+                "reason": "loaded_safety_check rejects any staged request carrying a non-empty loaded adapter stack because the conditioner and DiT loads are one atomic artifact. Resident stays available for the same adapter-bearing load surface, which is why the lora overlay is declared on resident only."
+              }
+            ]
+          }
+        }
+      },
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
         "label": "Anima 2B",
@@ -12959,6 +13449,39 @@
             }
             // END generated-from-engine-capabilities
           ]
+        }
+      },
+      // sc-20799 gap 1 — the Candle/CUDA Anima ladder. Same shape and the same engine evidence as
+      // `anima_base` (see that entry's block for the full derivation from pinned inference
+      // 42cab15ba candle-gen-anima/src/memory_strategy.rs): resident + staged residency only, bf16
+      // only, text_to_image with reference_count 0 only, and the lora overlay on resident only.
+      // The calibration fingerprint is route-local by construction — the engine builds it as
+      // `anima-candle-request-scoped-conditioning-v1-{provider_id with '_' -> '-'}` so that a
+      // base-route calibration can never admit this route on a matching component layout.
+      "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "anima_aesthetic", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-aesthetic", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-aesthetic", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" },
+            { "rung": "resident", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-aesthetic", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "lora", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" }
+          ]
+        },
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs",
+                "reason": "contract() classifies the staged-residency capability as StructurallyNotApplicable whenever the LoadSpec carries adapters: Anima adapter overlays span the conditioner and DiT load boundary, so staged residency refuses them rather than applying a partial overlay."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs",
+                "reason": "loaded_safety_check rejects any staged request carrying a non-empty loaded adapter stack because the conditioner and DiT loads are one atomic artifact. Resident stays available for the same adapter-bearing load surface, which is why the lora overlay is declared on resident only."
+              }
+            ]
+          }
         }
       },
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
@@ -13168,6 +13691,39 @@
             }
             // END generated-from-engine-capabilities
           ]
+        }
+      },
+      // sc-20799 gap 1 — the Candle/CUDA Anima ladder. Same shape and the same engine evidence as
+      // `anima_base` (see that entry's block for the full derivation from pinned inference
+      // 42cab15ba candle-gen-anima/src/memory_strategy.rs): resident + staged residency only, bf16
+      // only, text_to_image with reference_count 0 only, and the lora overlay on resident only.
+      // Turbo runs CFG-free in ~10 steps, but that is a sampling property — it shares the single
+      // `contract()` builder, so its memory surface is identical to base's apart from the
+      // route-local calibration fingerprint the engine derives from the provider id.
+      "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "anima_turbo", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-turbo", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" },
+            { "rung": "staged_residency", "requiredOffloadPolicy": "sequential", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-turbo", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" },
+            { "rung": "resident", "fingerprint": "anima-candle-request-scoped-conditioning-v1-anima-turbo", "tiers": ["bf16"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "lora", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs" }
+          ]
+        },
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs",
+                "reason": "contract() classifies the staged-residency capability as StructurallyNotApplicable whenever the LoadSpec carries adapters: Anima adapter overlays span the conditioner and DiT load boundary, so staged residency refuses them rather than applying a partial overlay."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs",
+                "reason": "loaded_safety_check rejects any staged request carrying a non-empty loaded adapter stack because the conditioner and DiT loads are one atomic artifact. Resident stays available for the same adapter-bearing load surface, which is why the lora overlay is declared on resident only."
+              }
+            ]
+          }
         }
       },
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
@@ -18252,6 +18808,82 @@
         "families": ["sdxl"],
         "types": ["style", "enhance", "character"]
       },
+      // SC-20799: bespoke InstantID request-scoped admission. Both backends of the pinned inference
+      // (mlx-gen-instantid / candle-gen-instantid `memory_strategy.rs`) declare Resident +
+      // StagedResidency Implemented for the exact `character_image` composition (one reference face,
+      // batch 1, the InstantIdMemoryIdentity overlay key binding route/adapters/PiD/face-restore to
+      // the exact artifact set), with the shared evidence identity
+      // `instantid-request-contract-v1` on an eager load. Deeper rungs are Missing at the pin
+      // (`bounded decode is Missing` — both `begin_memory_request` impls refuse it), so `exhaustive`
+      // keeps this contract from widening. The worker's bespoke lane
+      // (`image_jobs/instantid.rs`) consumes `InstantId::load_with_memory_context` +
+      // `begin_memory_request` directly; these rows are the matrix's visibility of that lane, scoped
+      // to the `identity` overlay exactly like the PuLID sibling — no plain/lora/control coordinate
+      // inherits this authority.
+      "mlx": {
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "instantid",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident", "fingerprint": "instantid-request-contract-v1",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["character_image"], "overlays": ["identity"],
+              "loadProfiles": ["identity"], "sourceKinds": ["dir"], "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-instantid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "instantid-request-contract-v1", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["character_image"], "overlays": ["identity"],
+              "loadProfiles": ["identity"], "sourceKinds": ["dir"], "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-instantid/src/memory_strategy.rs"
+            }
+          ]
+        }
+      },
+      "candle": {
+        // The candle InstantID stack runs dense f16 only (`resolved_numeric_tier()` is the dense
+        // Bf16 sentinel; the worker always resolves the `bf16/` turnkey tier off-Mac).
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "instantid",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident", "fingerprint": "instantid-request-contract-v1",
+              "tiers": ["bf16"], "modes": ["character_image"], "overlays": ["identity"],
+              "loadProfiles": ["identity"], "sourceKinds": ["dir"], "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-instantid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "instantid-request-contract-v1", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16"], "modes": ["character_image"], "overlays": ["identity"],
+              "loadProfiles": ["identity"], "sourceKinds": ["dir"], "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-instantid/src/memory_strategy.rs"
+            }
+          ]
+        }
+      },
       "ui": {
         "label": "InstantID (RealVisXL)",
         "description": "Identity-preserving character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on RealVisXL_V5.0 (photoreal SDXL, openrail++ commercial-OK) with InstantID's ArcFace embedding + 5-point-landmark ControlNet — the sc-2009 winner for faithful likeness with scene freedom (vs IP-Adapter resemblance only). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 3.0; ~22GB peak on Apple Silicon. Needs the InstantID weights (~4GB) + antelopev2 face pack, fetched on first use.",
@@ -20210,6 +20842,73 @@
         "limits": {
           "samplers": ["default"],
           "schedulers": ["default"]
+        }
+      },
+      // sc-20799 gap 1: the Candle/CUDA Bernini STILL-image memory ladder, previously undeclared.
+      // `provider` is `bernini`, not `bernini_image`: the MODEL_TABLE row maps sceneworks id
+      // `bernini_image` onto `engine_id: "bernini"`, and `evaluate_shared_image` looks the
+      // declaration up by ENGINE id. That is `crate::bernini::MODEL_ID` in candle-gen-bernini, i.e.
+      // the provider behind FULL_MEMORY_REGISTRATION (the sibling `bernini_renderer` /
+      // `crate::pipeline::MODEL_ID` provider is the renderer-only route and is not this entry).
+      //
+      // Engine truth at pinned inference 42cab15ba4d84b6356a475c9957bea12f4ecf6c7,
+      // crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs:
+      //  - `strategies()` marks Resident and BoundedDecode Implemented and leaves StagedResidency,
+      //    BoundedAttention and BoundedTransformerResidency MISSING. The file header states why, and
+      //    it is a deliberate non-inheritance from the MLX claims: the CUDA provider has a real tiled
+      //    Wan z16 VAE decode seam, but the older unconditional phase staging is NOT a
+      //    request-selected StagedResidency lever, and Bernini has no Candle deferred transformer
+      //    loader or attention-chunking seam. Missing is not StructurallyNotApplicable, so those
+      //    three rungs are simply absent below — no structural-exemption block is warranted.
+      //  - BoundedDecode parameters come straight from the crate: `DECODE_TILE_EDGES`
+      //    [512, 448, 384, 320, 256, 192] and `DECODE_OVERLAP` 64, kept in lockstep with the merged
+      //    Wan z16 implementation. `validate_decode` rejects any edge outside that list or any
+      //    overlap but 64.
+      //  - Still route (`route_ok`, mode key "text_to_image" | "edit"): reference_count must be
+      //    exactly 0 for text_to_image and exactly 1 for edit, batch 1, frames 1, no PiD, no phases,
+      //    and the geometry must be one of `ADVERTISED_STILL_GEOMETRIES`
+      //    [(512,512), (768,768), (1024,1024), (1280,720), (720,1280)] — which is byte-for-byte this
+      //    entry's `limits.resolutions` above, so the catalog cannot present an inadmissible frame.
+      //    The overlay must be absent or exactly "lora".
+      //  - `expected_packing` accepts None/Q4/Q8, giving the bf16/q8/q4 published tier subdirs the
+      //    worker's `resolve_candle_bernini_tier_dir_and_quant` selects.
+      //  - The "lora" overlay is declared because the off-Mac Candle descriptor really does serve
+      //    LoRA/LoKr (see this entry's `loraCompatibility` note: the empty `types` list keeps the
+      //    global MLX picker from exposing a no-op, while the capability matrix preserves the exact
+      //    Candle-only LoRA/LoKr cells). `resolve_adapters` on the bernini still lane installs that
+      //    stack through the generator load spec.
+      //  - ⚠️ FINGERPRINT SCOPE — read before treating these rows as measurement. The PRODUCTION
+      //    registration (`FULL_MEMORY_REGISTRATION` -> `memory_strategy_contract`) builds a contract
+      //    with `calibration: None`; the crate's own test asserts `contract.calibration == None`,
+      //    because production calibration is deliberately absent until the Windows/CUDA real-weight
+      //    campaign exists. There is therefore NO captured still-lane calibration identity to quote.
+      //    The authoring schema nevertheless REQUIRES `fingerprint` on every hand-authored
+      //    (`source: "inference:…"`) row — only generator-written
+      //    `config/engine-capabilities/…` rows may omit it — so these rows carry the crate's single
+      //    calibration constant `STATIC_CALIBRATION`, verbatim and unmodified. Two caveats it must
+      //    not be read past: that constant is attached to the WEIGHTS-FREE contract
+      //    (`weights_free_memory_strategy_contract`), not to production loads; and its "rv2v" name is
+      //    historical — the constant is applied route-independently for both Bernini providers, not
+      //    only to the reference-video-to-video route. It stands here as the declaration's identity
+      //    for the pinned provider code, NOT as evidence that this still route has been calibrated.
+      //    Replace it with a real still-lane identity when that campaign mints one.
+      "candle": {
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"]
+          }
+        },
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "bernini", "exhaustive": true,
+          "implementations": [
+            { "rung": "resident", "fingerprint": "bernini-candle-registry-rv2v-v2", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "edit_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs" },
+            // engagedRungs skips staged_residency on purpose: that rung is Missing on this provider,
+            // so bounded decode engages directly on top of resident.
+            { "rung": "bounded_decode", "fingerprint": "bernini-candle-registry-rv2v-v2", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "edit_image"], "overlays": ["none"], "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "bounded_decode"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "parameterRanges": { "decodeTileEdges": [512, 448, 384, 320, 256, 192], "decodeOverlaps": [64] }, "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs" },
+            { "rung": "resident", "fingerprint": "bernini-candle-registry-rv2v-v2", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "edit_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "lora", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs" },
+            { "rung": "bounded_decode", "fingerprint": "bernini-candle-registry-rv2v-v2", "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "edit_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "lora", "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "bounded_decode"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "parameterRanges": { "decodeTileEdges": [512, 448, 384, 320, 256, 192], "decodeOverlaps": [64] }, "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs" }
+          ]
         }
       },
       "ui": {

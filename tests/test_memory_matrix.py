@@ -184,8 +184,9 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # runtime catching is the chosen tradeoff for the residue. The generator carries the same note beside
     # `assertMlxStagedCoverageIsStructurallyConsistent`, which is where the mirror of these assertions
     # runs against the pre-publication document.
-    assert "flux2_dev" not in mlx_staged, (
-        "SC-18218: the pinned MLX FLUX.2 provider is Resident-only and owes no staged-route claim"
+    assert "flux2_dev" in mlx_staged, (
+        "sc-20799 retired the SC-18218 resident-only pin: at inference 42cab15ba4 all three Dev MLX "
+        "providers declare selectable Sequential staged residency, so flux2_dev is census-required"
     )
     assert "bernini_image" in mlx_staged, (
         "inference sc-18609 made bernini_image's declared MLX rung-4 ladder reachable"

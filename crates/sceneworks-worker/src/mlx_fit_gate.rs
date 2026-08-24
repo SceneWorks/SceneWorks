@@ -13482,10 +13482,12 @@ mod tests {
             // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
             // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
             // those providers reachable rung-4 ladders, so they are no longer Resident-only and
-            // have no estimate band left to flip. The four that remain have no ladder yet, which is
-            // what keeps this list a live audit rather than a formality.
+            // have no estimate band left to flip. sc-20799 removed the fourth row the same way:
+            // retiring `flux2_dev`'s `exhaustive` reading gave its T2I route a declared
+            // `staged_residency` rung across bf16/q4/q8, so the bf16 cell is no longer
+            // Resident-only and has no band to flip. The three that remain have no ladder yet,
+            // which is what keeps this list a live audit rather than a formality.
             vec![
-                ("flux2_dev", "flux2_dev", "bf16", 128),
                 ("flux2_dev", "flux2_dev_control", "q4", 64),
                 ("ideogram_4", "ideogram_4", "q8", 48),
                 ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
