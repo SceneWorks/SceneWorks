@@ -82,6 +82,8 @@ pub(super) const CANDLE_MINIMAX_H3_ADAPTER: &str = "candle_minimax_h3";
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
 
 /// The ONE registry id both catalog entries load. See fact 1 above — the partition split is a
 /// directory, not a provider.
@@ -1502,19 +1504,21 @@ pub(super) async fn generate_minimax_h3_using(
     Ok((decoded, raw_settings))
 }
 
-/// Real off-Mac MiniMax-H3 dispatch. Candle consumes the raw upstream snapshot (rather than the
-/// macOS-only staged MLX tiers) and uses the same task-shape, conditioning, adapter, and sampling
-/// rules as the MLX route.
+/// The exact tier selected by the product's shared `mlxQuantize` request field. MiniMax-H3's
+/// manifest default is q4; non-positive values explicitly select the dense upstream bf16 route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_minimax_h3_repo(request: &VideoRequest) -> String {
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|repo| !repo.is_empty())
-        .unwrap_or(CANDLE_MINIMAX_H3_REPO)
-        .to_owned()
+pub(super) fn candle_minimax_h3_tier(request: &VideoRequest) -> (&'static str, Option<Quant>) {
+    let bits = request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    });
+    match bits {
+        Some(bits) if bits <= 0 => ("bf16", None),
+        Some(bits) if bits <= 4 => ("q4", Some(Quant::Q4)),
+        Some(_) => ("q8", Some(Quant::Q8)),
+        None => ("q4", Some(Quant::Q4)),
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -1523,6 +1527,42 @@ fn candle_minimax_h3_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResu
         WorkerError::InvalidPayload(format!(
             "candle MiniMax-H3 weights snapshot not found for {repo}"
         ))
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CandleMiniMaxH3Load {
+    pub(super) root: PathBuf,
+    pub(super) dit_dir: Option<PathBuf>,
+    pub(super) text_encoder_dir: Option<PathBuf>,
+    pub(super) quant: Option<Quant>,
+    pub(super) tier: &'static str,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_minimax_h3_load(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<CandleMiniMaxH3Load> {
+    let (tier, quant) = candle_minimax_h3_tier(request);
+    let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;
+    let (dit_dir, text_encoder_dir) = if quant.is_some() {
+        let tier_root =
+            candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)?.join(tier);
+        (
+            Some(tier_root.join("transformer")),
+            Some(tier_root.join("text_encoder")),
+        )
+    } else {
+        (None, None)
+    };
+    Ok(CandleMiniMaxH3Load {
+        root,
+        dit_dir,
+        text_encoder_dir,
+        quant,
+        tier,
     })
 }
 
@@ -1542,12 +1582,28 @@ pub(super) async fn generate_candle_minimax_h3(
         resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
     let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
     let adapters = resolve_minimax_h3_adapters(settings, request)?;
-    let repo = candle_minimax_h3_repo(request);
-    let model_dir = candle_minimax_h3_snapshot_dir(settings, &repo)?;
+    let load = resolve_candle_minimax_h3_load(settings, request)?;
+    let adapter_bytes =
+        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "MiniMax-H3 cannot determine the resident size of the requested adapter stack."
+                        .to_owned(),
+                )
+            })?;
+    if let Some(error) = crate::vram_gate::minimax_h3_fit_error(
+        &request.model_manifest_entry,
+        load.tier,
+        adapter_bytes,
+        &settings.gpu_id,
+        super::candle::candle_video_vram_budget(settings).await,
+    ) {
+        return Err(error);
+    }
     let task = minimax_h3_task(&conditioning);
     let mut raw_settings = minimax_h3_raw_settings(
         request,
-        "bf16",
+        load.tier,
         task,
         &conditioning,
         steps,
@@ -1555,13 +1611,19 @@ pub(super) async fn generate_candle_minimax_h3(
         turbo,
     );
     if let Value::Object(raw) = &mut raw_settings {
-        raw.insert("repo".to_owned(), Value::String(repo));
+        raw.insert(
+            "repo".to_owned(),
+            Value::String(CANDLE_MINIMAX_H3_REPO.to_owned()),
+        );
     }
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir,
+        model_dir: load.root,
+        quant: load.quant,
+        dit_component_dir: load.dit_dir,
+        text_encoder_component_dir: load.text_encoder_dir,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),

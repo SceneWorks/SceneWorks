@@ -145,6 +145,27 @@
       ]
     },
     {
+      "modelId": "minimax_h3",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "image_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "text_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
       "modelId": "scail2_14b",
       "mode": "animate_character",
       "engineIds": [

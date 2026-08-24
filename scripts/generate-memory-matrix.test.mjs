@@ -5662,7 +5662,7 @@ test("the two worker declarations of a video route must agree (sc-18815)", async
   );
 });
 
-test("direct-only MiniMax-H3 Candle dispatch is understood but excluded from matrix routes", async () => {
+test("MiniMax-H3 Candle dispatch exposes the authorized base route and withholds Ref2VA", async () => {
   const [dispatch, minimax, routingCatalog, routingCandle, routingMlx, bodies] = await Promise.all([
     readFile(new URL("../crates/sceneworks-worker/src/video_jobs/mod.rs", import.meta.url), "utf8"),
     readFile(new URL("../crates/sceneworks-worker/src/video_jobs/minimax_h3.rs", import.meta.url), "utf8"),
@@ -5685,8 +5685,17 @@ test("direct-only MiniMax-H3 Candle dispatch is understood but excluded from mat
   ]);
   const publicRoutes = parseVideoRoutes(bodies);
   const routedBackends = routedLanes({ routingCatalog, routingCandle, routingMlx });
-  assertInternalCandleVideoRoutesStayExcluded(internal, publicRoutes, routedBackends);
-  assert.deepEqual([...routedBackends.get("minimax_h3")], ["mlx"]);
+  // sc-20755 authorizes the base t2va/fl2va executor. The shared internal resolver also knows how
+  // to name the Ref2VA engine, but sc-20756 still owns its off-Mac artifacts and public route.
+  // The worker keeps this family on its dedicated direct resolver rather than the generic
+  // `*_engine_id` parsers, so public authorization is the catalog lane, not `publicRoutes`.
+  assert.equal(publicRoutes.get("minimax_h3")?.candle, undefined);
+  assertInternalCandleVideoRoutesStayExcluded(
+    new Map([["minimax_h3_ref", internal.get("minimax_h3_ref")]]),
+    publicRoutes,
+    routedBackends,
+  );
+  assert.deepEqual([...routedBackends.get("minimax_h3")], ["mlx", "candle"]);
   assert.deepEqual([...routedBackends.get("minimax_h3_ref")], ["mlx"]);
 
   assert.throws(

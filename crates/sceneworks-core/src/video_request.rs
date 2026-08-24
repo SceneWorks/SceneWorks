@@ -5520,11 +5520,11 @@ mod tests {
     /// uncovered decode envelope.
     #[test]
     fn every_shipped_video_family_is_mapped_or_named_unmodelled() {
-        // MiniMax-H3 (both partitions) is deliberately unmodelled on BOTH lanes for now: the
-        // family has no candle lane at all (`platforms: ["macos"]` everywhere but the raw
-        // upstream snapshot, and no candle route), and its MLX decode envelope is owned by the
-        // epic's terminal calibration campaign — inventing a `vae_full_res_channels` figure here
-        // would state a write bound nobody has measured (sc-17137 main-sync reconciliation).
+        // MiniMax-H3 is deliberately unmodelled on both lanes. Its Candle base route is real as of
+        // sc-20755, but the provider's reference-parity fixed 256/64 spatial tiler does not consume
+        // gen-core's writable-element VaeTiling planner; inventing a channel transcription would
+        // state a cap the engine does not enforce. MLX remains terminal-campaign-owned, and the
+        // reference Candle route remains withheld until sc-20756.
         for (lane, deliberately_unmodelled) in [
             (VideoLane::Mlx, &["svd", "minimax_h3", "minimax_h3_ref"][..]),
             (VideoLane::Candle, &["minimax_h3", "minimax_h3_ref"][..]),
