@@ -2072,8 +2072,7 @@ use candle::{
     generate_candle_scail2, generate_candle_scail2_replace, generate_candle_video,
     generate_candle_wan_comfyui, generate_candle_wan_vace, generate_candle_wan_vace_extend_bridge,
     generate_candle_wan_vace_fun, is_candle_video_engine, wan_comfyui_available,
-    CANDLE_MINIMAX_H3_ADAPTER, CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER,
-    CANDLE_WAN_VACE_FUN_ADAPTER,
+    CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER, CANDLE_WAN_VACE_FUN_ADAPTER,
 };
 mod scail2;
 #[cfg(target_os = "macos")]
@@ -2096,13 +2095,13 @@ mod mochi;
 #[cfg(target_os = "macos")]
 use mochi::{generate_mochi, mochi_available, mochi_engine_id, MOCHI_ADAPTER};
 pub(crate) mod minimax_h3;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use minimax_h3::generate_candle_minimax_h3;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use minimax_h3::minimax_h3_engine_id;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use minimax_h3::{generate_candle_minimax_h3, CANDLE_MINIMAX_H3_ADAPTER};
 #[cfg(target_os = "macos")]
 use minimax_h3::{generate_minimax_h3, minimax_h3_available, MINIMAX_H3_ADAPTER};
 mod svd;

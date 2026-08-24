@@ -74,6 +74,14 @@ use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict
 /// Adapter id recorded on a real MLX MiniMax-H3 asset.
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_ADAPTER: &str = "mlx_minimax_h3";
+/// Adapter id recorded on a real off-Mac Candle MiniMax-H3 asset. It lives with the deliberately
+/// non-user-routed executor rather than the generic Candle route table, so capability-fact parsing
+/// continues to represent only user-reachable Candle lanes.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) const CANDLE_MINIMAX_H3_ADAPTER: &str = "candle_minimax_h3";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";
 
 /// The ONE registry id both catalog entries load. See fact 1 above — the partition split is a
 /// directory, not a provider.
@@ -1063,7 +1071,10 @@ pub(super) async fn resolve_minimax_h3_clip_conditioning(
 /// [`resolve_minimax_h3_clip_conditioning`] only so the caller can drop the scratch directory on
 /// EVERY exit — including the refusals, which are the paths most likely to leave a multi-hundred-MB
 /// PNG sequence behind.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 async fn minimax_h3_decode_reference_clip(
     api: &ApiClient,
@@ -1498,6 +1509,27 @@ pub(super) async fn generate_minimax_h3_using(
 /// macOS-only staged MLX tiers) and uses the same task-shape, conditioning, adapter, and sampling
 /// rules as the MLX route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_minimax_h3_repo(request: &VideoRequest) -> String {
+    request
+        .model_manifest_entry
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+        .unwrap_or(CANDLE_MINIMAX_H3_REPO)
+        .to_owned()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_minimax_h3_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<PathBuf> {
+    huggingface_snapshot_dir(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "candle MiniMax-H3 weights snapshot not found for {repo}"
+        ))
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) async fn generate_candle_minimax_h3(
     api: &ApiClient,
     settings: &Settings,
@@ -1513,8 +1545,8 @@ pub(super) async fn generate_candle_minimax_h3(
         resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
     let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
     let adapters = resolve_minimax_h3_adapters(settings, request)?;
-    let repo = super::candle::candle_video_repo(request, engine_id);
-    let model_dir = super::candle::candle_video_snapshot_dir(settings, &repo)?;
+    let repo = candle_minimax_h3_repo(request);
+    let model_dir = candle_minimax_h3_snapshot_dir(settings, &repo)?;
     let task = minimax_h3_task(&conditioning);
     let mut raw_settings = minimax_h3_raw_settings(
         request,

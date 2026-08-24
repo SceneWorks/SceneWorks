@@ -40,7 +40,9 @@ import {
   rung4ContractAdmits,
   familyStory,
   parseVideoEngineIds,
+  parseInternalCandleVideoRoutes,
   parseVideoRoutes,
+  assertInternalCandleVideoRoutesStayExcluded,
   assertOwnershipRegistriesAreDisjoint,
   assertUnroutedEntriesAreDeclared,
   assertVideoOwnership,
@@ -5641,6 +5643,45 @@ test("the two worker declarations of a video route must agree (sc-18815)", async
   assert.throws(
     () => parseVideoRoutes(drifted),
     /video route svd:mlx resolves to provider svd_xt_v2.*video route declarations disagree/s,
+  );
+});
+
+test("direct-only MiniMax-H3 Candle dispatch is understood but excluded from matrix routes", async () => {
+  const [dispatch, minimax, routingCatalog, routingCandle, routingMlx, bodies] = await Promise.all([
+    readFile(new URL("../crates/sceneworks-worker/src/video_jobs/mod.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-worker/src/video_jobs/minimax_h3.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
+    Object.fromEntries(
+      await Promise.all(
+        Object.entries(SOURCE_PATHS).map(async ([name, relative]) => [
+          name,
+          await readFile(new URL(`../${relative}`, import.meta.url), "utf8"),
+        ]),
+      ),
+    ),
+  ]);
+  const internal = parseInternalCandleVideoRoutes(dispatch, minimax);
+  assert.deepEqual([...internal], [
+    ["minimax_h3", "minimax_h3"],
+    ["minimax_h3_ref", "minimax_h3"],
+  ]);
+  const publicRoutes = parseVideoRoutes(bodies);
+  const routedBackends = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  assertInternalCandleVideoRoutesStayExcluded(internal, publicRoutes, routedBackends);
+  assert.deepEqual([...routedBackends.get("minimax_h3")], ["mlx"]);
+  assert.deepEqual([...routedBackends.get("minimax_h3_ref")], ["mlx"]);
+
+  assert.throws(
+    () => parseInternalCandleVideoRoutes(
+      dispatch.replace(
+        "} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {\n        CandleVideoRoute::MiniMaxH3(engine_id)\n    } else if is_candle_video_engine(&request.model) {",
+        "} else if is_candle_video_engine(&request.model) {",
+      ),
+      minimax,
+    ),
+    /direct Candle dispatch no longer selects CandleVideoRoute::MiniMaxH3/,
   );
 });
 

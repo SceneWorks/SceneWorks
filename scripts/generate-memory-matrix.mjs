@@ -1426,6 +1426,65 @@ export function parseVideoRoutes(bodies, unionOnlyMlxRoutes = UNION_ONLY_MLX_ROU
   return routes;
 }
 
+/**
+ * Direct-only Candle dispatches that deliberately do not make a user-facing Candle lane.
+ *
+ * `parseVideoRoutes` is the matrix's public-route parser: its output is joined with the routing
+ * catalog, so adding a direct/replay executor there would make an unmeasured lane look like a
+ * schedulable capability. MiniMax-H3 is the current case. Its resolver is intentionally kept in
+ * `video_jobs/mod.rs`, outside `candle_video_engine_id`; parse it independently so the contract
+ * still proves the internal arm names the real provider while the matrix keeps it excluded until
+ * `candle_video_routed` flips.
+ */
+export function parseInternalCandleVideoRoutes(candleDispatchSource, minimaxSource) {
+  const directRouteArm =
+    "} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {\n" +
+    "        CandleVideoRoute::MiniMaxH3(engine_id)\n" +
+    "    } else if is_candle_video_engine(&request.model) {";
+  if (!candleDispatchSource.includes(directRouteArm)) {
+    throw new Error(
+      "memory-matrix: MiniMax-H3 direct Candle dispatch no longer selects CandleVideoRoute::MiniMaxH3",
+    );
+  }
+  const engine = minimaxSource.match(
+    /const\s+MINIMAX_H3_ENGINE_ID:\s*&str\s*=\s*"([^"]+)"\s*;/,
+  )?.[1];
+  if (
+    !engine ||
+    !minimaxSource.includes(
+      "sceneworks_core::video_request::is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)",
+    )
+  ) {
+    throw new Error(
+      "memory-matrix: could not resolve MiniMax-H3's shared internal Candle engine id",
+    );
+  }
+  return new Map([
+    ["minimax_h3", engine],
+    ["minimax_h3_ref", engine],
+  ]);
+}
+
+/** Keep direct/replay-only executors out of the user-facing matrix until routing is authorized. */
+export function assertInternalCandleVideoRoutesStayExcluded(
+  internalRoutes,
+  publicRoutes,
+  routedBackends,
+) {
+  for (const id of internalRoutes.keys()) {
+    if (publicRoutes.get(id)?.candle) {
+      throw new Error(
+        `${id}: direct-only Candle executor leaked into parseVideoRoutes before candle_video_routed`,
+      );
+    }
+    if (routedBackends.get(id)?.has("candle")) {
+      throw new Error(
+        `${id}: direct-only Candle executor leaked into the routing catalog before candle_video_routed`,
+      );
+    }
+  }
+}
+
 // sc-16268: anchored on CODE, not on a doc comment. Provenance hashes these sources with inert
 // comments stripped, so a parse that reads comment text would let a semantic change slip past the
 // staleness tripwire. SC-18816 deliberately parses the broader staged-residency sweep rather than
