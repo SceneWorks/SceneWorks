@@ -13188,9 +13188,7 @@
             {
               "rung": "bounded_transformer_residency",
               "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
-              // sc-21505: q4 ALONE. bf16 and q8 produced four reconciliation coordinates with no
-              // matrix cell behind them — this entry's MLX rung-4 coverage is the q4 lane only.
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
@@ -13461,9 +13459,7 @@
             {
               "rung": "bounded_transformer_residency",
               "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
-              // sc-21505: q4 ALONE. bf16 and q8 produced four reconciliation coordinates with no
-              // matrix cell behind them — this entry's MLX rung-4 coverage is the q4 lane only.
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
@@ -13705,9 +13701,7 @@
             {
               "rung": "bounded_transformer_residency",
               "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
-              // sc-21505: q4 ALONE. bf16 and q8 produced four reconciliation coordinates with no
-              // matrix cell behind them — this entry's MLX rung-4 coverage is the q4 lane only.
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
