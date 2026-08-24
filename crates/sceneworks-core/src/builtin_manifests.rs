@@ -1387,7 +1387,14 @@ mod tests {
             empty,
             &tc::minimax_h3_text_encoder_dir(empty, empty, tier),
         ) {
-            paths.push(probe.to_string_lossy().into_owned());
+            // Manifest download patterns are URL/snapshot-relative and therefore always use
+            // forward slashes. `Path` renders with the host separator, so compare the same
+            // logical path on Windows instead of treating every shared component as unfetched.
+            paths.push(
+                probe
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
         }
         paths
     }

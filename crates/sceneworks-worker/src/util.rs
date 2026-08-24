@@ -1,43 +1,5 @@
-//! Small worker-wide utilities: byte/time formatting, asset ids, HF auth, and directory sizing.
+//! Small worker-wide utilities: byte/time formatting, asset ids, and HF auth.
 use super::*;
-
-pub(crate) async fn directory_size(path: &Path) -> u64 {
-    let mut total = 0_u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let mut entries = match tokio::fs::read_dir(&path).await {
-            Ok(entries) => entries,
-            Err(error) => {
-                // A missing directory is the normal start-of-a-fresh-download state (the HF
-                // `blobs/` dir does not exist until the first file lands), so it means "0 bytes
-                // so far", not a failure — don't log it at error level. Only surface genuine I/O
-                // problems (permissions, etc.).
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        event = "rust_worker_directory_size_failed",
-                        path = %path.display(),
-                        error = %error,
-                        "failed to read a directory while sizing a download"
-                    );
-                }
-                continue;
-            }
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let Ok(file_type) = entry.file_type().await else {
-                continue;
-            };
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file() && entry.file_name() != INSTALL_MARKER {
-                if let Ok(metadata) = entry.metadata().await {
-                    total = total.saturating_add(metadata.len());
-                }
-            }
-        }
-    }
-    total
-}
 
 pub fn format_bytes(value: u64) -> String {
     let mut size = value as f64;

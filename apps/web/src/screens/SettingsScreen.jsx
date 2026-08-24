@@ -81,6 +81,11 @@ export function SettingsScreen({
   lockedToSimple = false,
   embedWorkflow = true,
   onEmbedWorkflowChange,
+  // Settings → Storage → Model library → Change…. Owned by App.jsx (it shares the relocation
+  // sequence and the restart disclosure with the unavailable-library prompt, sc-19709): runs the
+  // native picker, validates + persists + re-binds, and opens the restart dialog. Resolves to the
+  // adopted target, `null` when the picker was dismissed; rejects with the message to show.
+  onChangeModelLibrary,
   sharingFocusRequest = 0,
 }) {
   // theme/changeTheme and the worker registry come from the app context (the same values the
@@ -88,6 +93,10 @@ export function SettingsScreen({
   // App.jsx, which owns them alongside the sidebar's mode switch.
   const { theme, changeTheme, visibleWorkers = [], macCapabilities } = useAppContext();
   const [settings, setSettings] = useState(null);
+  // The first-run storage snapshot, read only for `hfHomeDefault`: the model library row shows the
+  // folder the app is ACTUALLY reading from when no override is set, not "Default location" — the
+  // whole point of the row is telling a user whose cache moved where SceneWorks still thinks it is.
+  const [storageSetup, setStorageSetup] = useState(null);
   const [gpu, setGpu] = useState(null);
   const [credentials, setCredentials] = useState([]);
   const [newHost, setNewHost] = useState("");
@@ -142,13 +151,16 @@ export function SettingsScreen({
   const refresh = useCallback(async () => {
     try {
       if (isDesktop) {
-        const [loadedSettings, gpuInfo, storedCredentials, remoteAccess] = await Promise.all([
-          invoke("get_app_settings"),
-          invoke("get_gpu_info"),
-          invoke("list_credentials"),
-          invoke("get_remote_access"),
-        ]);
+        const [loadedSettings, gpuInfo, storedCredentials, remoteAccess, storage] =
+          await Promise.all([
+            invoke("get_app_settings"),
+            invoke("get_gpu_info"),
+            invoke("list_credentials"),
+            invoke("get_remote_access"),
+            invoke("get_storage_setup"),
+          ]);
         setSettings(loadedSettings);
+        setStorageSetup(storage);
         setGpu(gpuInfo);
         setCredentials(storedCredentials ?? []);
         if (remoteAccess) {
@@ -259,6 +271,49 @@ export function SettingsScreen({
   async function revealDataDir() {
     if (settings?.dataDir) {
       await invoke("reveal_in_os", { path: settings.dataDir });
+    }
+  }
+
+  // The Hugging Face cache home SceneWorks is ACTUALLY reading models from, as the shell resolves
+  // it for the sidecar spawn (ambient `HF_HOME` first, then the persisted override, then the
+  // platform default). The persisted override alone would lie whenever an ambient `HF_HOME` wins —
+  // which is exactly when it matters, so the row shows the resolved path and, in that case, says
+  // the environment owns it instead of offering a change that would not take effect.
+  const modelLibraryFromEnvironment = storageSetup?.hfHomeFromEnvironment === true;
+  const modelLibraryPath =
+    storageSetup?.hfHomeActive ?? settings?.hfHome ?? storageSetup?.hfHomeDefault ?? null;
+  // Outcome of the last Change…/Reveal, rendered INLINE at the row. The screen's shared status
+  // line sits at the top of the panel — off-screen when the user is scrolled down at the Storage
+  // group — so a relocation refusal there reads as a silent no-op (the sc-21389 field failure:
+  // the API refused with a typed 409 and the user saw "nothing happened").
+  const [modelLibraryNotice, setModelLibraryNotice] = useState("");
+
+  async function changeModelLibrary() {
+    setModelLibraryNotice("");
+    try {
+      const adopted = await onChangeModelLibrary?.();
+      if (adopted?.hfHome) {
+        // The shell persisted the override inside the relocation; re-read it rather than guessing.
+        const [reloaded, storage] = await Promise.all([
+          invoke("get_app_settings"),
+          invoke("get_storage_setup"),
+        ]);
+        setSettings(reloaded);
+        setStorageSetup(storage);
+        setModelLibraryNotice("Model library updated — restart SceneWorks to apply.");
+      }
+    } catch (error) {
+      setModelLibraryNotice(error?.message || String(error));
+    }
+  }
+
+  async function revealModelLibrary() {
+    if (!modelLibraryPath) return;
+    try {
+      await invoke("reveal_in_os", { path: modelLibraryPath });
+    } catch (error) {
+      // Most likely: the default cache home was never created because nothing was downloaded yet.
+      setModelLibraryNotice(error?.message || String(error));
     }
   }
 
@@ -695,6 +750,50 @@ export function SettingsScreen({
                       type="button"
                       onClick={revealDataDir}
                       disabled={!settings?.dataDir}
+                    >
+                      Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
+                    </button>
+                  </div>
+                </div>
+                {/* The Hugging Face cache home (`HF_HOME`) — where downloaded model weights live.
+                    Changing it runs the sc-19709 relocation: the folder is checked first (with
+                    models installed it must hold every one this install recorded, so nothing is
+                    orphaned; before anything is installed any folder is acceptable), then the
+                    override is persisted and the library re-bound. Like the data directory, the
+                    sidecars pick it up at their next spawn, so it needs a restart. */}
+                <div>
+                  <div className="settings-row-title">Model library (Hugging Face cache)</div>
+                  <div className="settings-row-sub">
+                    Downloaded model weights. Choose the Hugging Face cache folder (the one
+                    containing <code>hub</code>) — if you moved your cache to another drive, point
+                    SceneWorks at it here. Needs a restart.
+                  </div>
+                  <div className="settings-path">{modelLibraryPath ?? "…"}</div>
+                  {modelLibraryFromEnvironment ? (
+                    <div className="settings-row-sub">
+                      Set by the <code>HF_HOME</code> environment variable, which overrides
+                      anything chosen here. Unset it to change the location from Settings.
+                    </div>
+                  ) : null}
+                  {modelLibraryNotice ? (
+                    <p aria-live="polite" className="settings-status" role="status">
+                      {modelLibraryNotice}
+                    </p>
+                  ) : null}
+                  <div className="settings-button-row">
+                    <button
+                      className="settings-btn"
+                      type="button"
+                      onClick={changeModelLibrary}
+                      disabled={!onChangeModelLibrary || modelLibraryFromEnvironment}
+                    >
+                      Change…
+                    </button>
+                    <button
+                      className="settings-btn"
+                      type="button"
+                      onClick={revealModelLibrary}
+                      disabled={!modelLibraryPath}
                     >
                       Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
                     </button>

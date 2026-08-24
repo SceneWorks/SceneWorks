@@ -777,6 +777,12 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
+    // records it. The worker implementation is deliberately source-ready ahead of that pin, but a
+    // direct API client must not be able to send additional references to an older engine that
+    // cannot consume them. The catalog flag is absent today and will be set only with the paired
+    // descriptor/pin evidence.
+    validate_video_reference_asset_ids_payload(&job_payload, &model_manifest_entry)?;
     validate_selected_decoder_for_manifest(
         enqueue_backend(&state),
         &job_payload,

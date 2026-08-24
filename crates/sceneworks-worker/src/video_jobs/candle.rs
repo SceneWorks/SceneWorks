@@ -4,7 +4,8 @@ use super::prelude::*;
 use super::{
     ltx::{
         resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
-        resolve_video_clip_conditioning,
+        resolve_video_clip_conditioning, LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
     },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
@@ -60,8 +61,6 @@ pub(super) const CANDLE_WAN_5B_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
 const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_LTX_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
@@ -134,7 +133,7 @@ pub(super) fn candle_video_adapter_label(engine_id: &str) -> &'static str {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
     match engine_id {
-        "ltx_2_3_distilled" => CANDLE_LTX_REPO,
+        "ltx_2_3_distilled" => LTX_BUNDLE_REPO,
         "svd_xt" => SVD_REPO,
         "wan2_2_t2v_14b" => CANDLE_WAN_T2V_14B_REPO,
         "wan2_2_i2v_14b" => CANDLE_WAN_I2V_14B_REPO,
@@ -278,23 +277,116 @@ fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
     }
 }
 
-/// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. The checkpoint is
-/// already packed, so the returned load quant is deliberately `None`: `LoadSpec::quantize` means
-/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros has no
-/// Candle route after SC-18902 acceptance, and the SceneWorks model-id guard prevents its dense
-/// standalone checkpoint from being mistaken for this base-LTX turnkey tier.
+/// Whether a Candle LTX tier is complete enough for the packed provider. The Candle engine reads the
+/// packed transformer and its quant marker directly, so a partial on-demand `q8/` download must never
+/// win over a complete tier or be treated as a dense root checkpoint.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_tier_complete(dir: &Path) -> bool {
+    dir.join("transformer.safetensors").is_file() && dir.join("quantize_config.json").is_file()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleLtxTier {
+    Q4,
+    Q8,
+}
+
+/// Parse the Candle LTX tier without conflating an absent override with a present malformed one.
+/// Only an absent value gets the q4 default; every explicit value must parse exactly to 4 or 8.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
+    let Some(value) = request.advanced.get("mlxQuantize") else {
+        return Some(CandleLtxTier::Q4);
+    };
+    let bits = value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    match bits {
+        4 => Some(CandleLtxTier::Q4),
+        8 => Some(CandleLtxTier::Q8),
+        _ => None,
+    }
+}
+
+/// Find an exact packed tier in only the current immutable bundle revision or its approved parent.
+/// The selected root is used only to locate the cache's `snapshots/` directory: it is never itself
+/// admitted, because `huggingface_snapshot_dir` may select a mutable `refs/main` target or an
+/// arbitrary complete sibling by file count.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> Option<PathBuf> {
+    let tier = match tier {
+        CandleLtxTier::Q4 => "q4",
+        CandleLtxTier::Q8 => "q8",
+    };
+    let roots = root
+        .parent()
+        .filter(|parent| parent.file_name().and_then(|name| name.to_str()) == Some("snapshots"))
+        .map(|snapshots| {
+            [
+                snapshots.join(LTX_BUNDLE_REVISION),
+                snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION),
+            ]
+        });
+    let resolve = |candidate: PathBuf| {
+        let dir = candidate.join(tier);
+        candle_ltx_tier_complete(&dir).then_some(dir)
+    };
+    roots.into_iter().flatten().find_map(resolve)
+}
+
+/// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
+/// the returned load quant is deliberately `None`: `LoadSpec::quantize` means on-the-fly
+/// quantization to the Candle LTX provider and must never be set for these tiers. Base LTX supports
+/// only the published q4/q8 Candle tiers; an explicit bf16 or other value returns `None` so callers
+/// fail closed rather than silently loading q4. Eros has no Candle route after SC-18902 acceptance.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,
     engine_id: &str,
     model: &str,
+    request: &VideoRequest,
 ) -> Option<(PathBuf, Option<Quant>)> {
     if engine_id != "ltx_2_3_distilled" || model != "ltx_2_3" {
         return None;
     }
-    let q4 = root.join("q4");
-    (q4.join("transformer.safetensors").is_file() && q4.join("quantize_config.json").is_file())
-        .then_some((q4, None))
+    let tier = candle_ltx_requested_tier(request)?;
+    // Keep the Candle resolver aligned with the immutable bundle compatibility policy: an existing
+    // q4 install may still live at the proven parent while an on-demand q8 fetch lands at the
+    // current revision. Do not scan arbitrary cache siblings, which would let an unpinned checkpoint
+    // satisfy an explicit tier request.
+    candle_ltx_bundle_tier_across_revisions(root, tier).map(|dir| (dir, None))
+}
+
+/// Fetch the base LTX packed `q8/` tier on demand for the off-Mac Candle provider. A q8 request
+/// must resolve q8 after this completes; it may never silently downgrade to the default q4 tier.
+/// The bundle is intentionally fixed to the same immutable revision as the MLX resolver.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) async fn ensure_candle_ltx_q8_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model != "ltx_2_3" || candle_ltx_requested_tier(request) != Some(CandleLtxTier::Q8) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
+        return Ok(());
+    };
+    if candle_ltx_bundle_tier_across_revisions(&root, CandleLtxTier::Q8).is_some() {
+        return Ok(());
+    }
+    crate::model_jobs::ensure_hf_files_cached(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
+        &["q8/*".to_owned()],
+    )
+    .await
+    .map(|_| ())
 }
 
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
@@ -358,7 +450,7 @@ pub(super) fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
         .or_else(|| {
             complete_ltx_bundle_gemma_dir(huggingface_snapshot_dir(
                 &settings.data_dir,
-                CANDLE_LTX_REPO,
+                LTX_BUNDLE_REPO,
             ))
         })
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO))
@@ -903,18 +995,22 @@ pub(crate) async fn candle_video_vram_budget(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) struct Scail2ColdLoadPlan {
     pub(super) model_dir: PathBuf,
+    /// The packed provider contract is part of the cache/load identity. Q4/Q8 are not a request
+    /// hint: they are the exact hosted payload selected by the resolver below.
+    pub(super) quant: Option<Quant>,
     pub(super) admission: crate::generator_cache::GeneratorColdLoadAdmission,
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn scail2_cold_load_plan(
     manifest_entry: &JsonObject,
-    model_dir: PathBuf,
+    resolved: ResolvedCandleScail2Model,
     adapter_bytes: u64,
     gpu_id: &str,
 ) -> Scail2ColdLoadPlan {
     let manifest_entry = manifest_entry.clone();
     let gpu_id = gpu_id.to_owned();
+    let tier_key = resolved.tier.key();
     let admission = crate::generator_cache::GeneratorColdLoadAdmission::new(move || {
         // This executes on the dedicated cache OS thread, after a different resident has been
         // dropped. The helper owns a private bounded runtime, so it cannot deadlock the async worker
@@ -925,6 +1021,7 @@ pub(super) fn scail2_cold_load_plan(
         );
         match crate::vram_gate::scail2_video_fit_error_with_adapter_bytes(
             &manifest_entry,
+            tier_key,
             adapter_bytes,
             &gpu_id,
             budget,
@@ -934,7 +1031,8 @@ pub(super) fn scail2_cold_load_plan(
         }
     });
     Scail2ColdLoadPlan {
-        model_dir,
+        model_dir: resolved.model_dir,
+        quant: resolved.tier.quant(),
         admission,
     }
 }
@@ -1034,6 +1132,12 @@ pub(super) async fn generate_candle_video_using(
         ensure_mochi_q8_present(api, settings, job, request).await?;
         ensure_mochi_bf16_present(api, settings, job, request).await?;
     }
+    // The base LTX turnkey defaults to q4, but an admitted explicit q8 request must first fetch
+    // the published q8 subdir. Keep this ahead of snapshot resolution so the resolver can prove it
+    // selected q8 rather than quietly reusing q4.
+    if engine_id == "ltx_2_3_distilled" {
+        ensure_candle_ltx_q8_present(api, settings, job, request).await?;
+    }
     // sc-14492: gate SVD before even resolving its already-installed snapshot. A full/default
     // 25-frame burst OOMed twice on real 32 GB hardware, while the reduced 8-frame / chunk-1 / 12-step
     // recipe completed. The returned recipe fields are the only ones the SVD generation arm can
@@ -1066,6 +1170,14 @@ pub(super) async fn generate_candle_video_using(
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
     let is_ltx = engine_id == "ltx_2_3_distilled";
+    let ltx_tier = candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model, request);
+    if is_ltx && ltx_tier.is_none() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} requires a complete Candle LTX q4 or q8 packed tier matching advanced.mlxQuantize \
+             from an approved immutable bundle revision; repair this model in Model Manager",
+            request.model
+        )));
+    }
     let (mut model_dir, wan_quant) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
@@ -1080,9 +1192,7 @@ pub(super) async fn generate_candle_video_using(
             candle_video_vram_budget(settings).await,
         )?;
         (snapshot_dir, quant)
-    } else if let Some((dir, quant)) =
-        candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model)
-    {
+    } else if let Some((dir, quant)) = ltx_tier {
         (dir, quant)
     } else {
         let (dir, quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
@@ -1710,61 +1820,226 @@ pub(super) async fn generate_candle_wan_comfyui(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_SCAIL2_ADAPTER: &str = "candle_scail2";
 
-/// Resolve candle SCAIL-2 weights from an explicit override, the exact Model Manager-installed
-/// `SceneWorks/scail2-mlx` bf16 tier, or the legacy app-managed candle component tree. Both native
-/// engines consume the same six bf16 files; q4/q8 stay MLX-only because their DiT tensors use MLX
-/// packing. Every candidate is classified by the pinned provider's own fail-closed layout predicate.
-/// When none is complete, a missing checkpoint surfaces a clear repair error
-/// instead of degrading to a stub (a character animation / replacement must never silently produce
-/// meaningless output). The provider's `load` then validates each subdir and reports the precise gap.
+/// Exact Candle SCAIL-2 package tiers. Q4/Q8 are packed inference payloads, not aliases for a
+/// load-time conversion. Keep this type next to the directory resolver so the cache key, `LoadSpec`,
+/// cold-load accounting, and asset telemetry all originate from one resolved decision.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_candle_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
-    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_SCAIL2_DIR") {
-        let path = PathBuf::from(dir.trim());
-        if !dir.trim().is_empty() {
-            runtime_cuda::providers::scail2::snapshot_layout(&path).map_err(|error| {
-                WorkerError::InvalidPayload(format!(
-                    "scail2 (candle): $SCENEWORKS_CANDLE_SCAIL2_DIR points to an incomplete snapshot at {}: {error}",
-                    path.display()
-                ))
-            })?;
-            return Ok(path);
-        }
-    }
-
-    resolve_managed_candle_scail2_model_dir(settings)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Scail2CandleTier {
+    Bf16,
+    Q4,
+    Q8,
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn resolve_managed_candle_scail2_model_dir(
+impl Scail2CandleTier {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Self::Bf16 => "bf16",
+            Self::Q4 => "q4",
+            Self::Q8 => "q8",
+        }
+    }
+
+    fn quant(self) -> Option<Quant> {
+        match self {
+            Self::Bf16 => None,
+            Self::Q4 => Some(Quant::Q4),
+            Self::Q8 => Some(Quant::Q8),
+        }
+    }
+}
+
+/// One source of truth for the selected complete payload. `tier` must survive through the cold-load
+/// admission and into `VideoGenInput.quant`; returning a bare path here was how an installed q8
+/// payload could previously be accounted as dense.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug)]
+pub(super) struct ResolvedCandleScail2Model {
+    pub(super) model_dir: PathBuf,
+    pub(super) tier: Scail2CandleTier,
+}
+
+/// Resolve the request's exact SCAIL-2 package tier. We deliberately do not mirror the historical
+/// MLX `<=4 => q4, >=8 => q8` convenience mapping: q6, an unparseable value, and a fractional value
+/// name no published Candle artifact and must fail before any directory search can substitute one.
+/// Omission retains the prior dense bf16 Candle baseline; q4/q8 require an explicit selection.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_scail2_tier(
+    request: &VideoRequest,
+    has_adapters: bool,
+) -> WorkerResult<Scail2CandleTier> {
+    let value = request.advanced.get("mlxQuantize");
+    let tier = match value {
+        // Keep the established dense Candle baseline when the payload names no tier. Q4/Q8 are
+        // explicit exact artifact selections, so a stale/default caller can never be promoted to
+        // packed weights merely because they happen to be installed.
+        None | Some(Value::Null) => Scail2CandleTier::Bf16,
+        Some(value) => {
+            let bits = value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
+                            .to_owned(),
+                    )
+                })?;
+            match bits {
+                ..=0 => Scail2CandleTier::Bf16,
+                4 => Scail2CandleTier::Q4,
+                8 => Scail2CandleTier::Q8,
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "scail2 (candle): advanced.mlxQuantize={bits} has no exact hosted tier; choose q4 (4), q8 (8), or bf16 (<= 0)."
+                    )));
+                }
+            }
+        }
+    };
+    if has_adapters && tier != Scail2CandleTier::Bf16 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "scail2 (candle): packed {} cannot merge adapters; select the bf16 tier (advanced.mlxQuantize <= 0).",
+            tier.key()
+        )));
+    }
+    Ok(tier)
+}
+
+/// Require both the pinned provider's complete six-file predicate and the package's explicit
+/// quantization marker. The provider remains the authority for the safetensors shape/projection
+/// contract; the marker prevents a complete q4 directory from being passed off as q8 (or dense).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn validate_candle_scail2_tier_dir(
+    path: &Path,
+    tier: Scail2CandleTier,
+) -> WorkerResult<()> {
+    runtime_cuda::providers::scail2::snapshot_layout(path).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "scail2 (candle): {} is not a complete {} hosted package: {error}",
+            path.display(),
+            tier.key(),
+        ))
+    })?;
+    let config_path = path.join("config.json");
+    let config: Value = serde_json::from_slice(&std::fs::read(&config_path).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "scail2 (candle): cannot read {} package marker at {}: {error}",
+            tier.key(),
+            config_path.display(),
+        ))
+    })?)
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "scail2 (candle): {} package marker at {} is malformed: {error}",
+            tier.key(),
+            config_path.display(),
+        ))
+    })?;
+    let marker = config.get("quantization");
+    let marker_matches = match tier {
+        Scail2CandleTier::Bf16 => marker.is_none() || marker.is_some_and(Value::is_null),
+        Scail2CandleTier::Q4 | Scail2CandleTier::Q8 => marker
+            .and_then(Value::as_object)
+            .is_some_and(|quantization| {
+                quantization.get("bits").and_then(Value::as_i64)
+                    == Some(if tier == Scail2CandleTier::Q4 { 4 } else { 8 })
+                    && quantization.get("group_size").and_then(Value::as_i64) == Some(64)
+            }),
+    };
+    if marker_matches {
+        return Ok(());
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "scail2 (candle): {} does not carry the required {} package marker (q4/q8 require quantization.bits and group_size=64; bf16 must be dense).",
+        path.display(),
+        tier.key(),
+    )))
+}
+
+/// The pre-Model-Manager hand-built tree has no tier marker because it predates the hosted matrix.
+/// It remains a dense-only compatibility path; never use it to satisfy a q4/q8 request.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn validate_candle_scail2_legacy_bf16_dir(path: &Path) -> WorkerResult<()> {
+    runtime_cuda::providers::scail2::snapshot_layout(path)
+        .map(|_| ())
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "scail2 (candle): legacy bf16 snapshot at {} is incomplete: {error}",
+                path.display(),
+            ))
+        })
+}
+
+/// Resolve Candle SCAIL-2 weights from an explicit override, then the exact Model Manager tier, or
+/// (dense bf16 only) the old manually assembled component tree. There is intentionally no q8→q4,
+/// packed→dense, or legacy-packed fallback: a requested tier must be completely installed and carry
+/// its matching marker before the worker can use it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_scail2_model(
     settings: &Settings,
-) -> WorkerResult<PathBuf> {
+    request: &VideoRequest,
+    adapters: &[AdapterSpec],
+) -> WorkerResult<ResolvedCandleScail2Model> {
+    let tier = resolve_candle_scail2_tier(request, !adapters.is_empty())?;
+    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_SCAIL2_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if !dir.trim().is_empty() {
+            validate_candle_scail2_tier_dir(&path, tier).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "scail2 (candle): $SCENEWORKS_CANDLE_SCAIL2_DIR cannot satisfy the requested {} tier: {error}",
+                    tier.key(),
+                ))
+            })?;
+            return Ok(ResolvedCandleScail2Model {
+                model_dir: path,
+                tier,
+            });
+        }
+    }
+    resolve_managed_candle_scail2_model(settings, tier)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_managed_candle_scail2_model(
+    settings: &Settings,
+    tier: Scail2CandleTier,
+) -> WorkerResult<ResolvedCandleScail2Model> {
     if let Some(snapshot) = crate::model_jobs::huggingface_pinned_snapshot_dir(
         &settings.data_dir,
         SCAIL2_REPO,
         SCAIL2_REVISION,
     ) {
-        let bf16 = snapshot.join("bf16");
-        if runtime_cuda::providers::scail2::snapshot_layout(&bf16).is_ok() {
-            return Ok(bf16);
+        let selected = snapshot.join(tier.key());
+        if validate_candle_scail2_tier_dir(&selected, tier).is_ok() {
+            return Ok(ResolvedCandleScail2Model {
+                model_dir: selected,
+                tier,
+            });
         }
     }
 
-    // Retain the pre-Model-Manager manual component layout as a compatibility fallback.
-    let managed = settings
+    // Retain the pre-Model-Manager manual component layout only for dense adapter-compatible bf16.
+    let legacy = settings
         .data_dir
         .join("models")
         .join("candle")
         .join("scail2");
-    if runtime_cuda::providers::scail2::snapshot_layout(&managed).is_ok() {
-        return Ok(managed);
+    if tier == Scail2CandleTier::Bf16 && validate_candle_scail2_legacy_bf16_dir(&legacy).is_ok() {
+        return Ok(ResolvedCandleScail2Model {
+            model_dir: legacy,
+            tier,
+        });
     }
     Err(WorkerError::InvalidPayload(format!(
-        "scail2 (candle): the shared SCAIL-2 bf16 package is not installed or is incomplete. \
-         Install the bf16 tier from Model Manager ({SCAIL2_REPO} at {SCAIL2_REVISION}), repair that \
-         download, or set $SCENEWORKS_CANDLE_SCAIL2_DIR to a complete shared/legacy snapshot. \
-         Legacy fallback checked: {}.",
-        managed.display(),
+        "scail2 (candle): the requested {} package is not installed or is incomplete. Install the exact {} tier from Model Manager ({SCAIL2_REPO} at {SCAIL2_REVISION}) and repair that download before retrying.{}",
+        tier.key(),
+        tier.key(),
+        if tier == Scail2CandleTier::Bf16 {
+            format!(" Legacy bf16 fallback checked: {}.", legacy.display())
+        } else {
+            " No q4/q8 fallback to a different tier is permitted.".to_owned()
+        },
     )))
 }
 
@@ -1784,7 +2059,9 @@ fn candle_scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 /// sibling of the macOS `resolve_scail2_conditioning`. Loads the reference character image + the
 /// driving clip, segments both with the candle SAM3 PCS segmenter (every person → a palette color,
 /// left-to-right), paints the color-coded masks (animation: reference bg white, driving bg black), and
-/// assembles `Reference` + `Mask` + `ControlClip`. Segmentation + painting run on the blocking pool.
+/// assembles strict ordered `Reference`, `Mask` pairs before the `ControlClip`. Every
+/// `referenceAssetIds` entry is loaded + segmented separately in caller order; `sourceAssetId` is
+/// retained only as the legacy single-reference fallback. Segmentation + painting run on the blocking pool.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn resolve_candle_scail2_conditioning(
     api: &ApiClient,
@@ -1793,25 +2070,39 @@ async fn resolve_candle_scail2_conditioning(
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
-    // The character: a reference image (referenceAssetIds first, else the i2v sourceAssetId).
-    let ref_id = request
-        .reference_asset_ids
-        .first()
-        .map(String::as_str)
-        .or(request.source_asset_id.as_deref())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "scail2 animate_character requires a reference character image (referenceAssetIds \
-                 or sourceAssetId)."
-                    .into(),
+    let reference_ids: Vec<&str> = if request.reference_asset_ids.is_empty() {
+        request.source_asset_id.as_deref().into_iter().collect()
+    } else {
+        request
+            .reference_asset_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
+    };
+    if reference_ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "scail2 animate_character requires a reference character image (referenceAssetIds \
+             or sourceAssetId)."
+                .into(),
+        ));
+    }
+    if reference_ids.len() > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    let references = reference_ids
+        .into_iter()
+        .map(|reference_id| {
+            crate::image_jobs::load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                reference_id,
+                project_path,
             )
-        })?;
-    let reference = crate::image_jobs::load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        ref_id,
-        project_path,
-    )?;
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     // The driving video → frames at the output size (the engine re-resizes internally). Reuses the
     // candle Wan-VACE source-clip loader (`load_source_video_frames`, which reads `sourceClipAssetId`
@@ -1853,16 +2144,16 @@ async fn resolve_candle_scail2_conditioning(
         settings,
         &job.id,
         move |flag| {
-            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-                &rm,
-                &rt,
-                std::slice::from_ref(&reference),
-                Some(flag),
-                None,
-            )?;
-            let mask =
-                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)?;
-            Ok((reference, mask))
+            super::scail2::segment_scail2_references(references, &flag, |reference, flag| {
+                let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                    &rm,
+                    &rt,
+                    std::slice::from_ref(reference),
+                    Some(flag.clone()),
+                    None,
+                )?;
+                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+            })
         },
         move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
@@ -1898,9 +2189,13 @@ pub(super) async fn generate_candle_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
-    // Resolve and size adapters before constructing the cold-load gate. Dense SCAIL folds factors,
-    // but their source tensors coexist during the merge and were not part of the measured base peak.
+    // Resolve adapters before selecting the exact package: packed q4/q8 artifacts refuse adapter
+    // merging, so an adapter request resolves dense bf16 (or fails before any load) rather than
+    // silently reusing a packed directory.
     let adapters = resolve_scail2_adapters(settings, request)?;
+    let resolved = resolve_candle_scail2_model(settings, request, &adapters)?;
+    // Dense SCAIL folds factors, but their source tensors coexist during the merge and were not part
+    // of the measured base peak.
     let adapter_bytes =
         gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
             .ok_or_else(|| {
@@ -1910,10 +2205,11 @@ pub(super) async fn generate_candle_scail2(
             })?;
     let Scail2ColdLoadPlan {
         model_dir,
+        quant,
         admission,
     } = scail2_cold_load_plan(
         &request.model_manifest_entry,
-        resolve_candle_scail2_model_dir(settings)?,
+        resolved,
         adapter_bytes,
         &settings.gpu_id,
     );
@@ -1928,6 +2224,7 @@ pub(super) async fn generate_candle_scail2(
         scheduler: None,
         engine_id,
         model_dir,
+        quant,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),
@@ -2079,6 +2376,7 @@ pub(super) async fn generate_candle_scail2_replace(
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value, bool)> {
     let adapters = resolve_scail2_adapters(settings, request)?;
+    let resolved = resolve_candle_scail2_model(settings, request, &adapters)?;
     let adapter_bytes =
         gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
             .ok_or_else(|| {
@@ -2088,10 +2386,11 @@ pub(super) async fn generate_candle_scail2_replace(
             })?;
     let Scail2ColdLoadPlan {
         model_dir,
+        quant,
         admission,
     } = scail2_cold_load_plan(
         &request.model_manifest_entry,
-        resolve_candle_scail2_model_dir(settings)?,
+        resolved,
         adapter_bytes,
         &settings.gpu_id,
     );
@@ -2106,6 +2405,7 @@ pub(super) async fn generate_candle_scail2_replace(
         scheduler: None,
         engine_id,
         model_dir,
+        quant,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),

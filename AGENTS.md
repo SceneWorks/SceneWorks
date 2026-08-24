@@ -10,10 +10,13 @@
 - Follow [FEATURE_DEVELOPMENT.md](FEATURE_DEVELOPMENT.md) for epic integration
   branches, story PR targets, mirrored inference work, final merge ordering, and
   the CI protections required before using this workflow.
-- Read its *Current state* section before assuming anything about branch
-  protection. As of 2026-08-11 neither SceneWorks nor inference has a merge
-  queue; `main` is `strict: false` and `feature/*` is `strict: true` in both.
-  Queue staging/activation/recovery procedures are obsolete in both repositories.
+- Its *Current repository state* table is the branch-protection reference.
+  Neither repository has a merge queue; `feature/*` is `strict: false` and
+  merge-commit only in both; SceneWorks `main` is `strict: false`, inference
+  `main` is `strict: true`. The skills (`shortcut-plan`, `sceneworks-epic`,
+  `shortcut-story`) are the executable procedure; the document is the contract.
+  Per story: one implementation, one adversarial review against story-local AC,
+  one fix pass, merge on green, one-line closeout — nothing more.
 - The pin-keyed verification gates were **deliberately dismantled** on
   2026-08-15/16 (sc-19758, sc-19751, `e14171984`). A script that exists but is
   disabled or unwired is the designed state — never a blocker, never something

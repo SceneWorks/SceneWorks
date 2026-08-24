@@ -1,24 +1,24 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a27f9295e7c3be1504fbc66b54b0d7126b2e9e282ebe9bdc2788ed12a0651c7f",
+    "sceneWorksRevision": "source-tree:30f88fa8f1d396076ecd514b8839f437cb19e3e9416a303836b2217b97517293",
     "inferenceRevision": "bdca0edf56a6bcc933fabbf69d6d7f5f8e48b6a2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "487f2035f90acd98afd87c4e018314a95619a78f40499f54863944e05e193b0b"
+        "sha256": "bccc29e8ee4d70b59f50171aa1169bd6fd6ad83741eb592c6d54c9ec98f8b89a"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "bc21ccecc2cf2aada65739e53e914d04e38fb4698eb3a117850396bb45f147a1"
+        "sha256": "6d9f22ab12c2ce87f7c9bf14e10182ff91b3706b609994a799903451624717f7"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "0867b5c59ffc50ccd387fda81de9deec44e8ae4ad99ee97c741fb96f3efd6d58"
+        "sha256": "101cb53761c8f6a8cf32e59bfdc33ba638c10fbcddf9df3cceb57edc07b21327"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "57da581fc14e58dabba089b18b58c49264bbbe295e74903574c8858352ad2d51"
+        "sha256": "cbf57eff74a7dafa18f943887299c48c241003d35c1ef38b0d2586a7379e990b"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "8c5f7b0dba6ef384635551a4d61d91c0fcd675e85170b0c5cb6d777a23209a80"
+        "sha256": "18c01af0d6bc8bf4cec3c18f460b16e0d5b9d26cb8028dbb025d03011f99bff8"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -34,7 +34,7 @@
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
-        "sha256": "e3fd775ad37e012e116f6c2e05fa0c08c8de5e60776f17844c738f7fb6444769"
+        "sha256": "08ef7b1f1eae426daba2dba611b548ab779a4d6dadd39772ae3f95f834f72a9a"
       },
       "videoRouteSvd": {
         "path": "crates/sceneworks-worker/src/video_jobs/svd.rs",
@@ -46,7 +46,7 @@
       },
       "videoRouteScail2": {
         "path": "crates/sceneworks-worker/src/video_jobs/scail2.rs",
-        "sha256": "f0e70418357e6e72662d4c729819f69b57eb64220f9d011a2d1d5208b2757a9c"
+        "sha256": "a4ea65a7fbfb476d89371041d55e1f78098fccf3ff1efe25d8d06cc059fe23c4"
       },
       "videoRouteKreaRealtime": {
         "path": "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
@@ -54,11 +54,11 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "e87b9eff754bcfa197f9c8f504d0846c1261010e96c25cfe0407c29f26e44713"
+        "sha256": "e8de5f266621f7b65faf2248515cad9d15f31333f92857eae4d2bc2a046eaea6"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "bd97b32a05808add71e6e615fbd2edac75897dd8d9e94538acc329144387f21a"
+        "sha256": "eea05456be76dc4c2ff04e5a8c7bccc89265c74cabb84f846ad386e985d6c74f"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -66,7 +66,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "2d4fe1efd4113a782667886144276ab0a9d1dc3612842d3028927031f36c468b"
+        "sha256": "c21a03bfb171a532beb5c496d9c6bd9ef1a2a404eda48fe35e6bb1fbd5df54b8"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -172,12 +172,12 @@
       "image": 53,
       "video": 10
     },
-    "cells": 8785,
+    "cells": 8825,
     "publishedCells": 163,
-    "elidedCells": 8622,
+    "elidedCells": 8662,
     "elidedByState": {
-      "Implemented/unverified": 2778,
-      "Missing": 5844
+      "Implemented/unverified": 2786,
+      "Missing": 5876
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -3349,7 +3349,9 @@
         },
         "candle": {
           "tiers": [
-            "bf16"
+            "bf16",
+            "q4",
+            "q8"
           ],
           "modes": [
             "animate_character",
@@ -13051,60 +13053,60 @@
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
-      "implemented": 4,
+      "elided": 12,
+      "implemented": 12,
       "states": {
-        "Implemented/unverified": 4
+        "Implemented/unverified": 12
       }
     },
     {
       "modelId": "scail2_14b",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 4,
+      "coordinates": 12,
       "published": 0,
-      "elided": 4,
+      "elided": 12,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 12
       }
     },
     {
@@ -16599,6 +16601,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16637,6 +16644,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16674,6 +16686,11 @@
         {
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
           "variant": null
         }
       ]

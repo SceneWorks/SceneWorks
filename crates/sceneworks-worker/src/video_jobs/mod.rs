@@ -2423,12 +2423,10 @@ where
     .await
 }
 
-/// Assemble the SCAIL-2 `animate_character` conditioning (`Reference` + reference `Mask` +
-/// `ControlClip`) from an already-loaded reference image + driving frames. The two SAM3
-/// segmentation passes (reference → single painted mask, driving clip → per-frame painted masks)
-/// are supplied as closures so the backend-specific SAM3 module + paint background convention live
-/// at the call site while this orchestration (heartbeat, `ControlClip` shape) is shared (sc-8830 —
-/// collapses the ~100-line MLX/candle `resolve_scail2_conditioning` twin).
+/// Assemble SCAIL-2 `animate_character` conditioning from already-loaded character images +
+/// driving frames. Each reference is independently segmented into its paired color mask; the
+/// backend-specific SAM3 module and background convention stay at the call site while this
+/// orchestration remains shared between MLX and Candle.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2441,10 +2439,10 @@ async fn assemble_scail2_animate_conditioning<FR, FD>(
     segment_driving: FD,
 ) -> WorkerResult<Vec<Conditioning>>
 where
-    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Image, Image)> + Send + 'static,
+    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<(Image, Image)>> + Send + 'static,
     FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Vec<Image>, Vec<Image>)> + Send + 'static,
 {
-    let (reference, ref_mask) = scail2_segment_blocking(
+    let reference_pairs = scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -2460,20 +2458,7 @@ where
         segment_driving,
     )
     .await?;
-    Ok(vec![
-        Conditioning::Reference {
-            image: reference,
-            strength: None,
-        },
-        Conditioning::Mask { image: ref_mask },
-        Conditioning::ControlClip {
-            frames: driving,
-            mask: driving_mask,
-            masking_strength: 1.0,
-            start_frame: 0,
-            mode: ReplacementMode::default(),
-        },
-    ])
+    scail2::scail2_animate_conditioning(reference_pairs, driving, driving_mask)
 }
 
 // `pub(crate)` so `media_jobs`' own ffmpeg-backed tests can reuse `tests::ffmpeg_reachable` —
