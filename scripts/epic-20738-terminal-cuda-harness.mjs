@@ -1109,9 +1109,10 @@ async function nearestExistingParent(candidate) {
   }
 }
 
-async function assertNewConfinedDirectory(candidate, runnerTemp, repositories, label) {
+async function assertNewConfinedDirectory(
+  candidate, runnerTemp, repositories, label, lexicalRunnerTemp = runnerTemp,
+) {
   const target = assertOutsideRepository(candidate, repositories, label);
-  if (!isWithin(runnerTemp, target)) fail(`${label} must be a descendant of the resolved RUNNER_TEMP`);
   try {
     await lstat(target);
     fail(`${label} must not already exist`);
@@ -1120,13 +1121,20 @@ async function assertNewConfinedDirectory(candidate, runnerTemp, repositories, l
   }
   const parent = await nearestExistingParent(target);
   if (!isWithin(runnerTemp, parent.resolved, { allowEqual: true })) {
+    if (!isWithin(path.resolve(lexicalRunnerTemp), target)) {
+      fail(`${label} must be a descendant of the resolved RUNNER_TEMP`);
+    }
     fail(`${label} traverses a symlink or reparse point outside RUNNER_TEMP`);
   }
   const throughResolvedParent = path.resolve(parent.resolved, path.relative(parent.lexical, target));
   if (!isWithin(runnerTemp, throughResolvedParent)) {
+    if (!isWithin(runnerTemp, target)) {
+      fail(`${label} must be a descendant of the resolved RUNNER_TEMP`);
+    }
     fail(`${label} resolves outside RUNNER_TEMP`);
   }
-  return target;
+  assertOutsideRepository(throughResolvedParent, repositories, label);
+  return { target, resolved: throughResolvedParent };
 }
 
 export async function validateTrustedCacheRoot(candidate, repositories, runnerTemp) {
@@ -1139,9 +1147,7 @@ export async function validateTrustedCacheRoot(candidate, repositories, runnerTe
     fail("trusted cache root must be an existing ordinary directory, not a symlink/reparse point");
   }
   const resolved = await realpath(target);
-  if (comparable(resolved) !== comparable(target)) {
-    fail("trusted cache root traverses a symlink or reparse point");
-  }
+  assertOutsideRepository(resolved, repositories, "trusted cache root");
   if (isWithin(resolved, runnerTemp, { allowEqual: true })
     || isWithin(runnerTemp, resolved, { allowEqual: true })) {
     fail("trusted cache root and RUNNER_TEMP must be separate trees");
@@ -1160,20 +1166,21 @@ export async function validateCampaignPaths({
   const resolvedCacheRoot = await validateTrustedCacheRoot(
     cacheRoot, resolvedRepositories, resolvedRunnerTemp,
   );
-  const resolvedOutput = await assertNewConfinedDirectory(
-    output, resolvedRunnerTemp, resolvedRepositories, "output",
+  const outputPaths = await assertNewConfinedDirectory(
+    output, resolvedRunnerTemp, resolvedRepositories, "output", runnerTemp,
   );
-  const resolvedScratch = await assertNewConfinedDirectory(
-    scratch, resolvedRunnerTemp, resolvedRepositories, "scratch",
+  const scratchPaths = await assertNewConfinedDirectory(
+    scratch, resolvedRunnerTemp, resolvedRepositories, "scratch", runnerTemp,
   );
-  if (comparable(resolvedOutput) === comparable(resolvedScratch)
-    || isWithin(resolvedOutput, resolvedScratch) || isWithin(resolvedScratch, resolvedOutput)) {
+  if (comparable(outputPaths.resolved) === comparable(scratchPaths.resolved)
+    || isWithin(outputPaths.resolved, scratchPaths.resolved)
+    || isWithin(scratchPaths.resolved, outputPaths.resolved)) {
     fail("output and scratch must be distinct, non-nested RUNNER_TEMP descendants");
   }
   return {
     runnerTemp: resolvedRunnerTemp,
-    output: resolvedOutput,
-    scratch: resolvedScratch,
+    output: outputPaths.resolved,
+    scratch: scratchPaths.resolved,
     cacheRoot: resolvedCacheRoot,
     repositories: resolvedRepositories,
   };
@@ -1181,20 +1188,18 @@ export async function validateCampaignPaths({
 
 async function assertExistingConfinedTree(candidate, guard, label) {
   const target = assertOutsideRepository(candidate, guard.repositories, label);
-  if (!isWithin(guard.runnerTemp, target)) fail(`${label} escaped RUNNER_TEMP before cleanup`);
   const metadata = await lstat(target);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     fail(`${label} is not a controller-owned ordinary directory before cleanup`);
   }
   const resolved = await realpath(target);
-  if (comparable(resolved) !== comparable(target)) {
-    fail(`${label} was replaced by a symlink or reparse point before cleanup`);
-  }
-  const parent = await realpath(path.dirname(target));
+  assertOutsideRepository(resolved, guard.repositories, label);
+  if (!isWithin(guard.runnerTemp, resolved)) fail(`${label} escaped RUNNER_TEMP before cleanup`);
+  const parent = await realpath(path.dirname(resolved));
   if (!isWithin(guard.runnerTemp, parent, { allowEqual: true })) {
     fail(`${label} parent escaped RUNNER_TEMP before cleanup`);
   }
-  return target;
+  return resolved;
 }
 
 export async function safeRemoveTree(candidate, guard, label = "cleanup target") {
@@ -1233,12 +1238,12 @@ async function sha256File(file) {
 }
 
 export async function hashedFiles(root, { exclude = new Set() } = {}) {
-  const absolute = path.resolve(root);
-  const rootMetadata = await lstat(absolute);
-  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()
-    || comparable(await realpath(absolute)) !== comparable(absolute)) {
-    fail(`evidence root is not an ordinary non-reparse directory: ${absolute}`);
+  const requested = path.resolve(root);
+  const rootMetadata = await lstat(requested);
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    fail(`evidence root is not an ordinary non-reparse directory: ${requested}`);
   }
+  const absolute = await realpath(requested);
   const files = [];
   async function visit(directory) {
     const entries = await readdir(directory, { withFileTypes: true });
@@ -1646,10 +1651,10 @@ function legacyRecoveryProfile(currentProfile) {
 async function ordinaryTreeFiles(root) {
   const absolute = path.resolve(root);
   const metadata = await lstat(absolute);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()
-    || comparable(await realpath(absolute)) !== comparable(absolute)) {
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     fail(`imported prefix root must be an ordinary confined directory: ${absolute}`);
   }
+  const resolvedRoot = await realpath(absolute);
   const files = [];
   async function visit(directory) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -1659,11 +1664,11 @@ async function ordinaryTreeFiles(root) {
         fail(`imported prefix contains a symlink/reparse point: ${candidate}`);
       }
       const resolved = await realpath(candidate);
-      if (!isWithin(absolute, resolved)) {
+      if (!isWithin(resolvedRoot, resolved)) {
         fail(`imported prefix entry escaped its candidate root: ${candidate}`);
       }
-      if (entry.isDirectory()) await visit(resolved);
-      else if (entry.isFile()) files.push(resolved);
+      if (entry.isDirectory()) await visit(candidate);
+      else if (entry.isFile()) files.push(candidate);
       else fail(`imported prefix contains a non-regular entry: ${candidate}`);
     }
   }
