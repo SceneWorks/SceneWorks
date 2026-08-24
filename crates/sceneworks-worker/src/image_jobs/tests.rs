@@ -20912,6 +20912,115 @@ fn sdxl_ldm_entries() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// sc-20644 Wan row — the video lane sources a plan-backed entry by NAMED EXPERT ROLE, claims it
+/// without an `external_base_` id, and its deletable surface is pinned.
+///
+/// Wan is the family that forced the checkpoint plan to grow a vocabulary. Its ComfyUI checkpoint has
+/// two backbones — a high-noise and a low-noise expert, selected per denoise step and not
+/// interchangeable — so it has no single primary to derive. Until `checkpoint_inspector` could tell
+/// the two apart, a compiled Wan plan carried two anonymous `transformer` layers and every consumer
+/// could only refuse it as an ambiguous primary. The inspector half of that is proven executably in
+/// `sceneworks-core`'s own suite (`a_comfyui_wan_tree_compiles_to_two_named_expert_layers`); this is
+/// the worker half.
+///
+/// The Wan lane is candle-only (`cfg(all(not(target_os = "macos"), feature = "backend-candle"))`),
+/// so `cargo test` cannot link it here and its behavioural test first RUNS on the windows-candle CI
+/// lane. What is checkable on every build config — and what this asserts — is that the guards are
+/// live code in the right ORDER, the same posture sc-20636 took for the Z-Image lane.
+///
+/// Failing mutations: delete the plan-source call from `resolve_wan_comfyui_paths`; move it after the
+/// `usable` / `components[]` catalog gates; drop the `plan_backed` disjunct from
+/// `wan_comfyui_available`.
+#[test]
+fn the_wan_video_lane_sources_a_plan_backed_entry_by_expert_role() {
+    let source = include_str!("../video_jobs/candle.rs");
+
+    // The plan source is reached BEFORE every gate that describes a scanned catalog row. A linked
+    // Wan checkpoint has no `usable` flag and no `components[]`, so any of them running first makes
+    // the plan source unreachable.
+    let plan_source_at = source
+        .find("resolve_plan_backed_wan_comfyui_paths(request, settings)?")
+        .expect("the Wan lane must source a plan-backed entry from the plan");
+    for (gate, what) in [
+        (
+            "entry.get(\"usable\").and_then(Value::as_bool)",
+            "the `usable` catalog flag",
+        ),
+        (
+            "entry.get(\"components\").and_then(Value::as_array)",
+            "the `components[]` assembly",
+        ),
+    ] {
+        let gate_at = source
+            .find(gate)
+            .unwrap_or_else(|| panic!("fixture check: {what} must still exist"));
+        assert!(
+            plan_source_at < gate_at,
+            "the plan source must precede {what}; a linked checkpoint has neither"
+        );
+    }
+
+    // Both experts are resolved BY NAME from the plan's own role vocabulary — never positionally,
+    // and never from the catalog's `components[]` role strings.
+    for role in ["TRANSFORMER_HIGH_ROLE", "TRANSFORMER_LOW_ROLE"] {
+        assert!(
+            source.contains(&format!("sceneworks_core::checkpoint_inspector::{role}")),
+            "the Wan lane must name the {role} plan layer explicitly"
+        );
+    }
+    // The two optional in-place artifacts stay optional on the plan route too (sc-10909), and the
+    // T2V-only channel gate is applied to the PLAN's own high expert rather than skipped.
+    assert!(
+        source.contains("&[\"text_encoder\", \"vae\"],"),
+        "the in-place UMT5 encoder and VAE stay OPTIONAL on the plan route"
+    );
+    let gate_at = source
+        .find("if wan_expert_in_channels(&high) != Some(WAN_T2V_IN_CHANNELS) {")
+        .expect("the T2V-only channel gate must exist");
+    assert!(
+        source[plan_source_at..].contains("wan_expert_in_channels(&high)")
+            || gate_at > plan_source_at,
+        "a plan-backed I2V pair must decline for the same reason a scanned one does"
+    );
+
+    // The claim no longer rests on the `external_base_` id prefix alone.
+    let available_at = source
+        .find("pub(super) fn wan_comfyui_available(")
+        .expect("the Wan claim predicate must exist");
+    let available = &source[available_at..available_at + 900.min(source.len() - available_at)];
+    assert!(
+        available.contains("checkpoint_plan_checkpoint_id(&request.model_manifest_entry)"),
+        "a plan-backed Wan entry must be claimable without an `external_base_` id:\n{available}"
+    );
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME -------------------------------
+    for symbol in [
+        "fn resolve_wan_comfyui_paths(",
+        "entry.get(\"usable\").and_then(Value::as_bool)",
+        "entry.get(\"components\").and_then(Value::as_array)",
+        "WAN_COMFYUI_SNAPSHOT_TIERS",
+        // Must OUTLIVE the deletion above.
+        "fn resolve_plan_backed_wan_comfyui_paths(",
+        "fn wan_comfyui_snapshot_dir(",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Wan bespoke surface sc-20651 deletes must be live code: {symbol}"
+        );
+    }
+
+    // The expert roles are the inspector's, spelled once, so the plan writer and the plan reader
+    // cannot drift apart.
+    assert_eq!(
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+        "transformer_high"
+    );
+    assert_eq!(
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE,
+        "transformer_low"
+    );
+}
+
 /// sc-20644 ComfyUI-tree rows (Z-Image, Qwen-Image, FLUX.2) — single-claim conformance and the
 /// bespoke surface sc-20651 deletes, for the three families whose lanes are CANDLE-ONLY.
 ///

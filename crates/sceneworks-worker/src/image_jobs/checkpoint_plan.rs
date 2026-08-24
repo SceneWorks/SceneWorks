@@ -1310,6 +1310,102 @@ pub(crate) fn checkpoint_plan_bespoke_tree(
     }
 }
 
+/// A plan-sourced checkpoint resolved entirely by NAMED ROLE, with no shape-derived primary.
+///
+/// The third and last shape a bespoke lane can want, and the one Wan 2.2 needs: its ComfyUI
+/// checkpoint has no single backbone at all. It carries a high-noise and a low-noise expert, both
+/// selected per denoise step, so there is nothing for [`checkpoint_plan_primary`] to pick and asking
+/// it to pick would be the ambiguity the expert role vocabulary exists to remove.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) struct CheckpointPlanBespokeRoles {
+    /// `(role, pin)` for every role the caller declared that the plan carries, in declaration order.
+    pub(crate) layers: Vec<(&'static str, gen_core::PinnedWeightsFile)>,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl CheckpointPlanBespokeRoles {
+    /// The pin for one REQUIRED role. Panics only on a role the caller did not declare required,
+    /// which is a programming error — a role declared required and absent already refused.
+    pub(crate) fn required(&self, role: &str) -> &gen_core::PinnedWeightsFile {
+        self.optional(role).unwrap_or_else(|| {
+            panic!("role {role:?} was not declared required to checkpoint_plan_bespoke_roles")
+        })
+    }
+
+    /// The pin for an OPTIONAL role: `None` when the plan does not carry it, which is the family's
+    /// signal to fall back to its resident snapshot's own copy.
+    pub(crate) fn optional(&self, role: &str) -> Option<&gen_core::PinnedWeightsFile> {
+        self.layers
+            .iter()
+            .find(|(candidate, _)| *candidate == role)
+            .map(|(_, pin)| pin)
+    }
+}
+
+/// Resolve a plan-backed checkpoint to the exact set of layers a lane names, with no primary.
+///
+/// Takes the manifest ENTRY rather than a request, because the only thing it reads from a request is
+/// `model_manifest_entry` and the caller may be a video job, whose request type is different. That is
+/// also why it is `pub(crate)`: this seam is about checkpoint plans, not about image jobs.
+///
+/// It deliberately does NOT consult the checkpoint adapter, and the omission is the point rather
+/// than an oversight. The adapter supplies two things — the dialect SOURCE SHAPE and the eligible
+/// BACKENDS — and a roles-only resolution needs neither: there is no primary whose shape must be
+/// decided, and the only caller is compiled behind `cfg(backend-candle)`, so "is this backend
+/// eligible" is already a compile-time fact here. Requiring an adapter anyway would add a
+/// cross-repository dependency for its own sake. The family truth this resolution DOES need — which
+/// artifact is which expert — comes from the plan, which is the stronger authority: the inspector
+/// hashed those bytes and the store re-checked them.
+///
+/// Every refusal the other bespoke helpers raise still applies: integrity is fatal, a plan compiled
+/// for another family never feeds this lane, a declared-required role that is absent or ambiguous
+/// refuses by name, and a layer neither list names trips
+/// [`checkpoint_plan_unconsumed_layers`] rather than being silently left unloaded (E7/E8).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn checkpoint_plan_bespoke_roles(
+    entry: &JsonObject,
+    settings: &Settings,
+    family: &str,
+    required_roles: &[&'static str],
+    optional_roles: &[&'static str],
+) -> WorkerResult<Option<CheckpointPlanBespokeRoles>> {
+    let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(entry) else {
+        return Ok(None);
+    };
+    let checkpoint_id = checkpoint_id.to_owned();
+    let store = CheckpointPlanStore::open(&settings.data_dir);
+    let resolved = store
+        .resolve(&checkpoint_id)
+        .map_err(checkpoint_plan_refusal)?;
+    if resolved.family() != family {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:family-mismatch] checkpoint {checkpoint_id:?} compiles to the {:?} \
+             family, but this entry routes to the {family:?} lane; a plan is never loaded by \
+             another family's loader",
+            resolved.family()
+        )));
+    }
+    let mut consumed = std::collections::BTreeSet::new();
+    let mut layers = Vec::with_capacity(required_roles.len() + optional_roles.len());
+    for role in required_roles {
+        let (_, layer_id, pin) = checkpoint_plan_component_from_layers(&resolved, role, role)?;
+        consumed.insert(layer_id);
+        layers.push((*role, pin));
+    }
+    for role in optional_roles {
+        // Present-or-absent is the question; a role present MORE than once is still ambiguous and
+        // still refuses, so this asks the layer table directly rather than swallowing the error.
+        if resolved.layers_with_role(role).next().is_none() {
+            continue;
+        }
+        let (_, layer_id, pin) = checkpoint_plan_component_from_layers(&resolved, role, role)?;
+        consumed.insert(layer_id);
+        layers.push((*role, pin));
+    }
+    checkpoint_plan_unconsumed_layers(&resolved, &consumed)?;
+    Ok(Some(CheckpointPlanBespokeRoles { layers }))
+}
+
 /// The shared body of both bespoke-source helpers: resolve and re-verify the plan, prove it belongs
 /// to this family and this backend, read the shape from the adapter, select the primary, and refuse
 /// a plan whose layers this lane would not consume.

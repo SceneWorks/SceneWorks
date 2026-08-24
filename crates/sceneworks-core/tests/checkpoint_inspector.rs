@@ -1429,3 +1429,130 @@ fn descriptor_family_fallback_and_indexed_hidden_shards_are_fail_closed() {
         .iter()
         .any(|item| item.message.contains("not byte-aligned")));
 }
+
+/// The tensor surface a Wan 2.x DiT expert is recognized by: `blocks.N.{self_attn,cross_attn,ffn}`
+/// plus the per-block `modulation`. The `.ffn.` + bare `modulation` pairing is what separates Wan
+/// from Anima (adaln modulation) and LTX (attn1/attn2, no ffn) in `detect_transformer_family`.
+fn wan_expert_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("blocks.0.self_attn.q.weight", "BF16"),
+        ("blocks.0.cross_attn.q.weight", "BF16"),
+        ("blocks.0.ffn.0.weight", "BF16"),
+        ("blocks.0.modulation", "BF16"),
+        ("patch_embedding.weight", "BF16"),
+    ]
+}
+
+/// sc-20644 — a ComfyUI Wan 2.2 tree compiles to TWO NAMED expert layers, not two anonymous
+/// `transformer` layers.
+///
+/// Wan 2.2's high-noise and low-noise experts are selected per denoise step and are not
+/// interchangeable. Before this vocabulary existed, both landed under the single role `transformer`
+/// (the path-role inference maps `unet/` and `diffusion_models/` onto it), so a compiled Wan plan
+/// said "two transformers" and every consumer could only refuse it as an ambiguous primary. Naming
+/// them is what makes the plan usable.
+///
+/// Failing mutations: return `role` unconditionally from `refine_multi_expert_role`; drop
+/// `"wan-video"` from `MULTI_EXPERT_FAMILIES`; match the marker as a bare substring.
+#[test]
+fn a_comfyui_wan_tree_compiles_to_two_named_expert_layers() {
+    let temp = TempDir::new().unwrap();
+    let tree = temp.path().join("wan22");
+    write_safetensors(
+        &tree.join("unet/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"),
+        &wan_expert_entries(),
+        None,
+    );
+    write_safetensors(
+        &tree.join("unet/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"),
+        &wan_expert_entries(),
+        None,
+    );
+
+    let result = inspect_checkpoint(&linked_request(temp.path(), "wan22"));
+    assert!(result.is_runnable(), "{:?}", result.diagnostics);
+    assert_eq!(result.plans[0].family, "wan-video");
+
+    let mut roles: Vec<&str> = result.plans[0]
+        .layers
+        .iter()
+        .map(|layer| layer.role.as_str())
+        .collect();
+    roles.sort_unstable();
+    assert_eq!(
+        roles,
+        ["transformer_high", "transformer_low"],
+        "the two experts must be NAMED; two `transformer` layers is the ambiguity this fixes"
+    );
+
+    // Each named role resolves to its own file — the point of naming them at all.
+    let layer_for = |role: &str| -> String {
+        result.plans[0]
+            .layers
+            .iter()
+            .find(|layer| layer.role == role)
+            .map(|layer| format!("{:?}", layer.source))
+            .unwrap_or_else(|| panic!("no {role} layer"))
+    };
+    assert!(layer_for("transformer_high").contains("high_noise"));
+    assert!(layer_for("transformer_low").contains("low_noise"));
+}
+
+/// sc-20644 — the expert vocabulary is ADDITIVE: it cannot reclassify any other family's artifact,
+/// whatever the file happens to be called, and it cannot reclassify a SINGLE-expert Wan checkpoint.
+///
+/// This is the half the shipped goldens cannot prove on their own. The goldens show that every
+/// existing fixture still compiles identically; they do not show that a hostile *name* leaves them
+/// alone, because none of them is named that way. Both guards are exercised here directly.
+///
+/// Failing mutations: drop the family test from `refine_multi_expert_role` (the Qwen row gets an
+/// expert role); drop the both-markers-is-ambiguous arm from `expert_marker` (the merged Wan file
+/// silently becomes an expert).
+#[test]
+fn the_expert_role_vocabulary_cannot_reclassify_another_family_or_a_single_expert_wan() {
+    let temp = TempDir::new().unwrap();
+
+    // A Qwen-Image transformer whose file name carries the marker: still a plain `transformer`.
+    write_safetensors(
+        &temp
+            .path()
+            .join("qwen/unet/qwen_image_high_noise_fp8_e4m3fn.safetensors"),
+        &qwen_transformer_entries(),
+        None,
+    );
+    let qwen = inspect_checkpoint(&linked_request(temp.path(), "qwen"));
+    assert!(qwen.is_runnable(), "{:?}", qwen.diagnostics);
+    assert_eq!(qwen.plans[0].family, "qwen-image");
+    assert_eq!(
+        qwen.plans[0]
+            .layers
+            .iter()
+            .map(|layer| layer.role.as_str())
+            .collect::<Vec<_>>(),
+        ["transformer"],
+        "a non-multi-expert family is never considered for the refinement"
+    );
+
+    // A Wan checkpoint whose name carries BOTH markers, and one that carries neither: both stay
+    // plain `transformer`, because an ambiguous or absent marker is not evidence.
+    for name in [
+        "wan2.2_t2v_high_noise_and_low_noise_merged_14B.safetensors",
+        "wan2.2_t2v_14B_merged.safetensors",
+    ] {
+        let dir = temp.path().join("wan-single");
+        let _ = fs::remove_dir_all(&dir);
+        write_safetensors(&dir.join("unet").join(name), &wan_expert_entries(), None);
+        let result = inspect_checkpoint(&linked_request(temp.path(), "wan-single"));
+        assert!(result.is_runnable(), "{name}: {:?}", result.diagnostics);
+        assert_eq!(result.plans[0].family, "wan-video", "{name}");
+        assert_eq!(
+            result.plans[0]
+                .layers
+                .iter()
+                .map(|layer| layer.role.as_str())
+                .collect::<Vec<_>>(),
+            ["transformer"],
+            "{name}: an ambiguous or absent marker leaves the single-transformer role alone"
+        );
+    }
+}

@@ -1443,6 +1443,14 @@ fn resolve_wan_comfyui_paths(
     if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
         return Ok(None);
     }
+    // A plan-backed entry's bytes come from its compiled plan's own verified expert layers, never
+    // from a live `external_base_*` catalog scan — the only source a LINKED Wan tree has, and the
+    // only one the inspector hashed and the store re-checked (sc-20644 Wan row). Reached before the
+    // `usable` / `components[]` gates below, which are properties of a SCANNED catalog row that a
+    // linked checkpoint does not have and never will.
+    if let Some(paths) = resolve_plan_backed_wan_comfyui_paths(request, settings)? {
+        return Ok(Some(paths));
+    }
     if entry.get("usable").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
     }
@@ -1461,20 +1469,7 @@ fn resolve_wan_comfyui_paths(
     else {
         return Ok(None);
     };
-    let Some(snapshot_root) =
-        huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)
-    else {
-        return Ok(None);
-    };
-    let Some(snapshot_dir) = WAN_COMFYUI_SNAPSHOT_TIERS
-        .iter()
-        .map(|tier| snapshot_root.join(tier))
-        .find(|dir| {
-            dir.join("text_encoder").is_dir()
-                && dir.join("vae").is_dir()
-                && dir.join("tokenizer").join("tokenizer.json").is_file()
-        })
-    else {
+    let Some(snapshot_dir) = wan_comfyui_snapshot_dir(settings) else {
         return Ok(None);
     };
     let high = crate::paths::normalize_app_managed_model_path(
@@ -1512,12 +1507,100 @@ fn resolve_wan_comfyui_paths(
     }))
 }
 
+/// The PLAN-sourced counterpart of [`resolve_wan_comfyui_paths`] (epic 20398, sc-20644).
+///
+/// Wan is the family that needed the checkpoint plan to grow a vocabulary. Its ComfyUI checkpoint has
+/// TWO backbones — a high-noise and a low-noise expert, selected per denoise step and not
+/// interchangeable — so it has no single primary to derive, and until the inspector could tell the
+/// two apart a compiled Wan plan said only "two transformer layers" and was unusable. It now
+/// compiles to the named `transformer_high` / `transformer_low` roles this resolves by name.
+///
+/// The in-place UMT5 encoder and Wan VAE stay OPTIONAL, exactly as they are on the catalog path
+/// (sc-10909): a tree that carries them uses them, a tree that does not falls back to the resident
+/// snapshot tier's own. Anything the plan carries that is in NEITHER list refuses rather than going
+/// unloaded.
+///
+/// The T2V-only channel gate is applied here too, against the plan's own verified high expert, so a
+/// plan-backed I2V pair declines for the same reason a scanned one does rather than failing with a
+/// shape error at generate.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_plan_backed_wan_comfyui_paths(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiWanPaths>> {
+    let Some(plan) = crate::image_jobs::checkpoint_plan_bespoke_roles(
+        &request.model_manifest_entry,
+        settings,
+        "wan-video",
+        &[
+            sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+            sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE,
+        ],
+        &["text_encoder", "vae"],
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot_dir) = wan_comfyui_snapshot_dir(settings) else {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] a compiled Wan checkpoint needs the UMT5 encoder, \
+             VAE and tokenizer from a resident {WAN_COMFYUI_SNAPSHOT_REPO} tier, which a ComfyUI \
+             expert pair does not ship — install Wan 2.2 T2V from the Model Manager, then run this \
+             checkpoint again"
+        )));
+    };
+    let high = plan
+        .required(sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE)
+        .loader_path()
+        .to_path_buf();
+    if wan_expert_in_channels(&high) != Some(WAN_T2V_IN_CHANNELS) {
+        return Ok(None);
+    }
+    Ok(Some(ComfyuiWanPaths {
+        low: plan
+            .required(sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE)
+            .loader_path()
+            .to_path_buf(),
+        te: plan
+            .optional("text_encoder")
+            .map(|pin| pin.loader_path().to_path_buf()),
+        vae: plan
+            .optional("vae")
+            .map(|pin| pin.loader_path().to_path_buf()),
+        high,
+        snapshot_dir,
+    }))
+}
+
+/// The first fully-present `SceneWorks/wan2.2-t2v-a14b-candle` tier, or `None`. One probe, both
+/// routes — the catalog scan answers `Ok(None)` ("not this lane's"), the plan route answers with a
+/// typed refusal, because a plan-backed checkpoint has already been claimed.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_comfyui_snapshot_dir(settings: &Settings) -> Option<PathBuf> {
+    let root = huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)?;
+    WAN_COMFYUI_SNAPSHOT_TIERS
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| {
+            dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+                && dir.join("tokenizer").join("tokenizer.json").is_file()
+        })
+}
+
 /// True when this is a candle-runnable in-place ComfyUI Wan2.2 T2V job: an `external_base_*` model whose
 /// forwarded row is a usable wan-video with both expert components + a resident snapshot. Mirrors the
 /// image comfyui availability predicates.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn wan_comfyui_available(request: &VideoRequest, settings: &Settings) -> bool {
-    request.model.starts_with("external_base_")
+    // A PLAN-BACKED entry is claimable without an `external_base_` id: that prefix names a row the
+    // catalog assembled by scanning, and a linked checkpoint has no such row and never will. Gating
+    // the claim on it would have left every imported Wan checkpoint with no lane at all — which is
+    // the whole capability the row restores (sc-20644 Wan row).
+    let plan_backed =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+            .is_some();
+    (plan_backed || request.model.starts_with("external_base_"))
         && matches!(resolve_wan_comfyui_paths(request, settings), Ok(Some(_)))
 }
 
