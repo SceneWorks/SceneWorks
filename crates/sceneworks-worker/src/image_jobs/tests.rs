@@ -21133,7 +21133,7 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
         ),
         (
             "lora",
-            sdxl_request(json!({ "loras": [{ "name": "style", "weight": 0.4 }] })),
+            sdxl_request(json!({ "loras": [fx.installed_lora("sdxl-style")] })),
         ),
         (
             "hires",
@@ -21153,14 +21153,23 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
             1,
             "{label}: exactly one lane may claim a plan-backed SDXL request, got {claimants:?}"
         );
+        // Through the PRODUCTION seam, which propagates a lane's `Err` with `?`. The
+        // `*_available` probes `resolve_image_route` consults turn a production error into
+        // `false`, so a request that KILLS the job would read here as "declined" (review major 4).
         assert!(
-            resolve_image_route(request, &fx.settings).is_some(),
+            prepare_image_route(request, &fx.settings)
+                .unwrap_or_else(|error| panic!(
+                    "{label}: route preparation must not fail for a plan-backed request: {error}"
+                ))
+                .is_some(),
             "{label}: a plan-backed request must never fall through to the procedural stub"
         );
     }
     let route_of = |label: &str| {
         let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
-        resolve_image_route(request, &fx.settings)
+        prepare_image_route(request, &fx.settings)
+            .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
+            .map(|prepared| prepared.kind())
     };
     assert_eq!(route_of("t2i"), Some(ImageRoute::CheckpointPlan));
     assert_eq!(route_of("edit"), Some(ImageRoute::SdxlImported));
