@@ -8817,8 +8817,11 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
     let cancel = gen_core::CancelFlag::new();
     let mut steps_seen = 0u32;
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.75, None);
-    let (w, h, pixels) = flux2_control_generate_one(
+    let (w, h, pixels) = flux2_control_generate_one_scoped(
         generator.as_ref(),
+        // A directly-loaded generator has no live request evaluation to admit against; production
+        // always supplies one (see `generate_flux2_dev_control_stream`).
+        None,
         "a person standing in a meadow, photorealistic",
         512,
         512,
@@ -15053,8 +15056,11 @@ fn matrix_flux2_render(
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
     let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = flux2_control_generate_one(
+    let (_, _, pixels) = flux2_control_generate_one_scoped(
         generator,
+        // A directly-loaded generator has no live request evaluation to admit against; production
+        // always supplies one (see `generate_flux2_dev_control_stream`).
+        None,
         "a person standing in a meadow, photorealistic",
         side,
         side,

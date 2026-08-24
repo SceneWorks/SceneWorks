@@ -28,10 +28,11 @@ const EXPECTED_IMAGE_COUNT = 53;
 // than by omission, and admitting one would need the same three things video needed here.
 const MATRIX_MODALITIES = new Set(["image", "video"]);
 const EXPECTED_VIDEO_COUNT = 10;
-// SC-18218 removed FLUX.2-dev from the MLX staged-residency census: the pinned MLX provider is
-// eager/resident-only, so counting its generic route as staged coverage would contradict the captured
-// contract. Bernini is the mirror case — inference sc-18609 made its DECLARED MLX rung-4 ladder
-// actually reachable on both variants, so it belongs in the census.
+// SC-18218 removed FLUX.2-dev from the MLX staged-residency census when the then-pinned provider was
+// eager/resident-only; sc-20799 REVERSED that at pin 42cab15ba4, where all three Dev MLX providers
+// declare selectable Sequential staged residency, so flux2_dev is now census-required (the assertion
+// direction flipped with the pin). Bernini is the older mirror case — inference sc-18609 made its
+// DECLARED MLX rung-4 ladder actually reachable on both variants, so it belongs in the census.
 //
 // Neither fact is a total. This census used to be pinned to an exact population, which meant hand-
 // renewing 37 -> 38 for a reachability change that had nothing to do with the contract being guarded,
@@ -600,9 +601,10 @@ export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
       )
       .map((cell) => cell.modelId),
   );
-  if (staged.has("flux2_dev")) {
+  if (!staged.has("flux2_dev")) {
     throw new Error(
-      "flux2_dev claims MLX staged coverage, but SC-18218 measured the pinned provider as Resident-only",
+      "flux2_dev lost its MLX staged coverage; at pin 42cab15ba4 all three Dev providers declare " +
+        "selectable Sequential staged residency (sc-20799 retired the SC-18218 resident-only pin)",
     );
   }
   if (!staged.has("bernini_image")) {
@@ -5097,7 +5099,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   return matrix;
 }
 
-function renderMarkdown(matrix) {
+export function renderMarkdown(matrix) {
   const lines = [
     "# Generated memory-ladder matrix",
     "",

@@ -22,7 +22,7 @@
     "descriptorMlxRuntime": "84c822f6be536dc733916d79319e9a47f2aaf763f6babe37c4fcadd9a4c9cd7b",
     "descriptorPreviewFacts": "7fb9b2cf592f4d9c87578791baecd181486febc6d0882bbf214416ef30d2b1ed",
     "exceptionRegister": "6cae1b3f611bbc98dc1ac60392d275838ba095e6788032422f2115333db20aa8",
-    "manifest": "9fafad2bed71a4e90303836221823f82d72b23cbc1a92a9cbf4bb86ce6de731a",
+    "manifest": "20dcf3112c28d8e2c73b0daca2bf135314bfa7d01c4cb78cc43fb5a904c8996c",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
     "routerCandle": "307f4fe042e3e2ad0c09be1995d5a5cc5aecd08b1c3815e3ec4a3d7f2659c58d",
     "routerCatalog": "cc9cf0a18b0196b75841fdd4a1689be8c92a82df5336b43ffcb45e953b0ba51d",
@@ -48,7 +48,7 @@
     "workerDispatch": "38a455fc266032473665fa78f7f0fe346af4ed2fbe90c13929188de508040a11",
     "workerEngineTable": "03c64b8abe9c47424d601d4def9a255ef4c9da081098d972a23925bbce16e63b",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "d13158c21581e1b5f9b9b72ff9c0c98736a9cf6591360ab0338057062ea1626a",
+    "workerImageDispatch": "7b67ed2559b033fdcc02822b1c11783c0b2a16ce4171f1cb39b26aed91d1c526",
     "workerImageKreaImported": "0ce6e705505c9e75ead843201d2cb88f996962247b6f4b5d8e19bab326401d2c",
     "workerImageMageFinetuned": "84dad283dd6e8f747b95ebec700cb27a2f30d51488caddcaa887910fb61b50c5",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
@@ -61,13 +61,13 @@
     "workerVideoCandle": "4527f7c7f42bac9d65daa2004f993657391ec3cdc872bac0bc9e2c012c93e949",
     "workerVideoDispatch": "ee8f351bde3163b092d37e3ad2c462e6960b5631c00ea02526e923d62d45fb03",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "ad1a8bf109ab85e4b6c3bcb0a5fd8782be7553d3a6b66a8b23a896779eeba0c5",
+    "workerVideoLtx": "093c8238dfae3c784c70da50ac879a8b275e113915ef38732355a77737bedaf5",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "49e53adb08ea322e674150e6f2d6eb7183e915d6df2b6eb3e5ffd3c6acaa24a2",
     "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "466e9a6a9fc26d3ee3bb185685278c1ac8b38b4325fd6e430c1447a397f52462",
-    "workerVideoWan": "7dc50f0379dd6c57374c63ab8e097d82d79a61370cc6a6d6d99e84505989ef8e"
+    "workerVideoWan": "3c68363467af47841f4103b5fa34dd39ee6ca05d480ecde6b2dc9b45966a8cdd"
   },
   "models": [
     {
@@ -1731,13 +1731,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [

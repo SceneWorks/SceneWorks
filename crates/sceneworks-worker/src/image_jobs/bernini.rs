@@ -109,11 +109,11 @@ fn bernini_image_raw_settings(
 /// forwarded). Adapters are installed when the generator is loaded rather than carried by this
 /// per-image request: the MLX path remains adapter-free, while the candle path installs the resolved
 /// request stack.
+// The MLX lane and the shared `image_jobs/tests.rs` cases are this delegator's only callers; the
+// candle lane calls `bernini_image_generate_one_with_memory` directly, so a candle non-test lib
+// build would otherwise see it as dead code under `-D warnings`.
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(target_os = "macos", test))]
 fn bernini_image_generate_one(
     generator: &dyn Generator,
     prompt: &str,
@@ -129,7 +129,58 @@ fn bernini_image_generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    // The MLX still lane has no shared Candle memory evaluation, so the honest values are
+    // `None`/`None` rather than a fabricated selection. With both `None`,
+    // [`bernini_image_generate_one_with_memory`] is byte-identical to the historical
+    // `generator.generate` call: `generate_with_scope` opens no request scope, and
+    // `plan_request_execution_domains` returns early on a `request.memory` of `None`.
+    bernini_image_generate_one_with_memory(
+        generator,
+        prompt,
+        negative_prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        task,
+        conditioning,
+        None,
+        None,
+        preview,
+        cancel,
+        on_progress,
+    )
+}
+
+/// [`bernini_image_generate_one`] plus the shared declaration-driven memory evaluation for this
+/// render (sc-20799). `memory` is the provider-selected quality-preserving lever set; the
+/// `MemoryRunContext` is the exact pre-load selection the provider re-validates and opens a request
+/// scope against. Both are `None` on the MLX lane and on any Candle render the shared evaluator
+/// declined.
+#[allow(clippy::too_many_arguments)]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn bernini_image_generate_one_with_memory(
+    generator: &dyn Generator,
+    prompt: &str,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    task: &'static str,
+    conditioning: Vec<Conditioning>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    preview: gen_core::PreviewSink,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
         width,
@@ -139,6 +190,7 @@ fn bernini_image_generate_one(
         steps: Some(steps),
         guidance,
         conditioning,
+        memory,
         // A single still: `frames == 1` makes the engine return `GenerationOutput::Images`.
         frames: Some(1),
         video_mode: Some(task.to_owned()),
@@ -146,9 +198,16 @@ fn bernini_image_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&request, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("Bernini image generation failed: {error}")))?;
+    // The adopted safety/lifecycle seam every other image lane renders through: it runs the
+    // provider's memory safety check, opens exactly one request scope for an optimized selection,
+    // and plans the typed execution domains onto `request.memory`.
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_strategy_context,
+        on_progress,
+    )
+    .map_err(|error| WorkerError::Engine(format!("Bernini image generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
             let image = images
@@ -451,13 +510,47 @@ fn candle_bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
 /// The load-time [`Quant`] a resolved candle Bernini tier subfolder loads at: `q4/` ⇒ [`Quant::Q4`],
 /// `q8/` ⇒ [`Quant::Q8`], `bf16/` ⇒ `None` (dense). Passed to [`load_spec`] so the packed tiers
 /// (validated clean on sm_120, sc-11003) build packed while the default stays dense.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    all(test, target_os = "macos"),
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn candle_bernini_tier_quant(tier: &str) -> Option<Quant> {
     match tier {
         "q4" => Some(Quant::Q4),
         "q8" => Some(Quant::Q8),
         _ => None,
     }
+}
+
+/// The manifest/evidence TIER KEY for a resolved candle Bernini load quant — the inverse of
+/// [`candle_bernini_tier_quant`] over the three published tiers. The shared memory evaluator
+/// (`candle_memory_strategy::evaluate_shared_image`) is keyed by this string, and
+/// `candle_memory_strategy::numeric_tier` recognizes exactly `"bf16" | "q8" | "q4"`; a legacy flat
+/// snapshot resolves to quant `None`, which is dense — i.e. `bf16` — so this total mapping covers
+/// every value [`resolve_candle_bernini_tier_dir_and_quant`] can return.
+#[cfg(any(
+    all(test, target_os = "macos"),
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn candle_bernini_tier_key(quant: Option<Quant>) -> &'static str {
+    match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        _ => "bf16",
+    }
+}
+
+/// The reference count the candle Bernini STILL route carries for an engine task string. The pinned
+/// `candle-gen-bernini` `route_ok` still arm requires EXACTLY 0 references for its "text_to_image"
+/// mode key and EXACTLY 1 for "edit" — so `i2i` (which seeds the single `Conditioning::Reference`)
+/// is 1 and `t2i` is 0. Never a worker guess: it is the same `task` string the request is built
+/// with, so the declared coordinate and the engine's own gate cannot drift apart.
+#[cfg(any(
+    all(test, target_os = "macos"),
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn candle_bernini_still_reference_count(task: &str) -> u32 {
+    u32::from(task == "i2i")
 }
 
 /// Resolve the candle Bernini `(weights_dir, load-time quant)` for a generation: descend the resolved
@@ -545,6 +638,18 @@ async fn generate_candle_bernini_image_stream(
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let (weights_dir, quant) = resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
+    // sc-20799: the evidence/manifest axes the shared evaluator is keyed by. `tier_key` names the
+    // tier the disk-probing resolver ACTUALLY landed on (via its load quant), not a manifest
+    // re-derivation of what was requested — the same rule base.rs follows.
+    let tier_key = candle_bernini_tier_key(quant);
+    // `MemoryRouteMode::from_request` accepts this lane's two spellings ("image_generation" and
+    // "text_to_image" both map to TextToImage, "edit_image" to EditImage), and
+    // `candle_memory_strategy::request_mode` binds them to `MemoryMode::TextToImage` /
+    // `MemoryMode::Edit`, whose keys are the "text_to_image" / "edit" the engine's still `route_ok`
+    // matches. `candle_base_memory_request_mode` is base.rs's per-provider canonicalization; it is
+    // the identity for `bernini`, and calling it keeps this lane on the shared rule.
+    let shared_admission_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    let reference_count = candle_bernini_still_reference_count(task);
     let adapters = resolve_adapters(request, settings)?;
     let adapter_resident_bytes = bernini_adapter_resident_bytes(&adapters, quant)?;
     // Bernini still-image tiers have not been CUDA-calibrated. Keep the exact load-time weight and
@@ -598,8 +703,117 @@ async fn generate_candle_bernini_image_stream(
 
     // Load the resolved tier subfolder at its matching quant: `bf16/` dense (quant `None`), or the
     // packed `q4/`|`q8/` tree with `Quant::Q4`|`Quant::Q8` (sc-11003).
-    let spec = load_spec(weights_dir, quant, adapters, None)
-        .with_offload_policy(offload_policy);
+    //
+    // sc-20799: `with_resolved_route` is REQUIRED, not decorative. Both declaration lookups in
+    // `memory_route_registry` compare `spec.resolved_route` against the manifest entry's `id`
+    // (`evaluate_declared_candle_load_shape_for_request_with` and
+    // `declared_candle_request_strategy_contract_with` both REFUSE on a mismatch), and this lane's
+    // manifest id is `bernini_image` while the engine/provider id is `bernini`.
+    let adapter_count = adapters.len();
+    let mut strategy_spec = load_spec(weights_dir, quant, adapters, None)
+        .with_offload_policy(offload_policy)
+        .with_resolved_route(request.model.clone());
+    // Mirrors base.rs's generic candle stream. For this provider it is a no-op today: the
+    // `bernini_image` candle declaration has no `bounded_transformer_residency` rung, so
+    // `has_relevant_btr_declaration` is `Ok(false)` and the spec is returned untouched, and the
+    // registry rule for `bernini` sets `legacy_shaping: false`, so `apply_registered_load_shape`
+    // also returns it untouched. Keeping the call means a future BTR declaration shapes this lane
+    // exactly as it shapes every other one instead of silently skipping it.
+    strategy_spec = apply_declared_candle_image_load_shape(
+        engine_id,
+        Some(tier_key),
+        shared_admission_mode,
+        &request.model_manifest_entry,
+        strategy_spec,
+        // No sequential selection on this lane: the engine declares StagedResidency Missing and the
+        // registry rule sets `requires_sequential_selection: false`.
+        false,
+    );
+
+    // Live device budget, mirroring base.rs: credit the reclaimable pool the imminent single-slot
+    // evict will produce, then cap it to the configured CUDA ceiling.
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
+    let budget =
+        raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
+    // The same manifest-curve pricing base.rs uses for every non-receipt-priced provider. Bernini is
+    // NOT receipt-priced (`candle_memory_strategy::is_receipt_priced`), so the resident estimate is
+    // the manifest row plus the independently resident packed-adapter bytes, and those same bytes
+    // are passed again as the runtime overlay — exactly base.rs's non-receipt-priced recipe.
+    //
+    // ⚠️ Today this is `None`: the `bernini_image` manifest `candle` block declares a memory-strategy
+    // contract but carries NO `vramGbByTier` and NO `minMemoryGb`, and the Windows/CUDA real-weight
+    // campaign that would mint them does not exist yet (the declaration's own comment says so). A
+    // `None` predicted peak makes `evaluate_shared_image` return `Ok(None)` — an explicit,
+    // logged decline, NOT a swallowed error and NOT a fabricated floor. The lane then renders on the
+    // established on-disk floor gate below, and lights up on its own the day a measured row lands.
+    let predicted_peak_gb = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier_key,
+        adapter_resident_bytes,
+    );
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+        engine_id,
+        &request.model,
+        &strategy_spec,
+        candle_certified_load_spec(
+            engine_id,
+            settings,
+            &strategy_spec,
+            &request.model_manifest_entry,
+            tier_key,
+        ),
+        &request.model_manifest_entry,
+        tier_key,
+        shared_admission_mode,
+        // The still route accepts an absent overlay or exactly "lora"; the declaration's two
+        // overlay-bearing rows are keyed on the same spelling.
+        (adapter_count > 0).then_some("lora"),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            // A Bernini still is one frame of one image; `route_ok` requires exactly this.
+            batch: 1,
+            frames: 1,
+            reference_count,
+        },
+        reference_count > 0,
+        // This lane has no PiD, no hires-fix second pass, and no phase plan — there is nothing to
+        // derive these from, so they are honest constants rather than invented values.
+        false,
+        false,
+        false,
+        budget,
+        predicted_peak_gb,
+        adapter_resident_bytes,
+        if reclaimable_gb > 0.0 {
+            gen_core::MemoryCacheState::Warm
+        } else {
+            gen_core::MemoryCacheState::Cold
+        },
+    )?;
+    if memory_evaluation.is_none() {
+        tracing::info!(
+            model = %request.model,
+            engine = engine_id,
+            tier = tier_key,
+            mode = shared_admission_mode,
+            has_predicted_peak = predicted_peak_gb.is_some(),
+            has_budget = budget.is_some(),
+            "candle bernini still: the shared memory-strategy evaluator declined this request; \
+             rendering on the on-disk weights floor admission only (sc-20799)"
+        );
+    }
+    let generation_memory = memory_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.memory);
+    let memory_strategy_context = memory_evaluation
+        .and_then(|evaluation| optimized_shared_memory_context(engine_id, evaluation.context));
+
+    let spec = strategy_spec;
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -608,7 +822,7 @@ async fn generate_candle_bernini_image_stream(
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(tx, seeds, move |_index, seed, preview, on_progress| {
-                let (out_w, out_h, pixels) = bernini_image_generate_one(
+                let (out_w, out_h, pixels) = bernini_image_generate_one_with_memory(
                     generator,
                     &prompt,
                     negative_prompt.clone(),
@@ -619,6 +833,8 @@ async fn generate_candle_bernini_image_stream(
                     guidance,
                     task,
                     conditioning.clone(),
+                    generation_memory,
+                    memory_strategy_context.as_ref(),
                     preview,
                     &cancel,
                     on_progress,
@@ -644,4 +860,79 @@ async fn generate_candle_bernini_image_stream(
         asset_writes,
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// sc-20799: the two pure axes the Candle Bernini still lane hands the shared memory evaluator.
+// Host-runnable (macOS) even though the lane itself is `not(macos) + backend-candle`, because the
+// axes are pure string/quant mappings. Everything asserted here is copied from the pinned
+// `candle-gen-bernini` contract at 42cab15ba4d84b6356a475c9957bea12f4ecf6c7.
+// ---------------------------------------------------------------------------
+#[cfg(all(test, target_os = "macos"))]
+mod candle_bernini_memory_axis_tests {
+    use super::*;
+
+    /// `candle_bernini_tier_key` is the exact inverse of `candle_bernini_tier_quant` over the three
+    /// published tier subdirs, so the tier the disk probe LANDED on is the tier key the evaluator
+    /// (and any later calibration row) is looked up by.
+    #[test]
+    fn tier_key_round_trips_every_published_tier() {
+        for tier in ["bf16", "q8", "q4"] {
+            assert_eq!(
+                candle_bernini_tier_key(candle_bernini_tier_quant(tier)),
+                tier,
+                "candle Bernini tier {tier} must round-trip through its load quant"
+            );
+        }
+    }
+
+    /// A legacy flat snapshot resolves to quant `None`, which is the dense tree — `bf16`, never a
+    /// packed key. `resolve_candle_bernini_tier_dir_and_quant` returns exactly that for a flat root.
+    #[test]
+    fn dense_load_quant_keys_bf16() {
+        assert_eq!(candle_bernini_tier_key(None), "bf16");
+    }
+
+    /// The pinned `route_ok` still arm requires EXACTLY 1 reference for its "edit" mode key and
+    /// EXACTLY 0 for "text_to_image". The lane derives both from the same `task` string it builds
+    /// the engine request with, so the declared coordinate cannot drift from the conditioning.
+    #[test]
+    fn still_reference_count_matches_the_engine_route_gate() {
+        assert_eq!(
+            candle_bernini_still_reference_count(bernini_image_engine_task("edit_image")),
+            1,
+            "an i2i still seeds exactly one Conditioning::Reference"
+        );
+        assert_eq!(
+            candle_bernini_still_reference_count(bernini_image_engine_task("image_generation")),
+            0,
+            "a t2i still carries no reference"
+        );
+        assert_eq!(
+            candle_bernini_still_reference_count(bernini_image_engine_task("text_to_image")),
+            0,
+            "the text_to_image spelling is the same referenceless still as image_generation"
+        );
+    }
+
+    /// Every request-mode spelling this lane can hand `evaluate_shared_image` must be one
+    /// `MemoryRouteMode::from_request` accepts, and must land on the coordinate the `bernini_image`
+    /// manifest declaration and the `bernini` registry rule actually declare. A spelling it rejects
+    /// makes the evaluator return `Ok(None)` silently.
+    #[test]
+    fn lane_request_modes_map_to_the_declared_route_coordinates() {
+        use crate::memory_route_registry::MemoryRouteMode;
+        assert_eq!(
+            MemoryRouteMode::from_request("image_generation"),
+            Some(MemoryRouteMode::TextToImage)
+        );
+        assert_eq!(
+            MemoryRouteMode::from_request("text_to_image"),
+            Some(MemoryRouteMode::TextToImage)
+        );
+        assert_eq!(
+            MemoryRouteMode::from_request("edit_image"),
+            Some(MemoryRouteMode::EditImage)
+        );
+    }
 }

@@ -443,6 +443,13 @@ const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
 const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
 const SANA_MODES: &[MemoryRouteMode] =
     &[MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage];
+/// SC-20799: the two still modes candle-gen-bernini's `route_ok` admits — its still arm matches the
+/// mode keys "text_to_image" (0 references) and "edit" (exactly 1), the latter reached through
+/// `MemoryRouteMode::EditImage`. Deliberately NOT `MemoryRouteMode::ImageToImage`: that spelling maps
+/// to `MemoryMode::ImageToImage`, whose key the still arm does not match, and it is not in the
+/// `bernini_image` entry's `capabilities` either.
+const BERNINI_STILL_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::TextToImage, MemoryRouteMode::EditImage];
 const IDEOGRAM_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::TextToImage,
     MemoryRouteMode::ImageToImage,
@@ -895,6 +902,99 @@ const RULES: &[MemoryRouteRule] = &[
         modes: SANA_MODES,
         load_profiles: PLAIN,
         requires_sequential_selection: true,
+        legacy_shaping: false,
+    },
+    // SC-20799 gap 1: the three Anima Candle routes. One provider contract builder serves all three
+    // (candle-gen-anima `IDS`), but each keeps its own calibration identity, so they are three rules
+    // rather than one shared coordinate. `TEXT_ONLY` because both the engine route gate and the
+    // entries' `capabilities` admit text_to_image alone; `BF16_ONLY` because `resolved_numeric_tier`
+    // refuses any precision but bf16 AND the off-Mac download is the raw dense `split_files/` tree
+    // (the `anima_quant` tier converter is macOS-only, so there is no other tier to resolve).
+    // `PLAIN_LORA` because Resident admits a LoRA/LoKr overlay; staged residency refuses one, which
+    // is recorded as a structural exemption on the manifest declaration rather than by narrowing the
+    // load profiles here — the lora profile IS reachable, just not on the staged rung.
+    // `requires_sequential_selection` stays false: Resident is reachable without a sequential
+    // selection, and only the staged row carries `requiredOffloadPolicy: "sequential"`.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "anima_base",
+        tiers: BF16_ONLY,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "anima_aesthetic",
+        tiers: BF16_ONLY,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "anima_turbo",
+        tiers: BF16_ONLY,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    // SC-20799 gap 1: the three Boogu Candle routes. `BF16_Q4_Q8` matches
+    // candle-gen-boogu `validate_load_spec` (bf16 precision, quantize in {None, Q4, Q8}) and the
+    // three turnkey subdirs. `PLAIN` only: the same function REFUSES adapters, control, extra
+    // controls, IP-adapter, identity and external text encoders outright, so no overlay-bearing load
+    // profile is admissible — the entries' `loraCompatibility` blocks are reserved family
+    // placeholders with empty `types` lists. Base and Turbo are text-to-image; Edit is the
+    // `Route::Edit` arm, which admits `MemoryMode::Edit` at 1..=5 references and is the only mode in
+    // that entry's `capabilities`. The engine's base/turbo image_to_image arm is deliberately not
+    // routed: neither entry lists `image_to_image` in `capabilities`, so it has no catalog axis.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "boogu_image",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "boogu_image_turbo",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "boogu_image_edit",
+        tiers: BF16_Q4_Q8,
+        modes: &[MemoryRouteMode::EditImage],
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    // SC-20799 gap 1: the Candle Bernini STILL-image ladder. The provider is the ENGINE id `bernini`
+    // (`crate::bernini::MODEL_ID`, the FULL_MEMORY_REGISTRATION provider), which the MODEL_TABLE maps
+    // the `bernini_image` sceneworks id onto — the same id the video entry uses, distinguished here
+    // by the image modes. `route_ok`'s still arm admits mode key "text_to_image" (0 references) and
+    // "edit" (exactly 1), the latter reached through `MemoryRouteMode::EditImage` because
+    // `candle_memory_strategy::request_mode` maps the "edit_image" spelling to `MemoryMode::Edit`.
+    // `BF16_Q4_Q8` matches `expected_packing` (None/Q4/Q8) and the published tier subdirs.
+    // `PLAIN_LORA` because the still route accepts an absent overlay or exactly "lora", and the
+    // off-Mac Candle descriptor genuinely serves LoRA/LoKr. Bernini declares no staged-residency
+    // rung, so nothing here gates on a sequential selection.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "bernini",
+        tiers: BF16_Q4_Q8,
+        modes: BERNINI_STILL_MODES,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
         legacy_shaping: false,
     },
     // SC-20788: all three Chroma turnkey routes expose the same exact request-scoped Candle
@@ -7476,42 +7576,397 @@ mod tests {
             .iter()
             .map(|witness| witness.provider.as_str())
             .collect::<std::collections::BTreeSet<_>>();
+        // SC-20799: this used to be a hand-maintained provider inventory. Like the population total
+        // below it was a frozen corpus — every truthful new declaration required editing the list,
+        // which asserts nothing beyond "someone remembered". Cross-check the production witness walk
+        // against an INDEPENDENT manifest walk instead: the two must agree on exactly which
+        // providers ship a staged-residency request-strategy declaration. That is not tautological
+        // (it is two separate traversals, and `runtimeProvider` may rename a row's provider), it
+        // still fails loudly if a provider silently appears or vanishes, and it no longer forces
+        // unrelated declaration work to touch this assertion.
+        let declared_providers = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|model| {
+                let contract = model.get("candle")?.get("memoryStrategyContract")?;
+                let provider = contract.get("provider")?.as_str()?;
+                let rows = contract.get("implementations")?.as_array()?;
+                Some(
+                    rows.iter()
+                        .filter(|row| {
+                            row.get("rung").and_then(Value::as_str) == Some("staged_residency")
+                                && row.get("requestContexts").is_some()
+                        })
+                        .map(|row| {
+                            row.get("runtimeProvider")
+                                .and_then(Value::as_str)
+                                .unwrap_or(provider)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            providers,
-            [
-                "chroma1_base",
-                "chroma1_flash",
-                "chroma1_hd",
-                "ideogram_4",
-                "ideogram_4_turbo",
-                "krea_2_edit",
-                "krea_2_raw",
-                "krea_2_turbo_edit",
-                "qwen_image_edit",
-                "sana_1600m",
-                "sana_sprint_1600m",
-                "sd3_5_large",
-                "sd3_5_large_turbo",
-                "sd3_5_medium",
-            ]
-            .into()
+            providers, declared_providers,
+            "the witness walk and the manifest must agree on which providers ship a staged Candle request-strategy declaration"
         );
-        assert_eq!(witnesses.len(), 208);
-        assert!(witnesses.iter().all(|witness| {
-            matches!(
-                witness.tier,
-                MemoryRouteTier::Bf16 | MemoryRouteTier::Q4 | MemoryRouteTier::Q8
-            ) && matches!(
-                witness.overlay,
-                MemoryRouteOverlay::None | MemoryRouteOverlay::Lora
-            ) && matches!(
-                witness.load_profile,
-                MemoryRouteLoadProfile::Plain
-                    | MemoryRouteLoadProfile::Lora
-                    | MemoryRouteLoadProfile::LoraPid
-                    | MemoryRouteLoadProfile::Pid
-            )
-        }));
+        // SC-20799: this used to pin `witnesses.len() == 208`. A bare population total is a
+        // frozen-corpus gate — every truthful new declaration trips it, and the only repair a bump
+        // offers is a different opaque number that asserts nothing about shape. Recompute the
+        // expected population from the manifest instead, independently of the production walk, so
+        // the assertion states the RULE ("the population is exactly what the staged declarations
+        // enumerate") rather than a snapshot of today's total. It still fails loudly if a
+        // declaration silently broadens or disappears, which is what the count was protecting.
+        //
+        // Per staged row the population is tiers x modes x (load profiles whose overlay the row
+        // lists) — overlay is derived from the load profile and gated by `overlays`, it is NOT an
+        // independent fourth axis.
+        let mut expected_coordinates = std::collections::BTreeSet::new();
+        for model in manifest["models"].as_array().expect("models array") {
+            let Some(contract) = model
+                .get("candle")
+                .and_then(|candle| candle.get("memoryStrategyContract"))
+            else {
+                continue;
+            };
+            let contract_provider = contract["provider"].as_str().expect("declared provider");
+            for row in contract["implementations"]
+                .as_array()
+                .expect("implementations array")
+            {
+                if row.get("rung").and_then(Value::as_str) != Some("staged_residency")
+                    || row.get("requestContexts").is_none()
+                {
+                    continue;
+                }
+                let provider = row
+                    .get("runtimeProvider")
+                    .and_then(Value::as_str)
+                    .unwrap_or(contract_provider);
+                let axis = |field: &str| {
+                    row[field]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{provider} staged declaration has no {field}"))
+                        .iter()
+                        .map(|value| value.as_str().expect("string axis entry"))
+                        .collect::<Vec<_>>()
+                };
+                let overlays = axis("overlays");
+                for tier in axis("tiers") {
+                    for mode in axis("modes") {
+                        for profile in axis("loadProfiles") {
+                            let profile = MemoryRouteLoadProfile::ALL
+                                .into_iter()
+                                .find(|candidate| candidate.as_str() == profile)
+                                .expect("known load profile");
+                            if !overlays.contains(&profile.overlay().as_str()) {
+                                continue;
+                            }
+                            expected_coordinates.insert((
+                                provider.to_owned(),
+                                MemoryRouteTier::from_resolved_tier(tier).expect("known tier"),
+                                MemoryRouteMode::from_request(mode).expect("known mode"),
+                                profile.overlay(),
+                                profile,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            witnesses
+                .iter()
+                .map(|witness| {
+                    (
+                        witness.provider.clone(),
+                        witness.tier,
+                        witness.mode,
+                        witness.overlay,
+                        witness.load_profile,
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_coordinates,
+            "the witness population must be exactly the coordinate set the shipped staged declarations enumerate"
+        );
+        // NOTE: no `witnesses.len() == expected_coordinates.len()` assertion here. The production
+        // walk sorts and dedups before returning, so once the set equality above holds the length
+        // equality follows necessarily — it has no killing mutation and would be decoration.
+        // The vocabulary the shipped staged declarations are allowed to draw on. `identity` /
+        // `Identity` joined it with the sc-20799 InstantID request-scoped lanes, which declare an
+        // identity overlay on both backends; the set equality above is what pins the exact
+        // population, this only fences which axis values may appear at all.
+        for witness in &witnesses {
+            assert!(
+                matches!(
+                    witness.tier,
+                    MemoryRouteTier::Bf16 | MemoryRouteTier::Q4 | MemoryRouteTier::Q8
+                ),
+                "{} declares an out-of-vocabulary tier {:?}",
+                witness.provider,
+                witness.tier
+            );
+            assert!(
+                matches!(
+                    witness.overlay,
+                    MemoryRouteOverlay::None
+                        | MemoryRouteOverlay::Lora
+                        | MemoryRouteOverlay::Identity
+                ),
+                "{} declares an out-of-vocabulary overlay {:?}",
+                witness.provider,
+                witness.overlay
+            );
+            assert!(
+                matches!(
+                    witness.load_profile,
+                    MemoryRouteLoadProfile::Plain
+                        | MemoryRouteLoadProfile::Lora
+                        | MemoryRouteLoadProfile::LoraPid
+                        | MemoryRouteLoadProfile::Pid
+                        | MemoryRouteLoadProfile::Identity
+                ),
+                "{} declares an out-of-vocabulary load profile {:?}",
+                witness.provider,
+                witness.load_profile
+            );
+        }
+    }
+
+    /// SC-20799 gap 1. The three Anima Candle routes each declare exactly the rungs the pinned
+    /// provider implements — resident (plain AND lora) plus staged residency (plain only) — over the
+    /// single bf16 tier and the single text_to_image route, each under its OWN calibration identity.
+    /// The staged x lora coordinate must stay refused: candle-gen-anima classifies staged residency
+    /// as StructurallyNotApplicable whenever the load spec carries adapters, because the overlay
+    /// spans the conditioner/DiT load boundary.
+    #[test]
+    fn shipped_anima_candle_declarations_keep_lora_resident_only_and_bf16_only() {
+        for provider in ["anima_base", "anima_aesthetic", "anima_turbo"] {
+            let manifest = shipped_model(provider);
+            let candle = &manifest["candle"]["memoryStrategyContract"];
+            assert_eq!(candle["provider"], provider);
+            assert_eq!(candle["exhaustive"], true);
+            let rows = candle["implementations"].as_array().unwrap();
+
+            // Each route carries its own fingerprint, derived by the engine from the provider id, so
+            // a base calibration can never admit aesthetic/turbo on a matching component layout.
+            let fingerprint = format!(
+                "anima-candle-request-scoped-conditioning-v1-{}",
+                provider.replace('_', "-")
+            );
+            assert!(
+                rows.iter().all(|row| row["fingerprint"] == fingerprint
+                    && row["tiers"] == serde_json::json!(["bf16"])
+                    && row["modes"] == serde_json::json!(["text_to_image"])),
+                "{provider}: every Anima Candle row is bf16 text_to_image under its own identity"
+            );
+
+            // The ladder stops at staged residency: the provider leaves the three bounded rungs
+            // unimplemented, so they must not appear at all.
+            let rungs = rows
+                .iter()
+                .map(|row| row["rung"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                rungs,
+                ["resident", "staged_residency"].into(),
+                "{provider}: Anima Candle declares no bounded rung"
+            );
+
+            // lora rides resident only, and the staged x lora hole is recorded as a structural
+            // exemption rather than left unexplained in an `exhaustive` declaration.
+            let lora_rungs = rows
+                .iter()
+                .filter(|row| row["overlays"] == serde_json::json!(["lora"]))
+                .map(|row| row["rung"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lora_rungs,
+                ["resident"],
+                "{provider}: staged residency must not claim a lora overlay"
+            );
+            assert_eq!(
+                manifest["candle"]["memoryStrategyStructuralExemptions"]["staged_residency"]
+                    ["overlays"],
+                serde_json::json!(["lora"]),
+                "{provider}: the refused staged x lora coordinate must be declared as structural"
+            );
+            assert!(
+                manifest["candle"]["memoryStrategyStructuralExemptions"]["staged_residency"]
+                    ["evidence"]
+                    .as_array()
+                    .is_some_and(|evidence| !evidence.is_empty()),
+                "{provider}: a structural exemption must cite provider evidence"
+            );
+        }
+    }
+
+    /// SC-20799 gap 1. The three Boogu Candle routes declare resident + staged residency over the
+    /// bf16/q4/q8 turnkey subdirs and NOTHING else: candle-gen-boogu's `build_contract` marks every
+    /// other rung Missing, and `validate_load_spec` refuses adapters and auxiliary conditioning
+    /// outright, so no overlay-bearing coordinate exists. Base and Turbo are text_to_image at 0
+    /// references; Edit is the `Route::Edit` arm at 1..=5.
+    #[test]
+    fn shipped_boogu_candle_declarations_are_plain_only_over_every_turnkey_tier() {
+        for (provider, mode, reference_counts) in [
+            ("boogu_image", "text_to_image", serde_json::json!([0])),
+            ("boogu_image_turbo", "text_to_image", serde_json::json!([0])),
+            (
+                "boogu_image_edit",
+                "edit_image",
+                serde_json::json!([1, 2, 3, 4, 5]),
+            ),
+        ] {
+            let manifest = shipped_model(provider);
+            let candle = &manifest["candle"]["memoryStrategyContract"];
+            assert_eq!(candle["provider"], provider);
+            assert_eq!(candle["exhaustive"], true);
+            let rows = candle["implementations"].as_array().unwrap();
+
+            let rungs = rows
+                .iter()
+                .map(|row| row["rung"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rungs,
+                ["resident", "staged_residency"],
+                "{provider}: Boogu Candle declares resident + staged residency only"
+            );
+            assert!(
+                rows.iter().all(|row| {
+                    row["tiers"] == serde_json::json!(["bf16", "q4", "q8"])
+                        && row["modes"] == serde_json::json!([mode])
+                        && row["overlays"] == serde_json::json!(["none"])
+                        && row["loadProfiles"] == serde_json::json!(["plain"])
+                }),
+                "{provider}: every Boogu Candle row is a plain, overlay-free {mode} row over all three tiers"
+            );
+
+            // The lora matrix axis exists for these entries (the generator keys it on the mere
+            // presence of `loraCompatibility`, whose `types` list is empty here), but
+            // `validate_load_spec` refuses any Boogu load carrying adapters. Record that refusal as
+            // structural so the lora cells are explained rather than silently Missing.
+            assert_eq!(
+                manifest["candle"]["memoryStrategyStructuralExemptions"]["staged_residency"]
+                    ["overlays"],
+                serde_json::json!(["lora"]),
+                "{provider}: the engine-refused staged x lora coordinate must be declared structural"
+            );
+
+            // The provider mode each request context forwards must be exactly what the registry
+            // resolves for that public mode at every reference count it lists — otherwise the row
+            // would hand the engine a route it refuses.
+            let route_mode = MemoryRouteMode::from_request(mode).expect("known public mode");
+            for row in rows {
+                let contexts = row["requestContexts"].as_array().unwrap();
+                assert_eq!(contexts.len(), 1, "{provider}: one still route context");
+                let context = &contexts[0];
+                assert_eq!(context["mode"], mode);
+                assert_eq!(context["referenceCounts"], reference_counts);
+                for count in context["referenceCounts"].as_array().unwrap() {
+                    assert_eq!(
+                        context["providerMode"].as_str().unwrap(),
+                        expected_provider_mode(
+                            provider,
+                            MemoryRouteRequestContext {
+                                mode: route_mode,
+                                reference_count: u32::try_from(count.as_u64().unwrap()).unwrap(),
+                                use_pid: false,
+                                has_phases: false,
+                            },
+                        ),
+                        "{provider}: declared providerMode must match the registry mapping at {count} references"
+                    );
+                }
+            }
+        }
+    }
+
+    /// SC-20799 gap 1. The Candle Bernini STILL lane. The declaration hangs off the `bernini_image`
+    /// catalog entry but names the ENGINE id `bernini`, because that is the provider
+    /// `evaluate_shared_image` looks up. candle-gen-bernini implements Resident and BoundedDecode and
+    /// deliberately leaves StagedResidency, BoundedAttention and BoundedTransformerResidency Missing
+    /// rather than inheriting the MLX claims, so bounded decode engages straight on top of resident.
+    #[test]
+    fn shipped_bernini_still_candle_declaration_is_resident_and_bounded_decode_only() {
+        let manifest = shipped_model("bernini_image");
+        let candle = &manifest["candle"]["memoryStrategyContract"];
+        assert_eq!(
+            candle["provider"], "bernini",
+            "the still declaration is keyed on the engine id the MODEL_TABLE row maps onto"
+        );
+        let rows = candle["implementations"].as_array().unwrap();
+
+        let rungs = rows
+            .iter()
+            .map(|row| row["rung"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            rungs,
+            ["bounded_decode", "resident"].into(),
+            "Bernini Candle stills declare no staged, attention or transformer rung"
+        );
+
+        for row in rows {
+            assert_eq!(row["tiers"], serde_json::json!(["bf16", "q4", "q8"]));
+            assert_eq!(
+                row["modes"],
+                serde_json::json!(["text_to_image", "edit_image"])
+            );
+            // Staged residency is Missing on this provider, so bounded decode must engage directly
+            // on resident. An engagedRungs list that inserted staged_residency here would claim a
+            // rung the provider does not implement.
+            let engaged = row["engagedRungs"].as_array().unwrap();
+            assert!(
+                !engaged.iter().any(|rung| rung == "staged_residency"),
+                "Bernini bounded decode must not engage a staged rung the provider leaves Missing"
+            );
+            if row["rung"] == "bounded_decode" {
+                assert_eq!(
+                    engaged,
+                    &vec![
+                        serde_json::json!("resident"),
+                        serde_json::json!("bounded_decode")
+                    ]
+                );
+                // DECODE_TILE_EDGES / DECODE_OVERLAP, verbatim from the provider.
+                assert_eq!(
+                    row["parameterRanges"]["decodeTileEdges"],
+                    serde_json::json!([512, 448, 384, 320, 256, 192])
+                );
+                assert_eq!(
+                    row["parameterRanges"]["decodeOverlaps"],
+                    serde_json::json!([64])
+                );
+            }
+            // The still route admits exactly 0 references for text_to_image and exactly 1 for edit.
+            for context in row["requestContexts"].as_array().unwrap() {
+                let mode = context["mode"].as_str().unwrap();
+                let expected_references = if mode == "edit_image" { 1 } else { 0 };
+                assert_eq!(
+                    context["referenceCounts"],
+                    serde_json::json!([expected_references]),
+                    "Bernini still {mode} admits exactly {expected_references} references"
+                );
+                let route_mode = MemoryRouteMode::from_request(mode).expect("known public mode");
+                assert_eq!(
+                    context["providerMode"].as_str().unwrap(),
+                    expected_provider_mode(
+                        "bernini",
+                        MemoryRouteRequestContext {
+                            mode: route_mode,
+                            reference_count: expected_references,
+                            use_pid: false,
+                            has_phases: false,
+                        },
+                    ),
+                    "Bernini {mode} providerMode must match the registry mapping"
+                );
+            }
+        }
     }
 
     #[test]

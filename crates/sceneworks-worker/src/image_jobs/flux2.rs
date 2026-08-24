@@ -1188,42 +1188,6 @@ fn flux2_control_generate_one_scoped(
     }
 }
 
-/// Weights-backed render entry point for the real-weight control tests, which load a generator
-/// directly and therefore have no live [`crate::mlx_fit_gate::MlxRequestEvaluation`] to admit
-/// against. It calls the SAME render path as production with no request scope — production always
-/// supplies one (see [`generate_flux2_dev_control_stream`]). Test-only so an unadmitted control
-/// render can never be reached from a job.
-#[cfg(all(target_os = "macos", test))]
-#[allow(clippy::too_many_arguments)]
-fn flux2_control_generate_one(
-    generator: &dyn Generator,
-    prompt: &str,
-    width: u32,
-    height: u32,
-    seed: i64,
-    steps: u32,
-    guidance: Option<f32>,
-    conditioning: Vec<Conditioning>,
-    preview: gen_core::PreviewSink,
-    cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    flux2_control_generate_one_scoped(
-        generator,
-        None,
-        prompt,
-        width,
-        height,
-        seed,
-        steps,
-        guidance,
-        conditioning,
-        preview,
-        cancel,
-        on_progress,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn flux2_control_raw_settings(
     request: &ImageRequest,

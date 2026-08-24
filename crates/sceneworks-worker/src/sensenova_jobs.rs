@@ -44,15 +44,20 @@ use mlx_rs::ops::divide;
 use mlx_rs::Array;
 #[cfg(target_os = "macos")]
 use runtime_macos::media::image::{decoded_to_image, resize_bicubic_u8};
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 use runtime_macos::media::tokenizer::TextTokenizer;
 #[cfg(target_os = "macos")]
 use runtime_macos::media::Image;
 #[cfg(target_os = "macos")]
 use runtime_macos::providers::sensenova::{
-    load_raw, load_tokenizer, smart_resize, NeoChatConfig, Sampler, T2iModel, T2iOptions,
-    INTERLEAVE_RESOLUTIONS, INTERLEAVE_SYSTEM_MESSAGE,
+    load_runtime, smart_resize, Sampler, T2iOptions, INTERLEAVE_RESOLUTIONS,
+    INTERLEAVE_SYSTEM_MESSAGE,
 };
+// `load_raw` + `T2iModel::from_weights` are the raw assembly the ignored real-weight smokes still
+// drive directly (they assert loader/tier behavior, not admission). Production now goes through the
+// provider-owned `load_runtime`, so these are test-only.
+#[cfg(all(target_os = "macos", test))]
+use runtime_macos::providers::sensenova::{load_raw, load_tokenizer, NeoChatConfig, T2iModel};
 
 // Candle (Windows/CUDA) understanding path (sc-5501). `Image` is the neutral `gen_core::Image`
 // (`load_reference_image`'s return); the source-image preprocessing + tensor construction live in
@@ -67,27 +72,170 @@ use runtime_cuda::providers::sensenova::{
     INTERLEAVE_RESOLUTIONS, INTERLEAVE_SYSTEM_MESSAGE,
 };
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// ---------------------------------------------------------------------------
+// Worker-owned direct memory admission (SC-20799 gap 3).
+//
+// VQA and interleave bypass the `Generator` registry, so nothing upstream builds the
+// `MemoryRunContext` the pinned providers require. Both lanes therefore assemble their own
+// admission here, and both use the SAME ladder policy: build every candidate selection the LOADED
+// contract declares `Implemented` for this operation, deepest rung first, and take the first one
+// the shared `gen_core` safety pipeline accepts. Nothing is assumed about which rungs exist — the
+// contract is consulted — because rung 4 (`BoundedTransformerResidency`) is keyed on a deferred
+// load shape neither worker seam uses, so both providers report it `Missing` here today and the
+// ladder simply degrades to rung 3.
+// ---------------------------------------------------------------------------
+
+/// The live budget + resolved artifact identity for one direct SenseNova run.
+///
+/// `total_gb` / `free_gb` are `None` when the host exposes no readable budget — the worker's
+/// standing "no evidence never blocks" convention, which the context builder honors by sizing the
+/// budget to exactly this request. `predicted_peak_gb` is `None` when the manifest carries no
+/// memory declaration for this backend + tier (the MLX lane today); the loaded provider contract's
+/// own asset facts price the request instead.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[derive(Clone, Debug)]
 struct SenseNovaDirectAdmission {
     model_id: String,
     tier: &'static str,
-    total_gb: f64,
-    free_gb: f64,
-    predicted_peak_gb: f64,
+    total_gb: Option<f64>,
+    free_gb: Option<f64>,
+    predicted_peak_gb: Option<f64>,
 }
 
-#[cfg(target_os = "macos")]
-#[derive(Clone, Debug)]
-struct SenseNovaDirectAdmission;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+const SENSENOVA_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_gib_bytes(gb: f64) -> u64 {
+    (gb * SENSENOVA_BYTES_PER_GIB)
+        .ceil()
+        .clamp(0.0, u64::MAX as f64) as u64
+}
+
+/// The numeric tier a `"bf16" | "q4" | "q8"` key selects, in the providers' currency.
+///
+/// A tier key outside that set is a typed refusal, not a panic and not a silent dense default: the
+/// providers validate the declared tier against the checkpoint's own quantization provenance, so
+/// guessing here would only move the failure later.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_quant(tier: &str) -> WorkerResult<Option<gen_core::Quant>> {
+    match tier {
+        "bf16" => Ok(None),
+        "q4" => Ok(Some(gen_core::Quant::Q4)),
+        "q8" => Ok(Some(gen_core::Quant::Q8)),
+        other => Err(WorkerError::InvalidPayload(format!(
+            "SenseNova-U1 has no {other} turnkey tier (the family ships bf16, q4, and q8)"
+        ))),
+    }
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_memory_tier(tier: &str) -> WorkerResult<gen_core::MemoryNumericTier> {
+    Ok(gen_core::MemoryNumericTier {
+        precision: gen_core::Precision::Bf16,
+        quant: sensenova_quant(tier)?,
+        component_precision_floors: &[],
+    })
+}
+
+/// The MLX tier key for a resolved SenseNova snapshot.
+///
+/// The resolved turnkey subdir basename is the strongest artifact claim available (`resolve_weights_dir`
+/// descends into `q4/`, `q8/`, or `bf16/` for this standard-tier-layout family); a flat `modelPath`
+/// has no such basename, so the request/manifest-derived key stands in. This reproduces the two
+/// steps of `image_jobs::base::gate_tier_key`, which is private to the `image_jobs` module and not
+/// reachable from here. Any drift is caught by the provider: `validate_artifact_tier` compares the
+/// declared tier against the checkpoint's own recorded quantization provenance.
+#[cfg(target_os = "macos")]
+fn sensenova_mlx_tier_key(request: &ImageRequest, weights_dir: &Path) -> &'static str {
+    match weights_dir.file_name().and_then(|name| name.to_str()) {
+        Some("bf16") => "bf16",
+        Some("q4") => "q4",
+        Some("q8") => "q8",
+        // A flat `modelPath` has no tier basename: fall back to the requested/declared MLX bit
+        // width, the same reading `vram_gate::requested_tier_key` performs (that module is compiled
+        // only on the candle lane, so it cannot be called from here).
+        _ => match request
+            .advanced
+            .get("mlxQuantize")
+            .and_then(json_to_i64)
+            .or_else(|| {
+                request
+                    .model_manifest_entry
+                    .get("mlx")
+                    .and_then(|mlx| mlx.get("quantize"))
+                    .and_then(json_to_i64)
+            }) {
+            None => "q8",
+            Some(bits) if bits <= 0 => "bf16",
+            Some(bits) if bits <= 4 => "q4",
+            Some(_) => "q8",
+        },
+    }
+}
+
+/// macOS (MLX) direct admission.
+///
+/// The budget is the worker-owned live unified-memory reading — the same `sysctl hw.memsize`
+/// figure the MLX fit gate sizes against, and the same one the InstantID MLX lane uses. There is no
+/// per-process committed reading at this seam, so `free_gb == total_gb` and the context charges
+/// zero committed bytes.
+///
+/// The manifest `mlx` block carries no `vramGbByTier` / `minMemoryGb` for this family, so
+/// `predicted_peak_gb` is normally `None` and the loaded contract's asset facts price the request.
+/// The lookup is still performed — mirroring `instantid_manifest_peak_gb` — so a declaration added
+/// later is honored (and hard-refused pre-load, exactly like the candle sibling) without another
+/// code change.
 #[cfg(target_os = "macos")]
 async fn sensenova_direct_admission(
-    _request: &ImageRequest,
+    request: &ImageRequest,
     _settings: &Settings,
-    _weights_dir: &Path,
+    weights_dir: &Path,
 ) -> WorkerResult<Option<SenseNovaDirectAdmission>> {
-    Ok(None)
+    let tier = sensenova_mlx_tier_key(request, weights_dir);
+    let predicted_peak_gb = sensenova_manifest_peak_gb(&request.model_manifest_entry, "mlx", tier);
+    let total_gb = crate::gpu::total_unified_memory_gb().await;
+    if let (Some(predicted_peak_gb), Some(total_gb)) = (predicted_peak_gb, total_gb) {
+        if predicted_peak_gb > total_gb {
+            return Err(WorkerError::InvalidPayload(format!(
+                "SenseNova-U1 {tier} needs {predicted_peak_gb:.1} GB of unified memory including headroom, but this Mac has {total_gb:.1} GB"
+            )));
+        }
+    }
+    Ok(Some(SenseNovaDirectAdmission {
+        model_id: sensenova_model_id(request),
+        tier,
+        total_gb,
+        free_gb: total_gb,
+        predicted_peak_gb,
+    }))
+}
+
+/// The manifest's declared resident peak (GB) for one backend block + tier, mirroring
+/// `instantid_manifest_peak_gb`: the measured per-tier row, else the block's padded floor.
+#[cfg(target_os = "macos")]
+fn sensenova_manifest_peak_gb(
+    manifest_entry: &JsonObject,
+    backend_key: &str,
+    tier_key: &str,
+) -> Option<f64> {
+    let block = manifest_entry.get(backend_key)?;
+    block
+        .get("vramGbByTier")
+        .and_then(|tiers| tiers.get(tier_key))
+        .and_then(Value::as_f64)
+        .or_else(|| block.get("minMemoryGb").and_then(Value::as_f64))
+}
+
+/// The public SceneWorks route id this request resolves to. Shared by both lanes so the
+/// `LoadSpec::resolved_route` and the job's reported `model` cannot drift.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_model_id(request: &ImageRequest) -> String {
+    if request.model.trim().is_empty() {
+        "sensenova_u1_8b".to_owned()
+    } else {
+        request.model.clone()
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -118,88 +266,292 @@ async fn sensenova_direct_admission(
         )));
     }
     Ok(Some(SenseNovaDirectAdmission {
-        model_id: if request.model.trim().is_empty() {
-            "sensenova_u1_8b".to_owned()
-        } else {
-            request.model.clone()
-        },
+        model_id: sensenova_model_id(request),
         tier,
-        total_gb,
-        free_gb,
-        predicted_peak_gb,
+        total_gb: Some(total_gb),
+        free_gb: Some(free_gb),
+        predicted_peak_gb: Some(predicted_peak_gb),
     }))
 }
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// The `LoadSpec` both lanes hand their provider.
+///
+/// `resolved_route` is the public SceneWorks id, and the pinned providers' shared
+/// `validate_resolved_artifact_binding` then REQUIRES the weights path to carry the matching
+/// `SceneWorks/<route-with-dashes>-mlx` repository component in one of three spellings
+/// (`<route>-mlx`, `models--SceneWorks--<route>-mlx`, `SceneWorks__<route>-mlx`). That holds
+/// because `resolve_weights_dir` resolves through `engines::default_repo_for`, whose `default_repo`
+/// for every SenseNova route is exactly `SceneWorks/<route-with-dashes>-mlx` — see
+/// `worker_resolves_every_public_route_under_its_rehost_repository` below, which pins the coupling.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn sensenova_direct_spec(
     weights_dir: &Path,
     admission: &SenseNovaDirectAdmission,
-) -> gen_core::LoadSpec {
+) -> WorkerResult<gen_core::LoadSpec> {
     let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(weights_dir.to_path_buf()))
         .with_resolved_route(admission.model_id.clone());
-    match admission.tier {
-        "q4" => spec.with_quant(gen_core::Quant::Q4),
-        "q8" => spec.with_quant(gen_core::Quant::Q8),
-        "bf16" => spec,
-        tier => unreachable!("validated SenseNova tier {tier}"),
-    }
+    Ok(match sensenova_quant(admission.tier)? {
+        Some(quant) => spec.with_quant(quant),
+        None => spec,
+    })
 }
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn sensenova_resident_context(
-    contract: &gen_core::MemoryProviderContract,
-    admission: &SenseNovaDirectAdmission,
-    mode: gen_core::MemoryMode,
+/// One direct operation's exact executable identity, threaded into admission.
+///
+/// `mode_key` is the provider-owned `MemoryMode::Other` key (`"vqa"` / `"interleave"`); the
+/// geometry must match, field for field, the `GenerationRequest` the provider is subsequently
+/// handed — both pinned providers re-derive it and refuse a mismatch.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SenseNovaRunShape {
+    mode_key: &'static str,
     width: u32,
     height: u32,
     batch: u32,
     reference_count: u32,
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+const SENSENOVA_VQA_MODE: &str = "vqa";
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+const SENSENOVA_INTERLEAVE_MODE: &str = "interleave";
+
+/// Candidate selections for one operation, DEEPEST FIRST.
+///
+/// VQA never offers rung 4: both pinned providers refuse a VQA context whose selection is
+/// `BoundedTransformerResidency` outright ("bounded transformer residency is structurally not
+/// applicable to VQA understanding"), so offering it would only ever spend a rejection. Interleave
+/// does offer it, and whether it is actually selectable is then decided by the LOADED contract —
+/// rung 4 is declared `Implemented` only for a re-openable deferred snapshot, which an eager worker
+/// load is not, so in practice the ladder degrades to rung 3 without hardcoding that outcome.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_candidate_ladder(mode_key: &str) -> &'static [gen_core::MemoryStrategy] {
+    if mode_key == SENSENOVA_VQA_MODE {
+        &[
+            gen_core::MemoryStrategy::BoundedAttention,
+            gen_core::MemoryStrategy::Resident,
+        ]
+    } else {
+        &[
+            gen_core::MemoryStrategy::BoundedTransformerResidency,
+            gen_core::MemoryStrategy::BoundedAttention,
+            gen_core::MemoryStrategy::Resident,
+        ]
+    }
+}
+
+/// The concrete parameters one candidate selection needs, read from the contract's DECLARED ranges.
+///
+/// Every rung the selection engages (`MemoryProviderContract::engages`, the cost-order default
+/// intersected with what this provider implements) must carry a value drawn from that rung's own
+/// declared candidates; every rung it does not engage must carry `None`. `None` here means the
+/// contract declares no candidate for a knob this composition requires — the selection cannot be
+/// validated, so no candidate is synthesized for it.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_selection_parameters(
+    contract: &gen_core::MemoryProviderContract,
+    strategy: gen_core::MemoryStrategy,
+) -> Option<gen_core::MemoryStrategyParameters> {
+    let smallest = |rung: gen_core::MemoryStrategy,
+                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
+     -> Option<Option<u32>> {
+        if !contract.engages(strategy, rung) {
+            return Some(None);
+        }
+        pick(&contract.capability(rung)?.parameters)
+            .iter()
+            .copied()
+            .min()
+            .map(Some)
+    };
+    let window_component = if contract.engages(
+        strategy,
+        gen_core::MemoryStrategy::BoundedTransformerResidency,
+    ) {
+        contract
+            .capability(gen_core::MemoryStrategy::BoundedTransformerResidency)?
+            .parameters
+            .transformer_window_components
+            .first()
+            .copied()
+    } else {
+        None
+    };
+    Some(gen_core::MemoryStrategyParameters {
+        decode_tile_edge: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_tile_edges
+        })?,
+        decode_overlap: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_overlaps
+        })?,
+        attention_chunk_size: smallest(gen_core::MemoryStrategy::BoundedAttention, |ranges| {
+            &ranges.attention_chunk_sizes
+        })?,
+        transformer_window_size: smallest(
+            gen_core::MemoryStrategy::BoundedTransformerResidency,
+            |ranges| &ranges.transformer_window_sizes,
+        )?,
+        transformer_window_component: window_component,
+    })
+}
+
+/// The request's predicted resident peak, in bytes.
+///
+/// The manifest figure wins when the backend declares one. Otherwise the loaded contract's own
+/// asset facts are the honest floor: SenseNova declares `StagedResidency`
+/// `StructurallyNotApplicable` on both backends, so NO composition on this family engages staging,
+/// and the sc-18097 estimate floor for a non-staging composition is exactly
+/// `conditioning + (base - conditioning)`. This is deliberately independent of the selected rung —
+/// bounding attention scratch does not shrink the resident checkpoint, so every candidate is priced
+/// at the same resident figure rather than at an invented per-rung discount.
+///
+/// A zero footprint is a refusal, not a zero: it means neither the manifest nor the checkpoint said
+/// anything, and admitting against "0 bytes" would make the budget gate vacuous.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_predicted_peak_bytes(
+    contract: &gen_core::MemoryProviderContract,
+    admission: &SenseNovaDirectAdmission,
+) -> WorkerResult<u64> {
+    if let Some(gb) = admission.predicted_peak_gb {
+        return Ok(sensenova_gib_bytes(gb));
+    }
+    let facts = contract.asset_facts;
+    let floor = facts
+        .conditioning_bytes
+        .saturating_add(facts.base_bytes.saturating_sub(facts.conditioning_bytes));
+    if floor == 0 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SenseNova-U1 {} has no memory declaration for this backend and the loaded contract reports a zero-byte checkpoint footprint",
+            admission.tier
+        )));
+    }
+    Ok(floor)
+}
+
+/// Assemble one candidate `MemoryRunContext`.
+///
+/// `Resident` is the baseline and carries `MemoryOptimizationAuthority::Resident`; every optimized
+/// rung carries `Estimated`, which is what `gen_core::standard_memory_strategy_safety_check`
+/// requires of an optimized selection (an optimized selection with `Resident` authority is refused
+/// outright, and one without a contract calibration identity must be explicitly `Estimated`).
+/// `Estimated` is also the honest claim: this ladder is priced off a manifest/asset-facts estimate,
+/// never off a measured campaign, and claiming `Calibrated` would grade the request against
+/// evidence captured at a geometry it is not running.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+fn sensenova_memory_context(
+    contract: &gen_core::MemoryProviderContract,
+    tier: gen_core::MemoryNumericTier,
+    strategy: gen_core::MemoryStrategy,
+    parameters: gen_core::MemoryStrategyParameters,
+    admission: &SenseNovaDirectAdmission,
+    shape: &SenseNovaRunShape,
+    predicted_peak_bytes: u64,
 ) -> gen_core::MemoryRunContext {
-    const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let bytes = |gb: f64| (gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64;
     let calibration = contract.calibration.as_ref();
+    let total_bytes = admission
+        .total_gb
+        .map(sensenova_gib_bytes)
+        .unwrap_or(predicted_peak_bytes);
+    let committed_bytes = match (admission.total_gb, admission.free_gb) {
+        (Some(total), Some(free)) => sensenova_gib_bytes((total - free).max(0.0)),
+        _ => 0,
+    };
     gen_core::MemoryRunContext {
         selection: gen_core::MemorySelection {
-            strategy: gen_core::MemoryStrategy::Resident,
-            parameters: Default::default(),
-            tier: gen_core::MemoryNumericTier {
-                precision: gen_core::Precision::Bf16,
-                quant: match admission.tier {
-                    "q4" => Some(gen_core::Quant::Q4),
-                    "q8" => Some(gen_core::Quant::Q8),
-                    "bf16" => None,
-                    tier => unreachable!("validated SenseNova tier {tier}"),
-                },
-                component_precision_floors: &[],
-            },
+            strategy,
+            parameters,
+            tier,
         },
-        optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
+        optimization_authority: if strategy.is_optimized() {
+            gen_core::MemoryOptimizationAuthority::Estimated
+        } else {
+            gen_core::MemoryOptimizationAuthority::Resident
+        },
         calibration_abi: calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
         calibration_fingerprint: calibration
             .map_or_else(String::new, |item| item.fingerprint.clone()),
         load_shape: contract.load_shape,
-        mode,
-        has_reference: reference_count > 0,
+        mode: gen_core::MemoryMode::Other(shape.mode_key.to_owned()),
+        has_reference: shape.reference_count > 0,
         use_pid: false,
         has_phases: false,
         geometry: gen_core::MemoryGeometry {
-            width,
-            height,
-            batch,
+            width: shape.width,
+            height: shape.height,
+            batch: shape.batch,
             frames: 1,
-            reference_count,
+            reference_count: shape.reference_count,
         },
         overlay: None,
         budget: gen_core::MemoryBudget {
-            total_bytes: bytes(admission.total_gb),
-            committed_bytes: bytes((admission.total_gb - admission.free_gb).max(0.0)),
+            total_bytes,
+            committed_bytes,
             reclaimable_bytes: 0,
             reserved_headroom_bytes: 0,
         },
-        predicted_peak_bytes: bytes(admission.predicted_peak_gb),
+        predicted_peak_bytes,
         cache_state: gen_core::MemoryCacheState::Cold,
-        evidence_revision: "manifest-resident-v1".to_owned(),
+        evidence_revision: "worker-direct-ladder-v1".to_owned(),
     }
+}
+
+/// Pick the DEEPEST candidate selection the loaded contract accepts for this operation.
+///
+/// Deepest-first is the whole point: a resident-only stamp under-serves an engine that implements
+/// bounded attention on every public mode. Resident stays reachable because it is the last
+/// candidate, so an ample-memory host that would accept rung 3 gets rung 3 (whose mechanism costs
+/// nothing a caller would decline — it bounds scratch, not residency), and a host or composition
+/// that cannot gets the baseline.
+///
+/// Every candidate is graded by the SHARED pipeline, `gen_core::standard_memory_strategy_safety_check`,
+/// with the loaded numeric tier bound — the same function both providers' own safety checks
+/// delegate to. The providers re-run their own route gates on top of it at execution, so this is an
+/// admission filter, never a substitute for them. If nothing accepts, the job fails closed with the
+/// per-candidate reasons, before a single tensor is touched.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn sensenova_admitted_context(
+    contract: &gen_core::MemoryProviderContract,
+    admission: &SenseNovaDirectAdmission,
+    shape: SenseNovaRunShape,
+) -> WorkerResult<gen_core::MemoryRunContext> {
+    let tier = sensenova_memory_tier(admission.tier)?;
+    let predicted_peak_bytes = sensenova_predicted_peak_bytes(contract, admission)?;
+    let mut refusals: Vec<String> = Vec::new();
+    for strategy in sensenova_candidate_ladder(shape.mode_key) {
+        let Some(parameters) = sensenova_selection_parameters(contract, *strategy) else {
+            refusals.push(format!(
+                "{strategy:?}: the contract declares no candidate value for a parameter this composition engages"
+            ));
+            continue;
+        };
+        let context = sensenova_memory_context(
+            contract,
+            tier,
+            *strategy,
+            parameters,
+            admission,
+            &shape,
+            predicted_peak_bytes,
+        );
+        match gen_core::standard_memory_strategy_safety_check(contract, &context, Some(tier), None)
+        {
+            gen_core::MemorySafetyDecision::Accept => return Ok(context),
+            gen_core::MemorySafetyDecision::Reject { reason } => {
+                refusals.push(format!("{strategy:?}: {reason}"));
+            }
+        }
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "SenseNova-U1 {} admission refused every memory strategy for {} at {}x{} batch {} with {} reference(s): {}",
+        admission.tier,
+        shape.mode_key,
+        shape.width,
+        shape.height,
+        shape.batch,
+        shape.reference_count,
+        refusals.join("; ")
+    )))
 }
 
 /// The adapter id recorded on the generated assets + the interleaved document, matching the
@@ -278,11 +630,7 @@ pub(crate) async fn run_vqa_job(
             "Missing payload.projectId".to_owned(),
         ));
     }
-    let model_id = if request.model.trim().is_empty() {
-        "sensenova_u1_8b".to_owned()
-    } else {
-        request.model.clone()
-    };
+    let model_id = sensenova_model_id(&request);
     let question = job
         .payload
         .get("question")
@@ -428,21 +776,60 @@ fn vqa_generate(
     max_image_pixels: i64,
     job_id: &str,
     cancel: &gen_core::CancelFlag,
-    _direct_admission: Option<SenseNovaDirectAdmission>,
+    direct_admission: Option<SenseNovaDirectAdmission>,
 ) -> WorkerResult<String> {
+    let direct_admission = direct_admission.ok_or_else(|| {
+        WorkerError::InvalidPayload("SenseNova-U1 MLX admission was not prepared".to_owned())
+    })?;
+    let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let (model, tokenizer) = load_sensenova_model(weights_dir)?;
+    // The provider-owned typed runtime, NOT a second bespoke `T2iModel` assembled here: it keeps the
+    // registry loader's artifact pin, quantization, provider contract, and cache identity, and it is
+    // what owns the request scope `run_vqa` opens below.
+    let runtime = load_runtime(&spec)
+        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
     // pixel budget (default 768², `load_image_native` min 256²).
     let pixel_values = image_to_chw01(source, 256 * 256, max_image_pixels)?;
-    let answer = model
-        .vqa(
-            &tokenizer,
+    let (height, width) = smart_resize(
+        source.height as i32,
+        source.width as i32,
+        32,
+        256 * 256,
+        max_image_pixels,
+    );
+    let context = sensenova_admitted_context(
+        runtime.memory_contract(),
+        &direct_admission,
+        SenseNovaRunShape {
+            mode_key: SENSENOVA_VQA_MODE,
+            width: width as u32,
+            height: height as u32,
+            batch: 1,
+            reference_count: 1,
+        },
+    )?;
+    let request = gen_core::GenerationRequest {
+        prompt: question.to_owned(),
+        width: width as u32,
+        height: height as u32,
+        count: 1,
+        conditioning: vec![gen_core::Conditioning::Reference {
+            image: gen_core::Image::default(),
+            strength: None,
+        }],
+        ..Default::default()
+    };
+    let answer = runtime
+        .run_vqa(
+            &context,
+            request,
             question,
             std::slice::from_ref(&pixel_values),
             max_new_tokens,
             Sampler::Greedy,
+            T2iOptions::default(),
             Some(cancel),
         )
         .map_err(|error| {
@@ -470,7 +857,7 @@ fn vqa_generate(
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
     })?;
-    let spec = sensenova_direct_spec(weights_dir, &direct_admission);
+    let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let runtime = load_understanding_with_spec(&spec)
         .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
@@ -485,15 +872,17 @@ fn vqa_generate(
         256 * 256,
         max_image_pixels,
     );
-    let context = sensenova_resident_context(
+    let context = sensenova_admitted_context(
         runtime.memory_strategy_contract(),
         &direct_admission,
-        gen_core::MemoryMode::Other("vqa".to_owned()),
-        width as u32,
-        height as u32,
-        1,
-        1,
-    );
+        SenseNovaRunShape {
+            mode_key: SENSENOVA_VQA_MODE,
+            width: width as u32,
+            height: height as u32,
+            batch: 1,
+            reference_count: 1,
+        },
+    )?;
     let request = gen_core::GenerationRequest {
         prompt: question.to_owned(),
         width: width as u32,
@@ -631,11 +1020,7 @@ pub(crate) async fn run_interleave_job(
             "Interleaved generation requires a prompt.".to_owned(),
         ));
     }
-    let model_id = if request.model.trim().is_empty() {
-        "sensenova_u1_8b".to_owned()
-    } else {
-        request.model.clone()
-    };
+    let model_id = sensenova_model_id(&request);
     // Resolve every rollout knob (resolution snap + advanced overlay defaults/overrides) once, so
     // both backend seams read the exact same values (sc-8839). Pure + backend-neutral → unit-tested.
     let params = resolve_interleave_params(&request, &job.payload);
@@ -867,10 +1252,15 @@ fn interleave_generate(
     params: &InterleaveParams,
     job_id: &str,
     cancel: &gen_core::CancelFlag,
-    _direct_admission: Option<SenseNovaDirectAdmission>,
+    direct_admission: Option<SenseNovaDirectAdmission>,
 ) -> WorkerResult<(String, Vec<Image>)> {
+    let direct_admission = direct_admission.ok_or_else(|| {
+        WorkerError::InvalidPayload("SenseNova-U1 MLX admission was not prepared".to_owned())
+    })?;
+    let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let (model, tokenizer) = load_sensenova_model(weights_dir)?;
+    let runtime = load_runtime(&spec)
+        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
 
     // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`
@@ -895,14 +1285,45 @@ fn interleave_generate(
     // #634), so the keepalive's cancel poll stops a multi-minute rollout cooperatively (sc-9123).
     // Progress stays a no-op sink: this seam reports liveness via the Busy heartbeat, not per-step
     // job progress.
-    let out = model
-        .interleave_gen(
-            &tokenizer,
+    let reference_count = u32::try_from(input_arrays.len()).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave has too many source images".to_owned())
+    })?;
+    let count = u32::try_from(params.max_images).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave maxImages overflows".to_owned())
+    })?;
+    let context = sensenova_admitted_context(
+        runtime.memory_contract(),
+        &direct_admission,
+        SenseNovaRunShape {
+            mode_key: SENSENOVA_INTERLEAVE_MODE,
+            width: params.width as u32,
+            height: params.height as u32,
+            batch: count,
+            reference_count,
+        },
+    )?;
+    let request = gen_core::GenerationRequest {
+        prompt: prompt.to_owned(),
+        width: params.width as u32,
+        height: params.height as u32,
+        count,
+        conditioning: (reference_count > 0)
+            .then(|| gen_core::Conditioning::MultiReference {
+                images: vec![gen_core::Image::default(); reference_count as usize],
+            })
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = runtime
+        .run_interleave(
+            &context,
+            request,
             prompt,
             &input_arrays,
             params.width,
             params.height,
-            &opts,
+            opts,
             &params.system_message,
             params.max_new_tokens,
             params.max_images,
@@ -945,7 +1366,7 @@ fn interleave_generate(
     let direct_admission = direct_admission.ok_or_else(|| {
         WorkerError::InvalidPayload("SenseNova-U1 Candle admission was not prepared".to_owned())
     })?;
-    let spec = sensenova_direct_spec(weights_dir, &direct_admission);
+    let spec = sensenova_direct_spec(weights_dir, &direct_admission)?;
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
     let runtime = load_understanding_with_spec(&spec)
         .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
@@ -977,15 +1398,17 @@ fn interleave_generate(
     let count = u32::try_from(params.max_images).map_err(|_| {
         WorkerError::InvalidPayload("SenseNova interleave maxImages overflows".to_owned())
     })?;
-    let context = sensenova_resident_context(
+    let context = sensenova_admitted_context(
         runtime.memory_strategy_contract(),
         &direct_admission,
-        gen_core::MemoryMode::Other("interleave".to_owned()),
-        params.width as u32,
-        params.height as u32,
-        count,
-        reference_count,
-    );
+        SenseNovaRunShape {
+            mode_key: SENSENOVA_INTERLEAVE_MODE,
+            width: params.width as u32,
+            height: params.height as u32,
+            batch: count,
+            reference_count,
+        },
+    )?;
     let request = gen_core::GenerationRequest {
         prompt: prompt.to_owned(),
         width: params.width as u32,
@@ -1250,7 +1673,7 @@ fn vqa_result_json(
 /// engine's private `load_inner` from public re-exports. Loads dense bf16 with NO distill LoRA and
 /// NO quantization — the understanding (VQA) + interleave paths use the full base model, exactly as
 /// the torch adapter's `_load_model(distill_lora=None)`, keeping the VQA decode bit-identical.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn load_sensenova_model(weights_dir: &Path) -> WorkerResult<(T2iModel, TextTokenizer)> {
     let cfg = NeoChatConfig::from_dir(weights_dir)
         .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 config: {error}")))?;
@@ -2066,5 +2489,492 @@ mod tests {
         assert_eq!(segments[0], json!({ "type": "text", "text": "only one" }));
         assert_eq!(segments[1]["assetId"], "asset_a");
         assert_eq!(segments[2]["assetId"], "asset_b");
+    }
+
+    // =======================================================================
+    // Worker-owned direct memory admission (SC-20799 gap 3)
+    // =======================================================================
+
+    /// The six public SenseNova routes, in the exact spelling both pinned providers publish
+    /// (`QUALITY_PUBLIC_ROUTES` + `FAST_PUBLIC_ROUTES` on MLX, `QUALITY_ROUTES` + `FAST_ROUTES` on
+    /// candle).
+    #[cfg(target_os = "macos")]
+    const SENSENOVA_PUBLIC_ROUTES: [&str; 6] = [
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
+    ];
+
+    /// A local mirror of the pinned providers' private `validate_resolved_artifact_binding`
+    /// (inference `crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs` and its
+    /// byte-identical candle sibling): a resolved route requires the weights path to carry the
+    /// `SceneWorks/<route-with-dashes>-mlx` repository identity as a PATH COMPONENT, in one of three
+    /// spellings — the bare repo name, the HF cache's `models--SceneWorks--…`, and the app-owned
+    /// `SceneWorks__…`. The provider function is private, so the coupling is asserted through this
+    /// mirror; the tests below then pin the worker's own resolution against it.
+    #[cfg(target_os = "macos")]
+    fn provider_binds_repository(route: &str, root: &Path) -> bool {
+        let expected = format!("{}-mlx", route.replace('_', "-"));
+        let expected_hf = format!("models--SceneWorks--{expected}");
+        let expected_app = format!("SceneWorks__{expected}");
+        root.components().any(|component| {
+            let component = component.as_os_str().to_string_lossy();
+            component == expected || component == expected_hf || component == expected_app
+        })
+    }
+
+    /// The worker's OWN resolution is what has to satisfy that predicate.
+    ///
+    /// `resolve_weights_dir` builds the snapshot path from `model_repo(request, &model)`, whose
+    /// fallback is `engines::default_repo_for(<route>)`. For every public SenseNova route that
+    /// default repo is exactly `SceneWorks/<route-with-dashes>-mlx`, which is precisely the
+    /// repository identity the pinned providers demand — so an HF-cache or app-cache snapshot for
+    /// that repo always carries a matching component. This test is the seam that would fail if a
+    /// route were ever re-pointed at the upstream `sensenova/SenseNova-U1-8B-MoT` source repo, which
+    /// would make EVERY request for that route refuse at binding.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn worker_resolves_every_public_route_under_its_rehost_repository() {
+        for route in SENSENOVA_PUBLIC_ROUTES {
+            let repo = crate::engines::default_repo_for(route)
+                .unwrap_or_else(|| panic!("{route} must be a known engine id"));
+            assert_eq!(
+                repo,
+                format!("SceneWorks/{}-mlx", route.replace('_', "-")),
+                "{route} must resolve to its SceneWorks re-host, not the upstream source repo"
+            );
+            let repo_name = repo
+                .rsplit('/')
+                .next()
+                .expect("repo has an owner/name shape");
+            // The three cache spellings the worker can produce for that repo.
+            for root in [
+                PathBuf::from("/data/models").join(repo_name).join("q8"),
+                PathBuf::from("/data/hub")
+                    .join(format!("models--SceneWorks--{repo_name}"))
+                    .join("snapshots")
+                    .join("abc123")
+                    .join("q8"),
+                PathBuf::from("/data/app")
+                    .join(format!("SceneWorks__{repo_name}"))
+                    .join("bf16"),
+            ] {
+                assert!(
+                    provider_binds_repository(route, &root),
+                    "{route}: {} must carry the provider-required repository identity",
+                    root.display()
+                );
+            }
+        }
+    }
+
+    /// The refused shape: the upstream source snapshot. Nothing in the worker resolves here today —
+    /// this pins WHAT would break if something did.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_non_rehost_weights_path_is_the_shape_the_provider_refuses() {
+        let upstream = PathBuf::from("/data/hub")
+            .join("models--sensenova--SenseNova-U1-8B-MoT")
+            .join("snapshots")
+            .join("abc123");
+        for route in SENSENOVA_PUBLIC_ROUTES {
+            assert!(
+                !provider_binds_repository(route, &upstream),
+                "{route}: the upstream source snapshot must NOT satisfy the repository binding"
+            );
+        }
+        // A sibling route's re-host is equally refused — the binding is per-route, not per-family.
+        assert!(!provider_binds_repository(
+            "sensenova_u1_8b",
+            &PathBuf::from("/data/models/sensenova-u1-8b-fast-mlx/q8"),
+        ));
+    }
+
+    /// `sensenova_direct_spec` stamps the public route AND keeps the resolved directory, so the pair
+    /// it hands the provider is exactly the pair the binding gate grades.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_spec_carries_the_route_and_a_bound_weights_path() {
+        for route in SENSENOVA_PUBLIC_ROUTES {
+            let repo_name = format!("{}-mlx", route.replace('_', "-"));
+            let weights = PathBuf::from("/data/hub")
+                .join(format!("models--SceneWorks--{repo_name}"))
+                .join("snapshots")
+                .join("abc123")
+                .join("q4");
+            let admission = test_admission(route, "q4");
+            let spec = sensenova_direct_spec(&weights, &admission).expect("q4 is a real tier");
+            assert_eq!(spec.resolved_route.as_deref(), Some(route));
+            assert_eq!(spec.quantize, Some(gen_core::Quant::Q4));
+            let gen_core::WeightsSource::Dir(root) = &spec.weights else {
+                panic!("SenseNova always loads from a snapshot directory");
+            };
+            assert!(provider_binds_repository(route, root), "{route}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_admission(model_id: &str, tier: &'static str) -> SenseNovaDirectAdmission {
+        SenseNovaDirectAdmission {
+            model_id: model_id.to_owned(),
+            tier,
+            total_gb: Some(128.0),
+            free_gb: Some(128.0),
+            predicted_peak_gb: Some(24.0),
+        }
+    }
+
+    /// A contract shaped exactly like the pinned SenseNova declarations (both backends declare the
+    /// same five rungs identically): `Resident` and `BoundedAttention` implemented, staging and
+    /// bounded decode structurally not applicable, and rung 4 implemented ONLY on a re-openable
+    /// deferred snapshot. `streamable` selects between the eager shape an actual worker load
+    /// produces and the deferred shape, so the ladder's contract consultation is exercised both
+    /// ways. The declared parameter values are read from the provider crate's own public constants
+    /// rather than copied, so a pin bump that moves them moves these tests too.
+    #[cfg(target_os = "macos")]
+    fn test_contract(streamable: bool) -> gen_core::MemoryProviderContract {
+        use runtime_macos::providers::sensenova::memory_strategy::{
+            ATTENTION_CHUNK_SIZE, TRANSFORMER_WINDOW_SIZE,
+        };
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "sensenova_u1_8b",
+            gen_core::MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: false,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.load_shape = if streamable {
+            gen_core::LoadShape::DeferredMaterialization
+        } else {
+            gen_core::LoadShape::EagerMaterialization
+        };
+        contract.asset_facts.base_bytes = 17_000_000_000;
+        contract.asset_facts.transformer_bytes = 17_000_000_000;
+        for capability in &mut contract.strategies {
+            capability.support = match capability.strategy {
+                gen_core::MemoryStrategy::Resident => gen_core::MemoryStrategySupport::Implemented,
+                gen_core::MemoryStrategy::StagedResidency
+                | gen_core::MemoryStrategy::BoundedDecode => {
+                    gen_core::MemoryStrategySupport::StructurallyNotApplicable {
+                        reason: "one fused dual-path checkpoint; no VAE decode phase".to_owned(),
+                    }
+                }
+                gen_core::MemoryStrategy::BoundedAttention => {
+                    capability.parameters.attention_chunk_sizes = vec![ATTENTION_CHUNK_SIZE];
+                    gen_core::MemoryStrategySupport::Implemented
+                }
+                gen_core::MemoryStrategy::BoundedTransformerResidency if streamable => {
+                    capability.parameters.transformer_window_sizes = vec![TRANSFORMER_WINDOW_SIZE];
+                    capability.parameters.transformer_window_components =
+                        vec![gen_core::TransformerComponent::Dit];
+                    gen_core::MemoryStrategySupport::Implemented
+                }
+                gen_core::MemoryStrategy::BoundedTransformerResidency => {
+                    gen_core::MemoryStrategySupport::Missing
+                }
+            };
+        }
+        contract
+    }
+
+    #[cfg(target_os = "macos")]
+    fn vqa_shape() -> SenseNovaRunShape {
+        SenseNovaRunShape {
+            mode_key: SENSENOVA_VQA_MODE,
+            width: 768,
+            height: 768,
+            batch: 1,
+            reference_count: 1,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn interleave_shape() -> SenseNovaRunShape {
+        SenseNovaRunShape {
+            mode_key: SENSENOVA_INTERLEAVE_MODE,
+            width: 1024,
+            height: 1024,
+            batch: 4,
+            reference_count: 2,
+        }
+    }
+
+    /// VQA's ladder must never OFFER rung 4 — both providers refuse a VQA context that selects it
+    /// ("bounded transformer residency is structurally not applicable to VQA understanding").
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_vqa_ladder_never_offers_bounded_transformer_residency() {
+        assert_eq!(
+            sensenova_candidate_ladder(SENSENOVA_VQA_MODE),
+            &[
+                gen_core::MemoryStrategy::BoundedAttention,
+                gen_core::MemoryStrategy::Resident,
+            ],
+        );
+        assert_eq!(
+            sensenova_candidate_ladder(SENSENOVA_INTERLEAVE_MODE),
+            &[
+                gen_core::MemoryStrategy::BoundedTransformerResidency,
+                gen_core::MemoryStrategy::BoundedAttention,
+                gen_core::MemoryStrategy::Resident,
+            ],
+        );
+    }
+
+    /// Even handed a contract that DOES implement rung 4, VQA selects rung 3: the exclusion is the
+    /// operation's, not the contract's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vqa_selects_bounded_attention_even_on_a_rung_four_capable_contract() {
+        let contract = test_contract(true);
+        let context = sensenova_admitted_context(
+            &contract,
+            &test_admission("sensenova_u1_8b", "q8"),
+            vqa_shape(),
+        )
+        .expect("an ample budget admits the VQA ladder");
+        assert_eq!(
+            context.selection.strategy,
+            gen_core::MemoryStrategy::BoundedAttention
+        );
+        assert_eq!(context.selection.parameters.transformer_window_size, None);
+    }
+
+    /// The exact selection an eager worker load produces for each operation: rung 3, the contract's
+    /// own declared chunk size, `Estimated` authority, no rung-4 parameters, and the calibration
+    /// handshake taken from the contract.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_eager_contract_admits_bounded_attention_with_the_declared_chunk_size() {
+        let contract = test_contract(false);
+        for shape in [vqa_shape(), interleave_shape()] {
+            let context = sensenova_admitted_context(
+                &contract,
+                &test_admission("sensenova_u1_8b", "q8"),
+                shape,
+            )
+            .expect("an ample budget admits the ladder");
+            assert_eq!(
+                context.selection.strategy,
+                gen_core::MemoryStrategy::BoundedAttention,
+                "{}",
+                shape.mode_key
+            );
+            assert_eq!(
+                context.selection.parameters.attention_chunk_size,
+                Some(runtime_macos::providers::sensenova::memory_strategy::ATTENTION_CHUNK_SIZE),
+            );
+            assert_eq!(context.selection.parameters.transformer_window_size, None);
+            assert_eq!(
+                context.selection.parameters.transformer_window_component,
+                None
+            );
+            assert_eq!(context.selection.parameters.decode_tile_edge, None);
+            assert_eq!(context.selection.parameters.decode_overlap, None);
+            assert_eq!(
+                context.optimization_authority,
+                gen_core::MemoryOptimizationAuthority::Estimated,
+                "an optimized selection must carry non-Resident authority"
+            );
+            assert_eq!(context.selection.tier.quant, Some(gen_core::Quant::Q8));
+            assert_eq!(context.calibration_abi, gen_core::MEMORY_CALIBRATION_ABI);
+            assert_eq!(context.calibration_fingerprint, "");
+            assert_eq!(context.load_shape, contract.load_shape);
+            assert_eq!(
+                context.mode,
+                gen_core::MemoryMode::Other(shape.mode_key.to_owned())
+            );
+            assert_eq!(context.geometry.width, shape.width);
+            assert_eq!(context.geometry.batch, shape.batch);
+            assert_eq!(context.geometry.frames, 1);
+            assert_eq!(context.geometry.reference_count, shape.reference_count);
+            assert_eq!(context.has_reference, shape.reference_count > 0);
+            assert!(!context.use_pid && !context.has_phases);
+            // 24 GB manifest figure, unchanged by the rung: bounding attention scratch does not
+            // shrink the resident checkpoint.
+            assert_eq!(context.predicted_peak_bytes, sensenova_gib_bytes(24.0));
+        }
+    }
+
+    /// A deferred contract makes rung 4 selectable for interleave, and the deepest-first policy
+    /// takes it — with BOTH engaged rungs' parameters filled from the contract's declared ranges
+    /// (rung 4 engages rung 3 by cost order).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_deferred_contract_admits_bounded_transformer_residency_for_interleave() {
+        use runtime_macos::providers::sensenova::memory_strategy::{
+            ATTENTION_CHUNK_SIZE, TRANSFORMER_WINDOW_SIZE,
+        };
+        let contract = test_contract(true);
+        let context = sensenova_admitted_context(
+            &contract,
+            &test_admission("sensenova_u1_8b", "q8"),
+            interleave_shape(),
+        )
+        .expect("an ample budget admits the interleave ladder");
+        assert_eq!(
+            context.selection.strategy,
+            gen_core::MemoryStrategy::BoundedTransformerResidency
+        );
+        assert_eq!(
+            context.selection.parameters.attention_chunk_size,
+            Some(ATTENTION_CHUNK_SIZE)
+        );
+        assert_eq!(
+            context.selection.parameters.transformer_window_size,
+            Some(TRANSFORMER_WINDOW_SIZE)
+        );
+        assert_eq!(
+            context.selection.parameters.transformer_window_component,
+            Some(gen_core::TransformerComponent::Dit)
+        );
+        assert_eq!(
+            context.optimization_authority,
+            gen_core::MemoryOptimizationAuthority::Estimated
+        );
+    }
+
+    /// Resident stays REACHABLE: a contract that implements neither optimized rung degrades to the
+    /// baseline instead of failing, and the baseline carries `Resident` authority and no parameters.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_resident_only_contract_degrades_to_the_resident_baseline() {
+        let mut contract = test_contract(false);
+        for capability in &mut contract.strategies {
+            if capability.strategy == gen_core::MemoryStrategy::BoundedAttention {
+                capability.support = gen_core::MemoryStrategySupport::Missing;
+                capability.parameters.attention_chunk_sizes.clear();
+            }
+        }
+        let context = sensenova_admitted_context(
+            &contract,
+            &test_admission("sensenova_u1_8b", "bf16"),
+            interleave_shape(),
+        )
+        .expect("the resident baseline must remain reachable");
+        assert_eq!(
+            context.selection.strategy,
+            gen_core::MemoryStrategy::Resident
+        );
+        assert_eq!(
+            context.optimization_authority,
+            gen_core::MemoryOptimizationAuthority::Resident
+        );
+        assert_eq!(context.selection.parameters, Default::default());
+        assert_eq!(context.selection.tier.quant, None);
+    }
+
+    /// Nothing accepted ⇒ a typed refusal carrying every candidate's reason, never a silent
+    /// resident fallback and never a panic. A budget smaller than the predicted peak refuses every
+    /// rung, because the shared pipeline's budget check is the last gate on all of them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn admission_fails_closed_when_no_candidate_fits_the_budget() {
+        let contract = test_contract(true);
+        let admission = SenseNovaDirectAdmission {
+            model_id: "sensenova_u1_8b".to_owned(),
+            tier: "q8",
+            total_gb: Some(8.0),
+            free_gb: Some(8.0),
+            predicted_peak_gb: Some(24.0),
+        };
+        let error = sensenova_admitted_context(&contract, &admission, interleave_shape())
+            .expect_err("a 24 GB request must not be admitted into an 8 GB budget");
+        let WorkerError::InvalidPayload(message) = error else {
+            panic!("admission refusal must be a typed InvalidPayload, got {error:?}");
+        };
+        assert!(
+            message.contains("refused every memory strategy"),
+            "{message}"
+        );
+        for strategy in [
+            "BoundedTransformerResidency",
+            "BoundedAttention",
+            "Resident",
+        ] {
+            assert!(
+                message.contains(strategy),
+                "the refusal must name {strategy}: {message}"
+            );
+        }
+    }
+
+    /// An unknown tier key is a typed refusal, not a panic and not a silent dense default.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tier_keys_map_to_the_providers_quant_and_refuse_anything_else() {
+        assert_eq!(sensenova_quant("bf16").expect("bf16"), None);
+        assert_eq!(
+            sensenova_quant("q4").expect("q4"),
+            Some(gen_core::Quant::Q4)
+        );
+        assert_eq!(
+            sensenova_quant("q8").expect("q8"),
+            Some(gen_core::Quant::Q8)
+        );
+        let error = sensenova_quant("nvfp4").expect_err("nvfp4 is not a SenseNova tier");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message.contains("nvfp4")),
+            "{error:?}"
+        );
+    }
+
+    /// The manifest figure wins when declared; otherwise the LOADED contract's own asset facts are
+    /// the floor, and a zero footprint is a refusal rather than a vacuous zero-byte budget check.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn predicted_peak_prefers_the_manifest_then_the_contracts_asset_facts() {
+        let contract = test_contract(false);
+        let declared = test_admission("sensenova_u1_8b", "q8");
+        assert_eq!(
+            sensenova_predicted_peak_bytes(&contract, &declared).expect("declared"),
+            sensenova_gib_bytes(24.0)
+        );
+        let undeclared = SenseNovaDirectAdmission {
+            predicted_peak_gb: None,
+            ..declared
+        };
+        assert_eq!(
+            sensenova_predicted_peak_bytes(&contract, &undeclared).expect("asset facts"),
+            17_000_000_000
+        );
+        let mut empty = test_contract(false);
+        empty.asset_facts = Default::default();
+        let error = sensenova_predicted_peak_bytes(&empty, &undeclared)
+            .expect_err("a zero footprint must refuse");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message.contains("zero-byte")),
+            "{error:?}"
+        );
+    }
+
+    /// The MLX tier key reads the RESOLVED turnkey subdir first, and only falls back to the
+    /// requested/declared bit width for a flat `modelPath` with no tier basename.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mlx_tier_key_reads_the_resolved_subdir_then_the_request() {
+        let payload = json!({ "projectId": "p" });
+        let mut request = ImageRequest::from_payload(payload.as_object().expect("payload object"));
+        let root = Path::new("/data/models/sensenova-u1-8b-mlx");
+        assert_eq!(sensenova_mlx_tier_key(&request, &root.join("q4")), "q4");
+        assert_eq!(sensenova_mlx_tier_key(&request, &root.join("q8")), "q8");
+        assert_eq!(sensenova_mlx_tier_key(&request, &root.join("bf16")), "bf16");
+        // Flat path, nothing requested and nothing declared ⇒ the q8 default.
+        assert_eq!(sensenova_mlx_tier_key(&request, root), "q8");
+        request.model_manifest_entry = json!({ "mlx": { "quantize": 4 } })
+            .as_object()
+            .expect("object")
+            .clone();
+        assert_eq!(sensenova_mlx_tier_key(&request, root), "q4");
+        request.advanced = json!({ "mlxQuantize": 0 })
+            .as_object()
+            .expect("object")
+            .clone();
+        assert_eq!(sensenova_mlx_tier_key(&request, root), "bf16");
     }
 }

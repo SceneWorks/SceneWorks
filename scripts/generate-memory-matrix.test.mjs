@@ -25,6 +25,7 @@ import {
   isPublishableCell,
   memoryCharacterization,
   parseCandleBespokeStagedLanes,
+  renderMarkdown,
   OUT_OF_MATRIX_CELL_STATES,
   plannedCellIds,
   RUNG4_APPLICABILITIES,
@@ -335,6 +336,9 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "inferenceClosures",
     "instantId",
     "manifest",
+    // sc-20799: `CANDLE_BESPOKE_REQUEST_PROVIDERS` (receipt-backed bespoke Candle staged
+    // coverage) decides cell state, so the registry joined the fingerprint.
+    "memoryRouteRegistry",
     "memoryStrategy",
     "mlxFitGate",
     "routingCandle",
@@ -361,6 +365,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "engines",
     "imageRouting",
     "instantId",
+    "memoryRouteRegistry",
     "memoryStrategy",
     "mlxFitGate",
     "routingCandle",
@@ -918,7 +923,7 @@ test("decode geometry receipts stay semantic and never publish calibration range
   );
 });
 
-test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keeps stale captures historical", async () => {
+test("FLUX.2-dev MLX declares the pinned staged ladder and keeps stale captures historical", async () => {
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
@@ -926,23 +931,37 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
   const contract = manifest.models.find((model) => model.id === "flux2_dev")
     .mlx.memoryStrategyContract;
   assert.equal(contract.provider, "flux2_dev");
-  assert.equal(contract.exhaustive, true);
-  assert.deepEqual(
-    contract.implementations.map(({ rung, tiers, modes, overlays, engagedRungs }) => ({
-      rung,
-      tiers,
-      modes,
-      overlays,
-      engagedRungs,
-    })),
-    [{
-      rung: "resident",
-      tiers: ["q4", "q8"],
-      modes: ["text_to_image"],
-      overlays: ["none"],
-      engagedRungs: ["resident"],
-    }],
-  );
+  // sc-20799 retired the SC-18218 resident-only pin: at inference 42cab15ba4 all three Dev MLX
+  // providers implement selectable Sequential staged residency, so the contract is no longer
+  // exhaustive (the census now follows the registered-engine sweep, Klein-style) and carries the
+  // edit/control runtimeProvider rows whose requestContexts drive the non-legacy declared path.
+  assert.equal(contract.exhaustive, undefined);
+  const rowsFor = (provider) =>
+    contract.implementations.filter(
+      (row) => (row.runtimeProvider ?? contract.provider) === provider,
+    );
+  for (const provider of ["flux2_dev", "flux2_dev_edit", "flux2_dev_control"]) {
+    const rows = rowsFor(provider);
+    // SHAPE per provider, not a population: resident + staged and NOTHING deeper — the pinned
+    // providers implement no decode/attention/transformer rung ("activation/decode/transformer
+    // rungs remain Missing until route-specific evidence exists").
+    assert.deepEqual(
+      [...new Set(rows.map((row) => row.rung))].sort(),
+      ["resident", "staged_residency"],
+      `${provider}: exactly the resident + staged pair`,
+    );
+    assert.ok(
+      rows
+        .filter((row) => row.rung === "staged_residency")
+        .every(
+          (row) =>
+            row.requiredOffloadPolicy === "sequential" &&
+            Array.isArray(row.requestContexts) &&
+            row.requestContexts.length > 0,
+        ),
+      `${provider}: staged rows carry the Sequential requirement and requestContexts`,
+    );
+  }
 
   const shipped = await buildMatrix({ publish: false });
   const shippedCells = shipped.cells.filter(
@@ -953,29 +972,45 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
     135,
     "the full 3-tier x 3-active-mode x 3-overlay x 5-rung slice must exist after style retirement",
   );
+  // Resident + staged are Implemented across the lane; every deeper rung stays Missing.
+  assert.ok(
+    shippedCells
+      .filter((cell) => ["resident", "staged_residency"].includes(cell.rung))
+      .every((cell) => cell.state === "Implemented/unverified"),
+    "resident and staged must be Implemented across the FLUX.2-dev MLX lane at this pin",
+  );
+  assert.ok(
+    shippedCells
+      .filter((cell) =>
+        ["bounded_decode", "bounded_attention", "bounded_transformer_residency"].includes(cell.rung),
+      )
+      .every((cell) => cell.state === "Missing"),
+    "no deep rung may borrow the staged declaration",
+  );
+  // TWO retained cohorts per captured cell after the sc-17137 main sync: SC-18218's originals
+  // (10831e4ca) and sc-19721's re-captures (75d66db5), each covering the 768 and 1024 geometries —
+  // four historical rows per cell. The sc-20523 pin moved the shared gen-core closure past BOTH, so
+  // neither cohort is re-stamped current: the superseded captures stay historical until a real
+  // re-capture arrives, which is the property this has always been protecting.
+  const captured = shippedCells.filter(
+    (cell) => cell.evidence.historicalVerification.length > 0,
+  );
   assert.deepEqual(
-    shippedCells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
+    captured.map((cell) => cell.id).sort(),
     [
       "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
       "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
     ],
-    "BF16 and every sibling mode, overlay, and rung must remain Missing",
+    "the exact q4/q8 T2I Resident captures remain the only historically-evidenced cells",
   );
-  // TWO retained cohorts per cell after the sc-17137 main sync: SC-18218's originals (10831e4ca)
-  // and sc-19721's re-captures (75d66db5), each covering the 768 and 1024 geometries — four
-  // historical rows per cell. The sc-20523 pin moved the shared gen-core closure past BOTH, so
-  // neither cohort is re-stamped current: the superseded captures stay historical until a real
-  // re-capture arrives, which is the property this has always been protecting.
   assert.ok(
-    shippedCells
-      .filter((cell) => cell.state !== "Missing")
-      .every(
-        (cell) =>
-          cell.state === "Implemented/unverified" &&
-          cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
-          cell.evidence.currentEnvironmentVerification.length === 0 &&
-          cell.evidence.historicalVerification.length === 4,
-      ),
+    captured.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
+        cell.evidence.currentEnvironmentVerification.length === 0 &&
+        cell.evidence.historicalVerification.length === 4,
+    ),
     "the exact 768 and 1024 captures of both cohorts must remain attributable but historical after the shared gen-core closure moved",
   );
 
@@ -995,9 +1030,16 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
       }),
     },
   });
+  // Keyed on the evidence itself, not on `state !== "Missing"`: the sweep-driven staged cells are
+  // Implemented/unverified with no captures, and folding them in would let this assertion pass or
+  // fail on coverage the promotion fixture never touched.
   const currentCells = onCurrentClosure.cells.filter(
-    (cell) => cell.modelId === "flux2_dev" && cell.backend === "mlx" && cell.state !== "Missing",
+    (cell) =>
+      cell.modelId === "flux2_dev" &&
+      cell.backend === "mlx" &&
+      cell.evidence.currentEnvironmentVerification.length > 0,
   );
+  assert.equal(currentCells.length, 2, "exactly the two captured T2I Resident cells promote");
   assert.ok(
     currentCells.every(
       (cell) =>
@@ -1207,8 +1249,12 @@ test("backend scopes follow real routing even when manifest tuning blocks are ab
   const byId = new Map(manifest.models.map((model) => [model.id, model]));
   const lanes = routedLanes({ routingCatalog, routingCandle, routingMlx });
 
-  assert.equal(byId.get("anima_base").candle, undefined, "fixture premise: no candle tuning block");
-  assert.deepEqual(backendScopes(byId.get("anima_base"), lanes), ["mlx", "candle"]);
+  // sc-20799 gave every remaining image entry a candle tuning block, so the absent-block premise no
+  // longer has a live manifest instance. The claim under test is unchanged — the oracle keys on
+  // ROUTING, not on tuning blocks — so exercise it with a block-less synthetic entry directly, and
+  // keep the real-manifest read to prove the id exists in the catalog.
+  assert.ok(byId.get("anima_base"), "anima_base must remain a catalog entry");
+  assert.deepEqual(backendScopes({ id: "anima_base" }, lanes), ["mlx", "candle"]);
   assert.deepEqual(
     backendScopes({ id: "scail2_14b" }, lanes),
     ["mlx", "candle"],
@@ -2514,8 +2560,11 @@ test("a rung-4 implementation claim survives an absent rung 1 exactly when the p
   assert.equal(declares.get("15513:mlx"), false, "fixture assumes SenseNova MLX appends no edge");
   const exempt = await claimImplemented("15513", "sensenova_u1_8b");
   assert.ok(
-    exempt.rung1.every((cell) => cell.state === "Missing"),
-    "fixture assumes SenseNova advertises no MLX rung 1 either",
+    // sc-20799: SenseNova's staged rung is now declared Structurally N/A (the fused dual-path
+    // transformer has no separable conditioning component) rather than bare Missing — either way,
+    // the premise holds: no implemented MLX rung 1 exists for the rung-4 claim to lean on.
+    exempt.rung1.every((cell) => ["Missing", "Structurally N/A"].includes(cell.state)),
+    "fixture assumes SenseNova advertises no implemented MLX rung 1",
   );
   assert.ok(
     exempt.rung4.every(
@@ -5457,11 +5506,12 @@ function stagedCensusFixture() {
     overlay,
     state,
   });
-  // Minimum shape the other assertions in the function demand: bernini in the census, flux2_dev out of
-  // it, and the census neither empty nor the whole catalog.
+  // Minimum shape the other assertions in the function demand: bernini AND flux2_dev in the census
+  // (sc-20799 flipped flux2_dev's direction — at pin 42cab15ba4 all three Dev MLX providers declare
+  // selectable staged residency), and the census neither empty nor the whole catalog.
   return {
-    models: [model("bernini_image"), model("filler_a"), model("filler_b")],
-    cells: [cell("bernini_image")],
+    models: [model("bernini_image"), model("flux2_dev"), model("filler_a"), model("filler_b")],
+    cells: [cell("bernini_image"), cell("flux2_dev")],
     model,
     cell,
   };
@@ -6320,4 +6370,26 @@ test("receipt-backed bespoke Candle staged coverage is visible and census-fenced
     /unmapped=candle_new_provider/,
   );
   assert.throws(() => parseCandleBespokeStagedLanes("// nothing here"), /could not derive/);
+});
+
+test("the staged column tells structural truth apart from undelivered work (sc-20799)", async () => {
+  const matrix = await buildMatrix();
+  const markdown = renderMarkdown(matrix);
+  const row = (id, backend) =>
+    markdown
+      .split("\n")
+      .find((line) => line.startsWith(`| \`${id}\` |`) && line.includes(`| ${backend} |`));
+  // SenseNova's staged rung is an architecture fact (fused dual-path transformer, no separable
+  // conditioning component) on BOTH backends — the column must say so, not "Missing".
+  for (const backend of ["mlx", "candle"]) {
+    assert.match(
+      row("sensenova_u1_8b", backend),
+      /Structurally N\/A/,
+      `sensenova_u1_8b ${backend} staged column must render the structural verdict`,
+    );
+  }
+  // The delivered SC-20790 Kolors Candle bespoke lanes are receipt-backed coverage.
+  assert.match(row("kolors", "candle"), /Implemented\/unverified/);
+  // And a genuinely undelivered lane still reads Missing — the column did not go soft.
+  assert.match(row("svd", "candle"), /Missing/);
 });
