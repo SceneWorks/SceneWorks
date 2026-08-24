@@ -1305,10 +1305,14 @@ fn bespoke_image_lane_support(
                         | ("conditioning", "reference")
                 )
         }
-        // Staged until the final accepted inference pin and descriptor dump. The route is wired,
-        // but the checked-in semantic matrix/exceptions deliberately remain pin-keyed to the
-        // current provider facts and must not be advanced from source inference alone.
-        CandleImageLane::SdxlControl => false,
+        // The terminal CUDA campaign accepted this exact five-model route. Keep the semantic
+        // supplement tied to the production route table rather than the shared `sdxl` descriptor:
+        // the latter is intentionally broader than the product's OpenPose admission boundary.
+        CandleImageLane::SdxlControl => {
+            super::candle::is_sdxl_control_model(model)
+                && category == "conditioning"
+                && capability == "control"
+        }
         CandleImageLane::QwenEdit => {
             matches!(
                 model,
@@ -1863,15 +1867,6 @@ fn conditioning_cell(
     let (job_type, payload) = conditioning_payload(model, shape, mlx_facts, candle_facts)?;
     let job = probe_job(job_type, &model.id, payload)?;
     let supports = |facts: &RuntimeDescriptorFacts| {
-        // The shared `sdxl` runtime descriptor advertises ControlNet for every route alias, and the
-        // scheduler deliberately owns unsupported Illustrious control payloads only to reject them.
-        // Neither fact is product support: cells 18-19 remained terminal-evidence-only, so their
-        // exact model ids must stay false on both backends despite the shared descriptor/claim.
-        if shape == "control"
-            && matches!(model.id.as_str(), "illustrious_xl_v1" | "illustrious_xl_v2")
-        {
-            return false;
-        }
         let descriptors = native_generator_descriptors(facts, &model.id);
         descriptors
             .into_iter()
@@ -3594,8 +3589,9 @@ mod tests {
         );
 
         // Mutate the actual Candle runtime snapshot and feed it through the production derivation;
-        // this is deliberately not a copied matrix fixture. Removing a native fact must restore
-        // precisely its MLX-only parity obligation and make the checked-in matrix mismatch.
+        // this is deliberately not a copied matrix fixture. The accepted SDXL OpenPose product
+        // route is now an independent authority, so losing the shared descriptor's conditioning
+        // annotation must not revoke any of the exact five claims or recreate a residual gap.
         let mut missing_candle_control: Value = serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
         let generators = missing_candle_control["snapshot"]["generator_capabilities"]
             .as_array_mut()
@@ -3610,7 +3606,13 @@ mod tests {
             &serde_json::to_string(&missing_candle_control).unwrap(),
         )
         .expect("mutated production facts still derive a matrix");
-        for model in ["realvisxl", "realvisxl_lightning", "sdxl"] {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
             let cell = mutated
                 .models
                 .iter()
@@ -3621,18 +3623,13 @@ mod tests {
                         .find(|cell| cell.capability == "control")
                 })
                 .unwrap_or_else(|| panic!("mutated derivation emits {model}/control"));
-            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
-            assert_eq!(
-                cell.parity_obligation
-                    .as_ref()
-                    .map(|obligation| obligation.work_item.as_str()),
-                Some("epic-8588")
-            );
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
+            assert!(cell.parity_obligation.is_none());
         }
         let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
         assert!(
-            checked_in_matrix_matches_live(checked_in, mutated).is_err(),
-            "removing Candle SDXL control must break the checked-in matrix/residual relationship"
+            checked_in_matrix_matches_live(checked_in, mutated).is_ok(),
+            "the route-backed exact five must survive descriptor-only capture drift"
         );
 
         let mut missing_scail_multi_reference: Value =
@@ -4129,7 +4126,7 @@ mod tests {
     }
 
     #[test]
-    fn sc18481_strict_pose_control_uses_only_real_base_model_lanes() {
+    fn sc20739_strict_pose_control_uses_only_real_product_lanes() {
         let matrix = backend_capability_matrix().unwrap();
         for model in [
             "z_image_turbo",
@@ -4154,20 +4151,59 @@ mod tests {
             assert!(control.parity_obligation.is_none());
         }
 
-        for model in ["illustrious_xl_v1", "illustrious_xl_v2"] {
+        let exact_sdxl_openpose_models = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
+        for model in exact_sdxl_openpose_models {
             let row = matrix.models.iter().find(|row| row.id == model).unwrap();
             let control = row
                 .conditioning_shape
                 .iter()
                 .find(|cell| cell.capability == "control")
-                .expect("shared descriptor axis remains represented");
+                .expect("promoted OpenPose model must expose the control axis");
             assert_eq!(
                 (control.mlx, control.candle),
-                (Some(false), Some(false)),
-                "{model} terminal evidence must not become a product control claim"
+                (Some(true), Some(true)),
+                "{model} must preserve the accepted cross-backend OpenPose claim"
             );
             assert!(control.parity_obligation.is_none());
         }
+
+        assert_eq!(
+            super::super::candle::SDXL_CONTROL_MODELS,
+            exact_sdxl_openpose_models.as_slice(),
+            "the generic SDXL OpenPose model allowlist must remain the accepted exact five"
+        );
+        let manifest: ManifestRoot =
+            serde_json::from_str(&strip_jsonc_comments(MANIFEST)).expect("manifest parses");
+        let actual_sdxl_openpose_models: BTreeSet<_> = manifest
+            .models
+            .iter()
+            .filter_map(|model| {
+                let job = probe_job(
+                    JobType::ImageGenerate,
+                    &model.id,
+                    json!({
+                        "mode": "text_to_image",
+                        "prompt": "probe",
+                        "advanced": { "poses": [{}] }
+                    }),
+                )
+                .expect("control probe is structurally valid");
+                (super::super::candle::image_job_candle_lane(&job)
+                    == Some(super::super::candle::CandleImageLane::SdxlControl))
+                .then_some(model.id.as_str())
+            })
+            .collect();
+        assert_eq!(
+            actual_sdxl_openpose_models,
+            exact_sdxl_openpose_models.into_iter().collect(),
+            "the generic SDXL OpenPose route must not broaden beyond the accepted exact five"
+        );
 
         // These edit models consume the pose image as an ordinary reference; they do not own the
         // strict control lane and must not inherit the base-model supplement above.
