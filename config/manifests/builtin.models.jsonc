@@ -21092,57 +21092,29 @@
           "schedulers": ["default"]
         }
       },
-      // sc-17156 — THE CANDLE LANE EXISTS AS CODE AND IS NOT YET REACHABLE AS A PRODUCT.
+      // sc-20754 — measured on the Windows CUDA real-weights host, one tier per fresh process on an
+      // idle 96 GB RTX PRO 6000 Blackwell. Every probe used the shipped 1344x768 / 124-frame / 50-NFE
+      // workload, `CANDLE_GEN_OFFLOAD=sequential`, and a 0.00 GB idle baseline. `vramGbByTier` is the
+      // base-10 nvidia-smi POOL high-water, not a weights-floor estimate: q4 40.068 GB, q8 74.696 GB,
+      // bf16 67.012 GB. Decode owned the pool peak in all three runs; the concurrent-live driver
+      // high-waters were 36.69 / 65.80 / 62.66 GiB respectively. The non-monotonic q8/bf16 ordering
+      // is measured, not normalized away: the packed q8 route retained a larger allocator pool.
       //
-      // `candle-gen-minimax-h3` now ships a real end-to-end t2va + fl2va generator and is registered
-      // in `candle-gen-catalog`. What it does NOT yet have is a measured VRAM ceiling or any
-      // artifact a user could install off-Mac, so this block declares the two things that are
-      // provable today and deliberately omits the two that are not.
-      //
-      // ⚠️ NO `vramGbByTier` AND NO `minMemoryGb`, AND THAT IS THE HONEST STATE, NOT AN OVERSIGHT.
-      // The candle probe (`candle-gen-minimax-h3/tests/vram_probe.rs::minimax_h3_vram_bf16`) is
-      // written and wired into the `candle-minimax-h3` CUDA lane behind the `minimax_h3_vram_probe`
-      // dispatch input, but it has never been executed, for two reasons that are both operator
-      // actions rather than code:
-      //   1. the repository variable `CANDLE_MINIMAX_H3_SNAPSHOT` is UNSET, so the lane fails closed
-      //      at its first step by design; and
-      //   2. the pinned `minimax-h3` row in inference's `release/real-weight-models.toml` carries a
-      //      `download_files` allow-list (~11.6 GB: vae/, audio_vae/, FL2VA/audio_vae/, tokenizer/
-      //      and the text-encoder shard INDEX) that deliberately EXCLUDES `transformer/` and the
-      //      fourteen TE shards. A render needs both, so CI cannot materialize what the probe reads.
-      // Until that number exists, `predicted_peak_gb` returning `None` for this model is CORRECT:
-      // the fit gate stays best-effort rather than admitting a card against a guess. Do NOT
-      // backfill an estimate here — a 66.7 GB conditioner staged before a 66.3 GB DiT is not
-      // something to extrapolate from a sibling, and the weights-floor table on sc-17158 activity
-      // 18683 is a weights floor, not a generate peak.
-      //
-      // `measured: false` is therefore load-bearing rather than decorative: it is the schema's own
-      // way of saying this lane's ceilings are not evidence yet.
-      //
-      // ⚠️ THE DOWNLOADS ARE NO LONGER `macos`-ONLY — sc-19558 added the `platforms:
-      // ["windows", "linux"]` raw-snapshot set above, which is the layout this provider's
-      // `REQUIRED_COMPONENT_DIRS` reads, and sc-20267 then widened the q4/q8 DiT and text-encoder
-      // rows to all three platforms once the provider gained `supported_quants: &[Quant::Q4,
-      // Quant::Q8]` and a packed tier loader. So off-Mac now has a THREE-TIER artifact set, not one.
-      // THE ROUTING COLUMNS DID NOT MOVE WITH EITHER CHANGE. A `candle` block is metadata about a
-      // backend; the routing catalog is the authority on which lane serves a request (GH #2074 —
-      // declaration is not reachability), and `VIDEO_MODEL_CAPS` still carries every candle column
-      // false for both partitions because the two open items above — no measured ceiling, and no
-      // candle dispatch arm in `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs`, which is
-      // `#[cfg(target_os = "macos")]` end to end — are unchanged. Obtaining weights is a precondition
-      // of routing, not routing.
-      //
-      // ⚠️ AND NO `vramGbByTier` EVEN THOUGH THERE ARE NOW TIERS OFF-MAC. A tier axis in the download
-      // set is not a measured ceiling: the probe above still has never run, so the per-tier numbers
-      // this block would need do not exist. sc-20267 deliberately added none — a tier column filled in
-      // from the MLX measurements would be a guess about a different loader.
+      // `minMemoryGb` is the DEFAULT q4 measured peak plus the gate's 2 GB dedicated-VRAM reserve,
+      // rounded up to the integer schema: ceil(40.068 + 2) = 43. Per-tier admission still reads each
+      // exact row and adds the same reserve, so q8 and bf16 are never sized against this q4 floor.
+      // Routing remains a separate catalog decision (GH #2074); this block records backend memory
+      // evidence and does not itself make a Candle route reachable.
       "candle": {
+        "minMemoryGb": 43,
+        "vramGbByTier": { "q4": 40.068, "q8": 74.696, "bf16": 67.012 },
+        "vramMeasuredPixels": 1032192,
         // Provable, and structural rather than requested: the provider pins
         // `OFFLOAD_POLICY = OffloadPolicy::Sequential` and ignores `spec.offload_policy` entirely,
         // so a caller cannot talk it into resident staging. Pinned by
         // `the_offload_policy_is_forced_sequential_even_when_resident_is_requested`.
         "supportsSequentialOffload": true,
-        "measured": false
+        "measured": true
       },
       "ui": {
         "label": "MiniMax-H3",
