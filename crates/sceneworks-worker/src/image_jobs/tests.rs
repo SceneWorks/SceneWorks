@@ -20885,6 +20885,267 @@ fn a_krea_plan_with_layers_the_bespoke_lane_cannot_source_refuses_during_plannin
     );
 }
 
+/// The tensor surface a fused SDXL LDM/A1111 checkpoint is recognized by — the adapter's own
+/// `sdxl-ldm-v1` signature key, plus enough of the fused container's other stages that the
+/// inspector classifies the file as a fused CHECKPOINT rather than a bare transformer.
+#[cfg(target_os = "macos")]
+fn sdxl_ldm_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+            "F16",
+        ),
+        (
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+            "F16",
+        ),
+        ("first_stage_model.encoder.conv_in.weight", "F16"),
+        ("first_stage_model.decoder.conv_out.weight", "F16"),
+    ]
+}
+
+/// Populate the isolated Hugging Face cache with CLIP-L's two model-agnostic tokenizer assets at
+/// the exact pinned revision the SDXL lane and the plan route both resolve against. Without them
+/// the fused route's `ldm_tokenizer` component is genuinely absent and every claim probe below
+/// would be measuring a missing install rather than the routing rule.
+#[cfg(target_os = "macos")]
+fn install_sdxl_clip_l_tokenizer(settings: &Settings) {
+    let snapshot = settings
+        .data_dir
+        .join("hub")
+        .join("models--openai--clip-vit-large-patch14")
+        .join("snapshots")
+        .join(SDXL_CLIP_L_REVISION);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(snapshot.join("vocab.json"), b"{}").unwrap();
+    std::fs::write(snapshot.join("merges.txt"), b"#version: 0.2\n").unwrap();
+}
+
+/// sc-20644 SDXL row, AC1 + AC2 — a plan-backed fused SDXL checkpoint runs its full surface off the
+/// plan's verified FUSED layer, and every request shape has exactly one claiming lane.
+///
+/// Same mechanism as the Krea row and deliberately so: the SDXL lane's primary is one FILE, the
+/// shape rule that picks it is derived from the adapter's dialect (`ldm` → `FusedCheckpoint`, whose
+/// backbone is the inspector's `checkpoint` role) rather than from the family name, and the plan
+/// route keeps only the shapes its own body implements. What the row adds beyond wiring is that a
+/// LINKED fused checkpoint — no installed path, so nothing for the directory scan to find — can now
+/// reach edit / LoRA / img2img / Hires at all.
+///
+/// Failing mutations: delete the `checkpoint_plan_bespoke_primary_pin` call in
+/// `resolve_imported_sdxl_pin`; remove `"sdxl"` from
+/// `CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES`; disable the plan-backed decline in
+/// `resolve_imported_sdxl_pin`.
+#[cfg(target_os = "macos")]
+#[test]
+fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
+    let fx = CheckpointPlanFixture::new("sdxl-single-claim", true);
+    install_sdxl_clip_l_tokenizer(&fx.settings);
+    let checkpoint_id = fx.compile("communityxl.safetensors", &sdxl_ldm_entries());
+    let resolved = fx.store.resolve(&checkpoint_id).unwrap();
+    assert_eq!(
+        resolved.family(),
+        "sdxl",
+        "fixture check: the plan must compile as SDXL, or every assertion below is vacuous"
+    );
+
+    let sdxl_request = |extra: Value| {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "linked_communityxl",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "linked_communityxl",
+                "catalogScope": "user",
+                "family": "sdxl",
+                "importSourceShape": "fused_checkpoint",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                payload[key] = value.clone();
+            }
+        }
+        request(payload)
+    };
+
+    // The plan route's own availability, and the SDXL lane's two halves (shape gate + a resolvable
+    // primary) — the same terms `prepare_sdxl_imported_sources` uses. An ERRORING source resolution
+    // still counts as a claim: the lane took the request and refused it.
+    let plan_claims = |r: &ImageRequest| {
+        prepare_checkpoint_plan_sources(r, &fx.settings)
+            .map(|selection| selection.is_available())
+            .unwrap_or(true)
+    };
+    let sdxl_claims = |r: &ImageRequest| {
+        sdxl_imported_request_shape_available(r)
+            && !matches!(resolve_imported_sdxl_pin(r, &fx.settings), Ok(None))
+    };
+
+    let shapes: Vec<(&str, ImageRequest)> = vec![
+        ("t2i", sdxl_request(json!({}))),
+        (
+            "img2img",
+            sdxl_request(json!({ "referenceAssetId": "asset-1" })),
+        ),
+        (
+            "edit",
+            sdxl_request(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" })),
+        ),
+        (
+            "lora",
+            sdxl_request(json!({ "loras": [{ "name": "style", "weight": 0.4 }] })),
+        ),
+        (
+            "hires",
+            sdxl_request(json!({ "hiresFix": { "enabled": true, "scale": 1.5 } })),
+        ),
+    ];
+    for (label, request) in &shapes {
+        let claimants: Vec<&str> = [
+            ("checkpoint-plan", plan_claims(request)),
+            ("sdxl-imported", sdxl_claims(request)),
+        ]
+        .into_iter()
+        .filter_map(|(name, claimed)| claimed.then_some(name))
+        .collect();
+        assert_eq!(
+            claimants.len(),
+            1,
+            "{label}: exactly one lane may claim a plan-backed SDXL request, got {claimants:?}"
+        );
+        assert!(
+            resolve_image_route(request, &fx.settings).is_some(),
+            "{label}: a plan-backed request must never fall through to the procedural stub"
+        );
+    }
+    let route_of = |label: &str| {
+        let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
+        resolve_image_route(request, &fx.settings)
+    };
+    assert_eq!(route_of("t2i"), Some(ImageRoute::CheckpointPlan));
+    assert_eq!(route_of("edit"), Some(ImageRoute::SdxlImported));
+    assert_eq!(route_of("lora"), Some(ImageRoute::SdxlImported));
+    assert_eq!(route_of("hires"), Some(ImageRoute::SdxlImported));
+
+    // AC1 — the bespoke lane opens the PLAN's verified layer, in place, for a linked checkpoint.
+    let edit = sdxl_request(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }));
+    let pin = resolve_imported_sdxl_pin(&edit, &fx.settings)
+        .unwrap()
+        .expect("a plan-backed SDXL entry resolves its fused primary through the plan");
+    assert_eq!(
+        pin.loader_path(),
+        fx.library_dir.join("communityxl.safetensors"),
+        "the lane loads the LINKED file in place; nothing was copied or scanned"
+    );
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME ------------------------------
+    let source = include_str!("sdxl_imported.rs");
+    for symbol in [
+        "fn resolve_imported_sdxl_pin(",
+        "if request_is_checkpoint_plan_backed(request) {",
+        "checkpoint_plan_bespoke_primary_pin(request, settings, \"sdxl\")",
+        // The scan: SDXL shares Krea's `imported_dit_file` predicate plus its own path chain.
+        "imported_dit_file(&confined)",
+        "fn sdxl_imported_request_shape_available(",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the SDXL bespoke surface sc-20651 deletes must be live code: {symbol}"
+        );
+    }
+    let decline_at = source
+        .find("if request_is_checkpoint_plan_backed(request) {")
+        .unwrap();
+    let plan_source_at = source
+        .find("checkpoint_plan_bespoke_primary_pin(request, settings, \"sdxl\")")
+        .unwrap();
+    let scan_at = source.find("imported_dit_file(&confined)").unwrap();
+    assert!(
+        decline_at < plan_source_at && plan_source_at < scan_at,
+        "decline → plan source → filesystem scan, in that order"
+    );
+}
+
+/// sc-20644 SDXL row — the imported candle lane stages the components the DESCRIPTOR declares, and
+/// a fused checkpoint's declaration does not include the fp16-fix VAE.
+///
+/// A fused LDM checkpoint carries its own VAE, so the candle binding registers
+/// `LDM_REQUIRED_COMPONENTS` — the two model-agnostic tokenizers — and the loader takes the VAE from
+/// `ldm.vae`; `SdxlComponents::from_spec` makes `vae_fp16_fix` optional for a fused source and
+/// simply drops it. The lane nevertheless staged all three unconditionally, downloading ~335 MB from
+/// `madebyollin/sdxl-vae-fp16-fix` on every imported render for a component nothing reads. Driving
+/// the loop from `descriptor.required_components` removes the download without changing a render.
+///
+/// Both halves are checked: the REGISTRY half here (the declaration itself, executable on this
+/// backend) and the STRUCTURAL half by source text, because `attach_imported_sdxl_components` is
+/// candle-only and async over an `ApiClient`, so `cargo test` cannot link it on this lane.
+///
+/// Failing mutations: re-add `"vae_fp16_fix"` to the staged set unconditionally; iterate
+/// `SDXL_IMPORTED_COMPONENT_SOURCES` instead of `descriptor.required_components`.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_imported_sdxl_lane_stages_only_the_components_its_descriptor_declares() {
+    // The registry half. MLX declares `ldm_tokenizer`; candle declares the two tokenizers. Neither
+    // declares the fp16-fix VAE for a FUSED source — which is the whole claim.
+    for operation in [
+        gen_core::ImportedModelOperation::Generate,
+        gen_core::ImportedModelOperation::Edit,
+    ] {
+        let Some(descriptor) = crate::inference_runtime::imported_model_descriptor(
+            "sdxl",
+            gen_core::ImportedModelSource::FusedCheckpoint,
+            operation,
+        ) else {
+            continue;
+        };
+        assert!(
+            !descriptor.required_components.contains(&"vae_fp16_fix"),
+            "{operation:?}: a fused SDXL checkpoint carries its own VAE, so the provider must not \
+             declare the fp16-fix VAE; declared {:?}",
+            descriptor.required_components
+        );
+        assert!(
+            !descriptor.required_components.is_empty(),
+            "{operation:?}: fixture check — the fused route does declare components, so an empty \
+             staged set would not be a vacuous pass"
+        );
+    }
+
+    // The structural half: the staging loop is descriptor-driven, and the VAE is reachable only
+    // through the source table it consults — never named unconditionally beside the tokenizers.
+    let source = include_str!("sdxl_imported.rs");
+    assert!(
+        source.contains("for component in descriptor.required_components {"),
+        "the candle component staging must iterate the resolved descriptor's declaration"
+    );
+    let table_at = source
+        .find("const SDXL_IMPORTED_COMPONENT_SOURCES:")
+        .expect("the component source table must exist");
+    let table = &source[table_at..];
+    let loop_at = table
+        .find("for component in descriptor.required_components {")
+        .expect("the staging loop follows the table");
+    assert!(
+        !table[..loop_at].is_empty() && table[..loop_at].contains("\"vae_fp16_fix\""),
+        "the VAE stays available as catalog DATA for the snapshot route that does declare it"
+    );
+    assert!(
+        !table[loop_at..].contains("\"vae_fp16_fix\""),
+        "nothing after the descriptor-driven loop may name the VAE: staging it unconditionally is \
+         the ~335 MB dead download this row removed"
+    );
+}
+
 /// The plan route runs the SAME MLX admission as the legacy Krea imported lane (sc-20634 review).
 ///
 /// It previously ran `apply_residency_policy` plus the bare `start_cached_gen_stream`, which

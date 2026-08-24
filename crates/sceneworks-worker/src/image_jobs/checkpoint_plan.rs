@@ -338,7 +338,7 @@ fn checkpoint_plan_request_shape_refusal(
 ///
 /// sc-20651 deletes this table together with the lanes it names; the row's conformance test pins it
 /// by name so that deletion is mechanical.
-const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &["krea_2"];
+const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &["krea_2", "sdxl"];
 
 /// Whether SOME other lane could take this request if the plan route declines it.
 ///
@@ -829,6 +829,18 @@ fn resolve_checkpoint_plan_component(
         }
         gen_core::COMFYUI_TEXT_ENCODER_COMPONENT => from_layers("text_encoder"),
         gen_core::COMFYUI_VAE_COMPONENT => from_layers("vae"),
+        // A fused SDXL checkpoint's model-agnostic CLIP tokenizer vocabulary. The staging root and
+        // the pinned CLIP-L revision are the SDXL lane's own, so the plan route and that lane hand
+        // the loader ONE directory rather than two copies (sc-20644 SDXL row).
+        CHECKPOINT_PLAN_LDM_TOKENIZER_COMPONENT => Ok(CheckpointPlanComponent {
+            id: component,
+            source: WeightsSource::Dir(resolve_sdxl_ldm_tokenizer_root_cache_only(
+                settings,
+                &resolved.checkpoint_id,
+            )?),
+            consumed: None,
+            pin: None,
+        }),
         _ => Err(WorkerError::InvalidPayload(format!(
             "[checkpoint-plan:missing-component] checkpoint {:?} ({family} family) requires \
              component '{component}', which this runtime cannot supply for that family",
@@ -836,6 +848,10 @@ fn resolve_checkpoint_plan_component(
         ))),
     }
 }
+
+/// The fused-LDM tokenizer component id (SDXL's `ldm_tokenizer`), spelled here because the constant
+/// lives in the MLX-only `mlx-gen-sdxl` crate while this route serves both backends.
+const CHECKPOINT_PLAN_LDM_TOKENIZER_COMPONENT: &str = "ldm_tokenizer";
 
 /// Each plan family's resident base tier resolver: `(plan family, resolver)`.
 ///
