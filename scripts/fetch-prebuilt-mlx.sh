@@ -17,14 +17,21 @@
 #   build type defaults to Debug (what `cargo build`/`cargo test` consume; --release is Release)
 #   target defaults to the host triple
 #   dest defaults to ${PMETAL_MLX_PREBUILT_CACHE:-$HOME/.cache/pmetal/prebuilt}/<sha12>/<cell>
-#   --github-env appends PMETAL_MLX_PREBUILT_DIR=<dir> to $GITHUB_ENV for later CI steps
+#   --github-env appends both variables below to $GITHUB_ENV for later CI steps
 #
-# Prints `PMETAL_MLX_PREBUILT_DIR=<dir>` on success. Exit codes: 1 = no release/asset for this
+# Prints `PMETAL_MLX_PREBUILT_DIR=<dir>` and `PMETAL_METALLIB_PATH=<dir>/mlx.metallib` on success
+# (sc-20799: the tarball ships the Metal kernel library next to the archives, and the fork's
+# runtime resolver order is $PMETAL_METALLIB_PATH -> the build's compiled-in METAL_PATH ->
+# ~/.cache/pmetal/lib/mlx.metallib. `cargo test`/`cargo run` binaries have NO compiled-in path,
+# and the user cache is refreshed only when pmetal-mlx-sys's build.rs re-runs -- which is exactly
+# what a prebuilt, or a warm cargo cache, skips. Without the first entry those binaries die at
+# "Failed to load the default metallib"). Exit codes: 1 = no release/asset for this
 # rev+cell (e.g. the fork rev was just bumped and prebuilt-mlx has not published yet -- the one
 # case where building from source is the right answer); 2 = usage/environment; 3 = the asset
 # exists but is corrupt or is not the cell it claims to be (never tolerate that). Local use:
 #
-#   eval "$(scripts/fetch-prebuilt-mlx.sh)" && export PMETAL_MLX_PREBUILT_DIR && cargo build ...
+#   eval "$(scripts/fetch-prebuilt-mlx.sh)" \
+#     && export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH && cargo build ...
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,7 +50,7 @@ while [ $# -gt 0 ]; do
     --target) target="$2"; shift 2 ;;
     --dest) dest="$2"; shift 2 ;;
     --github-env) github_env=1; shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "fetch-prebuilt-mlx: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -63,12 +70,21 @@ cell="${target}-dt${deployment_target}-${build_type}-${FEATURES}"
 asset="pmetal-mlx-${sha12}-${cell}.tar.zst"
 [ -n "$dest" ] || dest="${PMETAL_MLX_PREBUILT_CACHE:-$HOME/.cache/pmetal/prebuilt}/${sha12}/${cell}"
 manifest="$dest/pmetal-mlx-prebuilt.txt"
+metallib="$dest/mlx.metallib"
 
+# Deliberately unguarded on the metallib's existence: both call sites below have already proved
+# the file is there (the cache branch requires it, the extract branch verifies it and deletes the
+# directory otherwise). A "skip the variable if the file is missing" guard would turn a corrupt
+# prebuilt back into the silent "default metallib not found" runtime failure this emit prevents.
 emit() {
   echo "PMETAL_MLX_PREBUILT_DIR=$dest"
+  echo "PMETAL_METALLIB_PATH=$metallib"
   if [ "$github_env" = 1 ]; then
     [ -n "${GITHUB_ENV:-}" ] || { echo "fetch-prebuilt-mlx: --github-env but GITHUB_ENV is unset" >&2; exit 2; }
-    echo "PMETAL_MLX_PREBUILT_DIR=$dest" >> "$GITHUB_ENV"
+    {
+      echo "PMETAL_MLX_PREBUILT_DIR=$dest"
+      echo "PMETAL_METALLIB_PATH=$metallib"
+    } >> "$GITHUB_ENV"
   fi
 }
 
