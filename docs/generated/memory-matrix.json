@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:736aca4adeda0083730497ec81e888e32c9cc42451f2870f20bdb403905756eb",
+    "sceneWorksRevision": "source-tree:7e0ece3d597440449e222cc97786974c396afed737be08f8ae28dad3afd41291",
     "inferenceRevision": "ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6",
     "sources": {
       "manifest": {
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "10ba6ce35eecfb9d1419f3d3655994163d279d67063be88e9d9244aa1fcf5f2d"
+        "sha256": "301a87846e1ac5a88ea3ab375a5648208162569db0ba52b88545c999e85196c9"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -70,7 +70,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "1487fa731e7ed59bd94a906da16e09cb54adfffb6fe5b1960d479441e976fc38"
+        "sha256": "da20f0d352818f582b90d85b5cc09705ce8523a993de8664e452b56e1e7505b4"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -102,7 +102,7 @@
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "7b03e32d060d8ecc1fa2915d71d6737379801bcd2cf6e701f7ee571d30dc8ea6"
+        "sha256": "05c0e4d3ee8e69260ecfda43a7450f6d5373b4b4537685caad9778108528bdd1"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -197,12 +197,12 @@
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 74,
+      "providers": 99,
       "bespokeWaivers": 1,
-      "mismatches": 434,
+      "mismatches": 474,
       "byLeg": {
-        "engine_manifest": 206,
-        "manifest_route": 70,
+        "engine_manifest": 234,
+        "manifest_route": 82,
         "survey_engine": 158
       }
     },

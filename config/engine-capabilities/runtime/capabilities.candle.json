@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
+    "inferenceRevision": "ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -1267,7 +1267,9 @@
         ],
         "supports_lora": true,
         "supports_lokr": true,
-        "supported_quants": [],
+        "supported_quants": [
+          "q4"
+        ],
         "supports_preview": false,
         "supports_prompt_enhancement": false,
         "samplers": [
@@ -1487,10 +1489,7 @@
         ],
         "supports_lora": false,
         "supports_lokr": false,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
+        "supported_quants": [],
         "supports_preview": true,
         "supports_prompt_enhancement": false,
         "samplers": [
@@ -1527,10 +1526,7 @@
         ],
         "supports_lora": false,
         "supports_lokr": false,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
+        "supported_quants": [],
         "supports_preview": true,
         "supports_prompt_enhancement": false,
         "samplers": [
@@ -1981,10 +1977,7 @@
         ],
         "supports_lora": true,
         "supports_lokr": true,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
+        "supported_quants": [],
         "supports_preview": false,
         "supports_prompt_enhancement": false,
         "samplers": [

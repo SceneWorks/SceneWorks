@@ -2795,15 +2795,55 @@ mod tests {
         .expect("the sc-18810 fit report parses")
     }
 
+    /// The q8 phase-fit block, resolved by SELECTION rather than by a fixed path.
+    ///
+    /// The report used to expose one tier-indexed slice per phase at `fits[phase].q8`. Since the
+    /// output-FPS axis entered the selector key, q8 maps to TWO complete selectors — fps30 with 11
+    /// records across six geometries, and fps24 with 2 records at a single geometry, which is under
+    /// `fit-ltx-temporal-form.mjs`'s three-geometry floor and therefore carries no fit at all. The
+    /// fitter refuses to pool records across selectors, so for an ambiguous tier it omits the
+    /// tier-indexed view (declaring the tier in `legacyFitsOmittedForTiers`) and carries the fit
+    /// inline on the selector entry instead. That drop is the truthful behaviour, not a regression:
+    /// there is no q8 slice that spans both selectors.
+    ///
+    /// This reader handles BOTH shapes and pins the invariant that makes either one unambiguous —
+    /// exactly one q8 selector may carry a fit, so the coefficients a runtime curve is promoted
+    /// from can never be silently swapped for another selector's.
+    fn ltx_q8_phase_fit<'a>(fit: &'a Value, phase: &str) -> &'a Value {
+        let omitted = fit["legacyFitsOmittedForTiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q8"));
+        if !omitted {
+            return &fit["fits"][phase]["q8"];
+        }
+        let fitted: Vec<&Value> = fit["selectorFits"]
+            .as_array()
+            .expect("selector fits")
+            .iter()
+            .filter(|entry| entry["selector"]["tier"] == "q8")
+            .filter(|entry| {
+                entry["fits"]
+                    .as_object()
+                    .is_some_and(|fits| !fits.is_empty())
+            })
+            .collect();
+        assert_eq!(
+            fitted.len(),
+            1,
+            "exactly one q8 selector may carry a fit, or `cross` has no single promotable source"
+        );
+        &fitted[0]["fits"][phase]
+    }
+
     /// The `cross` coefficients for one phase, in MANIFEST WIRE SHAPE — exactly the object a
     /// `phaseVramCurve` is, with no adaptation.
     ///
-    /// Note that `fits[phase].q8.chosen` is the per-series RMSE winner and is NOT uniformly
+    /// Note that the per-phase `chosen` is the per-series RMSE winner and is NOT uniformly
     /// `cross` (text ranks `area_only` first, denoise ranks `latent_tokens` first). The schema
     /// form adopted by this story is `cross` regardless, and
     /// [`the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve`] pins why.
     fn ltx_cross_curve(fit: &Value, phase: &str) -> JsonObject {
-        let coefficients = fit["fits"][phase]["q8"]["candidates"]["cross"]["coefficients"]
+        let coefficients = ltx_q8_phase_fit(fit, phase)["candidates"]["cross"]["coefficients"]
             .as_object()
             .expect("cross coefficients")
             .clone();
@@ -2834,7 +2874,7 @@ mod tests {
         let fit = ltx_temporal_fit();
         let shipped = ["fixedGb", "perMpxGb"];
         let mut extends = Vec::new();
-        let candidates = fit["fits"]["decode"]["q8"]["candidates"]
+        let candidates = ltx_q8_phase_fit(&fit, "decode")["candidates"]
             .as_object()
             .expect("candidate set");
         assert_eq!(candidates.len(), 5, "all five fitted forms must be graded");
@@ -2859,7 +2899,7 @@ mod tests {
             "only these forms can be an ADDITIVE schema change; the rest replace `perMpxGb`"
         );
         let held = |phase: &str, form: &str| {
-            fit["fits"][phase]["q8"]["candidates"][form]["heldOut"]["maxAbsGib"]
+            ltx_q8_phase_fit(&fit, phase)["candidates"][form]["heldOut"]["maxAbsGib"]
                 .as_f64()
                 .expect("held-out residual")
         };
@@ -2911,10 +2951,30 @@ mod tests {
             13,
             "the sweep's full record set must be graded, not a subset"
         );
+        // The fitted selector covers 11 of those 13. The other two are the fps24 pair, which sits
+        // at one geometry and so carries no fit of its own — they are graded here as OUT-OF-SAMPLE
+        // points, and the margin below is the fitted selector's own worst residual, never widened
+        // for them. Stated rather than hidden: a reader must be able to see that two of the graded
+        // records never entered the fit.
+        let fitted_records = fit["selectorFits"]
+            .as_array()
+            .expect("selector fits")
+            .iter()
+            .filter(|entry| {
+                entry["fits"]
+                    .as_object()
+                    .is_some_and(|fits| !fits.is_empty())
+            })
+            .flat_map(|entry| entry["recordIds"].as_array().expect("record ids"))
+            .count();
+        assert_eq!(
+            fitted_records, 11,
+            "the fitted q8 selector's own record count, with the remaining two graded out of sample"
+        );
         let mut graded = 0_usize;
         for phase in ["text", "denoise", "decode"] {
             let curve = ltx_cross_curve(&fit, phase);
-            let candidate = &fit["fits"][phase]["q8"]["candidates"]["cross"];
+            let candidate = &ltx_q8_phase_fit(&fit, phase)["candidates"]["cross"];
             let margin = candidate["fit"]["maxAbsGib"]
                 .as_f64()
                 .expect("fit residual")

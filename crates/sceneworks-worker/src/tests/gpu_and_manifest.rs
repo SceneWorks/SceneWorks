@@ -1764,34 +1764,23 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
+    // SC-20793 gave the four SDXL-family Candle bases their own per-tier rows and moved
+    // `sdxl_edit_candle.rs` off `admit_candle_base(.., CandleBaseEvidence::Ungateable(..))` onto
+    // `admit_sdxl_bespoke_memory`, which prices those rows. Both halves of the old exception are
+    // therefore gone: the catalog rows exist, and the recorded reason no longer appears at any
+    // live call site. They belong in `EVIDENCED`, which is what keeps the rows load-bearing.
     const EVIDENCED: &[&str] = &[
         "flux2_klein_9b",
         "flux2_dev",
         "z_image_turbo",
         "krea_2_raw",
         "krea_2_turbo",
+        "sdxl",
+        "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
     ];
     const EXPLICITLY_UNMEASURED: &[(&str, &str, &str)] = &[
-        (
-            "sdxl",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "realvisxl",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "illustrious_xl_v1",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "illustrious_xl_v2",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
         (
             "flux2_klein_9b_true_v2",
             "the local True V2 converted fine-tune has no CUDA calibration row",

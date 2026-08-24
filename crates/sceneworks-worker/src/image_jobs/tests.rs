@@ -452,10 +452,10 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
     let (clip_l, clip_bigg, vae) =
         resolve_candle_detail_components(&request, &settings, &weights_dir)
             .expect("dense base and all authoritative co-requisites resolve");
-    assert!(matches!(clip_l, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
-    assert!(matches!(clip_bigg, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(matches!(&clip_l, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
+    assert!(matches!(&clip_bigg, WeightsSource::File(path) if path.ends_with("tokenizer.json")));
     assert!(
-        matches!(vae, WeightsSource::File(path) if path.ends_with("diffusion_pytorch_model.safetensors"))
+        matches!(&vae, WeightsSource::File(path) if path.ends_with("diffusion_pytorch_model.safetensors"))
     );
 
     std::fs::remove_dir_all(&weights_dir).expect("remove staged bf16 tier");
@@ -463,13 +463,24 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
         .expect("fallback tier resolves")
         .expect("q4 sibling remains installed");
     assert_eq!(tier_key_from_resolved_dir(&packed_fallback), Some("q4"));
-    let error = resolve_candle_detail_components(&request, &settings, &packed_fallback)
-        .expect_err("a packed sibling must not masquerade as the requested dense detail base");
+    // SC-20793 admitted packed SDXL detail: the same packed-aware UNet/adapter loader the
+    // registered control route uses now serves detail, so this layer no longer refuses a q4
+    // sibling. What it must still do is resolve the SAME three authoritative co-requisites
+    // regardless of which physical tier resolved — they are repo-pinned components, not tier
+    // artifacts — and it must not silently substitute a tier-local file for one of them.
+    let (packed_clip_l, packed_clip_bigg, packed_vae) =
+        resolve_candle_detail_components(&request, &settings, &packed_fallback)
+            .expect("the packed sibling resolves the same authoritative co-requisites");
+    assert_eq!(
+        (packed_clip_l, packed_clip_bigg, packed_vae),
+        (clip_l, clip_bigg, vae),
+        "the co-requisites are repo-pinned; the resolved tier must not move them"
+    );
+    // The dense/packed refusal did not disappear, it moved to the provider, where the actual
+    // tensor headers are visible. This layer must not pre-empt it in its own words.
     assert!(
-        error
-            .to_string()
-            .contains("installed dense bf16 model tier"),
-        "the fallback refusal must tell the user which tier detail requires: {error}"
+        !include_str!("detail.rs").contains("requires the installed dense bf16 model tier"),
+        "the retired pre-load tier refusal must not be reinstated alongside the provider's"
     );
 }
 
@@ -16112,7 +16123,6 @@ fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
         ("Z-Image control", include_str!("zimage_control.rs"), "self.adapters.iter()"),
         ("Kolors IP-Adapter", include_str!("kolors_ipadapter.rs"), "admission_overlays.extend(adapters.iter()"),
         ("PuLID fallback", include_str!("pulid_candle.rs"), "overlays.extend(adapters.iter()"),
-        ("SDXL detail", include_str!("detail.rs"), "admission_paths.extend(adapters.iter()"),
     ] {
         assert!(
             source.contains(marker),
@@ -16139,6 +16149,22 @@ fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
             "Krea imported",
             include_str!("krea_imported.rs"),
             ".chain(adapter_pins)",
+        ),
+        // SC-20793 moved SDXL detail from the eager `admission_paths` list above onto the shared
+        // bespoke seam: the resolved adapters are bound onto the SAME `provider_spec` that is
+        // handed to `admit_sdxl_bespoke_memory`, so admission prices them from the spec. Both
+        // halves are asserted — binding the adapters to a spec that never reaches admission would
+        // charge nothing, and admitting a spec that never received them would charge nothing
+        // either.
+        (
+            "SDXL detail",
+            include_str!("detail.rs"),
+            ".with_adapters(adapters.clone());",
+        ),
+        (
+            "SDXL detail admission",
+            include_str!("detail.rs"),
+            "admit_sdxl_bespoke_memory(\n            &request,\n            settings,\n            provider_spec,",
         ),
     ] {
         assert!(
