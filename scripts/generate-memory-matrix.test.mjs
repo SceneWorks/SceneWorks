@@ -931,7 +931,7 @@ test("FLUX.2-dev MLX declares the pinned staged ladder and keeps stale captures 
   const contract = manifest.models.find((model) => model.id === "flux2_dev")
     .mlx.memoryStrategyContract;
   assert.equal(contract.provider, "flux2_dev");
-  // sc-20799 retired the SC-18218 resident-only pin: at inference 42cab15ba4 all three Dev MLX
+  // sc-20799 retired the SC-18218 resident-only pin: at inference ebcdc7da7 all three Dev MLX
   // providers implement selectable Sequential staged residency, so the contract is no longer
   // exhaustive (the census now follows the registered-engine sweep, Klein-style) and carries the
   // edit/control runtimeProvider rows whose requestContexts drive the non-legacy declared path.
@@ -3319,10 +3319,11 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // sc-19721 moved the pin onto the inference sc-17137 feature head; the 2026-08-19 main sync
   // re-stamped it to main's sc-20523 pin; sc-18650 (the epic-final bump) re-stamped it to the
   // inference-main merge of that head (f17c82544, tree-identical to 2881696cd); the true epic-final
-  // bump re-stamped it again to the #726 inference-main merge (4013049764). The literal is
+  // bump re-stamped it again to the #726 inference-main merge (4013049764), and sc-20799 to the #783
+  // inference-main merge (ebcdc7da7). The literal is
   // re-stamped rather than relaxed to a shape check: the assertion below only means something
   // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "42cab15ba4d84b6356a475c9957bea12f4ecf6c7");
+  assert.equal(pin, "ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
@@ -5507,7 +5508,7 @@ function stagedCensusFixture() {
     state,
   });
   // Minimum shape the other assertions in the function demand: bernini AND flux2_dev in the census
-  // (sc-20799 flipped flux2_dev's direction — at pin 42cab15ba4 all three Dev MLX providers declare
+  // (sc-20799 flipped flux2_dev's direction — at pin ebcdc7da7 all three Dev MLX providers declare
   // selectable staged residency), and the census neither empty nor the whole catalog.
   return {
     models: [model("bernini_image"), model("flux2_dev"), model("filler_a"), model("filler_b")],

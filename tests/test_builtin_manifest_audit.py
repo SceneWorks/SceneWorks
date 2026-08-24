@@ -936,10 +936,12 @@ def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
 def test_measured_memory_rows_declare_their_workload_geometry():
     """sc-16020: geometry is data, not a prose assumption.
 
-    The counts were derived from the live catalog when the field landed. Update them when
-    adding/removing rows; the universal assertions are what prevent a new row from silently
-    escaping the normalization contract or an unmeasured tier gate from presenting itself as a
-    calibrated measurement.
+    Stated as derivations rather than catalog head-counts (sc-20799 round 2): a pinned row count
+    only ever records how many rows existed on the day it was written, and every legitimate
+    add/remove edits the integer instead of testing anything. What actually has to hold is that the
+    populations partition cleanly and that every member of each satisfies its geometry invariant —
+    which is what prevents a new row from silently escaping the normalization contract or an
+    unmeasured tier gate from presenting itself as a calibrated measurement.
     """
     manifest = _load_builtin_models_manifest()
     mlx_rows = []
@@ -953,15 +955,26 @@ def test_measured_memory_rows_declare_their_workload_geometry():
         if "vramGbByTier" in candle:
             candle_rows.append((model["id"], candle))
 
-    assert len(mlx_rows) == 16
-    assert len(candle_rows) == 44
+    # Both populations must exist at all — an `all(...)` over an empty list is vacuously true, and
+    # a filter that silently stopped selecting anything is exactly the failure these guards exist
+    # to catch. Existence, not cardinality.
+    assert mlx_rows, "no download declares a measured peak; the mlx filter selected nothing"
+    assert candle_rows, "no model declares vramGbByTier; the candle filter selected nothing"
+
+    # Per-row invariant: every measured MLX peak is priced at the calibrated 1024² workload.
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
     assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
 
     measured_rows = [row for row in candle_rows if row[1]["measured"]]
     unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
-    assert len(measured_rows) == 24
-    assert len(unmeasured_rows) == 20
+    # measured ∪ unmeasured == candle_rows, and the two are disjoint. `measured` is asserted to be a
+    # bool above, so a row cannot sit outside both; this pins that neither branch drops or
+    # double-counts a row, which is the property the two head-counts were standing in for.
+    assert measured_rows and unmeasured_rows
+    measured_ids = {row[0] for row in measured_rows}
+    unmeasured_ids = {row[0] for row in unmeasured_rows}
+    assert measured_ids.isdisjoint(unmeasured_ids), measured_ids & unmeasured_ids
+    assert measured_ids | unmeasured_ids == {row[0] for row in candle_rows}
 
     measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
     assert all(

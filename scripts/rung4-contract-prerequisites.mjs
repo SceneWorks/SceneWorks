@@ -524,7 +524,7 @@ export function blankLiterals(source) {
 /**
  * The strategies receiving a rung-1 edge from a crate's `additional_prerequisites` constructions.
  *
- * Returns `[{ strategy, conditional }]`. Four shapes are recognised, which is every shape present at
+ * Returns `[{ strategy, conditional }]`. Five shapes are recognised, which is every shape present at
  * the pinned revision:
  *
  *   1. `additional_prerequisites: Vec::new()`                                   — no edges.
@@ -532,6 +532,7 @@ export function blankLiterals(source) {
  *   2b. `contract.additional_prerequisites = [A, B]…collect()`                  — ASSIGNMENT.
  *   3. `contract.additional_prerequisites.push((STRATEGY, EDGE))`
  *   4. `additional_prerequisites: COND.then_some((STRATEGY, EDGE)).into_iter().collect()`
+ *   5. `= [A, B, X].into_iter().filter(|s| COND || *s != X).map(|s| (s, EDGE)).collect()`
  *
  * A read (`.is_empty()`, `.iter()`) is not a construction and contributes nothing. Anything else
  * throws.
@@ -632,6 +633,54 @@ export function additionalPrerequisiteEdges(source, where) {
         conditional: false,
         resets: operator === "=",
       });
+      continue;
+    }
+
+    // SHAPE 5 (sc-20799, inference ebcdc7da). `candle-gen-sana` declares ONE array of rung
+    // candidates and removes the members this build cannot execute, instead of branching the whole
+    // construction. Exactly one predicate is recognised — `COND || *binder != MemoryStrategy::X`,
+    // which keeps every member and drops X unless COND holds — so X is recorded CONDITIONAL and the
+    // rest unconditional. Any other predicate throws: a filter the extractor cannot read must not
+    // silently become "keeps everything", which is the same fail-open direction as reading an
+    // unknown construction as "no edges". Checked before the plain `.into_iter().map` shape only for
+    // readability; that regex requires `.map` immediately after `.into_iter()` and cannot match this.
+    const arrayFilterMap =
+      /^\s*([:=])\[((?:MemoryStrategy::\w+,?)+)\]\.into_iter\(\)\.filter\(\|(\w+)\|(\w+)\|\|\*(\w+)!=MemoryStrategy::(\w+)\)\.map\(\|(\w+)\|\{?\((\w+),(MemoryStrategyPrerequisite::Rung\{[^}]*\},?)\)\}?\)\.collect\(\)/.exec(
+        rest,
+      );
+    if (arrayFilterMap) {
+      const [
+        ,
+        operator,
+        list,
+        filterBinder,
+        ,
+        derefBinder,
+        excluded,
+        mapBinder,
+        applied,
+        edge,
+      ] = arrayFilterMap;
+      if (filterBinder !== derefBinder) {
+        throw new Error(
+          `${where}: ${field} binds ${filterBinder} in its filter but compares ${derefBinder}`,
+        );
+      }
+      if (mapBinder !== applied) {
+        throw new Error(`${where}: ${field} maps ${mapBinder} but pairs ${applied}`);
+      }
+      assertRecognisedEdge(edge, where);
+      const members = list.split(",").filter(Boolean).map(stripStrategy);
+      if (!members.includes(excluded)) {
+        throw new Error(
+          `${where}: ${field} filters out MemoryStrategy::${excluded}, which the mapped array does ` +
+            "not contain — the extractor cannot say which member the predicate governs",
+        );
+      }
+      if (operator === "=") bucket.length = 0;
+      for (const strategy of members) {
+        bucket.push({ strategy, conditional: gated || strategy === excluded });
+      }
       continue;
     }
 

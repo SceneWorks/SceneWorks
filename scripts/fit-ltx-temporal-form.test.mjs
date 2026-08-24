@@ -293,7 +293,6 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
   );
   const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
   assert.equal(bundle.schemaVersion, 4);
-  assert.equal(bundle.curves.length, 1);
   // sc-20799: the fps24 group is under-sampled (one distinct geometry), so the fit drops it — but
   // the drop must be DECLARED, not silent. Assert the shape of the declaration, not a record count.
   assert.ok(Array.isArray(bundle.unmodeledRecords));
@@ -331,7 +330,21 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     [...catalog].sort(),
     "modeled union declared must equal the compiled source catalog",
   );
-  const curve = bundle.curves[0];
+  // Select the promoted curve by its selector identity rather than asserting the bundle holds
+  // exactly one curve and reading `[0]` (sc-20799 round 2): the fit emits one curve per selector
+  // key, so a positional read would silently compare a different key's coefficients the day a
+  // second key is fitted, and the `length === 1` guard would fail for a reason unrelated to what
+  // this assertion is about.
+  const curve = bundle.curves.find(
+    (candidate) =>
+      candidate.route === "ltx_2_3" &&
+      candidate.tier === "q8" &&
+      candidate.mode === "text_to_video",
+  );
+  assert.ok(
+    curve,
+    "the promoted bundle must carry the sc-18810 ltx_2_3 / q8 / text_to_video curve",
+  );
   assert.deepEqual(
     {
       modelId: curve.modelId,

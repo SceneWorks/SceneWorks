@@ -6197,7 +6197,7 @@
         // `candle_memory_strategy::evaluate_shared_image`; these rows are the declaration that call
         // was missing. No worker code change is required or made.
         //
-        // Engine truth at pinned inference 42cab15ba4d84b6356a475c9957bea12f4ecf6c7,
+        // Engine truth at pinned inference ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6,
         // crates/media/candle-gen/candle-gen-boogu/src/memory_strategy.rs:
         //  - `build_contract` marks Resident Implemented unconditionally, StagedResidency
         //    Implemented ONLY when the load is `canonical`, and EVERY other rung Missing. So the
@@ -9613,7 +9613,7 @@
             "rung": "resident", "parameters": {}
           }
         ],
-        // SC-20799: at the pinned inference revision (42cab15ba4) the three FLUX.2 Dev MLX
+        // SC-20799: at the pinned inference revision (ebcdc7da7) the three FLUX.2 Dev MLX
         // providers (`flux2_dev`, `flux2_dev_edit`, `flux2_dev_control`) all implement selectable
         // StagedResidency (Sequential offload on the eager load; the control route additionally
         // requires its ControlNet artifact). The SC-18218 resident-only reading described an older
@@ -9627,6 +9627,19 @@
           "abi": 1,
           "provider": "flux2_dev",
           "implementations": [
+            // DELIBERATE ASYMMETRY (sc-20799 round 2), not an omission. This t2i resident row has
+            // no `requestContexts` and covers only `["q4", "q8"]`, while its staged_residency
+            // sibling below carries request contexts and adds `bf16`. Both are correct: the
+            // resident row is the SC-18218 evidence carry-over, and it is scoped to exactly the
+            // shape that evidence priced. The `records` above carry this fingerprint at exactly
+            // q4 and q8, text_to_image / overlay none, 768² and 1024², rung resident — there is no
+            // bf16 resident record. It declares no contexts because it is the legacy
+            // (non-request-scoped) declaration path. The staged row is the current
+            // registered-engine sweep, which reads the
+            // request-scoped path in `memory_route_registry.rs` and therefore must enumerate its
+            // contexts, and which covers bf16 because staged residency is what makes bf16 fit at
+            // all. Adding contexts here, or widening the tier set to match the sibling, would
+            // claim request-scoped resident evidence that does not exist. Leave as is.
             {
               "rung": "resident",
               "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
@@ -13187,7 +13200,7 @@
       // `candle_memory_strategy::evaluate_shared_image`; these rows are the declaration that call was
       // missing. No worker code change is required or made.
       //
-      // Engine truth at the pinned inference rev 42cab15ba4d84b6356a475c9957bea12f4ecf6c7,
+      // Engine truth at the pinned inference rev ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6,
       // crates/media/candle-gen/candle-gen-anima/src/memory_strategy.rs:
       //  - One `contract()` builder serves all three ids (`IDS`), but each gets its OWN calibration
       //    identity `anima-candle-request-scoped-conditioning-v1-<id with '_' -> '-'>`, precisely so a
@@ -20851,7 +20864,7 @@
       // the provider behind FULL_MEMORY_REGISTRATION (the sibling `bernini_renderer` /
       // `crate::pipeline::MODEL_ID` provider is the renderer-only route and is not this entry).
       //
-      // Engine truth at pinned inference 42cab15ba4d84b6356a475c9957bea12f4ecf6c7,
+      // Engine truth at pinned inference ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6,
       // crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs:
       //  - `strategies()` marks Resident and BoundedDecode Implemented and leaves StagedResidency,
       //    BoundedAttention and BoundedTransformerResidency MISSING. The file header states why, and

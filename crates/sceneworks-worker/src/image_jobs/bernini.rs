@@ -866,7 +866,7 @@ async fn generate_candle_bernini_image_stream(
 // sc-20799: the two pure axes the Candle Bernini still lane hands the shared memory evaluator.
 // Host-runnable (macOS) even though the lane itself is `not(macos) + backend-candle`, because the
 // axes are pure string/quant mappings. Everything asserted here is copied from the pinned
-// `candle-gen-bernini` contract at 42cab15ba4d84b6356a475c9957bea12f4ecf6c7.
+// `candle-gen-bernini` contract at ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6.
 // ---------------------------------------------------------------------------
 #[cfg(all(test, target_os = "macos"))]
 mod candle_bernini_memory_axis_tests {

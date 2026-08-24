@@ -1855,7 +1855,11 @@ pub(super) fn video_admission_reference_shape(
             "first_last_frame" => "keyframe",
             // The LTX IC-LoRA clips are temporal carriers, not image references.
             "extend_clip" | "video_bridge" => "none",
-            _ => "other",
+            // sc-20799 round 2: `"other"` was a dead key here too — no evidence emitter ever
+            // serializes the literal string, so an LTX mode that landed on it could match no
+            // record. Every remaining LTX mode carries no image reference, which is exactly what
+            // `"none"` names, so it binds to real evidence instead of an unmatchable label.
+            _ => "none",
         };
     }
     // sc-20799: `"other"` was a DEAD key. The evidence emitters serialize a reference shape as
