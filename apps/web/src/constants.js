@@ -443,6 +443,10 @@ const seededFallbackModels = [
     ui: {
       description: "Stability AI Stable Diffusion XL base 1.0 — open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP; ~6.9GB fp16, real CFG + negative prompt, ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
       promptGuide: { title: "Stable Diffusion XL Prompt Guide", path: "/prompt-guides/sdxl.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -453,6 +457,28 @@ const seededFallbackModels = [
     ui: {
       description: "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL — the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable. openrail++ (commercial use OK, ungated). Same SDXL UNet + dual CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance.",
       promptGuide: { title: "RealVisXL Prompt Guide", path: "/prompt-guides/realvisxl.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
+    },
+  },
+  {
+    // Distilled RealVisXL sibling: five-step Lightning sampling with CFG off at the default
+    // guidance 1.0. The native MLX and Candle lanes also accept the shared SDXL OpenPose control.
+    id: "realvisxl_lightning",
+    name: "RealVisXL Lightning (fast photoreal SDXL)",
+    family: "sdxl",
+    type: "image",
+    capabilities: ["text_to_image"],
+    defaults: { resolution: "1024x1024", steps: 5, guidanceScale: 1.0, count: 4 },
+    ui: {
+      description: "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. CFG-free by default at guidance 1.0; the negative prompt becomes active only if guidance is raised toward 2.0. Text-to-image and OpenPose control only; use standard RealVisXL for edits, reference identity, inpaint, or detail-refine.",
+      promptGuide: { title: "RealVisXL Lightning Prompt Guide", path: "/prompt-guides/realvisxl-lightning.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -470,6 +496,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -486,6 +516,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
