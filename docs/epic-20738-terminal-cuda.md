@@ -8,16 +8,16 @@ epic's SceneWorks and inference heads are final, clean, reviewed, and pin-matche
 SC-21306's superseded recovery used exact GitHub artifact `9498929065` from run `32655428377`.
 That historical route revalidated and imported the authentic PASS ordinals 1-13 and 15-19, retained
 their complete prior lineage, and quarantined the failed LTX receipt at ordinal 14; only ordinal
-`[14]` executed with the corrected inference pin. It is not the current candidate path. The earlier
+`[14]` executed with the corrected inference pin. It is not the accepted recovery path. The earlier
 `9492288293` 16-PASS route remains a separately frozen legacy compatibility path; no receipt or
 provenance is rewritten across either boundary.
 
-The current recovery uses artifact `9500244306` only as immutable, authenticated source evidence for
-ordinals `[1-14]`. That artifact is explicitly false-green and non-final for E3: its ordinals 15-19
-are not promotion authority and must not be treated as accepted causal-control results. The sole
-pending candidate path is to re-import and re-hash `[1-14]`, execute `[15-19]` with the corrected
-same-seed mirrored-pose counterfactuals and bound delta/witnesses, then assemble a new complete
-candidate. No new candidate is accepted before it exists and passes the required validation.
+The accepted recovery uses artifact `9500244306` only as immutable, authenticated source evidence
+for ordinals `[1-14]`. That artifact is explicitly false-green and non-final for E3: its ordinals
+15-19 are not promotion authority and must not be treated as accepted causal-control results. Run
+`32686177202` re-imported and re-hashed `[1-14]`, executed only `[15-19]` with the corrected same-seed
+mirrored-pose counterfactuals and bound delta/witnesses, and produced the independently audited
+complete candidate recorded below.
 
 ## Frozen scope
 
@@ -298,13 +298,12 @@ In artifact `9492288293`, cells 14, 18, and 19 were not promotion authority:
 The audit also verifies GPU index/PCI identity/UUID/driver/compute capability and confinement to the
 97,887 MiB target, cache-preflight census and capacity, JIT authority lifecycles, derived-cache
 dispositions, per-cell scratch cleanup, and final emptiness of staging, derived, and persistent-miss
-stores. No rerun is needed for cells 15-17: their complete receipts and independently hashed outputs
-stand on their own. The safest recovery is one later sparse terminal campaign containing only LTX q8
-with its fixed eight-step request and the two Illustrious q4 cells after republished packed-marker
-authorities; it must import these sixteen PASS cells rather than rerun them.
+stores. At that stage, cells 15-17 did not need a rerun because their complete receipts and
+independently hashed outputs stood on their own. The resulting three-cell sparse-recovery plan was
+later superseded by the accepted corrected five-cell campaign below.
 
-That partial promotion closed only SC-20741, SC-20744, and SC-20748. SC-20742 remains blocked on
-the separate FLUX.2 TrueV2 authority and is not implied complete by this terminal campaign.
+That partial promotion originally closed only SC-20741, SC-20744, and SC-20748. The separate FLUX.2
+TrueV2 authority remains outside this terminal campaign and is not implied complete by it.
 
 ## Superseded false-green recovery evidence
 
@@ -319,21 +318,44 @@ results.
 
 Cell 14 completed the immutable LTX-2.3 q8 fixed eight-step schedule with 33 frames, exact q8
 resolution, no dense fallback, a 61,766 MiB (60.318 GiB) measured peak, and a 63 GiB admission
-floor including the 2 GiB reserve. The previous artifact's independently valid cells 18-19 remain
-the imported authority for Illustrious XL v1/v2 q4 plus OpenPose: each peaked at 5,830 MiB
-(5.693 GiB), giving an 8 GiB admission floor. Both used the republished packed q4/group64
-authorities, exact q4 resolution, no cross-tier fallback, and nondegenerate 512x512 outputs.
+floor including the 2 GiB reserve. The same artifact reported cells 18-19 for Illustrious XL v1/v2
+q4 plus OpenPose at 5,830 MiB (5.693 GiB) each, giving an 8 GiB admission floor. Both used the
+republished packed q4/group64 authorities, exact q4 resolution, no cross-tier fallback, and
+nondegenerate 512x512 outputs, but neither receipt is final causal-control authority.
 
 Those historical results therefore do not remove the LTX-2.3 q8 exception, admit q8 product routes,
 or expand the exact q4-only SDXL OpenPose product set. Their cleanup record remains historical
 evidence only.
 
-## Corrected pending five-cell recovery
+## Failed corrected-candidate diagnostic
 
-The sole pending candidate path must re-import and re-hash only ordinals `[1-14]` from immutable
-artifact `9500244306`, then execute only `[15-19]`: SDXL, RealVisXL, RealVisXL Lightning, Illustrious
-XL v1, and Illustrious XL v2 OpenPose. Each replacement uses the same seed and all non-control
-inputs with a mirrored whole-body pose, records bound control/output witnesses, and requires a mean
-absolute pixel delta greater than `0.01`. The older five receipts remain immutable source evidence;
-they are not rewritten or promoted as causal-control proof. After those five cells pass validation,
-assemble a new complete candidate; do not cite that new candidate as accepted before it exists.
+Run [`32679720253`](https://github.com/SceneWorks/SceneWorks/actions/runs/32679720253) produced
+artifact `9504924328`
+(`sc-20945-epic-20738-b69b038a82887c2d5a1c2aca21a88721bb941e60-32679720253-1`, 15,476,298
+bytes, GitHub SHA-256 `565d7bd98b414e8ea1641f9a821ae996ce7fe50720c28eb8b968a1db9121aa5f`).
+The five replacement cells failed before rendering. This artifact is diagnostic invalid evidence
+only; it is not a campaign candidate or promotion authority.
+
+## Accepted corrected five-cell recovery
+
+GitHub Actions run [`32686177202`](https://github.com/SceneWorks/SceneWorks/actions/runs/32686177202),
+attempt 1, ran on `cuda-windows-3` at exact SceneWorks head
+`bbb9b0b52682e1a97076b2b4fc7e66d425b2ecd5` and inference pin
+`31e02510ad6e9e1a3c3d205058576329d724c60d`. It uploaded artifact `9507015524`
+(`sc-20945-epic-20738-bbb9b0b52682e1a97076b2b4fc7e66d425b2ecd5-32686177202-1`, 18,714,660
+bytes) with GitHub SHA-256 `7c8bbbd6d319e658eda88063b029cbf5741e16acea9b5499698ea82b020c9797`.
+
+The accepted candidate re-imported and re-hashed only ordinals `[1-14]` from immutable artifact
+`9500244306`; all 139 files for those cells are byte-identical to their authenticated source. Only
+ordinals `[15-19]` are fresh: SDXL, RealVisXL, RealVisXL Lightning, Illustrious XL v1, and
+Illustrious XL v2 OpenPose. Each replacement holds the seed and every non-control input constant,
+uses a mirrored whole-body pose, and binds its control/output witnesses. Independent recomputation
+produced mean absolute pixel deltas, in ordinal order, of
+`[40.50802103678385, 26.223936716715496, 13.745040893554688, 10.24086888631185,
+27.06469472249349]`; every value exceeds the closed `0.01` floor.
+
+The independent audit rehashed and schema-validated all 170 receipt-bound files. All 19 cells pass,
+final staging and derived inventories are empty, the missing-file store is absent, and no emergency
+or quarantine evidence exists. This artifact is the exact accepted 19/19 promotion authority; the
+older five receipts from artifact `9500244306` remain false-green and are not rewritten or promoted
+as causal-control proof.
