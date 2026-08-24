@@ -1,0 +1,127 @@
+import React, { act } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AppContext } from "../context/AppContext.js";
+import { SimpleModelManager } from "./SimpleModelManager.jsx";
+import { SimpleUiContext } from "./SimpleUiContext.js";
+import { mountRoot, unmountRoot } from "../testUtils/dom.js";
+
+// AC1 for the Simple shell (epic 20398, sc-20650): the two ownership choices, the linked-library
+// lifecycle and the five managed inputs must be reachable from Simple as well — not just from the
+// advanced Models screen. Simple hands off almost everything to the advanced shell, so this is the
+// test that keeps the ONE exception honest.
+//
+// Driven through the real component and the real AppContext, with only the library transport and
+// the desktop bridge injected — so what is asserted is what a Simple user can actually reach.
+
+describe("SimpleModelManager checkpoint import (sc-20650)", () => {
+  let container;
+  let root;
+  let createModelImportJob;
+
+  beforeEach(() => {
+    ({ container, root } = mountRoot());
+    createModelImportJob = vi.fn(async () => ({ payload: { modelId: "imported" } }));
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.restoreAllMocks();
+  });
+
+  async function render(context = {}) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider
+          value={{
+            models: [],
+            loras: [],
+            jobs: [],
+            token: "tok",
+            createModelDownloadJob: vi.fn(),
+            createLoraDownloadJob: vi.fn(),
+            createModelImportJob,
+            jobAction: vi.fn(),
+            macCapabilities: {},
+            visibleWorkers: [],
+            workersById: {},
+            ...context,
+          }}
+        >
+          <SimpleUiContext.Provider value={{ toast: vi.fn(), openInAdvanced: vi.fn() }}>
+            <SimpleModelManager />
+          </SimpleUiContext.Provider>
+        </AppContext.Provider>,
+      );
+    });
+  }
+
+  function section() {
+    return container.querySelector(".checkpoint-import");
+  }
+
+  async function click(node) {
+    expect(node, "the control under test exists").toBeTruthy();
+    await act(async () => node.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  }
+
+  function buttonNamed(name) {
+    return [...container.querySelectorAll("button")].find((node) => node.textContent.trim() === name);
+  }
+
+  it("offers the two ownership choices from Simple, collapsed until asked", async () => {
+    await render();
+    expect(section()).toBeTruthy();
+    expect(section().classList.contains("compact")).toBe(true);
+    const toggle = section().querySelector(".checkpoint-import-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    // Collapsed means the catalog is still the page's subject.
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+
+    await click(toggle);
+    const choices = [...container.querySelectorAll('[aria-label="Model ownership"] [role="radio"]')];
+    expect(choices.map((node) => node.querySelector(".checkpoint-ownership-label").textContent)).toEqual([
+      "Use existing model library",
+      "Add to SceneWorks",
+    ]);
+  });
+
+  it("reaches all five managed inputs from Simple", async () => {
+    await render();
+    await click(section().querySelector(".checkpoint-import-toggle"));
+    await click([...container.querySelectorAll('[role="radio"]')].find((node) => node.textContent.startsWith("Add to SceneWorks")));
+    const sources = container.querySelector('[aria-label="Where the checkpoint comes from"]');
+    expect([...sources.querySelectorAll('[role="radio"]')].map((node) => node.textContent)).toEqual([
+      "Upload",
+      "Local copy",
+      "URL",
+      "Hugging Face",
+      "Civitai",
+    ]);
+  });
+
+  it("keeps the catalog rows Simple already had", async () => {
+    await render({ models: [{ id: "z", name: "Z-Image", type: "image", installState: "installed" }] });
+    expect(container.textContent).toContain("Z-Image");
+    expect(buttonNamed("Manage")).toBeTruthy();
+  });
+
+  it("shows a running import and its cancel control without opening the disclosure", async () => {
+    const jobAction = vi.fn();
+    await render({
+      jobs: [{ id: "job-1", type: "model_import", status: "running", payload: { modelId: "m" } }],
+      jobAction,
+    });
+    expect(section().querySelector(".checkpoint-import-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(container.textContent).toContain("Imports in progress");
+    const cancel = [...container.querySelectorAll("button")].find((node) => /cancel/i.test(node.textContent));
+    await click(cancel);
+    expect(jobAction).toHaveBeenCalledWith(expect.objectContaining({ id: "job-1" }), "cancel");
+  });
+
+  it("surfaces a duplicate-checkpoint warning from a completed import", async () => {
+    await render({
+      jobs: [{ id: "job-2", type: "model_import", status: "completed", result: { duplicateCheckpointIds: ["managed/i-1"] } }],
+    });
+    expect(container.querySelector(".checkpoint-duplicate-warning").textContent).toContain("managed/i-1");
+  });
+});

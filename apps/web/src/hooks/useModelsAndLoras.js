@@ -241,9 +241,14 @@ export function useModelsAndLoras({
       // multipart field names (e.g. `type`, not `modelType`) or the value is silently dropped
       // and the import defaults to `image` (sc-14020).
       Object.entries(metadata).forEach(([key, value]) => {
-        if (value != null && value !== "") {
-          body.append(key, value);
+        if (value == null || value === "") {
+          return;
         }
+        // The multipart parser reads `source` as a JSON DOCUMENT (models.rs
+        // `model_import_request_from_multipart` runs `serde_json::from_str` on it), so an object
+        // appended verbatim would arrive as the literal "[object Object]" and be refused as an
+        // invalid import source. Every other field is a scalar and is unchanged (epic 20398).
+        body.append(key, typeof value === "object" && !(value instanceof Blob) ? JSON.stringify(value) : value);
       });
       body.append("file", file);
     } else {

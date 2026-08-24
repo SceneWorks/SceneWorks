@@ -42,6 +42,22 @@ import {
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
 import { blanketFloorGb, suggestTier, tierFits } from "../tierSuggestion.js";
+import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
+import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
+import {
+  describeRefusal,
+  fetchLibraryRoots,
+  linkedCorrection,
+  linkedStatusIndex,
+  modelLinkedStatus,
+  modelOwnership,
+  modelProvenance,
+  removalCopy,
+  rescanLibraryCheckpoint,
+  scanLibraryRoot,
+  updateLibraryRoot,
+} from "../checkpointLibrary.js";
+import { isDesktop, tauriInvoke } from "../runtime.js";
 
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
@@ -132,12 +148,6 @@ function mlxStatusText(model) {
   }
 }
 
-const MODEL_TYPE_OPTIONS = [
-  { value: "image", label: "Image" },
-  { value: "video", label: "Video" },
-  { value: "audio", label: "Audio" },
-  { value: "utility", label: "Utility" },
-];
 const MODEL_TAB_TYPES = [
   ["image", "Image Models"],
   ["video", "Video Models"],
@@ -156,34 +166,6 @@ const MODEL_TAB_TYPES = [
 // an accepted one queues a `model_import` job whose completion refetches the catalog and
 // surfaces the new `catalogScope:"user"` model (a Krea 2 base checkpoint today).
 const MODEL_IMPORT_ENABLED = true;
-
-// Capability descriptors shown as chips on each model card. With models now grouped
-// by `type`, the chips are what tell the user what a card actually does (plain
-// text-to-image vs editing vs character reference, etc.). Unknown keys fall back to
-// a humanized form so a new capability still reads sensibly without a code change.
-const CAPABILITY_LABELS = {
-  text_to_image: "Text to Image",
-  image_to_image: "Image to Image",
-  edit_image: "Image Edit",
-  character_image: "Character",
-  vqa: "Visual Q&A",
-  interleave: "Interleaved",
-  image_to_video: "Image to Video",
-  text_to_video: "Text to Video",
-  // sc-8445: Krea Realtime advertises text/image/video-to-video, and without this row its third
-  // chip fell to the humanized fallback ("video to video") — visibly out of style beside the two
-  // title-cased siblings on the same card.
-  video_to_video: "Video to Video",
-  first_last_frame: "First / Last Frame",
-  extend_clip: "Extend Clip",
-  video_bridge: "Video Bridge",
-  replace_person: "Replace Person",
-};
-const RETIRED_MODEL_CAPABILITIES = new Set(["style_variations"]);
-
-function capabilityLabel(capability) {
-  return CAPABILITY_LABELS[capability] ?? String(capability).replaceAll("_", " ");
-}
 
 // Audio capability chips (epic 13400 / sc-13406): audio-type models describe what they
 // do through the manifest `audio` sub-block rather than the generic `capabilities[]`, so
@@ -568,6 +550,7 @@ export function ModelManagerScreen() {
   const {
     activeProject,
     jobs,
+    token = "",
     loras,
     models,
     jobAction,
@@ -642,19 +625,6 @@ export function ModelManagerScreen() {
   const [loraEditSuggestions, setLoraEditSuggestions] = useState([]);
   const [savingLora, setSavingLora] = useState(false);
   const [loraEditError, setLoraEditError] = useState("");
-  const [importingModel, setImportingModel] = useState(false);
-  const [modelImportMessage, setModelImportMessage] = useState({ tone: "neutral", text: "" });
-  // Point-at-file import (sc-14020) leads with the file picker; URL stays available via the
-  // segmented toggle. `type` defaults to image — the only importable base checkpoint today.
-  const [modelImportForm, setModelImportForm] = useState({
-    mode: "file",
-    sourceUrl: "",
-    file: null,
-    name: "",
-    type: "image",
-    family: "",
-  });
-  const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
   // Resolved-model hot cache (epic 19703, sc-19711). ONE status read backs every card's local-copy
@@ -663,6 +633,11 @@ export function ModelManagerScreen() {
   // whatever state the screen happened to open on. A settled cache costs exactly the one mount
   // read it always did, which is what keeps the per-row cost sc-19708 removed from coming back.
   const [modelCache, setModelCache] = useState(null);
+  // Linked-library state for the catalog rows (epic 20398, sc-20650). ONE scan per approved root,
+  // read on mount, indexed by checkpoint id. A card whose linked checkpoint is Needs Relink /
+  // Needs Rescan must show the corrective ACTION — the state comes from this seam and is never
+  // re-derived from a path, and the card must never render such a model as missing.
+  const [linkedStatuses, setLinkedStatuses] = useState(() => new Map());
   // Cache key of the entry whose keep/remove request is in flight, so its buttons disable.
   const [cacheBusyKey, setCacheBusyKey] = useState("");
   // Why the local-copy controls are absent, when they are. Held apart from `deleteMessage` so an
@@ -1012,59 +987,32 @@ export function ModelManagerScreen() {
     }
   }
 
-  async function importModel(event) {
-    event.preventDefault();
-    const isFileImport = modelImportForm.mode === "file";
-    if ((!isFileImport && !modelImportForm.sourceUrl.trim()) || (isFileImport && !modelImportForm.file) || !onImportModel) {
-      return;
-    }
-    setImportingModel(true);
-    setModelImportMessage({
-      tone: "neutral",
-      text: isFileImport ? "Uploading model file before queueing import." : "",
-    });
-    try {
-      const familyOverride = modelImportForm.family ? { family: modelImportForm.family } : {};
-      const job = await onImportModel({
-        ...(isFileImport ? { file: modelImportForm.file } : { sourceUrl: modelImportForm.sourceUrl.trim() }),
-        name: modelImportForm.name.trim() || undefined,
-        // Send the model type under `type` — the literal field name the backend's multipart parser
-        // reads (models.rs `model_import_request_from_multipart`) and that JSON deserialization
-        // accepts via `#[serde(alias = "type")]` on `ModelImportRequest`. Keying this `modelType`
-        // was silently dropped on file uploads (multipart has no serde aliasing), defaulting every
-        // imported checkpoint to `image` regardless of selection (sc-14020).
-        type: modelImportForm.type,
-        ...familyOverride,
-      });
-      const modelId = job?.payload?.modelId;
-      const resolvedFamily = job?.payload?.manifestEntry?.family;
-      const detectionNote =
-        !modelImportForm.family && resolvedFamily
-          ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`
-          : "";
-      setModelImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
-      setModelFileInputKey((current) => current + 1);
-      setModelImportMessage({
-        tone: "success",
-        text: `${modelId ? `Model import queued for ${modelId}.` : "Model import queued."}${detectionNote}`,
-      });
-    } catch (err) {
-      setModelImportMessage({ tone: "error", text: err.message });
-    } finally {
-      setImportingModel(false);
-    }
-  }
-
   async function deleteModel(model) {
     if (!onDeleteModel || model.removable === false) {
       return;
     }
+    // Ownership-aware confirmation (epic 20398, sc-20650). A LINKED model's bytes are the user's
+    // own library copy, which this route never owned and never touches; a MANAGED model's bytes
+    // were copied into SceneWorks' storage and really do go away. Those are opposite promises, so
+    // they get opposite words — showing the managed warning over a linked entry would frighten a
+    // user out of a safe removal, and the reverse would lose them files.
+    //
+    // Only a PLAN-BACKED row has a known ownership. A built-in catalog entry, or any row imported
+    // before this epic, keeps the pre-epic sentence: it is the accurate one for a delete whose
+    // teardown is the built-in-identity-preserving sweep, and guessing "managed" over it would
+    // overstate what the delete does.
+    const ownership = modelOwnership(model);
+    const legacyMessage = deleteConfirmation("model", model, recipePresets);
+    const ownershipCopy = ownership ? removalCopy(model) : null;
+    const presetNote = legacyMessage
+      .split("\n\n")
+      .filter((line) => line.startsWith("Referenced by presets:") || line.startsWith("Those presets"));
     // Desktop-safe confirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
     if (
       !(await appConfirm({
-        title: "Delete model?",
-        message: deleteConfirmation("model", model, recipePresets),
-        confirmLabel: "Delete",
+        title: ownershipCopy?.title ?? "Delete model?",
+        message: ownershipCopy ? [ownershipCopy.message, ...presetNote].join("\n\n") : legacyMessage,
+        confirmLabel: ownershipCopy?.confirmLabel ?? "Delete",
         cancelLabel: "Cancel",
         tone: "danger",
       }))
@@ -1174,11 +1122,8 @@ export function ModelManagerScreen() {
   const pendingLoraImportJobs = jobs.filter((job) => job.type === "lora_import" && !isSupersededLoraImport(job, completedImportTimes));
   const localLoraImportJobs = pendingLoraImportJobs.filter((job) => job.status !== "completed" && matchesFamily(job, familyFilter));
   const pendingModelImportJobs = jobs.filter((job) => job.type === "model_import" && job.status !== "completed");
-  const isModelFileImport = modelImportForm.mode === "file";
-  const modelImportDisabled =
-    importingModel ||
-    !onImportModel ||
-    (isModelFileImport ? !modelImportForm.file : !modelImportForm.sourceUrl.trim());
+  // Completed imports, for the duplicate-checkpoint warning the job result carries (sc-20650).
+  const completedModelImportJobs = jobs.filter((job) => job.type === "model_import" && job.status === "completed");
   const hiddenImportCount =
     familyFilter === "all" ? 0 : pendingLoraImportJobs.filter((job) => job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
   const isFileImport = importForm.mode === "file";
@@ -1208,6 +1153,88 @@ export function ModelManagerScreen() {
   const loraGroups = [...loraGroupMap.entries()]
     .sort(([a], [b]) => (a === "compatible" ? 1 : b === "compatible" ? -1 : a.localeCompare(b)))
     .map(([family, items]) => ({ family, items }));
+
+  // Re-read every approved root's scan. Called after a relink or a rescan so the card's verdict is
+  // the seam's fresh answer rather than an optimistic local flip.
+  const refreshLinkedStatuses = useCallback(async () => {
+    try {
+      const response = await fetchLibraryRoots(token);
+      const roots = Array.isArray(response?.roots) ? response.roots : [];
+      if (roots.length === 0) {
+        setLinkedStatuses(new Map());
+        return;
+      }
+      const scans = await Promise.all(roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)));
+      setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
+    } catch {
+      // See the mount effect: an enrichment read, silent by design.
+    }
+  }, [token]);
+
+  // The two corrective actions a non-Ready linked card offers. Both surface the store's own typed
+  // refusal on failure — `describeRefusal` has no generic branch, so a rejection the user has to
+  // act on can never arrive as "something went wrong".
+  async function relinkLinkedModel(status) {
+    const picked = isDesktop ? await tauriInvoke("choose_folder").catch(() => null) : null;
+    if (!picked) {
+      setDeleteMessage({
+        tone: "error",
+        text: isDesktop
+          ? "Choose the folder this library lives in now."
+          : "Relinking a library names a folder on the host, so it has to be done from SceneWorks on that machine.",
+      });
+      return;
+    }
+    setDeletingItem(`relink:${status.checkpointId}`);
+    try {
+      await updateLibraryRoot(token, status.rootId, { path: String(picked) });
+      await refreshLinkedStatuses();
+      setDeleteMessage({ tone: "success", text: "Library relinked. Its models are selectable again." });
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
+  async function rescanLinkedModel(status) {
+    setDeletingItem(`rescan:${status.checkpointId}`);
+    try {
+      const next = await rescanLibraryCheckpoint(token, status.rootId, status.relativePath);
+      await refreshLinkedStatuses();
+      setDeleteMessage(
+        next?.state === "ready"
+          ? { tone: "success", text: `${status.relativePath} is usable again.` }
+          : { tone: "error", text: next?.detail || `${status.relativePath} still cannot be used.` },
+      );
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetchLibraryRoots(token);
+        const roots = Array.isArray(response?.roots) ? response.roots : [];
+        if (roots.length === 0 || cancelled) return;
+        const scans = await Promise.all(
+          roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)),
+        );
+        if (!cancelled) setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
+      } catch {
+        // A deployment with no linked libraries answers here; the cards simply keep their ordinary
+        // install-state rendering. Deliberately silent: this is an enrichment read, and a banner
+        // for it would fire on every install that has never used a linked library.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   function renderModelCard(model) {
     const downloadJobs = downloadJobsFor(model);
@@ -1282,8 +1309,26 @@ export function ModelManagerScreen() {
     const macBlock = macModelBlock(model, macCapabilities);
     // Header install-status badge: warn tones for an incomplete cache, accent for installed,
     // neutral for missing.
-    const statusClass = incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge";
-    const statusText = incomplete ? "incomplete" : installed ? "installed" : "missing";
+    // A linked checkpoint whose library is detached, or whose file drifted, is NOT missing: the
+    // plans are intact and there is exactly one button to press (AC2, epic 20398). Rendering it as
+    // "missing" invites the user to re-download bytes they already own.
+    const linkedStatus = modelLinkedStatus(model, linkedStatuses);
+    const linkedFix = linkedCorrection(linkedStatus);
+    const provenance = modelProvenance(model);
+    const statusClass = linkedFix
+      ? "status-badge warning"
+      : incomplete
+        ? "status-badge warning"
+        : installed
+          ? "status-badge installed"
+          : "status-badge";
+    const statusText = linkedFix
+      ? linkedFix.headline.toLowerCase()
+      : incomplete
+        ? "incomplete"
+        : installed
+          ? "installed"
+          : "missing";
     // Where this model's files actually resolve from, straight off the typed judgement the one
     // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
     // discipline is the whole reason a second, drifting availability opinion can't exist.
@@ -1355,6 +1400,30 @@ export function ModelManagerScreen() {
           <p className="model-card-attribution">{model.ui.attribution}</p>
         ) : null}
         <p className="model-card-description">{model.ui?.description ?? model.family ?? model.id}</p>
+        {provenance ? (
+          <p className="model-card-provenance">
+            Source: {provenance.label}
+            {provenance.reference ? ` · ${provenance.reference}` : ""}
+          </p>
+        ) : null}
+        {linkedFix ? (
+          <div
+            aria-label={`${model.name ?? model.id} ${linkedFix.headline}`}
+            className="model-card-linked-fix"
+            role="group"
+          >
+            <p className="checkpoint-state-headline">{linkedFix.headline}</p>
+            <p>{linkedFix.summary}</p>
+            {linkedFix.detail ? <p className="checkpoint-import-detail">{linkedFix.detail}</p> : null}
+            <button
+              disabled={deletingItem === `relink:${linkedStatus.checkpointId}` || deletingItem === `rescan:${linkedStatus.checkpointId}`}
+              onClick={() => (linkedFix.action === "relink" ? relinkLinkedModel(linkedStatus) : rescanLinkedModel(linkedStatus))}
+              type="button"
+            >
+              {linkedFix.label}
+            </button>
+          </div>
+        ) : null}
         {capabilities.length ? (
           <ul className="model-capabilities">
             {capabilities.map((capability) => (
@@ -1928,127 +1997,20 @@ export function ModelManagerScreen() {
       return null;
     }
     return (
-      <section className="model-import-panel-section">
-        {MODEL_IMPORT_ENABLED && (
-          <form className="models-accent-band models-import-panel" aria-label="Import model" onSubmit={importModel}>
-            <div className="models-accent-band-head">
-              <span className="models-accent-dot" aria-hidden="true" />
-              <p className="eyebrow">Import model</p>
-              <span className="models-accent-band-caption">
-                Point at a base checkpoint file — auto-detects family (Krea 2 today)
-              </span>
-            </div>
-            <div className="segmented-control compact-segment" aria-label="Model import source">
-              <button
-                className={modelImportForm.mode === "url" ? "active" : ""}
-                disabled={importingModel}
-                onClick={() => setModelImportForm((current) => ({ ...current, mode: "url" }))}
-                type="button"
-              >
-                URL
-              </button>
-              <button
-                className={modelImportForm.mode === "file" ? "active" : ""}
-                disabled={importingModel}
-                onClick={() => setModelImportForm((current) => ({ ...current, mode: "file" }))}
-                type="button"
-              >
-                Upload
-              </button>
-            </div>
-            <div className="models-import-grid">
-              <label>
-                Type
-                {/* Base-checkpoint import only produces image models today (a Krea 2 DiT).
-                    `queue_model_import_job` (models.rs) writes this type verbatim into the
-                    user manifest and never reconciles it against the detected family, so
-                    offering video/audio/utility here would let an image checkpoint be
-                    mis-typed. Constrain to Image (disabled) until more base-checkpoint types
-                    are importable, then drop the image-only filter to restore the full
-                    MODEL_TYPE_OPTIONS selector (sc-14020). */}
-                <select disabled value={modelImportForm.type} aria-readonly="true">
-                  {MODEL_TYPE_OPTIONS.filter((option) => option.value === "image").map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Family
-                <select
-                  disabled={importingModel || !families.length}
-                  onChange={(event) => setModelImportForm((current) => ({ ...current, family: event.target.value }))}
-                  value={modelImportForm.family}
-                >
-                  {families.length ? (
-                    <>
-                      <option value="">Auto-detect</option>
-                      {families.map((family) => (
-                        <option key={family} value={family}>
-                          {family}
-                        </option>
-                      ))}
-                    </>
-                  ) : (
-                    <option value="">No known families</option>
-                  )}
-                </select>
-              </label>
-              {isModelFileImport ? (
-                <label>
-                  Model File
-                  <span className="file-picker-row">
-                    <span className="file-upload-button">
-                      Choose
-                      <input
-                        accept=".safetensors,.ckpt,.pt,.bin"
-                        disabled={importingModel}
-                        key={modelFileInputKey}
-                        onChange={(event) => setModelImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                        type="file"
-                      />
-                    </span>
-                    <span className="selected-file-name">{modelImportForm.file?.name ?? "No file selected"}</span>
-                  </span>
-                </label>
-              ) : (
-                <label>
-                  Source URL
-                  <input
-                    disabled={importingModel}
-                    onChange={(event) => setModelImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                    placeholder="https://..."
-                    value={modelImportForm.sourceUrl}
-                  />
-                </label>
-              )}
-              <label>
-                Name
-                <input
-                  disabled={importingModel}
-                  onChange={(event) => setModelImportForm((current) => ({ ...current, name: event.target.value }))}
-                  placeholder="Optional"
-                  value={modelImportForm.name}
-                />
-              </label>
-              <button disabled={modelImportDisabled} type="submit">
-                {importingModel ? (isModelFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
-              </button>
-            </div>
-            {modelImportMessage.text ? <p className={modelImportMessage.tone === "success" ? "inline-success" : "inline-warning"}>{modelImportMessage.text}</p> : null}
-          </form>
-        )}
-        {pendingModelImportJobs.length ? (
-          <div className="lora-import-progress">
-            <strong>Model imports in progress</strong>
-            <div className="local-job-stack">
-              {pendingModelImportJobs.map((job) => (
-                <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-              ))}
-            </div>
-          </div>
-        ) : null}
+      <section className="model-import-panel-section models-accent-band">
+        <CheckpointImportPanel
+          completedJobs={completedModelImportJobs}
+          credentials={credentials}
+          families={families}
+          macCapabilities={macCapabilities}
+          models={models}
+          onCancelJob={onCancelJob}
+          onImportModel={onImportModel}
+          onOpenQueue={onOpenQueue}
+          onRetryJob={(job, payload) => onResumeDownloadJob(job, payload)}
+          pendingJobs={pendingModelImportJobs}
+          token={token}
+        />
       </section>
     );
   }
