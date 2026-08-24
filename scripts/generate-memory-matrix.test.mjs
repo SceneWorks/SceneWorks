@@ -2517,6 +2517,11 @@ test("a rung-4 implementation claim survives an absent rung 1 exactly when the p
     const survey = await surveyFixture();
     const verdict = survey.families[group].backends.mlx;
     verdict.implementation = "shared-primitive";
+    // The two representations are mutually exclusive, and which one the REAL survey happens to use
+    // is not this fixture's subject — sc-21505 moved Mage-Flow onto exact scopes and this helper
+    // then authored both at once. Clear the other side so the fixture states one claim, whichever
+    // representation the committed survey arrives in.
+    delete verdict.implementationScopes;
     verdict.implementedEntries = [entry];
     verdict.strategyParameters = { transformerWindowSize: 1 };
     const sourceOverrides = { rung4Survey: JSON.stringify(survey) };
