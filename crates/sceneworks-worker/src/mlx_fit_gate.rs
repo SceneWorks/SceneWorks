@@ -42,9 +42,9 @@ use gen_core::{
     MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
     MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
-    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
-    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
-    TransformerComponent, WeightsSource,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryReferenceShape,
+    MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision,
+    Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -1508,13 +1508,20 @@ fn resident_evidence(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -1900,6 +1907,7 @@ fn evidence_admission_route(
                 })?;
                 let memory_evidence = MemoryEvidence {
                     key: MemoryEvidenceKey {
+                        model_family: plan.model_id.to_owned(),
                         resolved_route: plan.engine_id.to_owned(),
                         backend: gen_core::MemoryBackend::Mlx,
                         tier: plan.tier,
@@ -1907,8 +1915,14 @@ fn evidence_admission_route(
                             record.load_shape,
                         ),
                         mode: memory_mode_from_mode_key(mode_key),
+                        reference_shape: if inputs.reference_count == 0 {
+                            MemoryReferenceShape::None
+                        } else {
+                            MemoryReferenceShape::Image
+                        },
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
+                        frames_per_second: None,
                         strategy: evidence_strategy(binding.rung),
                         engaged_composition: record
                             .strategy
@@ -2173,13 +2187,20 @@ pub(crate) fn estimate_evidence(
 ) -> MemoryEvidence {
     MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -4966,6 +4987,7 @@ fn generic_mlx_shared_observation(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: "generic_mlx_cold_load".into(),
             resolved_route: "generic_mlx_cold_load".into(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
@@ -4973,8 +4995,10 @@ fn generic_mlx_shared_observation(
             // defers transformer materialization.
             load_shape: gen_core::LoadShape::EagerMaterialization,
             mode: memory_mode_from_mode_key("image_generation"),
+            reference_shape: MemoryReferenceShape::None,
             overlay: Some("resolved_load_spec".into()),
             geometry,
+            frames_per_second: None,
             strategy: MemoryStrategy::Resident,
             engaged_composition: vec![MemoryStrategy::Resident],
             parameters: Default::default(),
@@ -15485,11 +15509,17 @@ mod tests {
         };
         let evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "mage_flow".to_owned(),
                 resolved_route: "mage_flow".to_owned(),
                 backend: gen_core::MemoryBackend::Mlx,
                 tier: plan.tier,
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: memory_mode_from_mode_key("edit"),
+                reference_shape: if inputs.reference_count == 0 {
+                    MemoryReferenceShape::None
+                } else {
+                    MemoryReferenceShape::Image
+                },
                 overlay: inputs.overlay.clone(),
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -15498,6 +15528,7 @@ mod tests {
                     frames: 1,
                     reference_count: inputs.reference_count,
                 },
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),
                 parameters: selection.parameters,

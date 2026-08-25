@@ -2219,13 +2219,6 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     if model == "ltx_2_3_eros" {
         return Vec::new();
     }
-    // The executor is present for direct/replayed jobs, but the user-facing Candle capability is
-    // deliberately still withheld pending the MiniMax-H3 VRAM measurement. Keep the generated
-    // capability facts on that product truth; otherwise merely adding the dispatch arm would make
-    // the backend-capability matrix advertise a route before the separate one-line flip.
-    if matches!(model, "minimax_h3" | "minimax_h3_ref") {
-        return Vec::new();
-    }
     if model == "wan_2_2_vace_fun_14b" {
         return if mode == "replace_person" {
             vec!["wan2_2_vace_fun_14b"]
@@ -2251,6 +2244,7 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     }
     bernini_engine_id(model)
         .or_else(|| candle::candle_video_engine_id(model))
+        .or_else(|| minimax_h3_engine_id(model))
         .into_iter()
         .collect()
 }
