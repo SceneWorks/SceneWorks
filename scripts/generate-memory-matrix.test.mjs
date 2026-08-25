@@ -3333,10 +3333,13 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // sc-20644 tracking refresh then advanced that feature head to 725c6bc59 — inference #787, which
   // adds NVFP4 (sc-20641) and the registered Wan adapter + Krea MXFP8 (sc-20644) and carries the
   // LTX GroupNorm fix in through inference's own #794 main sync, so 31e02510a is now an ancestor of
-  // this pin rather than a thing still owed. The literal is re-stamped rather than relaxed to a
-  // shape check: the assertion below only means something while the pin is known, and
-  // `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "725c6bc59c61e940859fd925037184294cd2cafb");
+  // this pin rather than a thing still owed. sc-20651 — epic 20398's SINGLE terminal pin bump —
+  // then advanced it off the feature head onto inference MAIN's merge of that head (6d8be650d,
+  // inference #800), which is the adoption a sync deliberately deferred: 725c6bc59 is an ancestor
+  // of it, and the delta is the epic's own 13 review commits plus the merge. The literal is
+  // re-stamped rather than relaxed to a shape check: the assertion below only means something
+  // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
+  assert.equal(pin, "6d8be650d34d53b7539cb55c8dee862bd0863960");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
