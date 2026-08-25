@@ -17,9 +17,11 @@
 #   build type defaults to Debug (what `cargo build`/`cargo test` consume; --release is Release)
 #   target defaults to the host triple
 #   dest defaults to ${PMETAL_MLX_PREBUILT_CACHE:-$HOME/.cache/pmetal/prebuilt}/<sha12>/<cell>
-#   --github-env appends PMETAL_MLX_PREBUILT_DIR=<dir> to $GITHUB_ENV for later CI steps
+#   --github-env appends PMETAL_MLX_PREBUILT_DIR=<dir> and
+#   PMETAL_METALLIB_PATH=<dir>/mlx.metallib to $GITHUB_ENV for later CI steps
 #
-# Prints `PMETAL_MLX_PREBUILT_DIR=<dir>` on success. Exit codes: 1 = no release/asset for this
+# Prints `PMETAL_MLX_PREBUILT_DIR=<dir>` and `PMETAL_METALLIB_PATH=<dir>/mlx.metallib` on success.
+# Exit codes: 1 = no release/asset for this
 # rev+cell (e.g. the fork rev was just bumped and prebuilt-mlx has not published yet -- the one
 # case where building from source is the right answer); 2 = usage/environment; 3 = the asset
 # exists but is corrupt or is not the cell it claims to be (never tolerate that). Local use:
@@ -63,16 +65,19 @@ cell="${target}-dt${deployment_target}-${build_type}-${FEATURES}"
 asset="pmetal-mlx-${sha12}-${cell}.tar.zst"
 [ -n "$dest" ] || dest="${PMETAL_MLX_PREBUILT_CACHE:-$HOME/.cache/pmetal/prebuilt}/${sha12}/${cell}"
 manifest="$dest/pmetal-mlx-prebuilt.txt"
+metallib_path="$dest/mlx.metallib"
 
 emit() {
   echo "PMETAL_MLX_PREBUILT_DIR=$dest"
+  echo "PMETAL_METALLIB_PATH=$metallib_path"
   if [ "$github_env" = 1 ]; then
     [ -n "${GITHUB_ENV:-}" ] || { echo "fetch-prebuilt-mlx: --github-env but GITHUB_ENV is unset" >&2; exit 2; }
     echo "PMETAL_MLX_PREBUILT_DIR=$dest" >> "$GITHUB_ENV"
+    echo "PMETAL_METALLIB_PATH=$metallib_path" >> "$GITHUB_ENV"
   fi
 }
 
-if [ -f "$manifest" ] && [ -f "$dest/libmlx.a" ] && [ -f "$dest/libmlxc.a" ] && [ -f "$dest/mlx.metallib" ]; then
+if [ -f "$manifest" ] && [ -f "$dest/libmlx.a" ] && [ -f "$dest/libmlxc.a" ] && [ -f "$metallib_path" ]; then
   echo "fetch-prebuilt-mlx: using cached $dest" >&2
   emit
   exit 0
@@ -93,6 +98,7 @@ zstd -dc "$tmp/$asset" | tar -x -C "$dest"
 for f in libmlx.a libmlxc.a mlx.metallib pmetal-mlx-prebuilt.txt; do
   [ -f "$dest/$f" ] || { echo "fetch-prebuilt-mlx: $asset did not contain $f" >&2; rm -rf "$dest"; exit 3; }
 done
+[ -f "$metallib_path" ] || { echo "fetch-prebuilt-mlx: $asset did not contain mlx.metallib at $metallib_path" >&2; rm -rf "$dest"; exit 3; }
 grep -qx "deployment_target=${deployment_target}" "$manifest" || { echo "fetch-prebuilt-mlx: $asset manifest does not say deployment_target=${deployment_target}:" >&2; cat "$manifest" >&2; rm -rf "$dest"; exit 3; }
 grep -qx "build_type=${build_type}" "$manifest" || { echo "fetch-prebuilt-mlx: $asset manifest does not say build_type=${build_type}" >&2; rm -rf "$dest"; exit 3; }
 echo "fetch-prebuilt-mlx: extracted to $dest" >&2

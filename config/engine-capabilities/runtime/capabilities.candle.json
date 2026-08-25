@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
+    "inferenceRevision": "c943f0e60ba70586dfe5309f60af7d6164f893d3",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -1442,7 +1442,7 @@
           "referenceAudio"
         ],
         "supports_lora": true,
-        "supports_lokr": false,
+        "supports_lokr": true,
         "supported_quants": [
           "q4",
           "q8"
