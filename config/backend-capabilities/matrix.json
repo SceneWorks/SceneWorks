@@ -61,13 +61,13 @@
     "workerVideoCandle": "9a8e8a11b7ef172c64da668bae4e768645e3930c5284f5ab6c20e784c2a1d9c3",
     "workerVideoDispatch": "1c73dd7079bc901ba9c46584213214442a62dc78284122fce3adaf136e275b9c",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "82a228aa7883504a4f4bb910c3b9aa1450693152e5e781bd067e701d6f5af6ba",
+    "workerVideoLtx": "d3bb7913724f49cd33a45544776a6b621dc2e7ec146ffef0112fa25c316ac1c9",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "fbcafb8a560c5f341a5c87924fe2080705822fd338675ae398566e5e89223f3a",
     "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
-    "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
-    "workerVideoWan": "7075c99b863098aaef4cc80e46e49cbee27545c294f412a978aa21e4bde385c8"
+    "workerVideoVace": "466e9a6a9fc26d3ee3bb185685278c1ac8b38b4325fd6e430c1447a397f52462",
+    "workerVideoWan": "6544a3eed85bab509c798fcc0f6f4333634a2db8d7d8f222caff304e1be28ba5"
   },
   "models": [
     {
@@ -1681,13 +1681,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [

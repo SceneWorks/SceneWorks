@@ -95,14 +95,6 @@ use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 const HEADROOM_GB: f64 = crate::vram_gate::HEADROOM_GB;
 
 const KREA_CONTROL_ROUTE: &str = "krea_2_turbo_control";
-/// Catalog family behind the control ROUTE. `krea_2_turbo_control` is not a catalog entry of its
-/// own — it is the control route of the `krea_2` family (`krea_2_turbo` / `krea_2_raw` in
-/// `config/manifests/builtin.models.jsonc`), so evidence keys here carry the family, not the route.
-const KREA_CONTROL_FAMILY: &str = "krea_2";
-/// The control reference is a control IMAGE, so this lane can name its carrier exactly rather than
-/// falling back to `memory_strategy::reference_shape_for_count`'s untyped spelling.
-const KREA_CONTROL_REFERENCE_SHAPE: gen_core::MemoryReferenceShape =
-    gen_core::MemoryReferenceShape::Image;
 const KREA_CONTROL_CALIBRATION: &str = "sc-16013-krea-control-direct-1024-v1";
 /// Candle's bespoke Krea control provider models the separately supplied pose image as an img2img
 /// reference. These values mirror its authoritative evidence probe and must describe both measured
@@ -502,16 +494,15 @@ fn fit_ladder_for_tier(
         let verified = dimensions.all_satisfied();
         MemoryEvidence {
             key: MemoryEvidenceKey {
-                model_family: KREA_CONTROL_FAMILY.to_owned(),
+                model_family: KREA_CONTROL_ROUTE.to_owned(),
                 resolved_route: KREA_CONTROL_ROUTE.to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
                 load_shape: contract.load_shape,
                 mode: crate::memory_strategy::memory_mode_from_mode_key(KREA_CONTROL_MODE),
-                reference_shape: KREA_CONTROL_REFERENCE_SHAPE,
+                reference_shape: gen_core::MemoryReferenceShape::Image,
                 overlay: Some(overlay.clone()),
                 geometry: measured_geometry,
-                // `image_to_image`: a still lane, so no temporal identity.
                 frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),
@@ -674,13 +665,13 @@ fn fit_ladder_for_tier(
                 selection,
                 MemoryEvidence {
                     key: MemoryEvidenceKey {
-                        model_family: KREA_CONTROL_FAMILY.to_owned(),
+                        model_family: KREA_CONTROL_ROUTE.to_owned(),
                         resolved_route: KREA_CONTROL_ROUTE.to_owned(),
                         backend: gen_core::MemoryBackend::Candle,
                         tier: numeric_tier,
                         load_shape: contract.load_shape,
                         mode: crate::memory_strategy::memory_mode_from_mode_key(KREA_CONTROL_MODE),
-                        reference_shape: KREA_CONTROL_REFERENCE_SHAPE,
+                        reference_shape: gen_core::MemoryReferenceShape::Image,
                         overlay: Some(overlay.clone()),
                         geometry: request_geometry,
                         frames_per_second: None,

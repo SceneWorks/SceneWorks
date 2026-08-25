@@ -24,7 +24,7 @@ const EDGE = `MemoryStrategyPrerequisite::Rung {
                 scope: MemoryPrerequisiteScope::EngagedInSameRequest,
             }`;
 
-// The five constructions present at the pinned revision, each with the file it was taken from so a
+// The four constructions present at the pinned revision, each with the file it was taken from so a
 // reader can check the fixture against the real thing rather than against this file's idea of it.
 const SHAPES = [
   [
@@ -80,11 +80,11 @@ const SHAPES = [
     ["BoundedTransformerResidency?"],
   ],
   [
-    // A filtered list is a CEILING, not a declaration: the predicate strips the transformer rung
-    // unless the load is streamable. The extractor does not read the predicate, so EVERY listed
-    // strategy comes back conditional — the reading that still counts as present at the gate and
-    // never claims an unconditional edge the filter can remove.
-    "array + filter + map — candle-gen-sana/src/memory_strategy.rs",
+    // SHAPE 5 (sc-20799, inference ebcdc7da). One array of candidates, filtered down to the members
+    // this build can execute. The filtered-out member is conditional; its siblings are not — a
+    // distinction a shape that read the array alone would lose, and reading the filter as "keeps
+    // everything" would present a streamable-only edge as unconditional.
+    "filter + map — candle-gen-sana/src/memory_strategy.rs",
     `contract.additional_prerequisites = [
         MemoryStrategy::BoundedDecode,
         MemoryStrategy::BoundedAttention,
@@ -102,7 +102,7 @@ const SHAPES = [
         )
     })
     .collect();`,
-    ["BoundedDecode?", "BoundedAttention?", "BoundedTransformerResidency?"],
+    ["BoundedDecode", "BoundedAttention", "BoundedTransformerResidency?"],
   ],
 ];
 
@@ -152,34 +152,55 @@ test("an unrecognised construction or edge fails closed rather than reading as n
       ),
     /unrecognised prerequisite edge/,
   );
-  // The filter shape is recognised only while its predicate stays inside what the regex can see.
-  // A predicate containing a call is NOT read as an unfiltered list — that is the fail-OPEN
-  // direction, and it would silently republish the full list as unconditional edges.
+  // Shape 5's filter is recognised for exactly ONE predicate. A predicate the extractor cannot read
+  // must throw, not fall through to "keeps every member" — that would report a conditional edge as
+  // unconditional, which is the same fail-open direction as reading a new construction as no edges.
   assert.throws(
     () =>
       additionalPrerequisiteEdges(
-        `contract.additional_prerequisites = [MemoryStrategy::BoundedDecode]
-             .into_iter()
-             .filter(|strategy| spec.wants(*strategy))
-             .map(|strategy| (strategy, ${EDGE}))
-             .collect();`,
-        "filter with a call",
+        `contract.additional_prerequisites = [
+             MemoryStrategy::BoundedDecode,
+             MemoryStrategy::BoundedTransformerResidency,
+         ]
+         .into_iter()
+         .filter(|strategy| spec.supports(*strategy))
+         .map(|strategy| {
+             (
+                 strategy,
+                 MemoryStrategyPrerequisite::Rung {
+                     rung: MemoryStrategy::StagedResidency,
+                     scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+                 },
+             )
+         })
+         .collect();`,
+        "unreadable filter predicate",
       ),
     /unrecognised `additional_prerequisites` construction/,
   );
-  // And a predicate that never mentions its own binder is not narrowing the list this extractor is
-  // reading, so it refuses rather than guessing which strategies survive.
+  // And a predicate that excludes a strategy the array never contained is not a shape the extractor
+  // can attribute, so it fails closed too rather than guessing which member the filter governs.
   assert.throws(
     () =>
       additionalPrerequisiteEdges(
-        `contract.additional_prerequisites = [MemoryStrategy::BoundedDecode]
-             .into_iter()
-             .filter(|strategy| streamable)
-             .map(|strategy| (strategy, ${EDGE}))
-             .collect();`,
-        "filter ignoring its binder",
+        `contract.additional_prerequisites = [
+             MemoryStrategy::BoundedDecode,
+         ]
+         .into_iter()
+         .filter(|strategy| streamable || *strategy != MemoryStrategy::BoundedTransformerResidency)
+         .map(|strategy| {
+             (
+                 strategy,
+                 MemoryStrategyPrerequisite::Rung {
+                     rung: MemoryStrategy::StagedResidency,
+                     scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+                 },
+             )
+         })
+         .collect();`,
+        "filter excludes an absent member",
       ),
-    /never mentions it/,
+    /which the mapped array does not contain/,
   );
   // A read is not a construction, and must contribute nothing rather than throw — three provider
   // test modules assert `is_empty()` on the vector.

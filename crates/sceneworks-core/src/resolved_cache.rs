@@ -270,7 +270,7 @@ pub enum ResolvedCacheEntryState {
     Complete,
     Corrupt,
     /// Summary-only state for an entry with a durable eviction tombstone whose removal has not
-    /// finished yet. Never persisted into the metadata journal; `validate_metadata_shape` rejects
+    /// finished yet. Never persisted into the metadata journal; `validate_metadata_shape_with` rejects
     /// it there.
     Evicting,
 }
@@ -985,7 +985,16 @@ impl ResolvedCacheStore {
         if let Some(mut metadata) = existing {
             match metadata.state {
                 ResolvedCacheEntryState::Complete => {
-                    validate_complete_metadata(self, &metadata)?;
+                    // Paths and sizes only (sc-21534): "already complete" is a read verdict that
+                    // skips materialization; the load boundary still re-hashes before use. A
+                    // same-size alteration is therefore refused at load (falling back to the
+                    // source tier) rather than re-materialized here — the same posture as the
+                    // local-tier scan.
+                    validate_complete_metadata_inner(
+                        self,
+                        &metadata,
+                        ContentVerification::PathsAndSizesOnly,
+                    )?;
                     return Ok(ReservationOutcome::AlreadyComplete(Box::new(metadata)));
                 }
                 ResolvedCacheEntryState::Materializing => {
@@ -1084,7 +1093,14 @@ impl ResolvedCacheStore {
             JournalRead::Valid { metadata, .. }
                 if metadata.state == ResolvedCacheEntryState::Complete =>
             {
-                validate_complete_metadata(self, &metadata)?;
+                // Paths and sizes only (sc-21534): this is a read — callers use it to decide
+                // whether materialization can be skipped, and the load boundary
+                // ([`Self::acquire_complete`]) still re-hashes before any bytes reach a runtime.
+                validate_complete_metadata_inner(
+                    self,
+                    &metadata,
+                    ContentVerification::PathsAndSizesOnly,
+                )?;
                 Some(*metadata)
             }
             _ => None,
@@ -1093,9 +1109,10 @@ impl ResolvedCacheStore {
         Ok(result)
     }
 
-    /// Full runtime listing: complete entries are re-hashed, and any entry that fails validation
-    /// fails the whole listing. Recovery, staging cleanup and byte accounting depend on that
-    /// strictness, so it is the internal default.
+    /// Full runtime listing: complete entries are validated on identity, shape, confinement, file
+    /// presence and sizes (not content — see [`EntryListing`]), and any entry that fails fails the
+    /// whole listing. Recovery, staging cleanup and byte accounting depend on that fail-fast
+    /// semantics, so it is the internal default.
     pub fn enumerate(&self) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
         self.list(EntryListing::Runtime)
     }
@@ -1244,22 +1261,20 @@ impl ResolvedCacheStore {
             }
             _ => return Ok(None),
         };
-        // FULL STRENGTH, deliberately: this is the load boundary. The scan
-        // ([`Self::valid_local_artifacts`]) and the retention sweep both validate on paths and
-        // sizes only, and this re-hash under the entry's locks is precisely what makes that safe —
-        // it is the check that must refuse an altered bundle before any bytes reach a runtime.
-        //
-        // The boundary is defended three times over, so do not read a green suite as licence to
-        // relax any one of them: this call, `acquire_runtime_lease`'s own
-        // `ResolvedModelArtifact::validate` just below, and the full-strength
-        // `write_metadata_unlocked` that stamps usage all re-hash the closure. The *property* is
-        // pinned by
-        // `the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes`;
-        // because of the redundancy that test stays green if only one of the three is downgraded.
+        // FULL STRENGTH, deliberately — and exactly ONCE (sc-21534): this is the load boundary.
+        // The scan ([`Self::valid_local_artifacts`]), the listings, and the retention sweep all
+        // validate on paths and sizes only, and this re-hash under the entry's locks is precisely
+        // what makes that safe — it is the ONE check that must refuse an altered bundle before any
+        // bytes reach a runtime. The lease acquisition and the usage stamp below run under these
+        // same locks in this same call, so re-hashing there added no window this check does not
+        // already close; it only multiplied the cost (4 full hashes of a 33 GB bundle = the Krea
+        // bf16 4.5-minute verify that outlasted the stale-worker sweep). The property is pinned by
+        // `the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes`
+        // and the single-pass cost by `the_load_boundary_hashes_the_closure_exactly_once`.
         validate_complete_metadata(self, &metadata)?;
         let artifact = Arc::new(metadata.artifact.clone());
         let runtime_lease = resolver
-            .acquire_runtime_lease(&artifact)
+            .acquire_runtime_lease_prevalidated(&artifact)
             .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
         let lease_id = random_id()?;
         let now = now_seconds()?;
@@ -1301,10 +1316,26 @@ impl ResolvedCacheStore {
                 }) => {
                     let mut changed = false;
                     if had_invalid_slot {
-                        metadata.recovery_status = RecoveryStatus::RecoveredFromOlderSlot;
-                        metadata.artifact_pinned = true;
-                        metadata.refresh_effective_pin();
-                        changed = true;
+                        // FULL STRENGTH before the pin (sc-21534, same defense as the receipt
+                        // resurrection below): this branch re-pins a Complete entry recovered
+                        // from its older journal slot, and the listings — including this
+                        // method's opening `enumerate()` — no longer hash content. A
+                        // content-altered bundle pinned here would be refused at every load yet
+                        // never evicted — a permanent disk leak — so prove the bytes first. On
+                        // failure, record the observation and leave the entry UNPINNED and
+                        // unhealed: the load boundary refuses it regardless, and staying
+                        // unpinned is what lets retention reclaim it (after proving the source
+                        // holds a complete second copy) so the next use re-materializes clean.
+                        if metadata.state == ResolvedCacheEntryState::Complete
+                            && validate_complete_metadata(self, &metadata).is_err()
+                        {
+                            self.write_corrupt_marker(&digest)?;
+                        } else {
+                            metadata.recovery_status = RecoveryStatus::RecoveredFromOlderSlot;
+                            metadata.artifact_pinned = true;
+                            metadata.refresh_effective_pin();
+                            changed = true;
+                        }
                     }
                     let materializing_session_is_stale =
                         if metadata.state == ResolvedCacheEntryState::Materializing {
@@ -1349,6 +1380,10 @@ impl ResolvedCacheStore {
                     }
                 }
                 Err(_) => {
+                    // FULL STRENGTH kept here (sc-21534): unlike the listings, this path
+                    // resurrects an entry from its receipt and PINS it. A content-corrupt bundle
+                    // resurrected pinned would be refused at every load yet never evicted, so the
+                    // rare invalid-tombstone recovery proves the bytes before it re-pins them.
                     let receipt = self.read_complete_receipt(&digest).and_then(|metadata| {
                         validate_complete_metadata(self, &metadata)?;
                         Ok(metadata)
@@ -1674,7 +1709,13 @@ impl ResolvedCacheStore {
         digest: &str,
         metadata: &ResolvedCacheMetadata,
     ) -> Result<(), ResolvedCacheError> {
-        validate_metadata_shape(metadata, digest)?;
+        // Shape only (sc-21534): a journal write records a state or usage transition; it never
+        // changes bundle bytes, and re-hashing the closure here charged a full-bundle SHA-256 to
+        // every usage stamp and pin flip. Every boundary that STAMPS `Complete` content proves it
+        // itself immediately before writing (`record_complete` / `publish_staged` / `recover`'s
+        // receipt path run a full `artifact.validate()`), and the load boundary
+        // (`acquire_complete`) re-hashes before any bytes reach a runtime.
+        validate_metadata_shape_with(metadata, digest, ContentVerification::PathsAndSizesOnly)?;
         let generation = match self.read_metadata_unlocked(digest) {
             Ok(JournalRead::Valid { .. }) => {
                 highest_generation(&self.inner.root.join("entries").join(digest))?
@@ -2556,13 +2597,6 @@ fn validate_candidate(candidate: &PromotionCandidate) -> Result<(), ResolvedCach
     Ok(())
 }
 
-fn validate_metadata_shape(
-    metadata: &ResolvedCacheMetadata,
-    digest: &str,
-) -> Result<(), ResolvedCacheError> {
-    validate_metadata_shape_with(metadata, digest, ContentVerification::RehashEveryFile)
-}
-
 fn validate_metadata_shape_with(
     metadata: &ResolvedCacheMetadata,
     digest: &str,
@@ -2649,7 +2683,12 @@ fn validate_complete_metadata(
 }
 
 /// How a whole-store listing treats complete entries. `Runtime` is the strict internal listing
-/// (recovery, staging cleanup, byte accounting); `Inspect` is the read-only status listing.
+/// (recovery, staging cleanup, byte accounting); `Inspect` is the read-only status listing. Both
+/// validate on paths and sizes only (sc-21534: recovery re-hashed every complete entry in the
+/// cache at startup, the same whole-cache cost sc-19712 F-3 removed from job submission; byte
+/// accounting needs sizes, and every caller that ACTS on a summary re-proves it under fresh
+/// locks). They differ in failure semantics: a `Runtime` listing fails on the first invalid
+/// entry, an `Inspect` listing degrades that entry to `Corrupt` and keeps going.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryListing {
     Runtime,
@@ -2659,8 +2698,7 @@ enum EntryListing {
 impl EntryListing {
     fn verification(self) -> ContentVerification {
         match self {
-            Self::Runtime => ContentVerification::RehashEveryFile,
-            Self::Inspect => ContentVerification::PathsAndSizesOnly,
+            Self::Runtime | Self::Inspect => ContentVerification::PathsAndSizesOnly,
         }
     }
 }
@@ -2680,8 +2718,10 @@ enum ContentVerification {
     ///
     /// This mode is safe on a read path only because it is never the last word: the load boundary
     /// ([`ResolvedCacheStore::acquire_complete`]) re-verifies at [`Self::RehashEveryFile`] under
-    /// the entry's locks before any bytes reach a runtime, and every journal write validates at
-    /// full strength. Do not weaken that boundary — it is what this mode leans on.
+    /// the entry's locks before any bytes reach a runtime, and every boundary that stamps
+    /// `Complete` content (`record_complete`, `publish_staged`, `recover`'s receipt resurrection)
+    /// proves the bytes itself immediately before writing. Do not weaken the load boundary — it
+    /// is what this mode leans on.
     PathsAndSizesOnly,
 }
 
@@ -2691,7 +2731,10 @@ fn validate_complete_metadata_inner(
     verification: ContentVerification,
 ) -> Result<(), ResolvedCacheError> {
     let digest = cache_key_digest(&metadata.cache_key)?;
-    validate_metadata_shape_with(metadata, &digest, verification)?;
+    // Shape only here: the mode-specific content check is the `match verification` below, so
+    // passing `verification` through would hash the whole closure TWICE per full-strength call
+    // (sc-21534 — half of the 4x-per-load multiple behind the Krea bf16 4.5-minute verify).
+    validate_metadata_shape_with(metadata, &digest, ContentVerification::PathsAndSizesOnly)?;
     if metadata.state != ResolvedCacheEntryState::Complete
         || metadata.reservation_id.is_some()
         || metadata.reservation_owner.is_some()
