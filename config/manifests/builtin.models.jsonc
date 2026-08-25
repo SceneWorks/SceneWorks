@@ -1992,7 +1992,7 @@
               "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
             },
             // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
-            // Engine-derived rung x tier coverage for z_image_turbo.
+            // Engine-derived rung x tier coverage for z_image_turbo, z_image_turbo_control.
             // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
             // hand edits inside this region are overwritten.
             {
@@ -2002,6 +2002,15 @@
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora", "pid"],
               "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/z_image_turbo"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "z_image_turbo_control",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
+              "loadProfiles": ["single_control"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/z_image_turbo_control"
             }
             // END generated-from-engine-capabilities
           ]
@@ -2335,7 +2344,7 @@
               "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
             },
             // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
-            // Engine-derived rung x tier coverage for z_image.
+            // Engine-derived rung x tier coverage for z_image, z_image_control.
             // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
             // hand edits inside this region are overwritten.
             {
@@ -2345,6 +2354,15 @@
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora"],
               "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/z_image"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "z_image_control",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
+              "loadProfiles": ["single_control"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/z_image_control"
             }
             // END generated-from-engine-capabilities
           ]
@@ -14827,8 +14845,28 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
               "tiers": ["bf16"],
-              "modes": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              // sc-21609: modes narrowed to the coordinates production routes at CLEAN BASE.
+              // `image_inpaint` never reaches the worker (canonicalized to edit_image),
+              // `image_detail` always loads a tile ControlNet (control overlay — no cell exists),
+              // and `character_image` always loads an IP adapter, declared on its own identity
+              // row below.
+              "modes": ["text_to_image", "edit_image"],
               "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["bf16"],
+              // sc-21609: the SdxlSubMode::Ip lane — character requests always carry an IP
+              // adapter, so the coordinate lives at the identity overlay with the ip_adapter
+              // profiles the route registry now witnesses.
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["ip_adapter", "lora_ip_adapter"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
@@ -14841,9 +14879,9 @@
             {
               "rung": "staged_residency",
               "tiers": ["bf16", "q8", "q4"],
-              "modes": ["text_to_image"],
-              "overlays": ["none"],
-              "loadProfiles": ["plain"],
+              "modes": ["text_to_image", "edit_image", "image_detail", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "loadProfiles": ["plain", "lora", "ip_adapter", "lora_ip_adapter"],
               "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/sdxl"
             }
             // END generated-from-engine-capabilities
@@ -15831,7 +15869,12 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
               "tiers": ["bf16"],
-              "modes": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              // sc-21609: modes narrowed to the coordinates production routes at CLEAN BASE.
+              // `image_inpaint` never reaches the worker (canonicalized to edit_image),
+              // `image_detail` always loads a tile ControlNet (control overlay — no cell exists),
+              // and `character_image` always loads an IP adapter, declared on its own identity
+              // row below.
+              "modes": ["text_to_image", "edit_image"],
               "overlays": ["none"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
@@ -15841,9 +15884,38 @@
             {
               "rung": "bounded_transformer_residency",
               "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["bf16"],
+              // sc-21609: the SdxlSubMode::Ip lane — character requests always carry an IP
+              // adapter, so the coordinate lives at the identity overlay with the ip_adapter
+              // profiles the route registry now witnesses.
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["ip_adapter", "lora_ip_adapter"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
               "tiers": ["q4", "q8"],
-              "modes": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              // sc-21609: same narrowing as the bf16 row — inpaint spells edit, detail is a
+              // control-overlay load, character is the identity row below.
+              "modes": ["text_to_image", "edit_image"],
               "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["ip_adapter", "lora_ip_adapter"],
               "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
@@ -20988,7 +21060,42 @@
         "limits": {
           "samplers": ["default"],
           "schedulers": ["default"]
+        },
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for bernini.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "bernini",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image", "edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/bernini"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image", "edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/bernini"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image", "edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/bernini"
+            }
+          ]
         }
+        // END generated-from-engine-capabilities
       },
       // sc-20799 gap 1: the Candle/CUDA Bernini STILL-image memory ladder, previously undeclared.
       // `provider` is `bernini`, not `bernini_image`: the MODEL_TABLE row maps sceneworks id
