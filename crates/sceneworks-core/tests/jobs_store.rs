@@ -3703,22 +3703,25 @@ fn candle_supported_accepts_eligible_and_in_process_jobs() {
 
 #[test]
 fn candle_supported_rejects_unsupported_strict_pose() {
-    // The sc-5968 case generalized: sdxl + poses has no candle strict-pose lane, so the candle/CUDA
-    // flow can't serve it — it must fail loudly off-Mac, not silently render an unconditioned T2I.
+    // The sc-5968 case generalized: Chroma + poses has no candle strict-pose lane, so the
+    // candle/CUDA flow can't serve it — it must fail loudly off-Mac, not silently render an
+    // unconditioned T2I. SDXL is no longer a valid unsupported sentinel: sc-20747 added its native
+    // OpenPose lane on both MLX and Candle.
     let store = store("candle-oracle-pose");
     let job = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+        json!({ "model": "chroma1_base", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
     );
     let reason = candle_supported(&job).unwrap_err();
-    assert_eq!(reason.model.as_deref(), Some("sdxl"));
+    assert_eq!(reason.model.as_deref(), Some("chroma1_base"));
     assert!(reason.feature.contains("strict-pose"));
     assert!(reason
         .candle_error_message()
         .starts_with("candle_unsupported:"));
     let message = reason.candle_error_message();
     for model in [
+        "sdxl",
         "qwen_image",
         "kolors",
         "z_image_turbo",
@@ -3791,7 +3794,7 @@ fn candle_required_enforce_fails_unsupported_job() {
     let job = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+        json!({ "model": "chroma1_base", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
     );
     // Warn mode (enforce = false): no-op; the unsupported job stays queued.
     let warn = store
@@ -3974,12 +3977,12 @@ fn an_unhealthy_candle_worker_keeps_stranded_jobs_queued() {
 #[test]
 fn candle_stranded_sweep_partitions_and_is_noop_when_off() {
     let store = store("candle-strand-partition");
-    // No candle worker. An UNSUPPORTED job (sdxl+poses) is not candle-eligible, so the stranded
+    // No candle worker. An UNSUPPORTED job (Chroma + poses) is not candle-eligible, so the stranded
     // sweep leaves it for the enforce sweep — the two partition the queue.
     let unsupported = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sdxl", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
+        json!({ "model": "chroma1_base", "prompt": "p", "advanced": { "poses": [{ "id": "p" }] } }),
     );
     backdate_job_created_at(&store, &unsupported.id);
     let failed = store.fail_stranded_candle_jobs(true, 90).expect("sweep ok");

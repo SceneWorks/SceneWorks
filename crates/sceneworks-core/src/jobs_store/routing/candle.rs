@@ -59,6 +59,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
 pub(crate) enum CandleImageLane {
     ImportedFamily,
     InstantId,
+    SdxlControl,
     SdxlEdit,
     Flux2Edit,
     QwenEdit,
@@ -116,6 +117,14 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         lane: CandleImageLane::InstantId,
         models: ModelMatch::Any(&["instantid_realvisxl"]),
         shape: instantid_candle_eligible,
+    },
+    CandleImageRoute {
+        // Generic SDXL OpenPose ControlNet. This must precede the edit and IP-Adapter lanes so a
+        // pose-bearing conflict is claimed by the control handler and rejected rather than losing
+        // the pose in another conditioned route.
+        lane: CandleImageLane::SdxlControl,
+        models: ModelMatch::Family(is_sdxl_control_model),
+        shape: sdxl_control_candle_candidate,
     },
     CandleImageRoute {
         lane: CandleImageLane::SdxlEdit,
@@ -296,7 +305,8 @@ pub(crate) fn candle_pose_route_models() -> Vec<&'static str> {
         .filter(|route| {
             matches!(
                 route.lane,
-                CandleImageLane::QwenControl
+                CandleImageLane::SdxlControl
+                    | CandleImageLane::QwenControl
                     | CandleImageLane::KolorsControl
                     | CandleImageLane::ZImageControl
                     | CandleImageLane::Flux1Control
@@ -304,9 +314,10 @@ pub(crate) fn candle_pose_route_models() -> Vec<&'static str> {
                     | CandleImageLane::KreaControl
             )
         })
-        .flat_map(|route| match route.models {
-            ModelMatch::Any(models) => models.iter().copied(),
-            ModelMatch::Family(_) => [].iter().copied(),
+        .flat_map(|route| match (route.lane, &route.models) {
+            (CandleImageLane::SdxlControl, _) => SDXL_CONTROL_MODELS.iter().copied(),
+            (_, ModelMatch::Any(models)) => models.iter().copied(),
+            (_, ModelMatch::Family(_)) => [].iter().copied(),
         })
         .collect()
 }
@@ -321,6 +332,12 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
 
     if imported_image_request_provider_eligible(model, &job.payload, "candle") {
         return Some(CandleImageLane::ImportedFamily);
+    }
+
+    // Owned-to-reject requests are deliberately not a served lane. The scheduler claims them via
+    // `image_job_candle_pose_reject`, while the worker's reject guard runs before generic T2I.
+    if image_request_candle_pose_reject(model, &job.payload) {
+        return None;
     }
 
     CANDLE_IMAGE_ROUTES
@@ -356,6 +373,10 @@ pub(crate) enum CandleImageRefusal {
     ConditioningCarrier,
     /// A user LoRA on a family that advertises no inference adapter slot.
     UserLora,
+    /// FLUX.1 accepts only its hosted packed q4/q8 tiers on the generic Candle route.
+    Flux1PackedTier,
+    /// A quant tier plus adapter on a family where both are admitted only independently.
+    QuantLoraCombination,
     /// `advanced.poses` — strict-pose ControlNet.
     Poses,
     /// `advanced.phases` — a multi-phase schedule.
@@ -375,6 +396,8 @@ impl CandleImageRefusal {
             Self::EditMode => "mode edit_image",
             Self::ConditioningCarrier => "a populated conditioning carrier",
             Self::UserLora => "a user LoRA on an adapter-less family",
+            Self::Flux1PackedTier => "a FLUX.1 tier other than packed q4/q8",
+            Self::QuantLoraCombination => "an unproven quant tier plus adapter combination",
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
@@ -405,6 +428,14 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
         candle_refuses_conditioning_carrier,
     ),
     (CandleImageRefusal::UserLora, candle_refuses_user_lora),
+    (
+        CandleImageRefusal::Flux1PackedTier,
+        candle_refuses_flux1_unsupported_packed_tier,
+    ),
+    (
+        CandleImageRefusal::QuantLoraCombination,
+        candle_refuses_quant_lora_combination,
+    ),
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
@@ -498,9 +529,40 @@ pub(crate) fn candle_family_serves_quant(model: &str) -> bool {
     CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model)
 }
 
+/// Whether the family admits adapters composed with a selected/loaded Q4 or Q8 tier.
+pub(crate) fn candle_family_serves_quant_lora(model: &str) -> bool {
+    CANDLE_QUANT_LORA_MODELS.contains(&model)
+}
+
 /// LoRAs: not in the candle lane unless the audited family row advertises adapters.
 fn candle_refuses_user_lora(model: &str, payload: &Map<String, Value>) -> bool {
     !candle_family_serves_lora(model) && has_nonempty_array(payload, "loras")
+}
+
+/// Some families admit quant and adapters independently without proving their composition.
+fn candle_refuses_quant_lora_combination(model: &str, payload: &Map<String, Value>) -> bool {
+    candle_quant_lora_combination_is_unsupported(
+        candle_family_serves_quant(model),
+        candle_family_serves_lora(model),
+        candle_family_serves_quant_lora(model),
+        payload,
+    )
+}
+
+/// Pure decision seam for the deliberate standalone-quant + standalone-adapter catalog shape.
+/// Keeping this independent of a currently promoted model lets the staged Chroma catalog remain
+/// fail-closed while the composition rule stays directly testable.
+pub(crate) fn candle_quant_lora_combination_is_unsupported(
+    serves_quant: bool,
+    serves_lora: bool,
+    serves_quant_lora: bool,
+    payload: &Map<String, Value>,
+) -> bool {
+    serves_quant
+        && serves_lora
+        && !serves_quant_lora
+        && candle_request_wants_quant(payload)
+        && has_nonempty_array(payload, "loras")
 }
 
 /// Strict-pose ControlNet (`advanced.poses`, object-shaped entries) is refused by this base lane.
@@ -521,10 +583,41 @@ fn candle_refuses_phases(_model: &str, payload: &Map<String, Value>) -> bool {
 /// (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
 /// families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
 /// stay on candle. For the packed families the `mlxQuantize` value is a turnkey tier-SELECT (which
-/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize — but
-/// the gate is the same: quant-capable → stay.
+/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize. Once
+/// Chroma's staged catalog promotion lands, it has exactly those two published packed directories,
+/// so a non-q4/q8 value remains refused instead of reaching the downstream directory resolver.
 fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool {
-    !candle_family_serves_quant(model) && candle_request_wants_quant(payload)
+    let Some(bits) = candle_requested_quant_bits(payload) else {
+        return false;
+    };
+    !candle_family_serves_quant(model)
+        || (matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")
+            && !matches!(bits, 4 | 8))
+}
+
+/// FLUX.1's direct Candle loader opens the hosted q4/q8 artifact directories. It has no honest
+/// q6 or bf16 route: accepting either and letting the general resolver reinterpret it would make
+/// the selected tier and the loaded weights disagree. An absent/null selection keeps the hosted q4
+/// default; every other shape fails closed.
+fn candle_refuses_flux1_unsupported_packed_tier(model: &str, payload: &Map<String, Value>) -> bool {
+    if !matches!(model, "flux_schnell" | "flux_dev") {
+        return false;
+    }
+    let Some(advanced) = payload.get("advanced") else {
+        return false;
+    };
+    let Some(advanced) = advanced.as_object() else {
+        return true;
+    };
+    match advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => false,
+        Some(value) => !matches!(
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok()),
+            Some(4 | 8)
+        ),
+    }
 }
 
 /// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like
@@ -567,9 +660,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
 }
 
 /// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.
-/// `advanced.mlxQuantize` is an optional advanced override (the web UI doesn't send it; the MLX path
-/// otherwise defaults quant from the manifest) — so a payload-level value `> 0` is a deliberate quant
-/// request. `<= 0` (dense) and absent both leave candle on its native dense path (sc-5099).
+/// `advanced.mlxQuantize` is an optional advanced override, so a payload-level value `> 0` is a
+/// deliberate tier/quant request. Individual families may provide their own default tier or reject
+/// explicit dense encodings; this helper deliberately reports only an explicit positive request.
 pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
     candle_requested_quant_bits(payload).is_some()
 }
@@ -646,6 +739,10 @@ pub(crate) fn video_request_is_candle_eligible(
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
                 || bernini_video_candle_eligible(model, payload)
+                // An imported plan-backed Wan checkpoint (epic 20398): its model id is in no static
+                // routed list, so every predicate above answers `false` and the job would be
+                // refused at enqueue even though the candle ComfyUI Wan T2V lane serves it.
+                || plan_backed_wan_video_candle_eligible(payload)
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
@@ -660,6 +757,45 @@ pub(crate) fn video_request_is_candle_eligible(
         }
         _ => false,
     }
+}
+
+/// The one video shape a PLAN-BACKED manifest entry (`importPlan.checkpointId`, epic 20398) is
+/// claimable on: candle's in-place ComfyUI Wan **T2V** lane.
+///
+/// Keyed entirely on the forwarded `modelManifestEntry`, never on the model id — an imported
+/// checkpoint's id is in no static routed list and never will be, which is exactly why every other
+/// video predicate answered `false` for it and `create_video_job` returned `400` for a job the
+/// worker's `wan_comfyui_claims` would have taken (sc-20651).
+///
+/// Deliberately narrow on all three axes, because a claim is a promise a worker arm exists:
+/// * **family** — only `wan-video`. `resolve_wan_comfyui_paths` refuses any other family outright,
+///   and no other candle video lane consults a plan at all.
+/// * **mode** — only `text_to_video`. `resolve_candle_video_route` routes `extend_clip` /
+///   `video_bridge` / `replace_person` to the Wan-VACE / SCAIL-2 arms *before* the ComfyUI Wan arm
+///   is consulted, so a plan-backed entry on those modes never reaches a lane that can load its
+///   bytes. Claiming them would trade a `400` for a queued job that later refuses.
+/// * **shape** — no source/last-frame/clip conditioning. The T2V lane consumes none of it, and the
+///   claim must not admit a request whose conditioning would be silently dropped.
+///
+/// This is a claim, not a load: the worker still verifies the plan fail-closed (drift, missing
+/// tier, missing expert role) and raises a typed refusal when it cannot.
+pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return false;
+    };
+    if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
+        return false;
+    }
+    if crate::jobs_store::routing::catalog::checkpoint_plan_checkpoint_id(entry).is_none() {
+        return false;
+    }
+    if payload.get("mode").and_then(Value::as_str) != Some("text_to_video") {
+        return false;
+    }
+    !has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string(payload, "lastFrameAssetId")
+        && !has_nonempty_string(payload, "sourceClipAssetId")
+        && !has_nonempty_string(payload, "bridgeRightClipAssetId")
 }
 
 /// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the
@@ -881,11 +1017,54 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
-    // LTX base's shared packed-q4 turnkey. Other video providers remain dense and fail closed.
-    if candle_request_wants_quant(payload) && !candle_video_tier_select_eligible(model, payload) {
+    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; terminal
+    // acceptance proves its exact q4/q8 product packages. Other video providers remain dense and
+    // fail closed for positive tier requests.
+    if (candle_request_wants_quant(payload) || model == "ltx_2_3")
+        && !candle_video_tier_select_eligible(model, payload)
+    {
         return false;
     }
     true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleLtxTier {
+    Q4,
+    Q8,
+}
+
+/// Parse only the exact packed tiers published by the shared LTX bundle.
+fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
+    let value = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"));
+    let Some(value) = value else {
+        return Some(CandleLtxTier::Q4);
+    };
+    match value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?
+    {
+        4 => Some(CandleLtxTier::Q4),
+        8 => Some(CandleLtxTier::Q8),
+        _ => None,
+    }
+}
+
+fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<String, Value>) -> bool {
+    model == "ltx_2_3"
+        && matches!(
+            mode,
+            "text_to_video"
+                | "image_to_video"
+                | "first_last_frame"
+                | "extend_clip"
+                | "video_bridge"
+                | "replace_person"
+        )
+        && candle_ltx_requested_tier(payload).is_some()
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -895,17 +1074,10 @@ fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) 
     ) {
         return true;
     }
-    model == "ltx_2_3"
-        && payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .and_then(|advanced| advanced.get("mlxQuantize"))
-            .and_then(|value| {
-                value
-                    .as_i64()
-                    .or_else(|| value.as_str()?.trim().parse().ok())
-            })
-            == Some(4)
+    let Some(mode) = payload.get("mode").and_then(Value::as_str) else {
+        return false;
+    };
+    candle_ltx_product_tier_eligible(model, mode, payload)
 }
 
 /// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
@@ -926,7 +1098,7 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
     {
         return false;
     }
-    !candle_request_wants_quant(payload) || candle_video_tier_select_eligible(model, payload)
+    candle_ltx_product_tier_eligible(model, "replace_person", payload)
 }
 
 /// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
@@ -983,14 +1155,67 @@ pub(crate) fn video_request_candle_vace_eligible(
     true
 }
 
+/// The exact hosted tier this SCAIL-2 request can use, or `None` for a malformed/unsupported
+/// precision. Absence retains the established dense bf16 Candle baseline; q4/q8 are exact explicit
+/// package selections. This is deliberately stricter than the historical MLX range mapping: q6
+/// must not silently select q4/q8.
+fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static str> {
+    let value = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"));
+    match value {
+        None | Some(Value::Null) => Some("bf16"),
+        Some(value) => match value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+        {
+            Some(..=0) => Some("bf16"),
+            Some(4) => Some("q4"),
+            Some(8) => Some("q8"),
+            _ => None,
+        },
+    }
+}
+
+/// The request selects one exact tier and never asks a packed provider to merge an adapter.
+pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -> bool {
+    let has_adapters = payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty());
+    let Some(tier) = scail2_candle_effective_tier(payload) else {
+        return false;
+    };
+    !has_adapters || tier == "bf16"
+}
+
+/// Product admission for a source-ready SCAIL-2 tier.
+///
+/// sc-20969 terminal acceptance admits only SCAIL-2's exact shipped q4/q8/bf16 product packages.
+/// This remains separate from the adapter rule above so packed-plus-adapter combinations stay
+/// fail-closed and stale descriptor summaries cannot silently expand the product surface.
+fn scail2_candle_product_tier_eligible(
+    model: &str,
+    mode: &str,
+    payload: &Map<String, Value>,
+) -> bool {
+    model == "scail2_14b"
+        && matches!(mode, "animate_character" | "replace_person")
+        && matches!(
+            scail2_candle_effective_tier(payload),
+            Some("q4" | "q8" | "bf16")
+        )
+}
+
 /// Candle SCAIL-2 `animate_character` eligibility (sc-6837, epic 6563). SCAIL-2 is a DISTINCT candle
 /// engine (NOT Wan-VACE), so it has its own gate rather than membership in [`CANDLE_VIDEO_VACE_MODELS`]:
 /// the `scail2_14b` model + the `animate_character` mode + a reference character image
 /// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
-/// Inference LoRA / LoKr / LoHa + the Bias-Aware DPO LoRA + the lightx2v lightning diff-patch ARE on the
-/// candle path now (sc-6838 — the provider merges them into the dense DiT), so a LoRA-bearing animate job
-/// stays on candle. On-the-fly quantization is refused and remains queued (the provider is dense). Mirrors the
-/// MLX `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
+/// The exact q4/q8 hosted artifacts and dense bf16 tier are source-ready; unsupported or malformed
+/// precision requests fail closed. Packed tiers refuse adapters, while a dense adapter request is
+/// preserved and resolved to bf16 by the worker. Mirrors the MLX
+/// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "scail2_14b" {
@@ -1008,19 +1233,15 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
     if !has_nonempty_string(payload, "sourceClipAssetId") {
         return false;
     }
-    // Inference LoRA (DPO / lightning / user adapter) merges into the candle DiT (sc-6838), so a
-    // LoRA-bearing animate job is candle-eligible — only on-the-fly quant is still refused.
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
+    scail2_candle_source_tier_eligible(payload)
+        && scail2_candle_product_tier_eligible(model, "animate_character", payload)
 }
 
 /// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
 /// `PersonReplace` job: the source control clip + the tracked person + the character references (the
 /// same per-mode assets the Wan-VACE replace gate requires). Inference adapters use the same provider
-/// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch); only on-the-fly quant remains
-/// unsupported. A distinct candle engine, so it is gated here rather than
+/// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch) on dense bf16 only; the exact
+/// q4/q8 package tiers reject adapter merging. A distinct candle engine, so it is gated here rather than
 /// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
 pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "scail2_14b" {
@@ -1032,10 +1253,8 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
     {
         return false;
     }
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
+    scail2_candle_source_tier_eligible(payload)
+        && scail2_candle_product_tier_eligible(model, "replace_person", payload)
 }
 
 /// Candle Bernini VIDEO eligibility (sc-10997, epic 6562). Bernini is a DISTINCT candle engine (the
@@ -1100,6 +1319,54 @@ pub(crate) fn is_sdxl_family_candle_model(model: &str) -> bool {
         model,
         "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
     )
+}
+
+/// The exact SDXL-family ids that share the generic OpenPose ControlNet provider. This is
+/// deliberately wider than the accepted editable subset by one distilled checkpoint: RealVisXL
+/// Lightning supports the pose-only provider recipe, and the two Illustrious q4 packages share the
+/// exact SDXL provider/control composition proven by terminal cells 18-19.
+pub(crate) const SDXL_CONTROL_MODELS: &[&str] = &[
+    "sdxl",
+    "realvisxl",
+    "realvisxl_lightning",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
+];
+
+pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
+    SDXL_CONTROL_MODELS.contains(&model)
+}
+
+fn has_material_sdxl_control_intent(payload: &Map<String, Value>) -> bool {
+    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+        return false;
+    };
+    let poses_are_material = match advanced.get("poses") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(poses)) if poses.is_empty() => false,
+        Some(_) => true,
+    };
+    let named_control_is_material = match advanced.get("controlMode") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(mode)) => !mode.trim().is_empty(),
+        Some(_) => true,
+    };
+    poses_are_material
+        || named_control_is_material
+        || advanced
+            .get("controlImage")
+            .is_some_and(|value| !value.is_null())
+        || advanced
+            .get("controlWeights")
+            .is_some_and(|value| !value.is_null())
+}
+
+/// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
+/// scheduler predicate intentionally claims malformed/non-empty pose carriers and explicit material
+/// control intent too, before edit or IP-Adapter, so no other conditioned route can silently discard
+/// them. Missing/null/empty poses remain ordinary generation only when no other control field is set.
+pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> bool {
+    has_material_sdxl_control_intent(payload)
 }
 
 /// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle
@@ -1691,9 +1958,14 @@ pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool
 }
 
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
-/// z_image + flux_dev sc-8379 / sc-8412). A `advanced.poses` job on any OTHER candle-routed model has no
-/// pose path on candle (plain-SDXL pose ships via InstantID, `instantid_realvisxl`, not `sdxl`).
+/// z_image + flux_dev sc-8379 / sc-8412, plus the exact five-model SDXL OpenPose lane).
+/// An `advanced.poses` job on any OTHER candle-routed model has no pose path on candle.
 pub(crate) const CANDLE_POSE_MODELS: &[&str] = &[
+    "sdxl",
+    "realvisxl",
+    "realvisxl_lightning",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
     "qwen_image",
     "kolors",
     "z_image_turbo",
@@ -1707,9 +1979,9 @@ pub(crate) fn model_has_candle_pose_lane(model: &str) -> bool {
     CANDLE_POSE_MODELS.contains(&model)
 }
 
-/// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
+/// Material control intent on a **candle-routed model with no candle pose lane** —
 /// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything outside the wired
-/// pose families), not `edit_image` (sc-5968, epic 5483). No native lane has a pose path for these
+/// pose families) (sc-5968, epic 5483). No native lane has a control path for these
 /// models off-Mac (the historical `sdxl` adapter's OpenPose lived only in
 /// the `instantid_realvisxl` adapter), so a generic claimant could silently drop the poses and render an unconditioned T2I
 /// image. The candle worker therefore CLAIMS these (`worker_supports_job`) to REJECT them with a typed
@@ -1721,15 +1993,7 @@ pub(crate) fn image_request_candle_pose_reject(model: &str, payload: &Map<String
     if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
         return false;
     }
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
+    has_material_sdxl_control_intent(payload)
 }
 
 /// [`image_request_candle_pose_reject`] on a [`JobSnapshot`].

@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
+    "inferenceRevision": "6d8be650d34d53b7539cb55c8dee862bd0863960",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -1207,6 +1207,22 @@
       "registryCached": true
     },
     {
+      "family": "wan-video",
+      "source": "comfy_ui_tree",
+      "operation": "generate",
+      "providerId": "wan2_2_t2v_14b",
+      "conditioning": [],
+      "supportsLora": false,
+      "supportsLokr": false,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
       "family": "z-image",
       "source": "comfy_ui_tree",
       "operation": "generate",
@@ -1223,6 +1239,1969 @@
     }
   ],
   "memoryContracts": [
+    {
+      "id": "anima_aesthetic",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "anima_base",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "anima_turbo",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "bernini",
+      "composed": false,
+      "selectorDigest": "sha256:3ca9bd424522974a2a0a914b519b03b40f97982cafe9926417ab5964f3e878c9",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "bernini_renderer",
+      "composed": false,
+      "selectorDigest": "sha256:3ca9bd424522974a2a0a914b519b03b40f97982cafe9926417ab5964f3e878c9",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "boogu_image",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "boogu_image_edit",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "boogu_image_turbo",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "candle_kolors_control",
+      "composed": true,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "candle_kolors_ipadapter",
+      "composed": true,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "chroma1_base",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "chroma1_flash",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "chroma1_hd",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
     {
       "id": "flux1_dev",
       "composed": false,
@@ -2035,6 +4014,615 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "ideogram_4",
+      "composed": false,
+      "selectorDigest": "sha256:7d88c6e6d9b4507a0dd67e710c6f8c5eb38d652f259cf63eb901cd75e5122fa1",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ideogram_4_turbo",
+      "composed": false,
+      "selectorDigest": "sha256:7d88c6e6d9b4507a0dd67e710c6f8c5eb38d652f259cf63eb901cd75e5122fa1",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kolors",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
             "resident",
             "staged_residency"
           ],
@@ -3486,6 +6074,39 @@
             "bounded_decode",
             "resident",
             "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "ltx_2_3_distilled",
+      "composed": false,
+      "selectorDigest": "sha256:f76629a88946b6e364935426dc596dd123e7826818f6afa9da4aa44621d06253",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -5133,6 +7754,1244 @@
       ]
     },
     {
+      "id": "sana_1600m",
+      "composed": false,
+      "selectorDigest": "sha256:ad306945d29daf013575b74fa211b94c8cb34ee41a4d288bd46e65e83f299c3d",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "sana_sprint_1600m",
+      "composed": false,
+      "selectorDigest": "sha256:ad306945d29daf013575b74fa211b94c8cb34ee41a4d288bd46e65e83f299c3d",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "sd3_5_large",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "sd3_5_large_turbo",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "sd3_5_medium",
+      "composed": false,
+      "selectorDigest": "sha256:d2775beca067cb5833f519bff164e27ebcc3419cb0e4d3201a9f0df71eab119b",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "sdxl",
+      "composed": false,
+      "selectorDigest": "sha256:a5a5d7a272f154ec14ac37a19180806e9db6bee8a6403dbffa2bc06a64ca02dd",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "sensenova_u1_8b",
+      "composed": false,
+      "selectorDigest": "sha256:f5dff311ff0bab4af8198e182cad2179b91f402a7acc6d911ae3d3157acbff33",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "sensenova_u1_8b_fast",
+      "composed": false,
+      "selectorDigest": "sha256:5165f88d00b01b7f9e8e873304a6ceacb055433474280390646c7e655def758e",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
       "id": "wan2_2_ti2v_5b",
       "composed": false,
       "selectorDigest": "sha256:0b1809bce428e3b1b3772c1a6fc8b829fa9697034c73417e59cbdd1eb8aac191",
@@ -6046,6 +9905,741 @@
   ],
   "memoryRouteWitnesses": [
     {
+      "provider": "anima_aesthetic",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_edit",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_edit",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_edit",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
       "provider": "flux1_dev",
       "tier": "bf16",
       "mode": "character_image",
@@ -8000,6 +12594,853 @@
     },
     {
       "provider": "flux2_klein_9b",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "instantid",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "identity"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
       "tier": "q8",
       "mode": "text_to_image",
       "overlay": "none",
@@ -9577,99 +15018,36 @@
       "provider": "qwen_image_edit",
       "tier": "bf16",
       "mode": "character_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
       "tier": "bf16",
-      "mode": "edit_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
       "provider": "qwen_image_edit",
-      "tier": "nvfp4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
       "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
       "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
@@ -9682,43 +15060,22 @@
       "provider": "qwen_image_edit",
       "tier": "q4",
       "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
       "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
@@ -9731,39 +15088,1761 @@
       "provider": "qwen_image_edit",
       "tier": "q8",
       "mode": "edit_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
       "tier": "q8",
-      "mode": "image_detail",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sana_1600m",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sana_1600m",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sana_sprint_1600m",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sana_sprint_1600m",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
       "tier": "q8",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sd3_5_large",
       "tier": "q8",
       "mode": "image_to_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sd3_5_large",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
       "tier": "q8",
       "mode": "style_variations",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
       "tier": "q8",
       "mode": "text_to_image",
       "overlay": "none",

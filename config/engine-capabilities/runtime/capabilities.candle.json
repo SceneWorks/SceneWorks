@@ -1288,13 +1288,16 @@
         "modality": "video",
         "conditioning": [
           "reference",
+          "multiReference",
           "keyframe",
           "videoClip",
           "controlClip"
         ],
         "supports_lora": true,
         "supports_lokr": true,
-        "supported_quants": [],
+        "supported_quants": [
+          "q4"
+        ],
         "supports_preview": false,
         "supports_prompt_enhancement": false,
         "samplers": [
@@ -1514,10 +1517,7 @@
         ],
         "supports_lora": false,
         "supports_lokr": false,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
+        "supported_quants": [],
         "supports_preview": true,
         "supports_prompt_enhancement": false,
         "samplers": [
@@ -1554,10 +1554,7 @@
         ],
         "supports_lora": false,
         "supports_lokr": false,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
+        "supported_quants": [],
         "supports_preview": true,
         "supports_prompt_enhancement": false,
         "samplers": [
@@ -1576,7 +1573,6 @@
         "conditioning": [
           "reference",
           "mask",
-          "multiReference",
           "controlClip"
         ],
         "supports_lora": true,
@@ -2009,10 +2005,7 @@
         ],
         "supports_lora": true,
         "supports_lokr": true,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
+        "supported_quants": [],
         "supports_preview": false,
         "supports_prompt_enhancement": false,
         "samplers": [

@@ -4,6 +4,7 @@ import { Logo } from "../components/Logo.jsx";
 import { ConfirmHost } from "../appConfirm.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { assetCanRenderAsAudio } from "../components/assetMedia.jsx";
+import { lazyScreen } from "../components/LazyScreen.jsx";
 import { terminalStatuses } from "../constants.js";
 import { breakpointFor, contentMaxWidth } from "./breakpoint.js";
 import { ADVANCED_MODE } from "./uiMode.js";
@@ -29,7 +30,6 @@ import { SimpleAssets } from "./SimpleAssets.jsx";
 import { SimpleModelManager } from "./SimpleModelManager.jsx";
 import { SimpleQueue } from "./SimpleQueue.jsx";
 import { SimpleSettings } from "./SimpleSettings.jsx";
-import { SimpleLicenses } from "./SimpleLicenses.jsx";
 import "./simple.css";
 
 // The Simple UI shell (design handoff "Simple UI for creative studios").
@@ -42,6 +42,15 @@ import "./simple.css";
 //
 // It renders INSIDE App's providers, so every screen reads the same live catalogs, job
 // feed and actions the full workspace does. There is no parallel data layer.
+
+// The bundled licence corpus (apps/desktop/licenses/manifest.json via data/bundledLicenses.js)
+// is ~740 kB raw — the single largest module in the app. Simple reaches it from one Settings
+// sub-screen, so it loads on demand instead of riding in every Simple session's static graph.
+const SimpleLicenses = lazyScreen(
+  () => import("./SimpleLicenses.jsx"),
+  "SimpleLicenses",
+  "Licenses",
+);
 
 export const SIMPLE_SCREENS = [
   {

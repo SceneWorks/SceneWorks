@@ -110,10 +110,8 @@ test("held-out tier analysis uses only the exact staged single-pass selector", (
     "sc-18946",
   );
   assert.equal(report.coefficientTransfer.verdict, "open");
-  assert.deepEqual(report.coefficientTransfer.missingTiers, ["bf16"]);
-  assert.equal(report.phaseFlip.tiers.q8.status, "measured");
-  assert.equal(report.phaseFlip.tiers.q8.selector.rung, "staged_residency");
-  assert.equal(report.phaseFlip.tiers.q8.selector.decodePass, "single_pass");
+  assert.deepEqual(report.coefficientTransfer.missingTiers, ["q8", "q4", "bf16"]);
+  assert.equal(report.phaseFlip.tiers.q8.status, "insufficient_data");
 
 });
 
@@ -294,17 +292,72 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
   );
   const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
-  assert.equal(bundle.schemaVersion, 2);
-  assert.equal(bundle.curves.length, 1);
-  const curve = bundle.curves[0];
+  assert.equal(bundle.schemaVersion, 4);
+  // sc-20799: the fps24 group is under-sampled (one distinct geometry), so the fit drops it — but
+  // the drop must be DECLARED, not silent. Assert the shape of the declaration, not a record count.
+  assert.ok(Array.isArray(bundle.unmodeledRecords));
+  assert.ok(bundle.unmodeledRecords.length > 0, "the fps24 split must be declared unmodeled");
+  for (const entry of bundle.unmodeledRecords) {
+    assert.equal(entry.reason, "insufficient_geometries");
+    assert.ok(entry.selectorKey.length > 0);
+    assert.ok(entry.distinctGeometries < 3);
+    assert.ok(entry.sources.length > 0);
+    for (const source of entry.sources) {
+      assert.ok(source.recordIds.length > 0);
+      assert.match(source.sha256, /^[0-9a-f]{64}$/);
+    }
+  }
+  // The catalog must PARTITION: every source record is modeled or declared, never both, never
+  // neither. No literal counts — this has to survive the corpus growing.
+  const modeled = new Set(
+    bundle.curves.flatMap((curve) =>
+      curve.evidence.sources.flatMap((source) =>
+        source.recordIds.map((id) => `${source.path}\0${id}`)),
+    ),
+  );
+  const declared = new Set(
+    bundle.unmodeledRecords.flatMap((entry) =>
+      entry.sources.flatMap((source) => source.recordIds.map((id) => `${source.path}\0${id}`)),
+    ),
+  );
+  for (const key of modeled) assert.ok(!declared.has(key), `${key} is modeled and declared`);
+  const catalog = new Set(
+    DATASET_SOURCES.flatMap((source) =>
+      JSON.parse(source.raw).records.map((record) => `${source.path}\0${record.id}`)),
+  );
+  assert.deepEqual(
+    [...new Set([...modeled, ...declared])].sort(),
+    [...catalog].sort(),
+    "modeled union declared must equal the compiled source catalog",
+  );
+  // Select the promoted curve by its selector identity rather than asserting the bundle holds
+  // exactly one curve and reading `[0]` (sc-20799 round 2): the fit emits one curve per selector
+  // key, so a positional read would silently compare a different key's coefficients the day a
+  // second key is fitted, and the `length === 1` guard would fail for a reason unrelated to what
+  // this assertion is about.
+  const curve = bundle.curves.find(
+    (candidate) =>
+      candidate.route === "ltx_2_3" &&
+      candidate.tier === "q8" &&
+      candidate.mode === "text_to_video",
+  );
+  assert.ok(
+    curve,
+    "the promoted bundle must carry the sc-18810 ltx_2_3 / q8 / text_to_video curve",
+  );
   assert.deepEqual(
     {
       modelId: curve.modelId,
       modelFamily: curve.modelFamily,
+      route: curve.route,
       provider: curve.provider,
       backend: curve.backend,
       tier: curve.tier,
       mode: curve.mode,
+      referenceShape: curve.referenceShape,
+      referenceCount: curve.referenceCount,
+      framesPerSecond: curve.framesPerSecond,
+      overlay: curve.overlay,
       rung: curve.rung,
       loadShape: curve.loadShape,
       batch: curve.batch,
@@ -316,10 +369,15 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     {
       modelId: "ltx_2_3",
       modelFamily: "ltx-video",
+      route: "ltx_2_3",
       provider: "ltx_2_3",
       backend: "mlx",
       tier: "q8",
       mode: "text_to_video",
+      referenceShape: "none",
+      referenceCount: 0,
+      framesPerSecond: [30],
+      overlay: null,
       rung: "staged_residency",
       loadShape: "eager_materialization",
       batch: 1,
@@ -329,15 +387,11 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
       decodePass: "single_pass",
     },
   );
-  assert.deepEqual(
-    {
-      text: report.fits.text.q8.chosen,
-      denoise: report.fits.denoise.q8.chosen,
-      decode: report.fits.decode.q8.chosen,
-    },
-    { text: "area_only", denoise: "latent_tokens", decode: "cross" },
-    "the fit report's generic winner is deliberately not the ratified cross-curve selector",
-  );
+  const q8At30 = report.selectorFits.find((entry) => entry.selector.outputFps === 30);
+  assert.ok(q8At30, "the 30 FPS selector is independently fitted");
+  for (const phase of ["text", "denoise", "decode"]) {
+    assert.ok(q8At30.fits[phase].candidates.cross, `${phase} retains an exact 30 FPS cross fit`);
+  }
   for (const [wirePhase, fitPhase] of [
     ["conditioning", "text"],
     ["denoise", "denoise"],
@@ -347,14 +401,17 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
       Object.fromEntries(
         Object.entries(curve.phases[wirePhase]).filter(([key]) => key !== "maxResidualGb"),
       ),
-      report.fits[fitPhase].q8.candidates.cross.coefficients,
+      q8At30.fits[fitPhase].candidates.cross.coefficients,
       `${wirePhase} must carry the ratified cross coefficients verbatim`,
     );
   }
-  assert.equal(curve.evidence.records, DATASET.records.length);
+  const recordsAt30 = DATASET.records.filter((record) =>
+    record.diagnostics.measurements.some((entry) => entry.name === "outputFps" && entry.value === 30),
+  );
+  assert.equal(curve.evidence.records, recordsAt30.length);
   assert.deepEqual(
     curve.evidence.sources[0].recordIds,
-    DATASET.records.map((record) => record.id).sort(),
+    recordsAt30.map((record) => record.id).sort(),
     "the runtime artifact must name every immutable source record",
   );
   assert.equal(
@@ -382,7 +439,7 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
   );
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(schema.properties.schemaVersion.const, 2);
+  assert.equal(schema.properties.schemaVersion.const, 4);
   assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
   assert.equal(
     schema.properties.sourceFit.pattern,
@@ -393,6 +450,7 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     "generatedBy",
     "sourceFit",
     "sourceCatalog",
+    "unmodeledRecords",
     "curves",
   ]);
   assert.equal(schema.additionalProperties, false);
@@ -461,7 +519,10 @@ test("mixed complete selectors and sources produce deterministic independent cur
   assert.deepEqual(boundedCurve.evidence.sources.map(({ path }) => path), ["evidence/c.json"]);
   assert.deepEqual(
     q4Curve.evidence.sources.flatMap(({ recordIds }) => recordIds).sort(),
-    q4.records.map(({ id }) => id).sort(),
+    q4.records
+      .filter((record) => record.diagnostics.measurements.some((entry) => entry.name === "outputFps" && entry.value === 30))
+      .map(({ id }) => id)
+      .sort(),
   );
   assert.ok(
     Math.abs(
@@ -475,11 +536,11 @@ test("mixed complete selectors and sources produce deterministic independent cur
     ) < 1e-12,
     "bounded decode is fitted independently even though it shares q8 tier identity",
   );
-  assert.equal(mixedReport.selectorFits.length, 3);
+  assert.equal(mixedReport.selectorFits.length, 6);
   assert.deepEqual(
     mixedReport.legacyFitsOmittedForTiers,
-    ["q8"],
-    "the legacy tier-only view may not pool two complete q8 selectors",
+    ["q4", "q8"],
+    "the legacy tier-only view may not pool selectors with different FPS surfaces",
   );
 });
 
@@ -542,8 +603,8 @@ test("multi-dataset CLI output stays current when source order is reversed", () 
     assert.ok(generatedReport.coefficientTransfer);
     assert.ok(generatedReport.phaseFlip);
     assert.equal(JSON.parse(readFileSync(curvePath, "utf8")).sourceFit, "docs/generated/ltx-temporal-form-fit-sc-18946.json");
-    assert.equal(generatedReport.selectorFits.length, 3);
-    assert.deepEqual(generatedReport.legacyFitsOmittedForTiers, ["q8"]);
+    assert.equal(generatedReport.selectorFits.length, 6);
+    assert.deepEqual(generatedReport.legacyFitsOmittedForTiers, ["q4", "q8"]);
     assert.equal(
       generatedReport.noiseFloors.decode.replicatedGeometries,
       12,
@@ -594,7 +655,7 @@ test("duplicate or malformed source record identities cannot be promoted", () =>
   );
 
   const detachedSelectorSubset = structuredClone(report);
-  detachedSelectorSubset.selectorFits[0].recordIds.pop();
+  detachedSelectorSubset.selectorFits.find((entry) => entry.selector.outputFps === 30).recordIds.pop();
   assert.throws(
     () => buildVideoMemoryCurveBundle(detachedSelectorSubset, DATASET.records, MANIFEST, DATASET_SOURCES),
     /fit report record subset is detached/,

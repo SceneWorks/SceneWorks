@@ -2262,6 +2262,183 @@ async fn model_import_route_is_enabled_and_detector_gated() {
     assert_eq!(url_job["type"], "model_import");
 }
 
+/// The manifest `source.provider` vocabulary is deliberately COARSER than `importProvenance.source`:
+/// the two non-remote shapes an epic-20398 import can have (`upload`, `local-copy`) both keep the
+/// historical `"local"` that every pre-existing model entry carries and every reader of that field
+/// was written against. A remote import DOES widen it, because `civitai` names a genuinely new
+/// provider rather than re-spelling an existing one. Pins all five mappings through the real route,
+/// so a change to either half of the pair is caught rather than shipped silently.
+#[tokio::test]
+async fn model_import_manifest_provider_stays_coarser_than_import_provenance() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    );
+    // A copy-from-disk source has to be real: the route inspects it before queueing.
+    let local_file = temp_dir.path().join("data/models/dropbox/krea.safetensors");
+    write_krea_checkpoint_file(&local_file);
+
+    let provider_of = |job: &Value| {
+        job["payload"]["manifestEntry"]["source"]["provider"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let provenance_of = |job: &Value| {
+        job["payload"]["importProvenance"]["source"]
+            .as_str()
+            .map(str::to_owned)
+    };
+
+    // upload -> provider "local"
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, job) = request_multipart_model_upload(
+        app,
+        &[
+            ("modelId", "prov_upload"),
+            ("name", "Upload"),
+            ("type", "image"),
+        ],
+        "krea.safetensors",
+        &test_safetensors_bytes_with_typed_keys(&[
+            ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
+            ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+            ("model.diffusion_model.first.weight", "BF16"),
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "upload queued as {job:?}");
+    assert_eq!(provenance_of(&job).as_deref(), Some("upload"));
+    assert_eq!(
+        provider_of(&job).as_deref(),
+        Some("local"),
+        "an upload keeps the historical manifest provider: {job:?}"
+    );
+
+    for (label, body, expected_provenance, expected_provider) in [
+        (
+            "local-copy",
+            json!({
+                "modelId": "prov_local",
+                "type": "image",
+                "sourcePath": local_file.display().to_string(),
+            }),
+            "local-copy",
+            "local",
+        ),
+        (
+            "huggingface",
+            json!({"modelId": "prov_hf", "type": "image", "repo": "org/model"}),
+            "huggingface",
+            "huggingface",
+        ),
+        (
+            "url",
+            json!({
+                "modelId": "prov_url",
+                "type": "image",
+                "sourceUrl": "https://host.example/models/custom.safetensors",
+            }),
+            "url",
+            "url",
+        ),
+        (
+            "civitai",
+            json!({
+                "modelId": "prov_civitai",
+                "type": "image",
+                "source": {
+                    "kind": "civitai",
+                    "url": "https://civitai.com/api/download/models/9931",
+                    "modelVersionId": "9931",
+                },
+            }),
+            "civitai",
+            "civitai",
+        ),
+    ] {
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, job) = request(app, "POST", "/api/v1/models/import", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{label} queued as {job:?}");
+        assert_eq!(
+            provenance_of(&job).as_deref(),
+            Some(expected_provenance),
+            "{label}: {job:?}"
+        );
+        assert_eq!(
+            provider_of(&job).as_deref(),
+            Some(expected_provider),
+            "{label}: {job:?}"
+        );
+    }
+}
+
+/// sc-20636: a caller-supplied `modelId` is sanitized into the directory name (`safe_download_dir`)
+/// that becomes the managed INSTALL ID, and nothing validated the result. An id that sanitizes to
+/// something `CheckpointPlanStore::install_dir` refuses was answered 201 and then died in the worker
+/// with an `InvalidInstallId` the caller never saw. The refusal has to name the constraint, and it
+/// has to be judged on the RESOLVED name because that is the string the worker addresses a path with.
+#[tokio::test]
+async fn an_explicit_model_id_that_resolves_to_an_invalid_install_id_is_refused_at_queue_time() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    );
+
+    for (model_id, expected_reason) in [
+        // A dot-leading id survives sanitization intact and would name a hidden directory.
+        (".hidden", "must not start with '.' or '-'"),
+        ("-leading", "must not start with '.' or '-'"),
+        // `a/../b` sanitizes to `a__..__b`: the separators are replaced, the traversal token is not.
+        ("a/../b", "must not contain '..'"),
+    ] {
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, error) = request(
+            app,
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "modelId": model_id,
+                "type": "image",
+                "sourceUrl": "https://host.example/models/custom.safetensors",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "modelId {model_id:?} must be refused at queue time, not in the worker: {error:?}"
+        );
+        let detail = error["detail"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            detail.contains(expected_reason),
+            "the refusal must name the install-id constraint for {model_id:?}: {detail}"
+        );
+        assert!(
+            detail.contains(model_id),
+            "the refusal must name the offending id {model_id:?}: {detail}"
+        );
+    }
+
+    // The control: an id that sanitizes to a usable install directory still queues.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": "my.model-v2",
+            "type": "image",
+            "sourceUrl": "https://host.example/models/custom.safetensors",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "queued as {job:?}");
+}
+
 #[tokio::test]
 async fn imported_model_catalog_uses_paths_model_install_marker() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -4049,6 +4226,121 @@ async fn model_download_job_enqueues_co_requisite_dependencies() {
 }
 
 #[tokio::test]
+async fn sdxl_openpose_is_one_shared_soft_component_installed_with_each_backbone() {
+    const CONTROL_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
+    const CONTROL_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
+    const CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let stage = |repo: &str, revision: &str, file: &str| {
+        let path = huggingface_repo_cache_path(&data_dir, repo)
+            .expect("HF cache path")
+            .join("snapshots")
+            .join(revision)
+            .join(file);
+        std::fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("snapshot dirs create");
+        std::fs::write(path, b"installed fixture").expect("snapshot file writes");
+    };
+    // One complete SDXL q4 base plus every hard Candle component. The optional OpenPose snapshot is
+    // deliberately absent: ordinary generation must remain installed while Model Manager offers it.
+    stage(
+        "SceneWorks/sdxl-base-mlx",
+        "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+        "q4/model.safetensors",
+    );
+    for (repo, revision, file) in [
+        (
+            "openai/clip-vit-large-patch14",
+            "32bd64288804d66eefd0ccbe215aa642df71cc41",
+            "tokenizer.json",
+        ),
+        (
+            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+            "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+            "tokenizer.json",
+        ),
+        (
+            "madebyollin/sdxl-vae-fp16-fix",
+            "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+            "diffusion_pytorch_model.safetensors",
+        ),
+    ] {
+        stage(repo, revision, file);
+    }
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        models
+            .as_array()
+            .expect("model array")
+            .iter()
+            .all(|model| model["id"] != "controlnet_openpose_sdxl"),
+        "the optional checkpoint must not appear as a fake runnable utility model"
+    );
+    let sdxl = models
+        .as_array()
+        .expect("model array")
+        .iter()
+        .find(|model| model["id"] == "sdxl")
+        .expect("SDXL catalog row");
+    assert_eq!(sdxl["installState"], "installed");
+    assert_eq!(sdxl["cacheState"], "complete");
+    assert_eq!(sdxl["repairAvailable"], false);
+    assert_eq!(
+        sdxl["updateAvailable"], true,
+        "a missing soft OpenPose component is an install/update affordance, not a base-model outage"
+    );
+
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/sdxl/download",
+        json!({ "requestedGpu": "auto", "variant": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(primary["payload"]["repo"], "SceneWorks/sdxl-base-mlx");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let control_jobs = jobs
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .filter(|job| job["payload"]["repo"] == CONTROL_REPO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        control_jobs.len(),
+        1,
+        "one backbone install enqueues the shared OpenPose artifact exactly once"
+    );
+    let control = control_jobs[0];
+    assert_eq!(control["payload"]["revision"], CONTROL_REVISION);
+    assert_eq!(control["payload"]["files"], json!([CONTROL_FILE]));
+    assert!(
+        control["payload"]
+            .get("family")
+            .map_or(true, Value::is_null),
+        "a shared conditioning component is not reconciled as the SDXL base family"
+    );
+}
+
+#[tokio::test]
 async fn mmaudio_repo_rename_keeps_legacy_install_ready_and_skips_duplicate_clip_download() {
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -4758,6 +5050,441 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     let (loras_status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
     assert_eq!(loras_status, StatusCode::OK);
     assert_eq!(loras.as_array().expect("loras array").len(), 0);
+}
+
+/// The baseline empty catalog manifests every checkpoint-teardown test starts from, plus whatever
+/// `user.models.jsonc` body the caller wants. Written as one helper so the fixtures below differ
+/// only in the model entry under test.
+fn write_catalog_manifests_with_models(config_dir: &std::path::Path, user_models: &str) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    for (name, body) in [
+        (
+            "builtin.models.jsonc",
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        ),
+        ("user.models.jsonc", user_models),
+        (
+            "builtin.loras.jsonc",
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        ),
+        ("user.loras.jsonc", r#"{ "schemaVersion": 1, "loras": [] }"#),
+        (
+            "builtin.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+        (
+            "user.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+    ] {
+        std::fs::write(config_dir.join(name), body).expect("manifest writes");
+    }
+}
+
+/// A minimal single-file Krea 2 native DiT the checkpoint INSPECTOR accepts: the `txtfusion.` marker
+/// the family detector keys on, every tensor dense bf16, and — unlike
+/// `test_safetensors_bytes_with_typed_keys`, which pads every tensor to a fixed data end — tensor
+/// ranges that are actually contiguous, which the inspector requires.
+fn write_krea_checkpoint_file(path: &std::path::Path) {
+    let mut header = serde_json::Map::new();
+    let mut offset = 0_u64;
+    for name in [
+        "model.diffusion_model.txtfusion.projector.weight",
+        "model.diffusion_model.blocks.0.attn.wq.weight",
+        "model.diffusion_model.first.weight",
+    ] {
+        header.insert(
+            name.to_owned(),
+            json!({"dtype": "BF16", "shape": [1], "data_offsets": [offset, offset + 2]}),
+        );
+        offset += 2;
+    }
+    let encoded = serde_json::to_vec(&Value::Object(header)).expect("header serializes");
+    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(encoded);
+    bytes.resize(bytes.len() + offset as usize, 0x21);
+    std::fs::create_dir_all(path.parent().expect("file has a parent")).expect("dir creates");
+    std::fs::write(path, bytes).expect("checkpoint writes");
+}
+
+fn managed_upload_provenance() -> sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+    sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+        source: "upload".to_owned(),
+        reference: Some("krea.safetensors".to_owned()),
+        url: None,
+        version_id: None,
+        file_id: None,
+        credential_host: None,
+    }
+}
+
+/// sc-20636: `DELETE /api/v1/models/:id` removed the bytes and the manifest entry but left the
+/// managed checkpoint's catalog record, plan and bindings behind. That is not a leak of disk, it is
+/// a permanent poisoning of the id: the next import of the SAME id passes the route's `existing_ids`
+/// check (the manifest entry is gone) and then refuses FOREVER in the worker with `InstallIdTaken`,
+/// naming an install path that no longer exists.
+///
+/// A full import round-trip is not runnable here (the transfer is the worker's), so the delete path
+/// is driven directly against a real managed install published by `ManagedIngest`, and the
+/// re-importability claim is asserted the way the worker makes it: `ManagedIngest::begin` on the
+/// same id must succeed afterwards.
+#[tokio::test]
+async fn deleting_a_managed_model_removes_its_checkpoint_so_the_id_can_be_imported_again() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let source_file = temp_dir.path().join("library/krea.safetensors");
+    write_krea_checkpoint_file(&source_file);
+
+    // A real managed install: staged, committed by the atomic rename, plan + catalog record +
+    // bindings published. Exactly what a completed import leaves behind.
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let ingest = sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("ingest opens");
+    ingest
+        .stage_copy_file(&source_file, "krea.safetensors")
+        .expect("bytes stage");
+    let install = ingest
+        .finalize("krea.safetensors", None)
+        .expect("ingest finalizes");
+    assert_eq!(install.checkpoint_id, "managed/managed_model");
+    assert!(store.record("managed/managed_model").is_ok());
+
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "managed_model",
+                    "name": "Managed Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "managed/managed_model" }}
+                  }}]
+                }}"#,
+            install
+                .install_path
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // permanent=true keeps the assertions deterministic (the default move-to-OS-trash path depends
+    // on the host having a usable recycle bin/trash).
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/managed_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete answered {deleted:?}");
+    assert_eq!(deleted["removedManifestEntry"], true);
+    assert!(
+        !install.install_path.exists(),
+        "the managed install bytes must be gone: {}",
+        install.install_path.display()
+    );
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    assert!(
+        store.record("managed/managed_model").is_err(),
+        "the managed catalog record must not survive the delete: {:?}",
+        store.inventory().expect("inventory reads")
+    );
+    // The claim that actually matters, made the way the worker makes it.
+    sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("the install id must be free for a re-import after the delete");
+}
+
+/// sc-20651 feature-end review, MAJOR 2: the derivatives-first teardown REFUSES while a derivative
+/// is pinned, and that refusal must not be honoured HERE.
+///
+/// Everywhere else it is right — a pinned derivative's source bytes are still on disk, so holding
+/// the teardown keeps it usable. By this point in the delete route the bytes are ALREADY gone
+/// (`remove_whole_model_artifacts` ran) and so is the manifest entry, so honouring the refusal
+/// strands the plan record with nothing under it and `ManagedIngest::begin` then refuses the install
+/// id forever with `InstallIdTaken`, naming a path that no longer exists — the user can never
+/// re-import the model. Strictly worse than the orphaned derivative the ordering was fixing, which
+/// is orphaned either way once the bytes are gone.
+///
+/// So: the delete succeeds, the record is cleared regardless, and the warning NAMES both the
+/// checkpoint and the derivative cache entry left behind, because a named orphan is one the user can
+/// find and evict and a silent one is not.
+#[tokio::test]
+async fn a_pinned_derivative_does_not_strand_the_record_of_a_deleted_managed_model() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let source_file = temp_dir.path().join("library/krea.safetensors");
+    write_krea_checkpoint_file(&source_file);
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let ingest = sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("ingest opens");
+    ingest
+        .stage_copy_file(&source_file, "krea.safetensors")
+        .expect("bytes stage");
+    let install = ingest
+        .finalize("krea.safetensors", None)
+        .expect("ingest finalizes");
+
+    // A REAL published derivative of that install, then pinned — the same pin the cache's own
+    // removal refuses on, not a mocked failure.
+    let derivatives =
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)
+            .expect("derivative store opens");
+    let derivative_request =
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeRequestV1 {
+            kind: sceneworks_core::checkpoint_derivative::CheckpointDerivativeKindV1::DerivedIndex,
+            adapter_id: "krea_2".to_owned(),
+            adapter_version: "1".to_owned(),
+            codec_id: "dense-bf16".to_owned(),
+            codec_version: "1".to_owned(),
+            backend: "mlx".to_owned(),
+            outputs: vec!["index.json".to_owned()],
+        };
+    derivatives
+        .ensure(&install.checkpoint_id, &derivative_request, |outputs| {
+            use std::io::Write as _;
+            let mut file = outputs.create("index.json").map_err(|e| e.to_string())?;
+            file.write_all(b"{}").map_err(|error| error.to_string())
+        })
+        .expect("the derivative is produced and published");
+    let resolved = store
+        .resolve(&install.checkpoint_id)
+        .expect("the managed checkpoint resolves");
+    let cache_key = derivatives
+        .cache_key(&resolved, &derivative_request)
+        .expect("the derivative has a cache key");
+    derivatives
+        .cache()
+        .set_artifact_pin(&cache_key, true)
+        .expect("the derivative pins");
+    assert!(
+        derivatives.remove_managed_install("managed_model").is_err(),
+        "fixture check: a pinned derivative must make the derivatives-first teardown REFUSE, or \
+         this test proves nothing about the fallback"
+    );
+
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "managed_model",
+                    "name": "Managed Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "managed/managed_model" }}
+                  }}]
+                }}"#,
+            install
+                .install_path
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/managed_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a pinned derivative must not fail the delete: {deleted:?}"
+    );
+    assert_eq!(deleted["removedManifestEntry"], true);
+
+    let warnings = deleted["warnings"].to_string();
+    assert!(
+        warnings.contains("managed/managed_model") && warnings.contains(&cache_key),
+        "the warning must name the checkpoint AND the orphaned derivative: {warnings}"
+    );
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    assert!(
+        store.record("managed/managed_model").is_err(),
+        "the record must be cleared even though the derivative teardown refused: {:?}",
+        store.inventory().expect("inventory reads")
+    );
+    // The claim that actually matters, made the way the worker makes it.
+    sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("the install id must be free for a re-import after the delete");
+}
+
+/// The other half of the discrimination: a LINKED checkpoint's bytes are the user's own library
+/// copy, which this route never owned, so deleting the model must not reach `remove_managed` at all.
+///
+/// sc-20635's linked plan/derivative invalidation has now landed in the seam this was written to
+/// guard, so the record assertion below is the post-landing contract rather than the placeholder
+/// it started as: SceneWorks forgets its OWN documents (record, plan, bindings, derivatives),
+/// because leaving them behind stranded a plan nothing could reach or reclaim. The two guards this
+/// test actually exists for are unchanged and still asserted — managed teardown is never run for a
+/// linked entry, and the user's library file is never touched (E6).
+#[tokio::test]
+async fn deleting_a_linked_model_never_runs_managed_teardown_or_touches_the_library() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let library = temp_dir.path().join("library");
+    write_krea_checkpoint_file(&library.join("krea.safetensors"));
+    let library = std::fs::canonicalize(&library).expect("library canonicalizes");
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let root = store.approve_root(&library).expect("root approves");
+    let compiled = store
+        .compile_linked(&root.root_id, "krea.safetensors")
+        .expect("linked checkpoint compiles");
+    let checkpoint_id = compiled.checkpoint_id.clone();
+
+    // The model's own SceneWorks-owned marker directory, so the delete has artifacts to remove and
+    // reaches the teardown block rather than short-circuiting on the read-only refusal.
+    let model_dir = data_dir.join("models/imports/linked_model");
+    std::fs::create_dir_all(&model_dir).expect("model dir creates");
+    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("marker writes");
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "linked_model",
+                    "name": "Linked Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "{checkpoint_id}" }}
+                  }}]
+                }}"#,
+            model_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/linked_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete answered {deleted:?}");
+    let warnings = deleted["warnings"].to_string();
+    assert!(
+        !warnings.contains(&checkpoint_id),
+        "a linked checkpoint must not be run through managed teardown: {warnings}"
+    );
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    assert!(
+        matches!(
+            store.record(&checkpoint_id),
+            Err(
+                sceneworks_core::checkpoint_plan_store::CheckpointPlanError::UnknownCheckpoint { .. }
+            )
+        ),
+        "SceneWorks' own plan record is forgotten with the model (sc-20635): {:?}",
+        store.record(&checkpoint_id)
+    );
+    assert!(
+        store
+            .approved_roots()
+            .expect("approved roots load")
+            .get(&root.root_id)
+            .is_some(),
+        "forgetting one checkpoint must never un-approve its library root"
+    );
+    assert!(
+        library.join("krea.safetensors").is_file(),
+        "the user's own library copy must survive the model delete"
+    );
+}
+
+/// The files are gone before the checkpoint teardown runs, so a teardown failure cannot un-delete
+/// the model and must not fail the request. It is surfaced through the delete's own `warnings`, and
+/// the warning has to name the checkpoint — that id is the only handle anyone has on the record left
+/// behind. Driven by a corrupt `inventory.json`, which is what `remove_managed` reads first.
+#[tokio::test]
+async fn a_failed_managed_checkpoint_teardown_warns_instead_of_failing_the_delete() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let model_dir = data_dir.join("models/imports/managed_model");
+    std::fs::create_dir_all(&model_dir).expect("model dir creates");
+    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("marker writes");
+    let checkpoints_dir = data_dir.join("checkpoints");
+    std::fs::create_dir_all(&checkpoints_dir).expect("checkpoints dir creates");
+    std::fs::write(checkpoints_dir.join("inventory.json"), "{ not json")
+        .expect("corrupt inventory writes");
+
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "managed_model",
+                    "name": "Managed Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "managed/managed_model" }}
+                  }}]
+                }}"#,
+            model_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/managed_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a teardown failure must not fail the delete: {deleted:?}"
+    );
+    assert_eq!(deleted["removedManifestEntry"], true);
+    assert!(!model_dir.exists());
+    let warnings = deleted["warnings"].to_string();
+    assert!(
+        warnings.contains("managed/managed_model"),
+        "the warning must name the checkpoint left behind: {warnings}"
+    );
 }
 
 /// Deleting a global-scope trained LoRA must also sweep the preview-sample directory the training
@@ -7093,4 +7820,166 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
         .lookup_complete(&keys[1])
         .expect("sibling lookup succeeds")
         .is_some());
+}
+
+/// `POST /api/v1/models/import` accepts linked (in-place) ownership: an approved library root id
+/// plus a confined relative path (sc-20635, AC1/AC2).
+///
+/// This is the API half of the reachability chain — without it, `approve_root`/`compile_linked`
+/// have no caller and a linked checkpoint can never become a manifest entry. What it pins: both
+/// halves are required, the pair excludes the fetch sources, an unapproved root and a traversal
+/// path are refused BEFORE a job is queued, and an accepted request carries no install directory.
+#[tokio::test]
+async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    for name in [
+        "builtin.models.jsonc",
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+    ] {
+        let field = if name.ends_with("models.jsonc") {
+            "models"
+        } else {
+            "loras"
+        };
+        std::fs::write(
+            config_dir.join(name),
+            format!("{{ \"schemaVersion\": 1, \"{field}\": [] }}"),
+        )
+        .expect("manifest writes");
+    }
+
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let library = temp_dir.path().join("comfy-library");
+    std::fs::create_dir_all(library.join("checkpoints")).expect("library creates");
+    std::fs::write(
+        library.join("checkpoints/dit.safetensors"),
+        b"not-inspected-here",
+    )
+    .expect("checkpoint writes");
+    let library = std::fs::canonicalize(&library).expect("library canonicalizes");
+    let root = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+        .approve_root(&library)
+        .expect("root approves");
+
+    let app = create_app(settings).expect("app creates");
+
+    // Half a pair names no checkpoint.
+    for half in [
+        json!({ "linkedRootId": root.root_id, "type": "image" }),
+        json!({ "linkedRelativePath": "checkpoints/dit.safetensors", "type": "image" }),
+    ] {
+        let (status, body) = request(app.clone(), "POST", "/api/v1/models/import", half).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    }
+
+    // Linked ownership excludes the fetch sources: one import, one ownership mode.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": root.root_id,
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "sourceUrl": "https://example.com/models/custom.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+
+    // An unapproved root is refused before anything is queued.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": "root-0000000000000000",
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[checkpoint-plan:unknown-root]"),
+        "the typed refusal reaches the caller: {body:?}"
+    );
+
+    // Traversal, absolute and non-portable paths are refused by the SAME validator `compile_linked`
+    // applies, so the API and the store cannot disagree about what is confined (AC2).
+    for bad in [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "checkpoints/../../escape.safetensors",
+        "checkpoints\\dit.safetensors",
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "linkedRootId": root.root_id,
+                "linkedRelativePath": bad,
+                "type": "image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?} -> {body:?}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[checkpoint-plan:invalid-relative-path]"),
+            "{bad:?} -> {body:?}"
+        );
+    }
+
+    // The accepted request queues an import that carries the durable identity and NO install
+    // directory: a linked checkpoint is referenced in place, never copied.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": root.root_id,
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["type"], "model_import");
+    assert_eq!(job["payload"]["linkedRootId"], json!(root.root_id));
+    assert_eq!(
+        job["payload"]["linkedRelativePath"],
+        json!("checkpoints/dit.safetensors")
+    );
+    assert_eq!(
+        job["payload"]["targetDir"],
+        Value::Null,
+        "a linked import installs nothing, so it gets no install directory: {job:?}"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["source"]["provider"], json!("linked-library"));
+    assert_eq!(entry["source"]["rootId"], json!(root.root_id));
+    assert_eq!(
+        entry["paths"],
+        Value::Null,
+        "no install path is written for a linked entry: {entry:?}"
+    );
+    let serialized = serde_json::to_string(entry).expect("entry serializes");
+    assert!(
+        !serialized.contains(library.to_str().expect("utf-8 library path")),
+        "the queued entry must carry rootId + relativePath, never an absolute path: {serialized}"
+    );
 }

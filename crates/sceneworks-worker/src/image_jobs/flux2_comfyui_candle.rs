@@ -45,6 +45,55 @@ const FLUX2_COMFYUI_SNAPSHOT_REPO: &str = "SceneWorks/flux2-dev-mlx";
 /// partially-downloaded tier does not block the lane.
 pub(super) const FLUX2_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["bf16", "q8", "q4"];
 
+/// The PLAN-sourced counterpart of [`resolve_flux2_comfyui_paths`].
+///
+/// FLUX.2's ComfyUI tree is the DiT alone — its Mistral-3 text encoder, VAE and tokenizer always
+/// come from a resident `SceneWorks/flux2-dev-mlx` tier. So NO sidecar role is declared consumed,
+/// which means a plan carrying a text encoder or a VAE REFUSES here rather than having it silently
+/// replaced by the snapshot tier's own copy (E8).
+///
+/// `quant` is left at the type default and overwritten by the caller with the registry-validated
+/// request selection, exactly as it is on the scan path — the tier is a request choice, not a
+/// property of the checkpoint.
+fn resolve_plan_backed_flux2_comfyui_paths(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
+    let Some(tree) = super::checkpoint_plan_bespoke_tree(request, settings, "flux2", &[], &[])?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ComfyuiFlux2Paths {
+        transformer: tree.primary,
+        snapshot_dir: flux2_comfyui_snapshot_dir(settings).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:missing-component] a compiled FLUX.2 checkpoint needs the \
+                 Mistral-3 text encoder, VAE and tokenizer from a resident \
+                 {FLUX2_COMFYUI_SNAPSHOT_REPO} tier, which a ComfyUI tree does not ship — install \
+                 FLUX.2-dev from the Model Manager, then run this checkpoint again"
+            ))
+        })?,
+        quant: FLUX2_COMFYUI_DEFAULT_QUANT,
+        adapters: PreparedAdapters {
+            specs: Vec::new(),
+            pins: Vec::new(),
+        },
+    }))
+}
+
+/// The first fully-present `SceneWorks/flux2-dev-mlx` tier, or `None`. One probe, both routes.
+fn flux2_comfyui_snapshot_dir(settings: &Settings) -> Option<PathBuf> {
+    let root = huggingface_snapshot_dir(&settings.data_dir, FLUX2_COMFYUI_SNAPSHOT_REPO)?;
+    FLUX2_COMFYUI_SNAPSHOT_TIERS
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| {
+            dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+                && dir.join("tokenizer").join("tokenizer.json").is_file()
+        })
+}
+
 /// The compute quant the dequanted DiT (and the snapshot Mistral TE) are folded onto the GPU at. The 32B
 /// dev does not fit the GPU dense after the fp8→f32 dequant, so a quant is required; Q8 preserves the
 /// ~8-bit fp8 source and fits a 96 GB card (~24 GB TE + ~32 GB DiT + VAE). An `advanced.quant` of `q4`
@@ -99,20 +148,7 @@ pub(super) fn resolve_flux2_comfyui_paths(
     };
     // The Mistral-3 TE / VAE / tokenizer come from a resident FLUX.2-dev snapshot tier; if none is
     // installed there is nothing to encode/decode with, so this is not (yet) runnable.
-    let Some(snapshot_root) =
-        huggingface_snapshot_dir(&settings.data_dir, FLUX2_COMFYUI_SNAPSHOT_REPO)
-    else {
-        return Ok(None);
-    };
-    let Some(snapshot_dir) = FLUX2_COMFYUI_SNAPSHOT_TIERS
-        .iter()
-        .map(|tier| snapshot_root.join(tier))
-        .find(|dir| {
-            dir.join("text_encoder").is_dir()
-                && dir.join("vae").is_dir()
-                && dir.join("tokenizer").join("tokenizer.json").is_file()
-        })
-    else {
+    let Some(snapshot_dir) = flux2_comfyui_snapshot_dir(settings) else {
         return Ok(None);
     };
     Ok(Some(ComfyuiFlux2Paths {
@@ -150,6 +186,13 @@ pub(super) fn prepare_flux2_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
+    // A plan-backed entry whose REQUEST the plan-driven route claims belongs to that route; this
+    // lane never also claims it. Explicit rather than left to the `external_base_` id prefix below:
+    // that prefix is an incidental property of how the catalog names a scanned row, and an
+    // incidental condition is not a claim (sc-20634 review; sc-20644 FLUX.2 row).
+    if super::request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
     let Some(_descriptor) = super::imported_generate_request_supported(
         request,
         "flux2",
@@ -157,15 +200,24 @@ pub(super) fn prepare_flux2_comfyui_sources(
     ) else {
         return Ok(None);
     };
-    if !request.model.starts_with("external_base_") {
-        return Ok(None);
-    }
     let quant = match flux2_comfyui_quant(request) {
         Ok(quant) => quant,
         Err(_) => return Ok(None),
     };
-    let Some(mut paths) = resolve_flux2_comfyui_paths(request, settings)? else {
-        return Ok(None);
+    // A plan-backed entry whose request the plan route does NOT claim runs here on the plan's own
+    // verified layers rather than a live `external_base_*` catalog scan — the only source a LINKED
+    // ComfyUI tree has (sc-20644 FLUX.2 row).
+    let mut paths = match resolve_plan_backed_flux2_comfyui_paths(request, settings)? {
+        Some(paths) => paths,
+        None => {
+            if !request.model.starts_with("external_base_") {
+                return Ok(None);
+            }
+            let Some(paths) = resolve_flux2_comfyui_paths(request, settings)? else {
+                return Ok(None);
+            };
+            paths
+        }
     };
     paths.quant = quant;
     paths.adapters = super::resolve_prepared_adapters(request, settings)?;

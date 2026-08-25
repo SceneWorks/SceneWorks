@@ -97,6 +97,12 @@ EXPECTED_SHIPPED_CONTROL_WEIGHTS = frozenset(
             "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
         ),
         (
+            "sdxl",
+            "xinsir/controlnet-openpose-sdxl-1.0",
+            "diffusion_pytorch_model.safetensors",
+            "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+        ),
+        (
             "kolors_control",
             "Kwai-Kolors/Kolors-ControlNet-Pose",
             "diffusion_pytorch_model.safetensors",
@@ -455,6 +461,7 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         "image_jobs/krea_imported.rs",
         "image_jobs/qwen.rs",
         "image_jobs/qwen_control.rs",
+        "image_jobs/sdxl_control.rs",
         "image_jobs/zimage.rs",
         "image_jobs/zimage_control.rs",
     }
@@ -788,6 +795,32 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_memory_request_provider_mode_schema_admits_public_character_image():
+    """SC-20798: provider-owned Character routes keep their public typed coordinate."""
+    schema = _load_schema(SCHEMA_PATH)
+    provider_modes = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            properties = value.get("properties", {})
+            if "providerMode" in properties:
+                provider_modes.append(properties["providerMode"])
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(schema)
+    assert len(provider_modes) == 1
+    assert provider_modes[0]["enum"] == [
+        "text_to_image",
+        "image_to_image",
+        "edit_image",
+        "character_image",
+    ]
+
+
 def test_memory_declaration_withhold_is_authorable_on_both_backends():
     """sc-20246: the withhold the declaration projector honors must pass the authoring schema.
 
@@ -977,10 +1010,12 @@ def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
 def test_measured_memory_rows_declare_their_workload_geometry():
     """sc-16020: geometry is data, not a prose assumption.
 
-    The counts were derived from the live catalog when the field landed. Update them when
-    adding/removing rows; the universal assertions are what prevent a new row from silently
-    escaping the normalization contract or an unmeasured tier gate from presenting itself as a
-    calibrated measurement.
+    Stated as derivations rather than catalog head-counts (sc-20799 round 2): a pinned row count
+    only ever records how many rows existed on the day it was written, and every legitimate
+    add/remove edits the integer instead of testing anything. What actually has to hold is that the
+    populations partition cleanly and that every member of each satisfies its geometry invariant —
+    which is what prevents a new row from silently escaping the normalization contract or an
+    unmeasured tier gate from presenting itself as a calibrated measurement.
     """
     manifest = _load_builtin_models_manifest()
     mlx_rows = []
@@ -994,15 +1029,26 @@ def test_measured_memory_rows_declare_their_workload_geometry():
         if "vramGbByTier" in candle:
             candle_rows.append((model["id"], candle))
 
-    assert len(mlx_rows) == 16
-    assert len(candle_rows) == 38
+    # Both populations must exist at all — an `all(...)` over an empty list is vacuously true, and
+    # a filter that silently stopped selecting anything is exactly the failure these guards exist
+    # to catch. Existence, not cardinality.
+    assert mlx_rows, "no download declares a measured peak; the mlx filter selected nothing"
+    assert candle_rows, "no model declares vramGbByTier; the candle filter selected nothing"
+
+    # Per-row invariant: every measured MLX peak is priced at the calibrated 1024² workload.
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
     assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
 
     measured_rows = [row for row in candle_rows if row[1]["measured"]]
     unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
-    assert len(measured_rows) == 26
-    assert len(unmeasured_rows) == 12
+    # measured ∪ unmeasured == candle_rows, and the two are disjoint. `measured` is asserted to be a
+    # bool above, so a row cannot sit outside both; this pins that neither branch drops or
+    # double-counts a row, which is the property the two head-counts were standing in for.
+    assert measured_rows and unmeasured_rows
+    measured_ids = {row[0] for row in measured_rows}
+    unmeasured_ids = {row[0] for row in unmeasured_rows}
+    assert measured_ids.isdisjoint(unmeasured_ids), measured_ids & unmeasured_ids
+    assert measured_ids | unmeasured_ids == {row[0] for row in candle_rows}
 
     measured_image_rows = [
         row
@@ -1039,20 +1085,29 @@ def test_measured_memory_rows_declare_their_workload_geometry():
 
 
 def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
-    """sc-18473: the installable shared package and its fail-closed gate share one exact row."""
+    """sc-20744: terminal receipts promote exact q4/q8 alongside the established bf16 row."""
     manifest = _load_builtin_models_manifest()
     scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
     candle = scail["candle"]
     assert candle == {
-        "minMemoryGb": 105,
-        "vramGbByTier": {"bf16": 102.115},
+        "minMemoryGb": 64,
+        "vramGbByTier": {"q4": 61.260, "q8": 64.928, "bf16": 102.115},
         "vramMeasuredPixels": 832 * 480,
         "measured": True,
     }
     assert candle["minMemoryGb"] == math.ceil(
-        candle["vramGbByTier"]["bf16"] + 2
+        candle["vramGbByTier"]["q4"] + 2
     )
-    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+    assert "64 GB for q4, 67 GB for q8, and 105 GB for bf16" in scail["ui"]["description"]
+
+    variants = {download["variant"]: download for download in scail["downloads"]}
+    assert set(variants) == {"q4", "q8", "bf16"}
+    for tier in ("q4", "q8"):
+        assert variants[tier]["files"] == [f"{tier}/*"]
+        assert variants[tier]["platforms"] == ["macos", "windows", "linux"]
+        assert variants[tier]["revision"] == "ce88cfdb1008f395e9c820e525e6db7b6695f7b3"
+    assert variants["bf16"]["platforms"] == ["macos", "windows", "linux"]
+    assert variants["q4"]["default"] is True
 
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(

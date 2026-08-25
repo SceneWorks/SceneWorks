@@ -10,6 +10,7 @@ import {
   GENERATED_END,
   catalogAxes,
   clearProjection,
+  contractIsLoraOnly,
   engineContractInventory,
   modelSpans,
   parseEngineModelTable,
@@ -258,6 +259,81 @@ test("an entry outside the wired pose families has no control overlay to declare
   const model = parse(FIXTURE_MANIFEST).models[0];
   const axes = catalogAxes(model, "mlx", { mlx: new Set(), candle: new Set() });
   assert.ok(!axes.overlays.has("control"));
+});
+
+test("a LoRA-only backend contract removes the unreachable plain overlay", () => {
+  // STRUCTURAL, not id-keyed (sc-20799): any model whose exact contract names only the LoRA load
+  // profile for its base provider is suppressed — the fixture keeps its own id to prove no
+  // magic-id list exists.
+  const model = parse(FIXTURE_MANIFEST).models[0];
+  model.candle = {
+    memoryStrategyContract: {
+      provider: "widget",
+      implementations: [{ overlays: ["lora"] }],
+    },
+  };
+  model.loraCompatibility = { families: ["widget"] };
+  const axes = catalogAxes(model, "candle", { mlx: new Set(), candle: new Set() }, "widget");
+  assert.deepEqual([...axes.overlays], ["lora"]);
+});
+
+test("contractIsLoraOnly keys on the contract's shape alone", () => {
+  const loraOnly = {
+    candle: {
+      memoryStrategyContract: { provider: "widget", implementations: [{ overlays: ["lora"] }] },
+    },
+  };
+  assert.ok(contractIsLoraOnly(loraOnly, "candle", "widget"));
+  // A single row serving the plain profile too is NOT lora-only.
+  const mixedRow = {
+    candle: {
+      memoryStrategyContract: {
+        provider: "widget",
+        implementations: [{ overlays: ["none", "lora"] }],
+      },
+    },
+  };
+  assert.ok(!contractIsLoraOnly(mixedRow, "candle", "widget"));
+  // One plain row among lora rows is NOT lora-only.
+  const mixedRows = {
+    candle: {
+      memoryStrategyContract: {
+        provider: "widget",
+        implementations: [{ overlays: ["lora"] }, { overlays: ["none"] }],
+      },
+    },
+  };
+  assert.ok(!contractIsLoraOnly(mixedRows, "candle", "widget"));
+  // No contract / no implementations: nothing to suppress on.
+  assert.ok(!contractIsLoraOnly({}, "candle", "widget"));
+  assert.ok(!contractIsLoraOnly(
+    { candle: { memoryStrategyContract: { provider: "widget", implementations: [] } } },
+    "candle",
+    "widget",
+  ));
+  // The predicate is per-backend: a lora-only candle contract says nothing about mlx.
+  assert.ok(!contractIsLoraOnly(loraOnly, "mlx", "widget"));
+  // A sibling runtimeProvider's lora row describes ITS lane, not the base model's plain route.
+  const siblingOnly = {
+    candle: {
+      memoryStrategyContract: {
+        provider: "widget",
+        implementations: [{ runtimeProvider: "widget_sibling", overlays: ["lora"] }],
+      },
+    },
+  };
+  assert.ok(!contractIsLoraOnly(siblingOnly, "candle", "widget"));
+  // A contract whose OWN provider is a sibling lane (a route-local edit provider, the Krea Turbo
+  // shape) never suppresses the base model's plain route.
+  const siblingContract = {
+    candle: {
+      memoryStrategyContract: {
+        provider: "widget_edit",
+        implementations: [{ overlays: ["lora"] }],
+      },
+    },
+  };
+  assert.ok(!contractIsLoraOnly(siblingContract, "candle", "widget"));
 });
 
 // --- source-of-truth parsers ---------------------------------------------------------------------

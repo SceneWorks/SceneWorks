@@ -164,23 +164,83 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path (epic 3641,
 /// sc-3671), so every SDXL shape — including a LyCORIS-tagged job — is MLX-eligible.
 /// `image_detail` is a separate job type with its own routing (see `image_detail_native_eligible`).
-pub(crate) fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
+pub(crate) fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    sdxl_mlx_lane(payload).is_some()
+}
+
+/// The core-side SDXL route classification. Both shapes are owned by the MLX worker, but preserving
+/// the lane here keeps scheduling tests aligned with the worker's precedence instead of treating
+/// ControlNet as an accidental consequence of the old catch-all SDXL predicate. Ownership includes
+/// fail-closed routes whose exact provider composition is rejected before generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MlxSdxlLane {
+    Control,
+    Generic,
+}
+
+pub(crate) fn sdxl_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane> {
+    Some(if sdxl_control_mlx_candidate(payload) {
+        MlxSdxlLane::Control
+    } else {
+        MlxSdxlLane::Generic
+    })
+}
+
+/// Candidate predicate for the dedicated SDXL OpenPose ControlNet lane. As on Candle, any material
+/// `advanced.poses` carrier or explicit material control intent is claimed before edit/IP/generic
+/// routing; exact shape, count, supported mode, and conflict validation belongs to the shared worker
+/// handler and fails closed there.
+pub(crate) fn sdxl_control_mlx_candidate(payload: &Map<String, Value>) -> bool {
+    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+        return false;
+    };
+    let poses_are_material = match advanced.get("poses") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(poses)) if poses.is_empty() => false,
+        Some(_) => true,
+    };
+    let named_control_is_material = match advanced.get("controlMode") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(mode)) => !mode.trim().is_empty(),
+        Some(_) => true,
+    };
+    poses_are_material
+        || named_control_is_material
+        || advanced
+            .get("controlImage")
+            .is_some_and(|value| !value.is_null())
+        || advanced
+            .get("controlWeights")
+            .is_some_and(|value| !value.is_null())
 }
 
 /// RealVisXL Lightning MLX-routing (sc-6075). The standalone distilled checkpoint runs through the
 /// `sdxl` engine on its few-step `lightning` (Euler-trailing) sampler, which the engine restricts to
 /// **txt2img** (it rejects an img2img/reference init — `mlx-gen-sdxl` "acceleration sampler is
-/// txt2img-only"). So only a plain text-to-image job is MLX-eligible here; any `edit_image`, source,
-/// reference, or mask conditioning is refused and remains queued (or is hidden by the manifest's
-/// txt2img-only `capabilities`). LoRAs + quant are fine on the SDXL path, so they don't gate.
+/// txt2img-only"). Plain text-to-image remains generating; a material pose carrier is also claimed by
+/// the named control lane, where the worker executes the supported ControlNet + Lightning composition.
+/// Any non-pose `edit_image`, source, reference, or mask shape is
+/// refused and remains queued. LoRAs + quant are fine on the SDXL path, so they don't gate.
 pub(crate) fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
+    realvisxl_lightning_mlx_lane(payload).is_some()
+}
+
+pub(crate) fn realvisxl_lightning_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane> {
+    // Material pose carriers are worker-owned before the legacy txt2img-only exclusions.
+    if sdxl_control_mlx_candidate(payload) {
+        return Some(MlxSdxlLane::Control);
     }
-    !(has_nonempty_string(payload, "sourceAssetId")
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return None;
+    }
+    if has_nonempty_string(payload, "sourceAssetId")
         || has_nonempty_string(payload, "referenceAssetId")
-        || has_nonempty_string(payload, "maskAssetId"))
+        || has_nonempty_string(payload, "maskAssetId")
+    {
+        None
+    } else {
+        Some(MlxSdxlLane::Generic)
+    }
 }
 
 /// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
@@ -725,6 +785,20 @@ pub(crate) fn video_request_is_mlx_eligible(
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
+    // **A DELIBERATE, TESTED NEGATIVE (sc-20651).** SceneWorks ships NO MLX video lane that reads a
+    // checkpoint plan: `resolve_video_route` on macOS has no plan-backed arm, and every MLX Wan/LTX
+    // engine loads the builtin snapshot for its model id. So a plan-backed entry
+    // (`importPlan.checkpointId`, epic 20398) that reached an MLX lane would render BUILTIN weights
+    // under the user's imported checkpoint id — a silent substitution, not a capability.
+    //
+    // The `VIDEO_MLX_ROUTED_MODELS` guard below already excludes every imported id, so this is not
+    // the common path; it is the guard for a plan-backed entry forwarded under a BUILTIN model id,
+    // which that list would happily admit. Its candle twin is
+    // [`super::candle::plan_backed_wan_video_candle_eligible`], the only lane that exists — never
+    // add an MLX arm here without a worker route that actually loads the plan's bytes.
+    if super::catalog::checkpoint_plan_checkpoint_id_of_payload_entry(payload).is_some() {
+        return false;
+    }
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
         return false;
     }

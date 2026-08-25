@@ -26,16 +26,812 @@ fn video_admission_captures_the_resolved_decode_chunk_from_the_engine_input() {
     );
 
     let inputs = WAN
-        .split_once("crate::video_admission::VideoAdmissionInputs {")
+        .split_once("let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {")
         .expect("shared video funnel invokes admission")
         .1
-        .split_once("},")
+        .split_once("};")
         .expect("admission inputs close")
         .0;
     assert!(
         inputs.contains("decode_chunk_size: admission_geometry.3"),
         "the captured chunk must reach VideoAdmissionInputs: {inputs}"
     );
+}
+
+#[test]
+fn video_admission_preflights_packaged_evidence_before_live_memory_probe() {
+    const WAN: &str = include_str!("wan.rs");
+    let preflight = WAN
+        .find("packaged_video_evidence_covers_request")
+        .expect("production funnel has packaged-evidence preflight");
+    let probe = WAN
+        .find("live_video_runtime_state(")
+        .expect("production funnel has live-memory probe");
+    assert!(
+        preflight < probe,
+        "unsupported modes must retain direct generation before any fallible memory probe"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_admission_overlay_keys_the_resolved_provider_video_mode() {
+    let mut input = VideoGenInput::default();
+    assert_eq!(video_admission_overlay(&input, "", None).unwrap(), None);
+
+    input.video_mode = Some("no_audio".to_owned());
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("provider_video_mode:no_audio"),
+        "the provider-only no-audio carrier must not inherit the null-overlay T2V curve"
+    );
+
+    input.enhance_prompt = true;
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("enhancer:standard+provider_video_mode:no_audio"),
+        "standard prompt enhancement and provider mode remain exact identity axes"
+    );
+
+    input.use_uncensored_enhancer = true;
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("enhancer:uncensored+provider_video_mode:no_audio"),
+        "uncensored enhancement must not borrow standard prompt-enhancement evidence"
+    );
+
+    input.video_mode = None;
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("enhancer:uncensored"),
+        "removing the request-only mode must not erase the loaded enhancer axis"
+    );
+
+    input.engine_id = "ltx_2_3";
+    input.conditioning = vec![Conditioning::Reference {
+        image: gen_core::Image {
+            width: 768,
+            height: 512,
+            pixels: Vec::new(),
+        },
+        strength: Some(1.0),
+    }];
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("enhancer:uncensored+reference:image:768x512:strength:3f800000"),
+        "the fitted LTX image and exact strength bits must reach the evidence identity"
+    );
+
+    input.conditioning.push(Conditioning::Reference {
+        image: gen_core::Image {
+            width: 768,
+            height: 512,
+            pixels: Vec::new(),
+        },
+        strength: Some(1.0),
+    });
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("enhancer:uncensored"),
+        "a multi-reference request must not mint the single-reference receipt"
+    );
+
+    input.conditioning = vec![
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        Conditioning::Keyframe {
+            image: gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            frame_idx: -1,
+            strength: 1.0,
+        },
+    ];
+    assert_eq!(
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
+        Some(
+            "enhancer:uncensored+keyframe:first:image:768x512:frame:0:strength:3f800000+keyframe:last:image:768x512:frame:-1:strength:3f800000"
+        ),
+        "the ordered first/last carrier, shape, latent anchors, and independent strengths must reach the evidence identity"
+    );
+
+    input.conditioning.swap(0, 1);
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("enhancer:uncensored"),
+        "reordered keyframes must not mint the ordered first/last receipt"
+    );
+
+    input.conditioning = vec![Conditioning::VideoClip {
+        frames: vec![
+            gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new()
+            };
+            153
+        ],
+        frame_idx: 0,
+        strength: 1.0,
+    }];
+    assert_eq!(
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
+        Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000"),
+        "the one IC-LoRA clip's source-frame count, image shape, appended-token anchor, and strength must be sealed"
+    );
+
+    input.conditioning = vec![
+        Conditioning::VideoClip {
+            frames: vec![
+                gen_core::Image {
+                    width: 768,
+                    height: 512,
+                    pixels: Vec::new(),
+                };
+                153
+            ],
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        Conditioning::VideoClip {
+            frames: vec![
+                gen_core::Image {
+                    width: 768,
+                    height: 512,
+                    pixels: Vec::new(),
+                };
+                153
+            ],
+            frame_idx: -1,
+            strength: 1.0,
+        },
+    ];
+    assert_eq!(
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
+        Some("enhancer:uncensored+clip:append:frames:153:image:768x512:frame:0:strength:3f800000+clip:append:frames:153:image:768x512:frame:-1:strength:3f800000"),
+        "the bridge must preserve both ordered endpoint clips, source-frame domains, latent anchors, and strengths"
+    );
+
+    input.conditioning.swap(0, 1);
+    assert_eq!(
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .as_deref(),
+        Some("enhancer:uncensored"),
+        "reordered bridge clips must not mint the ordered endpoint receipt"
+    );
+    assert_eq!(
+        video_admission_reference_count("ltx_2_3", "video_bridge", &input.conditioning),
+        0,
+        "IC-LoRA clip endpoints are temporal carriers, never image-reference count evidence"
+    );
+    assert_eq!(
+        video_admission_reference_shape("ltx_2_3", "video_bridge", &input.conditioning),
+        "none",
+        "bridge must retain its temporal receipt identity after cumulative Bernini integration"
+    );
+
+    input.conditioning = vec![
+        Conditioning::ControlClip {
+            frames: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            mask: vec![gen_core::Image {
+                width: 768,
+                height: 512,
+                pixels: Vec::new(),
+            }],
+            masking_strength: 0.75,
+            start_frame: 0,
+            mode: ReplacementMode::FaceOnly,
+        },
+        Conditioning::MultiReference {
+            images: vec![
+                gen_core::Image {
+                    width: 256,
+                    height: 512,
+                    pixels: Vec::new(),
+                },
+                gen_core::Image {
+                    width: 512,
+                    height: 256,
+                    pixels: Vec::new(),
+                },
+            ],
+        },
+    ];
+    input.width = 704;
+    input.height = 512;
+    assert_eq!(
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
+        Some("enhancer:uncensored+replace_person:control:frames:1:shapes:0:768x512@768x512:frame:0:mode:FaceOnly:strength:3f400000:references:ordered_grid:2x1:count:2:shapes:0:256x512,1:512x256:composite:704x512"),
+        "LTX replacement must seal the ordered control/reference carrier rather than borrowing I2V evidence"
+    );
+}
+
+/// sc-20799. Outside Bernini and LTX every video carrier was keyed shape-`"other"` plus
+/// `conditioning.len()`, and adapters were keyed `adapters:{N}`. Two physically different payloads
+/// therefore shared one admission identity and could borrow each other's admitted peak. These are
+/// the sealed replacements, asserted as SHAPE — distinct payloads differ, equal payloads are
+/// stable, unpriceable shapes refuse — never as digest literals.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
+    let image = |width: u32, height: u32, fill: u8| gen_core::Image {
+        width,
+        height,
+        pixels: vec![fill; (width as usize) * (height as usize) * 3],
+    };
+    let control = |frames: usize, fill: u8, strength: f32| Conditioning::ControlClip {
+        frames: vec![image(64, 64, fill); frames],
+        mask: vec![image(64, 64, 0); frames],
+        masking_strength: strength,
+        start_frame: 0,
+        mode: Default::default(),
+    };
+    let overlay_for = |engine: &'static str, mode: &str, conditioning: Vec<Conditioning>| {
+        let input = VideoGenInput {
+            engine_id: engine,
+            width: 512,
+            height: 512,
+            conditioning,
+            ..Default::default()
+        };
+        video_admission_overlay(&input, mode, None)
+    };
+
+    // --- Wan-VACE replace_person: reference CARDINALITY was erased by `"other"`. ---
+    let one_reference = vec![
+        control(4, 1, 1.0),
+        Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        },
+    ];
+    let eight_references = {
+        let mut entries = vec![control(4, 1, 1.0)];
+        for index in 0..8 {
+            entries.push(Conditioning::Reference {
+                image: image(32, 32, 9 + index),
+                strength: None,
+            });
+        }
+        entries
+    };
+    let single = overlay_for(
+        "wan_2_2_vace_fun_14b",
+        "replace_person",
+        one_reference.clone(),
+    )
+    .unwrap()
+    .expect("sealed Wan-VACE carrier");
+    let many = overlay_for(
+        "wan_2_2_vace_fun_14b",
+        "replace_person",
+        eight_references.clone(),
+    )
+    .unwrap()
+    .expect("sealed Wan-VACE carrier");
+    assert!(single.starts_with(crate::video_admission::WAN_VACE_REPLACE_RECEIPT_DOMAIN));
+    assert_ne!(single, many, "one reference is not eight references");
+    // The load-bearing half: curve lookup STRIPS the request seal, so the cardinality has to live
+    // in the evidence axis. If it only reached the seal, one reference and eight would resolve to
+    // the same curve key — exactly the borrow this seals shut.
+    let strip = |overlay: &str| {
+        crate::video_admission::video_curve_overlay_for_test(Some(overlay)).expect("curve overlay")
+    };
+    assert_ne!(
+        strip(&single),
+        strip(&many),
+        "reference cardinality must survive seal-stripping, or the curve key is borrowable"
+    );
+    assert_eq!(
+        single,
+        overlay_for("wan_2_2_vace_fun_14b", "replace_person", one_reference)
+            .unwrap()
+            .unwrap(),
+        "the same assembly must seal to the same identity"
+    );
+    // The masking strength changes the working set and is an evidence axis, not just a seal input.
+    let looser = vec![
+        control(4, 1, 0.5),
+        Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        },
+    ];
+    assert_ne!(
+        single,
+        overlay_for("wan_2_2_vace_fun_14b", "replace_person", looser)
+            .unwrap()
+            .unwrap()
+    );
+    // Different driving BYTES at the same shapes change only the seal, not the evidence axis.
+    let other_bytes = vec![
+        control(4, 2, 1.0),
+        Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        },
+    ];
+    let other_bytes = overlay_for("wan_2_2_vace_fun_14b", "replace_person", other_bytes)
+        .unwrap()
+        .unwrap();
+    assert_ne!(single, other_bytes, "content mutation must change the seal");
+    assert_eq!(
+        crate::video_admission::video_curve_overlay_for_test(Some(&single)),
+        crate::video_admission::video_curve_overlay_for_test(Some(&other_bytes)),
+        "curve lookup strips only the request seal, so same-shape carriers share memory evidence"
+    );
+    // Fails CLOSED on a shape it cannot price, rather than minting a borrowable token.
+    assert!(overlay_for(
+        "wan_2_2_vace_fun_14b",
+        "replace_person",
+        vec![Conditioning::Reference {
+            image: image(32, 32, 9),
+            strength: None,
+        }],
+    )
+    .is_err());
+
+    // --- SCAIL-2: animation and replacement share one physical assembly, two working sets. ---
+    let scail2 = |fill: u8| {
+        vec![
+            Conditioning::Reference {
+                image: image(48, 48, fill),
+                strength: None,
+            },
+            Conditioning::Mask {
+                image: image(48, 48, 0),
+            },
+            control(6, 3, 1.0),
+        ]
+    };
+    let animation = overlay_for("scail2_14b", "animate_character", scail2(1))
+        .unwrap()
+        .expect("sealed SCAIL-2 carrier");
+    let replacement = overlay_for("scail2_14b", "replace_person", scail2(1))
+        .unwrap()
+        .expect("sealed SCAIL-2 carrier");
+    assert!(animation.contains(crate::video_admission::SCAIL2_CARRIER_RECEIPT_DOMAIN));
+    assert_ne!(
+        animation, replacement,
+        "the two SCAIL-2 tasks must not share one admission identity"
+    );
+    assert_ne!(
+        animation,
+        overlay_for("scail2_14b", "animate_character", scail2(2))
+            .unwrap()
+            .unwrap(),
+        "a different identity still must change the receipt"
+    );
+    // SCAIL-2's advertised overlay spelling at the seam is the literal `adapter`.
+    let with_adapter = VideoGenInput {
+        engine_id: "scail2_14b",
+        width: 512,
+        height: 512,
+        adapters: vec![AdapterSpec::new(
+            std::path::PathBuf::from("lightning.safetensors"),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )],
+        conditioning: scail2(1),
+        ..Default::default()
+    };
+    assert!(
+        video_admission_overlay(&with_adapter, "animate_character", None)
+            .unwrap()
+            .unwrap()
+            .starts_with("adapter+")
+    );
+
+    // --- Krea Realtime v2v: the clip length and strength are the working set. ---
+    let clip = |frames: usize, strength: f32| {
+        vec![Conditioning::VideoClip {
+            frames: vec![image(64, 64, 5); frames],
+            frame_idx: 0,
+            strength,
+        }]
+    };
+    let short = overlay_for("krea_realtime_14b", "video_to_video", clip(8, 1.0))
+        .unwrap()
+        .expect("sealed Krea v2v carrier");
+    assert!(short.starts_with(crate::video_admission::KREA_V2V_RECEIPT_DOMAIN));
+    assert_ne!(
+        short,
+        overlay_for("krea_realtime_14b", "video_to_video", clip(64, 1.0))
+            .unwrap()
+            .unwrap(),
+        "an 8-frame init is not a 64-frame init"
+    );
+    assert_ne!(
+        short,
+        overlay_for("krea_realtime_14b", "video_to_video", clip(8, 0.4))
+            .unwrap()
+            .unwrap(),
+        "the v2v strength is its own axis"
+    );
+    assert!(overlay_for("krea_realtime_14b", "video_to_video", vec![])
+        .unwrap_err()
+        .to_string()
+        .contains("exactly one VideoClip"));
+
+    // --- Adapters: cardinality -> exact ordered content receipt. ---
+    let with_adapters = |paths: &[&str]| VideoGenInput {
+        engine_id: "wan_2_2",
+        adapters: paths
+            .iter()
+            .map(|path| {
+                AdapterSpec::new(
+                    std::path::PathBuf::from(path),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let a = video_admission_overlay(&with_adapters(&["a.safetensors"]), "text_to_video", None)
+        .unwrap()
+        .expect("adapter overlay");
+    let b = video_admission_overlay(&with_adapters(&["b.safetensors"]), "text_to_video", None)
+        .unwrap()
+        .expect("adapter overlay");
+    assert!(
+        a.starts_with("adapters:"),
+        "the seam spells it `adapters:<sha256>`"
+    );
+    assert_ne!(
+        a, b,
+        "two different single-adapter stacks are two identities"
+    );
+    assert_ne!(
+        a,
+        video_admission_overlay(
+            &with_adapters(&["a.safetensors", "b.safetensors"]),
+            "text_to_video",
+            None
+        )
+        .unwrap()
+        .unwrap()
+    );
+
+    // --- MultiReference count: 1 image and 8 images were both `conditioning.len() == 1`. ---
+    let multi = |count: usize| {
+        vec![Conditioning::MultiReference {
+            images: vec![image(32, 32, 4); count],
+        }]
+    };
+    assert_eq!(
+        video_admission_reference_count("wan_2_2", "reference_to_video", &multi(1)),
+        1
+    );
+    assert_eq!(
+        video_admission_reference_count("wan_2_2", "reference_to_video", &multi(8)),
+        8,
+        "a MultiReference of eight is eight reference images, not one entry"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_adapter_overlay_records_exact_artifact_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter_path = root.path().join("style.safetensors");
+    std::fs::write(&adapter_path, b"weights-free-adapter").unwrap();
+    let input = VideoGenInput {
+        engine_id: "bernini",
+        adapters: vec![AdapterSpec::new(
+            adapter_path.clone(),
+            0.75,
+            gen_core::AdapterKind::Lora,
+        )],
+        ..Default::default()
+    };
+
+    const RECEIPT: &str = "adapters:[artifact=safetensors;path_hex=2f746d702f7374796c652e7361666574656e736f7273;digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;kind=Lora;scale_bits=3f400000;pass_scale_bits=none;expert=None;verified_bytes=20;stable=true]";
+    let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+        "bernini",
+        gen_core::MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: false,
+            block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+        phases: vec![gen_core::MemoryPhase::Denoise],
+        variables: vec![gen_core::MemoryFormulaVariable::OverlayBytes],
+        resident_components: vec![gen_core::MemoryResidentComponent {
+            id: RECEIPT.to_owned(),
+            kind: gen_core::MemoryComponentKind::AdapterStack,
+            resident_bytes: 20,
+            bounded_by: None,
+            residency: gen_core::MemoryComponentResidency::WholeRender,
+        }],
+    };
+
+    assert_eq!(
+        video_admission_overlay(&input, "", Some(&contract))
+            .unwrap()
+            .as_deref(),
+        Some(crate::video_admission::bernini_adapter_receipt_axis(RECEIPT).as_str()),
+        "the worker must bind the opaque request axis to the provider's load-exact receipt"
+    );
+    assert_eq!(
+        video_admission_overlay(&input, "", None).unwrap().as_deref(),
+        Some("bernini-adapter-unverified"),
+        "missing provider receipt must fail closed, never trigger a second filesystem reconstruction"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[clip]),
+        "video"
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "video_to_video", &[]),
+        "none"
+    );
+    // sc-20799: a carrier admission cannot name exactly resolves to "none", the emitters' own
+    // spelling for an absent reference surface. The old literal "other" was never produced by any
+    // evidence record, so it matched nothing while still pooling every unnamed carrier into one key.
+    assert_eq!(
+        video_admission_reference_shape(
+            "bernini",
+            "video_to_video",
+            &[Conditioning::Reference {
+                image: Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![0; 12],
+                },
+                strength: Some(1.0),
+            }],
+        ),
+        "none"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_admission_flattens_the_single_multi_reference_carrier() {
+    let images = vec![
+        Image {
+            width: 640,
+            height: 360,
+            pixels: vec![11; 640 * 360 * 3],
+        },
+        Image {
+            width: 360,
+            height: 640,
+            pixels: vec![29; 360 * 640 * 3],
+        },
+    ];
+    let conditioning = vec![Conditioning::MultiReference { images }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &conditioning),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &conditioning),
+        2
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_rv2v_admission_preserves_the_clip_image_partition() {
+    let image = Image {
+        width: 2,
+        height: 2,
+        pixels: vec![1; 12],
+    };
+    let clip = Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![2; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let one_clip_one_image = vec![
+        clip,
+        Conditioning::MultiReference {
+            images: vec![image.clone()],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &one_clip_one_image),
+        "video+multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_video_to_video", &one_clip_one_image),
+        2
+    );
+
+    let two_images = vec![Conditioning::MultiReference {
+        images: vec![image.clone(), image],
+    }];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_to_video", &two_images),
+        "multi_image"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "reference_to_video", &two_images),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "reference_video_to_video", &two_images),
+        "none",
+        "zero clips plus two images must not borrow the clip-plus-image surface"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_mv2v_admission_has_a_typed_ordered_multiclip_carrier() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let clips = vec![clip(1), clip(2)];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &clips),
+        "multi_video"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "multi_video_to_video", &clips),
+        2
+    );
+    assert_eq!(
+        video_admission_reference_shape("bernini", "multi_video_to_video", &[clip(1)]),
+        "none"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_ads2v_admission_keeps_two_clip_roles_and_flattened_images() {
+    let clip = |pixel| Conditioning::VideoClip {
+        frames: vec![Image {
+            width: 2,
+            height: 2,
+            pixels: vec![pixel; 12],
+        }],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let conditioning = vec![
+        clip(1),
+        clip(2),
+        Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![3; 12],
+                },
+                Image {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![4; 12],
+                },
+            ],
+        },
+    ];
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &conditioning),
+        "ads2v"
+    );
+    assert_eq!(
+        video_admission_reference_count("bernini", "ads2v", &conditioning),
+        4
+    );
+    let mut crossed = conditioning.clone();
+    crossed.swap(1, 2);
+    assert_eq!(
+        video_admission_reference_shape("bernini", "ads2v", &crossed),
+        "none"
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
+    for reference_asset_ids in [
+        Vec::<&str>::new(),
+        vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        vec!["same", "same"],
+    ] {
+        let request = request(serde_json::json!({
+            "projectId": "p",
+            "model": "bernini",
+            "mode": "reference_to_video",
+            "prompt": "ordered subjects",
+            "referenceAssetIds": reference_asset_ids,
+        }));
+        assert!(validate_r2v_reference_ids(&request).is_err());
+    }
+
+    let exact = request(serde_json::json!({
+        "projectId": "p",
+        "model": "bernini",
+        "mode": "reference_to_video",
+        "prompt": "ordered subjects",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"],
+    }));
+    validate_r2v_reference_ids(&exact).expect("one ordered wrapper may contain eight distinct ids");
 }
 
 /// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
@@ -645,58 +1441,17 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
-fn calibrated_video_memory_surface_is_exact_t2v_only() {
-    let mut input = VideoGenInput {
-        fps: 24,
-        ..VideoGenInput::default()
-    };
-    assert!(calibrated_video_memory_surface(&input, "text_to_video"));
-    assert!(calibrated_video_memory_surface(
-        &VideoGenInput {
-            fps: 30,
-            ..VideoGenInput::default()
-        },
-        "text_to_video"
-    ));
-
-    assert!(!calibrated_video_memory_surface(&input, "image_to_video"));
-    input.conditioning.push(Conditioning::Reference {
-        image: gen_core::Image {
-            width: 1,
-            height: 1,
-            pixels: vec![0, 0, 0],
-        },
-        strength: None,
-    });
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.conditioning.clear();
-    input.enhance_prompt = true;
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.enhance_prompt = false;
-    input.use_uncensored_enhancer = true;
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.use_uncensored_enhancer = false;
-    input.uncensored_enhancer_dir = Some(PathBuf::from("/fixture/enhancer"));
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.uncensored_enhancer_dir = None;
-    input.adapters.push(AdapterSpec {
-        path: PathBuf::from("/fixture/adapter.safetensors"),
-        scale: 1.0,
-        kind: gen_core::AdapterKind::Lora,
-        pass_scales: None,
-        moe_expert: None,
-    });
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.adapters.clear();
-    input.video_mode = Some("no_audio".to_owned());
-    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    input.video_mode = None;
-    for fps in [0, 1, 23, 31, 60] {
-        input.fps = fps;
-        assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
-    }
+fn video_funnel_has_no_exact_t2v_admission_predicate() {
+    const WAN: &str = include_str!("wan.rs");
+    assert!(
+        !WAN.contains("calibrated_video_memory_surface"),
+        "video admission must be keyed by packaged evidence, not a hard-coded surface helper"
+    );
+    assert!(
+        WAN.contains("reference_shape: admission_reference_shape"),
+        "the funnel must carry the reference carrier to evidence admission"
+    );
 }
 
 #[test]
@@ -843,6 +1598,18 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         3,
         "one owner function and exactly two production callers must exist"
     );
+    let plan = SOURCE
+        .split_once("pub(super) fn scail2_cold_load_plan(")
+        .expect("SCAIL-2 cold-load plan")
+        .1
+        .split_once("/// Windows/CUDA candle video path")
+        .expect("SCAIL-2 cold-load plan boundary")
+        .0;
+    assert!(
+        plan.contains("let tier_key = resolved.tier.key();")
+            && plan.contains("&manifest_entry,\n            tier_key,"),
+        "cold-load accounting must use the same resolved package tier as the model path"
+    );
     let animate = SOURCE
         .split_once("pub(super) async fn generate_candle_scail2(")
         .expect("animate arm")
@@ -861,8 +1628,9 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         assert!(
             arm.contains("let Scail2ColdLoadPlan {")
                 && arm.contains("model_dir,")
+                && arm.contains("quant,")
                 && arm.contains("admission,"),
-            "{name} must keep the resolved model path and cold admission together"
+            "{name} must keep the resolved model path, exact quant tier, and cold admission together"
         );
         let input = arm
             .split_once("let input = VideoGenInput {")
@@ -871,6 +1639,10 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         assert!(
             input.contains("model_dir,"),
             "{name} must use the planned model path"
+        );
+        assert!(
+            input.contains("quant,"),
+            "{name} must pass the planned q4/q8 LoadSpec quant through the shared video telemetry path"
         );
         assert!(
             input.contains("cold_load_admission: Some(admission),"),
@@ -890,6 +1662,12 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
                 "with_cached_generator_for_request_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
             ),
         "the shared video path must bind SCAIL admission, request accounting, and the same cancel flag at the generator-cache seam"
+    );
+    assert!(
+        wan.contains("spec.quantize = input.quant;")
+            && wan.contains("quant: input.quant,")
+            && wan.contains("let video_settings = VideoSettingsSnapshot::from_input(&input);"),
+        "the exact planned quant must remain in LoadSpec and completion telemetry"
     );
     let cache = include_str!("../generator_cache.rs");
     assert!(
@@ -4202,8 +4980,9 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         },
     );
 
-    // Weights absent (empty env override, empty data dir) ⇒ the route falls to Stub, BUT the Stub
-    // arm's fail-loud gate must refuse rather than hand back a procedural fake video.
+    // Weights absent ⇒ the route falls to Stub, BUT the Stub arm's fail-loud gate must refuse
+    // rather than hand back a procedural fake video. Isolate every HF cache variable so a developer's
+    // real downloaded Krea tier cannot turn this absence fixture into an available route.
     let empty_guard = tempfile::Builder::new()
         .prefix("krea_empty_")
         .tempdir()
@@ -4213,18 +4992,26 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         data_dir: empty.to_path_buf(),
         ..Settings::from_env()
     };
-    temp_env_var("SCENEWORKS_MLX_KREA_REALTIME_DIR", "", || {
-        assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
-        let err = ensure_video_engine_weights(&req, &bare)
-            .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
-        let WorkerError::InvalidPayload(message) = err else {
-            panic!("expected an actionable InvalidPayload");
-        };
-        assert!(
-            message.contains("krea_realtime_14b") && message.contains("Model Manager"),
-            "the error must name the model and tell the user what to do: {message}"
-        );
-    });
+    temp_env_vars(
+        &[
+            ("SCENEWORKS_MLX_KREA_REALTIME_DIR", ""),
+            ("HF_HUB_CACHE", empty.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ],
+        || {
+            assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
+            let err = ensure_video_engine_weights(&req, &bare)
+                .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
+            let WorkerError::InvalidPayload(message) = err else {
+                panic!("expected an actionable InvalidPayload");
+            };
+            assert!(
+                message.contains("krea_realtime_14b") && message.contains("Model Manager"),
+                "the error must name the model and tell the user what to do: {message}"
+            );
+        },
+    );
 }
 
 /// The caller-side mapping pin: drives `generate_krea_realtime_using` end to end (through the
@@ -4721,7 +5508,24 @@ fn write_complete_krea_tier(root: &Path, tier: &str) {
     for file in files {
         let path = root.join(tier).join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"x").unwrap();
+        // Placeholder bytes are enough for the files this fixture only needs to EXIST, but the
+        // pinned inference revision PARSES the tier's `config.json` to resolve the provider-owned
+        // numeric tier instead of merely checking for it, so that row carries the real
+        // quantization block. Every other `.json` row still only needs to exist — but `b"x"` is
+        // not JSON, so it gets an empty object: still a placeholder, just a readable one.
+        let contents: &[u8] = if file == &"config.json" {
+            match tier {
+                "q4" => br#"{"quantization":{"bits":4,"group_size":64}}"#,
+                "q8" => br#"{"quantization":{"bits":8,"group_size":64}}"#,
+                "bf16" => b"{}",
+                _ => unreachable!("the tier file table only exposes published tiers"),
+            }
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            b"{}"
+        } else {
+            b"x"
+        };
+        std::fs::write(path, contents).unwrap();
     }
 }
 
@@ -6083,14 +6887,16 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
     }));
     assert_eq!(
-        resolve_candle_video_route(&scail2_replace, &settings),
+        resolve_candle_video_route(&scail2_replace, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::Stub,
     );
     let disabled_eros = request(json!({
         "projectId": "p", "model": "ltx_2_3_eros", "mode": "text_to_video",
     }));
     assert_eq!(
-        resolve_candle_video_route(&disabled_eros, &settings),
+        resolve_candle_video_route(&disabled_eros, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::UnsupportedEros,
     );
 
@@ -6110,7 +6916,8 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
             "projectId": "p", "model": "ltx_2_3_eros", "mode": mode,
         }));
         assert_eq!(
-            resolve_candle_video_route(&eros, &settings),
+            resolve_candle_video_route(&eros, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::UnsupportedEros,
             "Eros {mode} must fail loudly rather than reach a real or stub Candle route",
         );
@@ -6131,20 +6938,23 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
     }
     assert!(reject_unsupported_candle_video_route(CandleVideoRoute::Stub).is_ok());
     assert_eq!(
-        resolve_candle_video_route(&scail2_replace, &settings),
+        resolve_candle_video_route(&scail2_replace, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
     );
     let vace_fun = request(json!({
         "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
     }));
     assert_eq!(
-        resolve_candle_video_route(&vace_fun, &settings),
+        resolve_candle_video_route(&vace_fun, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::ReplacePersonWanVaceFun,
     );
     for mode in ["replace_person", "extend_clip", "video_bridge"] {
         let native = request(json!({ "projectId": "p", "model": "ltx_2_3", "mode": mode }));
         assert_eq!(
-            resolve_candle_video_route(&native, &settings),
+            resolve_candle_video_route(&native, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::CandleVideo,
             "base LTX {mode} must stay on the native LTX provider",
         );
@@ -6167,7 +6977,8 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
     }));
     assert_eq!(
-        resolve_candle_video_route(&extend, &settings),
+        resolve_candle_video_route(&extend, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::WanVaceExtendBridge,
     );
 }
@@ -6182,7 +6993,8 @@ fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
         "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
     }));
     assert_eq!(
-        resolve_candle_video_route(&replacement, &settings),
+        resolve_candle_video_route(&replacement, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::ReplacePersonWanVaceFun,
     );
     assert_eq!(
@@ -6200,7 +7012,8 @@ fn candle_vace_fun_dispatch_is_dedicated_to_person_replace() {
             "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": mode,
         }));
         assert_eq!(
-            resolve_candle_video_route(&unsupported, &settings),
+            resolve_candle_video_route(&unsupported, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::Stub,
             "VACE-Fun {mode} must not cross-route to a base or single-expert VACE engine",
         );
@@ -6248,7 +7061,8 @@ fn candle_video_route_bernini_every_mode() {
     ] {
         let req = request(json!({ "projectId": "p", "model": "bernini", "mode": mode }));
         assert_eq!(
-            resolve_candle_video_route(&req, &settings),
+            resolve_candle_video_route(&req, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::Bernini(engine),
             "bernini {mode} must route to CandleVideoRoute::Bernini",
         );
@@ -6259,7 +7073,8 @@ fn candle_video_route_bernini_every_mode() {
         "projectId": "p", "model": "bernini", "mode": "text_to_video",
     }));
     assert_eq!(
-        resolve_candle_video_route(&off, &settings),
+        resolve_candle_video_route(&off, &settings)
+            .expect("route resolution must not fail for this fixture"),
         CandleVideoRoute::Stub,
     );
 }
@@ -7574,11 +8389,11 @@ fn scail2_engine_id_maps_only_the_scail2_family() {
     assert_eq!(scail2_engine_id(""), None);
 }
 
-/// The off-Mac resolver must consume the exact pinned bf16 tier that Model Manager installs, and it
-/// must use the provider-owned completeness predicate rather than a weaker worker-side sentinel.
+/// The off-Mac resolver must consume the exact Model Manager q4/q8/bf16 directory, require both the
+/// provider-owned complete layout and the packed marker, and never fall back from the user's tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
+fn candle_scail2_resolves_exact_model_manager_tier_fail_closed() {
     let _env = crate::test_env::EnvVars::set(&[
         ("HF_HUB_CACHE", ""),
         ("HUGGINGFACE_HUB_CACHE", ""),
@@ -7593,36 +8408,92 @@ fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
         .prefix("sw_candle_scail2_shared_")
         .tempdir()
         .expect("temp dir");
-    let tier = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
+    let snapshot = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
         .expect("repo cache path")
         .join("snapshots")
-        .join(SCAIL2_REVISION)
-        .join("bf16");
-    std::fs::create_dir_all(&tier).unwrap();
+        .join(SCAIL2_REVISION);
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
         ..Settings::from_env()
     };
 
+    let write_complete_tier = |tier: Scail2CandleTier, marker: Value| {
+        let path = snapshot.join(tier.key());
+        std::fs::create_dir_all(&path).unwrap();
+        for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+            std::fs::write(path.join(file), b"").unwrap();
+        }
+        std::fs::write(
+            path.join("config.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        path
+    };
+
     // A directory or one plausible tensor is not an install. Missing any provider-required file
     // must keep routing closed and name Model Manager as the repair path.
-    std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
-    let error = resolve_managed_candle_scail2_model_dir(&settings)
+    let incomplete_q4 = snapshot.join("q4");
+    std::fs::create_dir_all(&incomplete_q4).unwrap();
+    std::fs::write(incomplete_q4.join("dit.safetensors"), b"").unwrap();
+    let error = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
         .unwrap_err()
         .to_string();
     assert!(error.contains("Model Manager"), "got: {error}");
-    assert!(error.contains("bf16"), "got: {error}");
+    assert!(error.contains("q4"), "got: {error}");
 
-    for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
-        std::fs::write(tier.join(file), b"").unwrap();
-    }
+    let q4 = write_complete_tier(
+        Scail2CandleTier::Q4,
+        json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+    );
     assert_eq!(
-        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
-        tier
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
+            .unwrap()
+            .model_dir,
+        q4
+    );
+    assert_eq!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
+            .unwrap()
+            .tier,
+        Scail2CandleTier::Q4
     );
 
-    std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
-    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+    let q8 = write_complete_tier(
+        Scail2CandleTier::Q8,
+        json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+    );
+    assert_eq!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+            .unwrap()
+            .model_dir,
+        q8
+    );
+
+    // q8 must not use a complete q4 tier. The selector's marker is checked independently of
+    // directory name so a mixed or copied package cannot be misreported as q8.
+    std::fs::write(
+        q8.join("config.json"),
+        serde_json::to_vec(&json!({ "quantization": { "bits": 4, "group_size": 64 } })).unwrap(),
+    )
+    .unwrap();
+    let mixed = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+        .unwrap_err()
+        .to_string();
+    assert!(mixed.contains("q8"), "got: {mixed}");
+    assert!(mixed.contains("No q4/q8 fallback"), "got: {mixed}");
+    std::fs::write(
+        q8.join("config.json"),
+        serde_json::to_vec(&json!({ "quantization": { "bits": 8, "group_size": 64 } })).unwrap(),
+    )
+    .unwrap();
+
+    std::fs::remove_file(q8.join("t5_encoder.safetensors")).unwrap();
+    let partial = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+        .unwrap_err()
+        .to_string();
+    assert!(partial.contains("q8"), "got: {partial}");
+    assert!(partial.contains("No q4/q8 fallback"), "got: {partial}");
 }
 
 /// Existing manually assembled candle snapshots remain a compatibility fallback, but only when the
@@ -7647,13 +8518,66 @@ fn candle_scail2_preserves_complete_legacy_layout_only() {
         data_dir: data.path().to_path_buf(),
         ..Settings::from_env()
     };
-    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+    assert!(resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Bf16).is_err());
 
     std::fs::write(legacy.join("tokenizer/tokenizer.json"), b"").unwrap();
     assert_eq!(
-        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Bf16)
+            .unwrap()
+            .model_dir,
         legacy
     );
+    assert!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4).is_err(),
+        "a legacy dense tree must never satisfy a packed q4 request"
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_tier_selector_is_exact_and_adapter_safe() {
+    let request_with = |advanced: Value| request(json!({ "projectId": "p", "advanced": advanced }));
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({})), false).unwrap(),
+        Scail2CandleTier::Bf16,
+        "the off-Mac default remains the established dense baseline"
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 4 })), false).unwrap(),
+        Scail2CandleTier::Q4
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": "8" })), false).unwrap(),
+        Scail2CandleTier::Q8
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 0 })), false).unwrap(),
+        Scail2CandleTier::Bf16
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({})), true).unwrap(),
+        Scail2CandleTier::Bf16,
+        "adapter-bearing default requests retain the valid dense flow"
+    );
+    for value in [json!(6), json!("q8"), json!(4.0)] {
+        let error =
+            resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": value })), false)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("exact hosted tier") || error.contains("must be exactly"),
+            "{error}"
+        );
+    }
+    let adapter_error =
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 8 })), true)
+            .unwrap_err()
+            .to_string();
+    assert!(
+        adapter_error.contains("cannot merge adapters"),
+        "{adapter_error}"
+    );
+    assert!(adapter_error.contains("bf16"), "{adapter_error}");
 }
 
 /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),
@@ -7832,6 +8756,166 @@ async fn scail2_conditioning_guards_fire_before_io() {
         replace_err.contains("person track"),
         "replace missing-track error: {replace_err}"
     );
+}
+
+/// One shared assembler is the parity boundary for both MLX and Candle. It must retain every
+/// reference's own mask and caller order, reject the missing-pair and seven-reference cases, and
+/// never substitute the image-only generic MultiReference carrier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
+    let image = |shade| Image {
+        width: 1,
+        height: 1,
+        pixels: vec![shade, shade, shade],
+    };
+    let driving = vec![image(200)];
+    let driving_mask = vec![image(201)];
+
+    for count in [1usize, 2, 6] {
+        let pairs: Vec<_> = (0..count)
+            .map(|index| (image(index as u8), image(index as u8 + 32)))
+            .collect();
+        let conditioning = super::scail2::scail2_animate_conditioning(
+            pairs,
+            driving.clone(),
+            driving_mask.clone(),
+        )
+        .expect("1–6 reference/mask pairs must be valid");
+        assert_eq!(conditioning.len(), count * 2 + 1);
+        for index in 0..count {
+            match &conditioning[index * 2] {
+                Conditioning::Reference { image, strength } => {
+                    assert_eq!(
+                        image.pixels[0], index as u8,
+                        "reference {index} keeps its order"
+                    );
+                    assert_eq!(*strength, None);
+                }
+                other => panic!("entry {} must be Reference, got {other:?}", index * 2),
+            }
+            match &conditioning[index * 2 + 1] {
+                Conditioning::Mask { image } => assert_eq!(
+                    image.pixels[0],
+                    index as u8 + 32,
+                    "reference {index} must retain its own mask"
+                ),
+                other => panic!("entry {} must be Mask, got {other:?}", index * 2 + 1),
+            }
+        }
+        assert!(matches!(
+            conditioning.last(),
+            Some(Conditioning::ControlClip { .. })
+        ));
+        assert!(
+            !conditioning
+                .iter()
+                .any(|item| matches!(item, Conditioning::MultiReference { .. })),
+            "SCAIL-2 must never emit bare image-only MultiReference conditioning"
+        );
+    }
+
+    let empty =
+        super::scail2::scail2_animate_conditioning(vec![], driving.clone(), driving_mask.clone())
+            .expect_err("a missing reference/mask pair must fail before engine dispatch")
+            .to_string();
+    assert!(
+        empty.contains("at least one reference character"),
+        "got: {empty}"
+    );
+    let seven = super::scail2::scail2_animate_conditioning(
+        (0..7)
+            .map(|index| (image(index), image(index + 32)))
+            .collect(),
+        driving,
+        driving_mask,
+    )
+    .expect_err("a seventh pair must not be silently dropped")
+    .to_string();
+    assert!(
+        seven.contains("at most 6 reference characters"),
+        "got: {seven}"
+    );
+}
+
+/// Cancellation is checked at each reference boundary, so a user cancellation after one masked
+/// reference cannot continue into later character segmentation.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_multi_reference_segmentation_stops_between_references_on_cancel() {
+    let image = |shade| Image {
+        width: 1,
+        height: 1,
+        pixels: vec![shade, shade, shade],
+    };
+    let cancel = CancelFlag::new();
+    let mut seen = Vec::new();
+    let result = super::scail2::segment_scail2_references(
+        vec![image(1), image(2)],
+        &cancel,
+        |reference, _| {
+            seen.push(reference.pixels[0]);
+            cancel.cancel();
+            Ok(image(reference.pixels[0] + 32))
+        },
+    );
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(_))),
+        "got: {result:?}"
+    );
+    assert_eq!(
+        seen,
+        vec![1],
+        "the second reference must not begin after cancellation"
+    );
+}
+
+/// Loading every requested reference fails closed before segmentation if one asset has disappeared;
+/// a missing second character must not result in the first character being rendered by itself.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_missing_reference_asset_fails_before_masking() {
+    let data_dir = tempfile::tempdir().expect("data dir creates");
+    let project_dir = tempfile::tempdir().expect("project dir creates");
+    let error = crate::image_jobs::load_reference_image(
+        data_dir.path(),
+        "project-scail2",
+        "missing-second-character",
+        project_dir.path(),
+    )
+    .expect_err("a missing ordered reference asset must stop the job")
+    .to_string();
+    assert!(
+        error.contains("reference asset missing-second-character"),
+        "missing asset error must identify the rejected reference, got: {error}"
+    );
+}
+
+/// Both backend-specific resolvers must enter the same paired-reference helper. This source-level
+/// contract runs even in a lightweight build that does not link MLX or Candle.
+#[test]
+fn scail2_multi_reference_resolvers_stay_backend_parity_twins() {
+    const MLX: &str = include_str!("scail2.rs");
+    const CANDLE: &str = include_str!("candle.rs");
+    for (backend, source) in [("MLX", MLX), ("Candle", CANDLE)] {
+        assert!(
+            source.contains("segment_scail2_references(references, &flag"),
+            "{backend} must independently segment every ordered reference through the shared helper"
+        );
+        assert!(
+            source.contains("MAX_SCAIL2_REFERENCE_CHARACTERS"),
+            "{backend} must reject a seventh reference even for legacy/retry payloads"
+        );
+    }
 }
 
 /// A SCAIL-2 MLX snapshot dir if present: env override (`SCENEWORKS_MLX_SCAIL2_DIR`), then the
@@ -8387,8 +9471,8 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
     assert_eq!(wan_tier_subdir(root, &req), Some(dir));
 }
 
-/// Write the six files that make a SCAIL-2 tier subdir COMPLETE ([`scail2_tier_is_complete`]), so
-/// [`scail2_tier_subdir`] treats it as present.
+/// Write the six files plus the tier-matching config marker that make a SCAIL-2 tier subdir COMPLETE
+/// ([`scail2_tier_is_complete`]), so [`scail2_tier_subdir`] treats it as present.
 #[cfg(target_os = "macos")]
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
@@ -8396,6 +9480,17 @@ fn write_complete_scail2_tier(root: &Path, tier: &str) {
     for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
+    let config = match tier {
+        "bf16" => json!({}),
+        "q4" => json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        "q8" => json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+        _ => panic!("unsupported SCAIL-2 test tier {tier}"),
+    };
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
 }
 
 /// `mlxQuantize` selects the preferred SCAIL-2 tier, then falls back to the always-smaller present
@@ -11793,6 +12888,67 @@ fn advanced_numeric_helpers_parse_flf_keyframe_knobs() {
     assert_eq!(advanced::i32(&bare.advanced, "imageFrameIndex", 0), 0);
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ltx_i2v_strength_is_accepted_and_keyed_as_its_own_admission_axis() {
+    let defaulted = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+        "mode": "image_to_video"
+    }));
+    assert_eq!(ltx_i2v_conditioning_strength(&defaulted).unwrap(), 1.0);
+
+    let explicit = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+        "mode": "image_to_video", "advanced": { "imageConditioningStrength": 1.0 }
+    }));
+    assert_eq!(ltx_i2v_conditioning_strength(&explicit).unwrap(), 1.0);
+
+    // sc-20799: a previously-valid non-1.0 strength must still RUN. It is resolved, not refused.
+    for (value, expected) in [
+        (json!(0.8), 0.8_f32),
+        (json!("0.8"), 0.8_f32),
+        (json!(0.0), 0.0_f32),
+    ] {
+        let permissive = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "mode": "image_to_video", "advanced": { "imageConditioningStrength": value }
+        }));
+        assert_eq!(
+            ltx_i2v_conditioning_strength(&permissive).unwrap(),
+            expected
+        );
+    }
+
+    // What actually keeps the 1.0 receipt un-borrowable is the admission overlay, not a refusal:
+    // every distinct strength is a distinct key, so no two strengths share an evidence identity.
+    let overlay_for = |strength: f32| {
+        let mut input = VideoGenInput {
+            engine_id: "ltx_2_3",
+            ..VideoGenInput::default()
+        };
+        input.conditioning = vec![Conditioning::Reference {
+            image: gen_core::Image {
+                width: 512,
+                height: 512,
+                pixels: Vec::new(),
+            },
+            strength: Some(strength),
+        }];
+        video_admission_overlay(&input, "", None)
+            .unwrap()
+            .expect("LTX reference overlay")
+    };
+    let pinned = overlay_for(1.0);
+    let loosened = overlay_for(0.8);
+    let other = overlay_for(0.5);
+    assert_ne!(pinned, loosened);
+    assert_ne!(loosened, other);
+    assert_eq!(pinned, overlay_for(1.0));
+}
+
 /// `resolve_keyframe_conditioning` fails clearly when an FLF source/last-frame asset id is
 /// missing (the guards run before any project/image IO, so no fixture is needed).
 #[cfg(target_os = "macos")]
@@ -13105,7 +14261,8 @@ mod candle_video_label_tests {
         });
         let req = VideoRequest::from_payload(payload.as_object().expect("object"));
         assert_eq!(
-            resolve_candle_video_route(&req, &settings),
+            resolve_candle_video_route(&req, &settings)
+                .expect("route resolution must not fail for this fixture"),
             CandleVideoRoute::CandleVideo,
             "a t2v mochi job must route to the candle video engine, NOT the stub"
         );
@@ -13163,15 +14320,30 @@ mod candle_video_label_tests {
     }
 
     #[test]
-    fn candle_ltx_resolves_the_shared_q4_turnkey_tier_only_for_the_base_model() {
+    fn candle_ltx_source_resolver_prepares_exact_tiers_without_promoting_q8() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let q4 = temp.path().join("q4");
+        let snapshots = temp.path().join("snapshots");
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        let q4 = current.join("q4");
+        let q8 = current.join("q8");
         std::fs::create_dir_all(&q4).expect("q4");
+        std::fs::create_dir_all(&q8).expect("q8");
         std::fs::write(q4.join("transformer.safetensors"), "x").expect("transformer");
         std::fs::write(q4.join("quantize_config.json"), "{}").expect("quant config");
+        std::fs::write(q8.join("transformer.safetensors"), "x").expect("transformer");
+        std::fs::write(q8.join("quantize_config.json"), "{}").expect("quant config");
 
-        let (resolved, quant) = candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3")
-            .expect("base LTX q4 tier");
+        let q4_request = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 4 }
+        }));
+        let q8_request = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 8 }
+        }));
+        let default_request = request(json!({ "projectId": "p", "model": "ltx_2_3" }));
+
+        let (resolved, quant) =
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q4_request)
+                .expect("base LTX q4 tier");
         assert_eq!(resolved, q4);
         assert_eq!(
             quant, None,
@@ -13193,15 +14365,197 @@ mod candle_video_label_tests {
             spec.quantize.is_none(),
             "production LTX provider spec must load the pre-packed q4 tier with quantize=None"
         );
+        // This directly exercises reusable source plumbing below the product router. The core route
+        // remains the authority that withholds q8 until terminal evidence advances its capability.
+        let (resolved_q8, q8_quant) =
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q8_request)
+                .expect("base LTX q8 tier");
+        assert_eq!(resolved_q8, q8, "an explicit q8 request must select q8");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3_eros").is_none(),
+            q8_quant.is_none(),
+            "the pre-packed q8 tier must not request a second load-time quantization"
+        );
+        assert_eq!(
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &default_request,)
+                .map(|(dir, _)| dir),
+            Some(q4.clone()),
+            "the no-override default remains q4"
+        );
+        for invalid_tier in [
+            json!(0),
+            json!(5),
+            json!(7),
+            json!(9),
+            json!("bf16"),
+            json!("8.0"),
+            Value::Null,
+            json!(8.0),
+            json!({ "bits": 8 }),
+        ] {
+            let invalid = request(json!({
+                "projectId": "p", "model": "ltx_2_3",
+                "advanced": { "mlxQuantize": invalid_tier.clone() }
+            }));
+            assert!(
+                candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &invalid)
+                    .is_none(),
+                "unsupported LTX Candle tier {invalid_tier} must fail closed"
+            );
+        }
+        assert!(
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3_eros", &q4_request,)
+                .is_none(),
             "Eros stays on its dense standalone checkpoint"
         );
 
+        std::fs::remove_file(q8.join("quantize_config.json")).expect("tear q8 tier");
+        assert!(
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q8_request,)
+                .is_none(),
+            "an explicit q8 request must never silently select q4"
+        );
         std::fs::remove_file(q4.join("quantize_config.json")).expect("tear tier");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3").is_none(),
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q4_request,)
+                .is_none(),
             "a partial q4 tier is never selected"
+        );
+
+        let split = tempfile::tempdir().expect("split cache");
+        let snapshots = split.path().join("snapshots");
+        let prior = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        for (dir, tier) in [(&prior, "q4"), (&current, "q8")] {
+            let tier_dir = dir.join(tier);
+            std::fs::create_dir_all(&tier_dir).expect("tier dir");
+            std::fs::write(tier_dir.join("transformer.safetensors"), "x").expect("transformer");
+            std::fs::write(tier_dir.join("quantize_config.json"), "{}").expect("quant marker");
+        }
+        assert_eq!(
+            candle_ltx_tier_subdir(&prior, "ltx_2_3_distilled", "ltx_2_3", &q8_request)
+                .map(|(dir, _)| dir),
+            Some(current.join("q8")),
+            "an on-demand q8 tier in the current revision must beat q4 in the selected prior revision"
+        );
+
+        let unapproved = tempfile::tempdir().expect("unapproved cache");
+        let unapproved_snapshots = unapproved.path().join("snapshots");
+        let arbitrary = unapproved_snapshots.join("arbitrary-revision");
+        for tier in ["q4", "q8"] {
+            let tier_dir = arbitrary.join(tier);
+            std::fs::create_dir_all(&tier_dir).expect("arbitrary tier dir");
+            std::fs::write(tier_dir.join("transformer.safetensors"), "x")
+                .expect("arbitrary transformer");
+            std::fs::write(tier_dir.join("quantize_config.json"), "{}")
+                .expect("arbitrary quant marker");
+        }
+        for request in [&q4_request, &q8_request, &default_request] {
+            assert!(
+                candle_ltx_tier_subdir(&arbitrary, "ltx_2_3_distilled", "ltx_2_3", request,)
+                    .is_none(),
+                "a complete tier selected from an unapproved revision must not satisfy Candle LTX"
+            );
+        }
+    }
+
+    #[test]
+    fn candle_ltx_q8_fetch_is_on_demand_and_never_required_when_complete() {
+        fn block_on<F: std::future::Future>(future: F) -> F::Output {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(future)
+        }
+
+        let hub = tempfile::tempdir().expect("hub");
+        let repo_cache = hub.path().join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("repo slug")
+        ));
+        let snapshots = repo_cache.join("snapshots");
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        let prior = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+        for (snapshot, tier) in [(&current, "q4"), (&prior, "q8")] {
+            let dir = snapshot.join(tier);
+            std::fs::create_dir_all(&dir).expect("tier dir");
+            std::fs::write(dir.join("transformer.safetensors"), "x").expect("transformer");
+            std::fs::write(dir.join("quantize_config.json"), "{}").expect("quant marker");
+        }
+        std::fs::create_dir_all(repo_cache.join("refs")).expect("refs");
+        std::fs::write(repo_cache.join("refs/main"), LTX_BUNDLE_REVISION).expect("refs/main");
+        let data = tempfile::tempdir().expect("data");
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-candle-ltx-q8", "type": "video_generate", "status": "running",
+            "projectId": "p", "projectName": "P", "payload": { "model": "ltx_2_3" },
+            "result": {}, "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0, "stage": "queued", "message": "", "error": null, "etaSeconds": null,
+            "attempts": 1, "cancelRequested": false,
+            "createdAt": "2026-08-13T00:00:00Z", "updatedAt": "2026-08-13T00:00:00Z"
+        }))
+        .expect("job snapshot");
+        let q8 = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "advanced": { "mlxQuantize": 8 }
+        }));
+
+        let cached = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            cached.is_ok(),
+            "q8 cached only in the approved parent revision must skip the offline network: {cached:?}"
+        );
+
+        std::fs::remove_file(prior.join("q8/quantize_config.json")).expect("tear q8");
+        let arbitrary = snapshots.join("arbitrary-complete-revision").join("q8");
+        std::fs::create_dir_all(&arbitrary).expect("arbitrary q8");
+        std::fs::write(arbitrary.join("transformer.safetensors"), "x")
+            .expect("arbitrary transformer");
+        std::fs::write(arbitrary.join("quantize_config.json"), "{}")
+            .expect("arbitrary quant marker");
+        std::fs::write(repo_cache.join("refs/main"), "arbitrary-complete-revision")
+            .expect("mutable refs/main");
+        let missing = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            missing.is_err(),
+            "an arbitrary refs/main q8 must not suppress the fixed-revision q8/* fetch or load q4"
+        );
+
+        let current_q8 = current.join("q8");
+        std::fs::create_dir_all(&current_q8).expect("current q8");
+        std::fs::write(current_q8.join("transformer.safetensors"), "x")
+            .expect("current transformer");
+        std::fs::write(current_q8.join("quantize_config.json"), "{}")
+            .expect("current quant marker");
+        let current_cached = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            current_cached.is_ok(),
+            "q8 in the approved current revision must be accepted even when refs/main is arbitrary: \
+             {current_cached:?}"
         );
     }
 
@@ -17391,4 +18745,192 @@ fn a_plain_minimax_h3_lora_loads_without_changing_the_schedule() {
         "…and must still be LOADED — the plumbing is general, not turbo-only"
     );
     assert_eq!(raw["minimaxH3Turbo"], json!("off"));
+}
+
+// ---- Plan-backed video routing refusals (epic 20398, sc-20651) ----
+
+/// The MLX-lane twin of the candle refusals below (sc-20651 feature-end review minor).
+///
+/// Every arm of the macOS `resolve_video_route` ladder is matched off a BUILTIN engine model id, and
+/// a plan-backed imported entry carries none of them — so it reaches `VideoRoute::Stub`, whose
+/// handler calls `ensure_video_engine_weights` and, finding no engine family in the id either, used
+/// to pass straight through to `generate_stub_video`. The job then COMPLETED with a procedural
+/// clip at the requested geometry, which is indistinguishable from a real render until watched.
+/// There is no macOS video lane that loads a checkpoint plan, so the honest answer is a refusal —
+/// the same `[checkpoint-plan:no-video-lane]` verdict `plan_backed_wan_video_route` gives on candle.
+///
+/// The control at the end is what makes this an assertion about the PLAN and not about the model
+/// id: the identical request without `importPlan` still passes the gate and keeps its stub.
+///
+/// Failing mutation: delete the `checkpoint_plan_checkpoint_id` arm at the top of
+/// `wan::ensure_video_engine_weights` — the plan-backed request passes the gate and stubs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_backed_video_request_refuses_on_macos_instead_of_reaching_the_stub() {
+    let settings = crate::test_env::offline_settings();
+    let payload = |entry: Value| {
+        request(json!({
+            "projectId": "project-1",
+            "model": "imported_wan_2_2_abc123",
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "modelManifestEntry": entry
+        }))
+    };
+
+    let plan_backed = payload(json!({
+        "id": "imported_wan_2_2_abc123",
+        "family": "wan-video",
+        "importPlan": { "checkpointId": "ckpt_wan_abc123" }
+    }));
+    assert_eq!(
+        resolve_video_route(&plan_backed, &settings),
+        VideoRoute::Stub,
+        "fixture check: no macOS ladder arm claims a plan-backed entry — the Stub arm is exactly \
+         where this request lands, which is why the gate has to be the thing that refuses"
+    );
+    let message = match wan::ensure_video_engine_weights(&plan_backed, &settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        Ok(()) => panic!("a plan-backed entry must never pass the gate that guards stub output"),
+    };
+    assert!(
+        message.contains("[checkpoint-plan:no-video-lane]")
+            && message.contains("\"ckpt_wan_abc123\""),
+        "the refusal must carry the shared tag and name the checkpoint: {message}"
+    );
+
+    // Control: without the plan the same id keeps its pre-epic behaviour — through the gate, to the
+    // stub — so the refusal is keyed on the plan and nothing else.
+    let unplanned = payload(json!({
+        "id": "imported_wan_2_2_abc123",
+        "family": "wan-video"
+    }));
+    assert!(
+        wan::ensure_video_engine_weights(&unplanned, &settings).is_ok(),
+        "an entry with no plan must be untouched by this gate"
+    );
+}
+
+/// A `VideoRequest` for an imported plan-backed checkpoint: `family` + `importPlan.checkpointId` on
+/// the forwarded `modelManifestEntry`, no installed component paths.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn plan_backed_video_request(family: &str, mode: &str) -> VideoRequest {
+    request(json!({
+        "projectId": "project-1",
+        "model": "imported_wan_2_2_abc123",
+        "mode": mode,
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "id": "imported_wan_2_2_abc123",
+            "family": family,
+            "importPlan": { "checkpointId": "ckpt_wan_abc123" }
+        }
+    }))
+}
+
+/// The message every plan-backed router refusal must carry, asserted through the ROUTER accessor so
+/// a refusal that stops at a resolver and is swallowed on the way out still fails.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn plan_backed_router_refusal(request: &VideoRequest, settings: &Settings) -> String {
+    match resolve_candle_video_route_for_test(request, settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        Ok(()) => panic!("a plan-backed entry must never resolve to a renderable route here"),
+    }
+}
+
+/// **The video twin of `into_unclaimed_refusal`.** `resolve_candle_video_route`'s terminal arm is
+/// `CandleVideoRoute::Stub`, which COMPLETES the job with procedural video — and the
+/// `!backend_candle_enabled` early-out reached it before any plan-backed check existed, so an
+/// imported checkpoint on a candle-disabled worker SUCCEEDED with a moving gradient.
+///
+/// The control at the end is what makes this an assertion about the plan rather than about the
+/// setting: the identical request WITHOUT `importPlan` still resolves, so only the plan flips it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_plan_backed_video_request_refuses_instead_of_stubbing_when_candle_is_disabled() {
+    let settings = Settings {
+        backend_candle_enabled: false,
+        ..crate::test_env::offline_settings()
+    };
+    let message = plan_backed_router_refusal(
+        &plan_backed_video_request("wan-video", "text_to_video"),
+        &settings,
+    );
+    assert!(
+        message.contains("[checkpoint-plan:no-video-lane]")
+            && message.contains("\"ckpt_wan_abc123\"")
+            && message.contains("candle backend is disabled"),
+        "the refusal must name the checkpoint and the reason: {message}"
+    );
+
+    // Control: the same disabled worker still stubs a NON-plan-backed request, unchanged.
+    assert!(
+        resolve_candle_video_route_for_test(
+            &request(json!({
+                "projectId": "project-1",
+                "model": "wan_2_2",
+                "mode": "text_to_video",
+                "prompt": "a fox"
+            })),
+            &settings,
+        )
+        .is_ok(),
+        "the refusal must be keyed on the plan, not on the disabled backend"
+    );
+}
+
+/// The `replace_person` / `extend_clip` / `video_bridge` arms are evaluated BEFORE the ComfyUI Wan
+/// arm, so an imported checkpoint on those modes used to be routed into a builtin Wan-VACE /
+/// SCAIL-2 lane that loads SceneWorks' own weights and never reads the plan's bytes — a silent
+/// substitution, not a stub. It must refuse by name instead, and the refusal must say which mode
+/// the plan-backed lane actually serves.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_plan_backed_video_request_refuses_every_mode_the_plan_lane_does_not_serve() {
+    let settings = Settings {
+        backend_candle_enabled: true,
+        ..crate::test_env::offline_settings()
+    };
+    for mode in [
+        "replace_person",
+        "extend_clip",
+        "video_bridge",
+        "image_to_video",
+        "first_last_frame",
+        "animate_character",
+    ] {
+        let message =
+            plan_backed_router_refusal(&plan_backed_video_request("wan-video", mode), &settings);
+        assert!(
+            message.contains("[checkpoint-plan:no-video-lane]")
+                && message.contains("\"ckpt_wan_abc123\"")
+                && message.contains("text_to_video only")
+                && message.contains(mode),
+            "{mode} must refuse by name: {message}"
+        );
+    }
+}
+
+/// No candle video lane loads a checkpoint plan for any family but Wan, and the ladder's other
+/// engine arms are routed off the MODEL ID — which an imported checkpoint never matches — so a
+/// plan-backed entry of another family would land on `Stub`. Refuse, naming the family.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_plan_backed_video_request_of_a_family_with_no_video_lane_refuses_by_name() {
+    let settings = Settings {
+        backend_candle_enabled: true,
+        ..crate::test_env::offline_settings()
+    };
+    let message = plan_backed_router_refusal(
+        &plan_backed_video_request("ltx-video", "text_to_video"),
+        &settings,
+    );
+    assert!(
+        message.contains("[checkpoint-plan:no-video-lane]")
+            && message.contains("\"ckpt_wan_abc123\"")
+            && message.contains("\"ltx-video\""),
+        "the refusal must name the checkpoint and the family: {message}"
+    );
 }
