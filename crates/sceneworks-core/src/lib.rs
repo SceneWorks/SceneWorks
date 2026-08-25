@@ -25,6 +25,7 @@ pub mod jobs_store;
 pub mod jsonc;
 pub mod lora_family;
 pub mod lora_url;
+pub mod managed_checkpoint_variants;
 pub mod media_convert;
 pub mod memory_calibration;
 pub mod minimax_h3_turbo;

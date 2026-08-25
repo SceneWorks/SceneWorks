@@ -612,7 +612,8 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          endpoint — depends on `sceneworks-gen-core`. The registry is also cfg-gated to \
          macOS-or-candle: on the candle-off build `inference_runtime::media()` is EMPTY, so a \
          derived list would refuse every import there. And the registry binds at least six families \
-         against this list's three, so deriving would silently WIDEN what import accepts.",
+         against this list's four (`flux2`, `krea_2`, `mage-flow`, `sdxl`), so deriving would \
+         silently WIDEN what import accepts.",
     ),
     (
         "../sceneworks-core/src/checkpoint_inspector.rs",

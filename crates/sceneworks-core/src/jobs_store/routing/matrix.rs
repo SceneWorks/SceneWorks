@@ -762,6 +762,10 @@ fn imported_family_rows(
             "krea_2" => "transformer_file",
             "sdxl" => "fused_checkpoint",
             "mage-flow" => "transformer_directory",
+            // sc-11043 (epic 11037): the pinned FLUX.2 Klein NVFP4 artifact is a single
+            // transformer file, the same source shape Krea imports use — deliberately not the
+            // `comfy_ui_tree` shape the FLUX.2-dev import records.
+            "flux2" => "transformer_file",
             other => {
                 return Err(format!(
                     "unmapped imported probe source shape for {other:?}"
@@ -3981,14 +3985,42 @@ mod tests {
                 "{} must be proven through a novel imported id, not a builtin proxy",
                 row.family
             );
-            let (manifest_operations, evaluated_operations) = match row.family.as_str() {
-                "krea_2" => (
-                    &["edit_image", "text_to_image"][..],
-                    &["edit_image", "image_to_image", "text_to_image"][..],
-                ),
-                "mage-flow" | "sdxl" => (&["text_to_image"][..], &["text_to_image"][..]),
-                family => panic!("unreviewed supported import family {family}"),
-            };
+            // Per family: its literal defaults, its UI-derived operation set, and which backends
+            // actually serve it. The last pair is spelled out rather than derived so a silent
+            // capability LOSS still flips a tuple.
+            let (manifest_operations, evaluated_operations, mlx_serves, candle_serves) =
+                match row.family.as_str() {
+                    "krea_2" => (
+                        &["edit_image", "text_to_image"][..],
+                        &["edit_image", "image_to_image", "text_to_image"][..],
+                        true,
+                        true,
+                    ),
+                    "sdxl" => (&["text_to_image"][..], &["text_to_image"][..], true, true),
+                    // Candle's engine facts declare no `mage-flow` imported provider at all, so
+                    // its cells are legitimately false there and MLX-only — which is exactly what
+                    // a parity obligation records.
+                    "mage-flow" => (&["text_to_image"][..], &["text_to_image"][..], true, false),
+                    // FLUX.2 (sc-11043, epic 11037). The import GATE admits the Klein NVFP4
+                    // single file, but the provider row that serves it is engine DATA that
+                    // arrives with the inference pin carrying sc-21485's registration — the pin
+                    // in place today declares only `flux2` + `comfy_ui_tree`. So at this pin the
+                    // family is admitted and routes NOWHERE, on either backend, and the matrix
+                    // records exactly that rather than a capability nothing backs. MLX stays
+                    // false permanently: it has no consumer for packed E2M1 weights.
+                    //
+                    // The generator's own two-sided rule is what keeps this honest across the
+                    // bump — "declared and routable" or "undeclared and unroutable", never one
+                    // without the other — so when the row lands, the cells and this expectation
+                    // move together or the artifact fails to generate at all.
+                    "flux2" => (
+                        &["text_to_image"][..],
+                        &["text_to_image"][..],
+                        imported_transformer_file_route_registered("mlx", "flux2"),
+                        imported_transformer_file_route_registered("candle", "flux2"),
+                    ),
+                    family => panic!("unreviewed supported import family {family}"),
+                };
             assert_eq!(
                 row.manifest_operations, manifest_operations,
                 "imported {} literal defaults drifted",
@@ -3999,22 +4031,20 @@ mod tests {
                 "imported {} UI-derived operation set drifted",
                 row.family
             );
-            // Per-backend, not parity. Candle's engine facts declare no `mage-flow` imported
-            // provider at all, so its cells are legitimately false there and MLX-only — which is
-            // exactly what a parity obligation records. Spelled out per family so a silent
-            // capability LOSS still flips a tuple and fails.
-            let candle_serves = row.family != "mage-flow";
+            // Per-backend, not parity: the two native engines genuinely declare different imported
+            // coverage, and a family may be admitted by the import gate while no engine serves it
+            // yet.
             for cell in &row.operation_and_mode {
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(candle_serves)),
+                    (Some(mlx_serves), Some(candle_serves)),
                     "imported {}/{} must match the live per-backend family route",
                     row.family,
                     cell.capability
                 );
                 assert_eq!(
-                    cell.parity_obligation.is_none(),
-                    candle_serves,
+                    cell.parity_obligation.is_some(),
+                    mlx_serves && !candle_serves,
                     "imported {}/{} must carry a parity obligation exactly when MLX serves it alone",
                     row.family,
                     cell.capability
@@ -4050,12 +4080,23 @@ mod tests {
             assert!(row.guidance_method.is_empty());
             assert_eq!(
                 (row.preview.mlx, row.preview.candle),
-                (Some(true), Some(candle_serves)),
+                (Some(mlx_serves), Some(candle_serves)),
                 "imported {} preview must retain its production worker sink on every backend that \
                  serves the family",
                 row.family
             );
         }
+    }
+
+    /// Whether the live engine facts register a single-transformer-file imported provider for a
+    /// family on a backend.
+    ///
+    /// Read from the facts rather than hardcoded because for `flux2` (sc-11043) it is the one
+    /// expectation that legitimately MOVES with the inference pin: the row arrives with
+    /// sc-21485's registration. Everything else about the family stays asserted by value.
+    fn imported_transformer_file_route_registered(backend: &str, family: &str) -> bool {
+        super::super::catalog::imported_provider_routes(backend, family)
+            .any(|route| route.source == "transformer_file")
     }
 
     #[test]
