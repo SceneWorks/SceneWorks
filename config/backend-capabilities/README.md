@@ -45,7 +45,8 @@ runtime facts now prove all six of its cells on both backends. It also records f
 records for the 13 Eros cells withdrawn from Candle by SC-18902; the one residual
 SC-20756 enabled Ref2VA operation, all three conditioning shapes, all three precision tiers and
 LoRA. SC-20757 now covers both MiniMax-H3 Candle LoKr cells: the H3-specific fabricated LoKr
-fixture on actual Candle CUDA applied/adapted exactly one target, matched zero unmatched targets,
+fixture on the committed tiny H3 DiT, exercised on actual Candle CUDA, applied/adapted exactly one
+target, matched zero unmatched targets,
 and measured residual rel-max `3.737437e-7 < 2e-5` in two passes. The receipt records
 `realAdapter=false` and `realRender=false`; it is not evidence of a published H3 LoKr artifact or
 a real-weight render.
