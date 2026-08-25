@@ -707,6 +707,20 @@ impl JobsStore {
         // not error — it would silently write `j_type` into `source_codec`. That is why
         // `purge_terminal_jobs_completed_before` names every column on both sides instead of
         // relying on `*`; keep it that way.
+        //
+        // `image_count` is here for the same reason and was MISSED (sc-11045 review): it was
+        // back-filled onto `generation_metrics` (epic 10402) but never onto the history mirror, so
+        // a database materialized before epic 10402 has a history table without it — and both
+        // pieces of named SQL below reference `image_count` on that table by name. Every retention
+        // sweep and every Generation Stats read on such an install fails with "no such column"
+        // rather than degrading. Naming the columns is what makes the mapping order-independent; it
+        // is also what makes a MISSING column a hard error instead of a silent shift.
+        ensure_column(
+            &transaction,
+            "generation_metrics_history",
+            "image_count",
+            "integer",
+        )?;
         ensure_column(
             &transaction,
             "generation_metrics_history",

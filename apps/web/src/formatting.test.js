@@ -99,4 +99,26 @@ describe("source codec vs execution representation", () => {
     expect(weightFactsLabel({ quantLabel: "q4" })).toBe("—");
     expect(weightFactsLabel(undefined)).toBe("—");
   });
+
+  // sc-11045: a run that executed PART of the codec packed and part dense is neither "native
+  // (packed)" nor "dense fallback". The pinned engine's shipping policy for this leg is mixed, so
+  // rendering the any-collapse said "native (packed)" about a load whose majority was dense.
+  //
+  // Failing mutation: restore the any-collapse in
+  // `CheckpointWeightFactsV1::representation_label` (Rust) — the metrics row then carries
+  // "native-packed" and the first expectation below is red.
+  it("renders a mixed execution with its counts rather than collapsing to either arm", () => {
+    expect(
+      weightFactsLabel({ sourceCodec: "nvfp4-v1", executionRepresentation: "mixed:68/95" }),
+    ).toBe("nvfp4-v1 · mixed (68 packed / 95 dense)");
+    expect(executionRepresentationLabel("mixed:68/95")).toBe("mixed (68 packed / 95 dense)");
+    expect(executionRepresentationLabel("mixed:68/95")).not.toMatch(/native/i);
+    // A bare or unparseable mix still says "mixed" rather than guessing an arm.
+    expect(executionRepresentationLabel("mixed")).toBe("mixed");
+    expect(executionRepresentationLabel("mixed:x/y")).toBe("mixed");
+    // The pure arms and the unmeasured arm are untouched.
+    expect(executionRepresentationLabel("native-packed")).toBe("native (packed)");
+    expect(executionRepresentationLabel("dense-fallback")).toBe("dense fallback");
+    expect(executionRepresentationLabel(undefined)).toBe("not measured");
+  });
 });

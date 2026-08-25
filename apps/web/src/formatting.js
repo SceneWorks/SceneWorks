@@ -95,9 +95,26 @@ const EXECUTION_REPRESENTATION_LABELS = {
   "dense-fallback": "dense fallback",
 };
 
+// A load that ran PART of a codec packed and part dense carries `mixed:<packed>/<dense>` instead of
+// either pure label (sc-11045). "native (packed)" for such a run is untrue about the dense majority
+// whenever the engine's shipping policy is mixed — which the pinned engine documents for this leg —
+// so the mix is rendered with its counts rather than collapsed to whichever arm happens to be
+// non-empty. A bare `mixed` with no counts still renders honestly.
+const MIXED_PREFIX = "mixed";
+
 export function executionRepresentationLabel(representation) {
   const key = representation && String(representation).trim();
   if (!key) return "not measured";
+  if (key === MIXED_PREFIX) return "mixed";
+  if (key.startsWith(`${MIXED_PREFIX}:`)) {
+    const [packed, dense] = key.slice(MIXED_PREFIX.length + 1).split("/");
+    const packedCount = Number(packed);
+    const denseCount = Number(dense);
+    if (Number.isFinite(packedCount) && Number.isFinite(denseCount)) {
+      return `mixed (${packedCount} packed / ${denseCount} dense)`;
+    }
+    return "mixed";
+  }
   return EXECUTION_REPRESENTATION_LABELS[key] ?? key;
 }
 

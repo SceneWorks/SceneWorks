@@ -786,18 +786,44 @@ fn generation_metrics_separate_source_codec_from_execution_representation() {
 /// holding `j_status`, and `j_type` holding whatever landed there — unparseable, so Generation
 /// Stats breaks for every install that predates this change. Naming both branches' columns is what
 /// this pins.
+///
+/// Driven at TWO ages of database (sc-11045 review). The older one predates `image_count` as well:
+/// that column was back-filled onto `generation_metrics` by epic 10402 but never onto the history
+/// mirror, while both pieces of named SQL reference it on that table BY NAME — so on an install
+/// old enough to have a history table without it, every retention sweep and every Generation Stats
+/// read failed outright with "no such column". A test that always seeds `image_count` cannot see
+/// that; this one seeds a schema without it.
 #[test]
 fn generation_metrics_history_survives_a_pre_migration_schema() {
-    let db = temp_db("gen-metrics-upgrade");
+    for (label, with_image_count) in [
+        ("gen-metrics-upgrade", true),
+        ("gen-metrics-upgrade-pre-image-count", false),
+    ] {
+        generation_metrics_history_upgrade_case(label, with_image_count);
+    }
+}
+
+/// One age of pre-migration database. `with_image_count: false` is the epic-10402-era shape.
+///
+/// Failing mutation (run): delete the `ensure_column(…, "generation_metrics_history",
+/// "image_count", …)` call in `initialize`. The second case then fails on the retention sweep with
+/// `no such column: image_count`.
+fn generation_metrics_history_upgrade_case(label: &str, with_image_count: bool) {
+    let db = temp_db(label);
     let path = db.path();
 
     // Build the schema as it shipped BEFORE sc-21484: `generation_metrics` without the two
     // columns, and a history mirror materialized from that older shape. Written by hand rather
     // than by an older `initialize()` because the point is the physical column ORDER, and only a
     // literal `create table` fixes it.
+    let image_count_column = if with_image_count {
+        "image_count integer,"
+    } else {
+        ""
+    };
     let connection = Connection::open(&path).expect("db opens");
     connection
-        .execute_batch(
+        .execute_batch(&format!(
             "
             create table generation_metrics (
               job_id text primary key,
@@ -808,7 +834,7 @@ fn generation_metrics_history_survives_a_pre_migration_schema() {
               scheduler text,
               scheduler_shift real,
               steps integer,
-              image_count integer,
+              {image_count_column}
               guidance_scale real,
               true_cfg_scale real,
               guidance_method text,
@@ -831,8 +857,8 @@ fn generation_metrics_history_survives_a_pre_migration_schema() {
             create table generation_metrics_history as
               select m.*, 'x' as j_type, 'x' as j_status, 'x' as j_project_id, 'x' as j_created_at
                 from generation_metrics m where 0;
-            ",
-        )
+            "
+        ))
         .expect("pre-migration schema seeds");
     drop(connection);
 
@@ -862,6 +888,14 @@ fn generation_metrics_history_survives_a_pre_migration_schema() {
         "an upgraded history mirror must have the new columns appended after the identity \
          columns, or this test proves nothing: {columns:?}"
     );
+    // The older shape's `image_count` is back-filled too, and it lands in the appended block — the
+    // exact position the named SQL is indifferent to and a positional one would not be.
+    if !with_image_count {
+        assert!(
+            index("image_count") > index("j_created_at"),
+            "{label}: an epic-10402-era mirror gets image_count appended: {columns:?}"
+        );
+    }
 
     connection
         .execute(
@@ -883,6 +917,7 @@ fn generation_metrics_history_survives_a_pre_migration_schema() {
                 quant_label: Some("nvfp4".to_owned()),
                 source_codec: Some("nvfp4-v1".to_owned()),
                 execution_representation: Some("dense-fallback".to_owned()),
+                image_count: Some(3),
                 total_ms: Some(4321),
                 ..Default::default()
             },
@@ -916,6 +951,11 @@ fn generation_metrics_history_survives_a_pre_migration_schema() {
     assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
     assert_eq!(row.metrics.quant_label.as_deref(), Some("nvfp4"));
     assert_eq!(row.metrics.total_ms, Some(4321));
+    assert_eq!(
+        row.metrics.image_count,
+        Some(3),
+        "{label}: the back-filled image_count carries through the sweep and the union"
+    );
 
     // And the type filter — which reads `stats.j_type` — still finds it.
     assert_eq!(
