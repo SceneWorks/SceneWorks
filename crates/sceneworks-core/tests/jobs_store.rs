@@ -773,6 +773,160 @@ fn generation_metrics_separate_source_codec_from_execution_representation() {
     assert_eq!(row.metrics.total_ms, Some(1234));
 }
 
+/// The same separation, on a database that EXISTED before the two columns did — the only shape in
+/// which the physical column order of `generation_metrics_history` differs from the order the
+/// history query produces (sc-21484 review).
+///
+/// The fresh-database test above cannot see this. `create table … as select` gives a fresh mirror
+/// the same column order as `generation_metrics`, so a positional `select *` in
+/// `list_generation_metrics` is accidentally correct there. On an upgraded database `ensure_column`
+/// APPENDS `source_codec` and `execution_representation` after the `j_*` identity columns, while
+/// the query's left branch produces them before `j_type`. Same arity, so nothing errors: every
+/// history row would read back with `source_codec` holding `j_type`, `execution_representation`
+/// holding `j_status`, and `j_type` holding whatever landed there — unparseable, so Generation
+/// Stats breaks for every install that predates this change. Naming both branches' columns is what
+/// this pins.
+#[test]
+fn generation_metrics_history_survives_a_pre_migration_schema() {
+    let db = temp_db("gen-metrics-upgrade");
+    let path = db.path();
+
+    // Build the schema as it shipped BEFORE sc-21484: `generation_metrics` without the two
+    // columns, and a history mirror materialized from that older shape. Written by hand rather
+    // than by an older `initialize()` because the point is the physical column ORDER, and only a
+    // literal `create table` fixes it.
+    let connection = Connection::open(&path).expect("db opens");
+    connection
+        .execute_batch(
+            "
+            create table generation_metrics (
+              job_id text primary key,
+              model text,
+              quant_label text,
+              quant_bits integer,
+              sampler text,
+              scheduler text,
+              scheduler_shift real,
+              steps integer,
+              image_count integer,
+              guidance_scale real,
+              true_cfg_scale real,
+              guidance_method text,
+              use_pid integer,
+              pid_target text,
+              width integer,
+              height integer,
+              seed integer,
+              loras_json text,
+              load_ms integer,
+              sample_ms integer,
+              decode_ms integer,
+              total_ms integer,
+              peak_memory_bytes integer,
+              peak_memory_pct real,
+              peak_gpu_load_pct real,
+              backend text,
+              updated_at text not null
+            );
+            create table generation_metrics_history as
+              select m.*, 'x' as j_type, 'x' as j_status, 'x' as j_project_id, 'x' as j_created_at
+                from generation_metrics m where 0;
+            ",
+        )
+        .expect("pre-migration schema seeds");
+    drop(connection);
+
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store upgrades in place");
+
+    // The upgrade must have put the two new columns AFTER the `j_*` ones — otherwise this test is
+    // not exercising the shape it claims to.
+    let connection = Connection::open(&path).expect("db reopens");
+    let statement = connection
+        .prepare("select * from generation_metrics_history")
+        .expect("history is queryable");
+    let columns: Vec<String> = statement
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    drop(statement);
+    let index = |name: &str| {
+        columns
+            .iter()
+            .position(|column| column == name)
+            .unwrap_or_else(|| panic!("history is missing {name}: {columns:?}"))
+    };
+    assert!(
+        index("source_codec") > index("j_created_at"),
+        "an upgraded history mirror must have the new columns appended after the identity \
+         columns, or this test proves nothing: {columns:?}"
+    );
+
+    connection
+        .execute(
+            "insert into jobs (
+               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+               attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values ('upgraded-run','image_generate','completed','{}','{}','auto',1,'completed',
+                       '',1,0,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("terminal job seeds");
+    drop(connection);
+
+    store
+        .upsert_generation_metrics(
+            "upgraded-run",
+            &GenerationMetrics {
+                model: Some("kreamania-v7".to_owned()),
+                quant_label: Some("nvfp4".to_owned()),
+                source_codec: Some("nvfp4-v1".to_owned()),
+                execution_representation: Some("dense-fallback".to_owned()),
+                total_ms: Some(4321),
+                ..Default::default()
+            },
+        )
+        .expect("metrics upsert");
+    store
+        .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+        .expect("retention sweep");
+
+    let historical = store
+        .list_generation_metrics(None, None, None, 100)
+        .expect("history queryable through the union");
+    let row = historical
+        .iter()
+        .find(|row| row.job_id == "upgraded-run")
+        .expect("the purged run survives in Generation Stats");
+    assert_eq!(
+        row.metrics.source_codec.as_deref(),
+        Some("nvfp4-v1"),
+        "a positional union reads j_type here instead of the codec"
+    );
+    assert_eq!(
+        row.metrics.execution_representation.as_deref(),
+        Some("dense-fallback")
+    );
+    assert_eq!(
+        row.job_type,
+        JobType::ImageGenerate,
+        "a positional union shifts j_type off the end and it stops parsing"
+    );
+    assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
+    assert_eq!(row.metrics.quant_label.as_deref(), Some("nvfp4"));
+    assert_eq!(row.metrics.total_ms, Some(4321));
+
+    // And the type filter — which reads `stats.j_type` — still finds it.
+    assert_eq!(
+        store
+            .list_generation_metrics(Some("image_generate"), None, None, 100)
+            .expect("filtered list")
+            .len(),
+        1
+    );
+}
+
 /// A historical row records neither fact, and absence must stay absence — an unmeasured run is not
 /// a dense run (sc-21484).
 #[test]

@@ -1284,12 +1284,35 @@ impl JobsStore {
             bindings.push(Box::new(quant_label.to_owned()));
         }
         let mut sql = String::from(
+            // Both `union all` branches NAME every column, in one order, rather than
+            // `select m.*, j.…` / `select *` (sc-21484). `union all` matches its branches
+            // POSITIONALLY and takes the result names from the first branch, so an unnamed
+            // right branch is only correct while the two tables' physical column order
+            // agrees. It does not on an upgraded database: `generation_metrics_history` was
+            // materialized before `source_codec` / `execution_representation` existed, so
+            // `ensure_column` appends them AFTER the `j_*` identity columns, while the left
+            // branch produces them before. Same arity, so nothing errors — history rows
+            // would just read back with `source_codec` holding `j_type` and every later
+            // value shifted, breaking Generation Stats on every existing install.
             "select stats.* from (
-               select m.*, j.type as j_type, j.status as j_status,
+               select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
+                      m.execution_representation, m.sampler, m.scheduler, m.scheduler_shift,
+                      m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
+                      m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
+                      m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
+                      m.peak_memory_bytes, m.peak_memory_pct, m.peak_gpu_load_pct, m.backend,
+                      m.updated_at, j.type as j_type, j.status as j_status,
                       j.project_id as j_project_id, j.created_at as j_created_at
                  from generation_metrics m join jobs j on j.id = m.job_id
                union all
-               select * from generation_metrics_history
+               select job_id, model, quant_label, quant_bits, source_codec,
+                      execution_representation, sampler, scheduler, scheduler_shift,
+                      steps, image_count, guidance_scale, true_cfg_scale,
+                      guidance_method, use_pid, pid_target, width, height, seed,
+                      loras_json, load_ms, sample_ms, decode_ms, total_ms,
+                      peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
+                      updated_at, j_type, j_status, j_project_id, j_created_at
+                 from generation_metrics_history
              ) stats",
         );
         if !conditions.is_empty() {

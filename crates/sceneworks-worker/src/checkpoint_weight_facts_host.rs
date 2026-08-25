@@ -38,7 +38,6 @@
 
 use std::path::Path;
 
-use sceneworks_core::base_weights::QuantFormat;
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 use sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID;
 use sceneworks_core::checkpoint_weight_facts::{
@@ -97,19 +96,6 @@ pub(crate) fn materialization_from_runtime() -> MaterializationFact {
     }
 }
 
-/// The source codec an imported model-manifest entry declares, from the header classification the
-/// import gate persisted as `importQuantFormat`.
-///
-/// Returns `None` when the entry carries no classification (a builtin, or an import that predates
-/// the stamp), when the string is not one this build knows, or when the classification has no
-/// proved engine codec ([`QuantFormat::source_codec_id`]). A caller that gets `None` omits the
-/// source-codec fact; it must never substitute the requested tier, which is a different vocabulary
-/// and a different question.
-pub(crate) fn manifest_entry_source_codec(entry: &Map<String, Value>) -> Option<&'static str> {
-    QuantFormat::from_label(entry.get("importQuantFormat").and_then(Value::as_str)?)?
-        .source_codec_id()
-}
-
 /// The host-independent binding token for a resolved checkpoint file, matching the engine's
 /// `SourceBinding::stable_token` rendering. `None` when the file cannot be stat'd — a token is an
 /// identity claim and an unreadable file supports none.
@@ -133,7 +119,11 @@ pub(crate) fn imported_checkpoint_facts(
     checkpoint_path: Option<&Path>,
     materialization: MaterializationFact,
 ) -> Option<CheckpointWeightFactsV1> {
-    let codec_id = manifest_entry_source_codec(entry)?;
+    // The SAME resolver admission gates on (`catalog::imported_entry_source_codec`), never a second
+    // local copy of the rule. A worker-side duplicate is the sc-13542 resolver-drift class: the two
+    // could disagree on an entry — a case difference is enough — and the run would route native on
+    // admission's answer while the receipt and telemetry carried no source codec at all.
+    let codec_id = sceneworks_core::jobs_store::imported_entry_source_codec(entry)?;
     CheckpointWeightFactsV1::try_new(
         checkpoint_path.and_then(source_binding_for),
         host_native_execution_capability(),
@@ -247,27 +237,74 @@ mod tests {
         entry
     }
 
+    /// The facts producer resolves the source codec through the SAME helper admission gates on,
+    /// so the two cannot answer differently for one entry.
+    ///
+    /// The case rows are the witness: the shared resolver trims and lowercases, so `"NVFP4"` and
+    /// `" NVFP4 "` are `nvfp4-v1` here exactly as they are at admission. A worker-local
+    /// exact-match copy answered `None` for both while admission routed native — the drift this
+    /// asserts against (sc-13542 class). A facts object is built iff a codec resolves, so the
+    /// `Some`/`None` split below is also the presence/absence of the whole fact set.
     #[test]
     fn the_source_codec_comes_from_the_verified_classification_not_the_tier() {
+        let codec = |quant: Option<&str>| {
+            imported_checkpoint_facts(
+                &entry(quant),
+                None,
+                MaterializationFact::Unavailable {
+                    reason: MaterializationUnavailable::NoRuntimeReceipt,
+                },
+            )
+            .map(|facts| facts.source()[0].codec_id.clone())
+        };
+        assert_eq!(codec(Some("nvfp4")).as_deref(), Some(NVFP4_CODEC_ID));
         assert_eq!(
-            manifest_entry_source_codec(&entry(Some("nvfp4"))),
-            Some(NVFP4_CODEC_ID)
-        );
-        assert_eq!(
-            manifest_entry_source_codec(&entry(Some("int8_tensorwise_per_row"))),
+            codec(Some("int8_tensorwise_per_row")).as_deref(),
             Some("int8-per-row-v1")
         );
-        assert_eq!(
-            manifest_entry_source_codec(&entry(Some("bf16"))),
-            Some("dense-bf16-v1")
-        );
-        // No stamp, an unknown stamp, a TIER spelling, and a classification with no proved codec
-        // all yield nothing rather than a guess.
-        assert_eq!(manifest_entry_source_codec(&entry(None)), None);
-        assert_eq!(manifest_entry_source_codec(&entry(Some("q4"))), None);
-        assert_eq!(manifest_entry_source_codec(&entry(Some("NVFP4"))), None);
-        assert_eq!(manifest_entry_source_codec(&entry(Some("nvfp4-v1"))), None);
-        assert_eq!(manifest_entry_source_codec(&entry(Some("fp8_e4m3"))), None);
+        assert_eq!(codec(Some("bf16")).as_deref(), Some("dense-bf16-v1"));
+        // Case and surrounding whitespace are normalized, matching admission exactly.
+        assert_eq!(codec(Some("NVFP4")).as_deref(), Some(NVFP4_CODEC_ID));
+        assert_eq!(codec(Some(" NVFP4 ")).as_deref(), Some(NVFP4_CODEC_ID));
+        // No stamp, an unknown stamp, a TIER spelling, a CODEC spelling, and a classification with
+        // no proved codec all yield nothing rather than a guess.
+        assert_eq!(codec(None), None);
+        assert_eq!(codec(Some("q4")), None);
+        assert_eq!(codec(Some("nvfp4-v1")), None);
+        assert_eq!(codec(Some("fp8_e4m3")), None);
+    }
+
+    /// Pins the identity directly, entry by entry: whatever admission resolves is what the facts
+    /// producer stamps, including for the spellings that only a normalizing resolver accepts.
+    #[test]
+    fn the_facts_producer_and_admission_read_one_resolver() {
+        for quant in [
+            None,
+            Some("nvfp4"),
+            Some("NVFP4"),
+            Some(" NVFP4 "),
+            Some("bf16"),
+            Some("int8_tensorwise_per_row"),
+            Some("q4"),
+            Some("fp8_e4m3"),
+            Some("nvfp4-v1"),
+        ] {
+            let entry = entry(quant);
+            let admission = sceneworks_core::jobs_store::imported_entry_source_codec(&entry);
+            let stamped = imported_checkpoint_facts(
+                &entry,
+                None,
+                MaterializationFact::Unavailable {
+                    reason: MaterializationUnavailable::NoRuntimeReceipt,
+                },
+            )
+            .map(|facts| facts.source()[0].codec_id.clone());
+            assert_eq!(
+                stamped.as_deref(),
+                admission,
+                "facts producer and admission disagree on {quant:?}"
+            );
+        }
     }
 
     /// The `sm_120` floor this module renders is the same constant the tier picker gates on, and it

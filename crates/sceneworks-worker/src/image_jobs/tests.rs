@@ -2966,7 +2966,7 @@ fn imported_krea_records_the_sampler_it_explicitly_executes() {
         "model": "kreamania_v4_int8",
         "advanced": { "sampler": "not-the-runtime-sampler" }
     }));
-    let raw = krea_imported_raw_settings(&req, 8, false, 0);
+    let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
     assert_eq!(raw.get("resolvedSampler"), Some(&json!("euler")));
 }
 

@@ -199,11 +199,35 @@ impl fmt::Display for ExecutionRepresentation {
 /// rests entirely on this being a rendering of a probe rather than an assertion by a consumer who
 /// would like the answer to be yes. Tests may construct the host they are simulating; nothing else
 /// should.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// # Deserialization revalidates
+///
+/// The `Deserialize` impl is routed through [`Self::new`] rather than derived onto the field
+/// (sc-21484 review). A derived impl would accept any string set, so a persisted receipt carrying
+/// a *tier* spelling — `"nvfp4"`, the request vocabulary — would round-trip through the asset
+/// receipt and back out as a native-execution claim that [`Self::new`] refuses to build. The
+/// guarantee has to hold on the way in as well as the way out or it is only a construction-time
+/// convention.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeExecutionCapabilityFact {
     /// The codec ids this host executes in their stored packing, sorted and de-duplicated.
     native_codec_ids: BTreeSet<String>,
+}
+
+impl<'de> Deserialize<'de> for NativeExecutionCapabilityFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            #[serde(default)]
+            native_codec_ids: BTreeSet<String>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.native_codec_ids).map_err(serde::de::Error::custom)
+    }
 }
 
 impl NativeExecutionCapabilityFact {
@@ -412,6 +436,11 @@ pub enum CheckpointWeightFactsError {
         codec_id: String,
         tensor_count: usize,
     },
+    /// The payload declares a `schemaVersion` this build cannot read. A future version may add
+    /// fields whose absence changes what the rest of the payload MEANS, so decoding it as v1 and
+    /// dropping them would produce a confidently-wrong fact set — exactly the class this module
+    /// exists to make unrepresentable. Refuse instead (sc-21484 review).
+    UnsupportedSchemaVersion { version: u32 },
 }
 
 impl fmt::Display for CheckpointWeightFactsError {
@@ -457,6 +486,11 @@ impl fmt::Display for CheckpointWeightFactsError {
                  non-native host runs the declared dense fallback and its receipt must say so",
                 ExecutionRepresentation::NativePacked
             ),
+            Self::UnsupportedSchemaVersion { version } => write!(
+                f,
+                "checkpoint weight facts: payload declares schemaVersion {version}; this build \
+                 reads {CHECKPOINT_WEIGHT_FACTS_VERSION}"
+            ),
         }
     }
 }
@@ -482,14 +516,42 @@ pub struct CheckpointWeightFactsV1 {
 
 /// The wire form, used only as the `Deserialize` staging shape so decoding runs the same validation
 /// `try_new` does.
+///
+/// `schema_version` is carried explicitly rather than ignored (sc-21484 review). The serialized
+/// form has always emitted `schemaVersion`, but a staging struct without the field silently
+/// DROPPED it, so a v2 payload decoded as a v1 fact set — a future revision's added fields would
+/// vanish while the object still claimed to be a complete, validated receipt. A payload that
+/// predates the field (or omits it) is v1 by [`Default`]; a payload from a newer writer is
+/// refused.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CheckpointWeightFactsWire {
+    #[serde(default = "default_schema_version")]
+    schema_version: u32,
     #[serde(default)]
     source_binding: Option<SourceBindingFact>,
     capability: NativeExecutionCapabilityFact,
     source: Vec<SourceCodecFact>,
     materialization: MaterializationFact,
+}
+
+/// An absent `schemaVersion` is v1 — the only version that has ever been written.
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl Default for CheckpointWeightFactsWire {
+    fn default() -> Self {
+        Self {
+            schema_version: default_schema_version(),
+            source_binding: None,
+            capability: NativeExecutionCapabilityFact::dense_only(),
+            source: Vec::new(),
+            materialization: MaterializationFact::Unavailable {
+                reason: MaterializationUnavailable::NoRuntimeReceipt,
+            },
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for CheckpointWeightFactsV1 {
@@ -498,6 +560,13 @@ impl<'de> Deserialize<'de> for CheckpointWeightFactsV1 {
         D: serde::Deserializer<'de>,
     {
         let wire = CheckpointWeightFactsWire::deserialize(deserializer)?;
+        if wire.schema_version == 0 || wire.schema_version > CHECKPOINT_WEIGHT_FACTS_VERSION {
+            return Err(serde::de::Error::custom(
+                CheckpointWeightFactsError::UnsupportedSchemaVersion {
+                    version: wire.schema_version,
+                },
+            ));
+        }
         Self::try_new(
             wire.source_binding,
             wire.capability,
@@ -1113,5 +1182,93 @@ mod tests {
             reported(vec![row(ExecutionRepresentation::NativePacked, 0, 0)]),
         )
         .expect("an empty native row claims nothing");
+    }
+
+    /// The wire form carries `schemaVersion` rather than dropping it, so a payload from a future
+    /// writer is refused instead of quietly decoding as v1 with its added fields discarded.
+    #[test]
+    fn a_future_schema_version_is_refused_and_an_absent_one_is_v1() {
+        let facts = CheckpointWeightFactsV1::declared_source(
+            None,
+            NativeExecutionCapabilityFact::dense_only(),
+            NVFP4_CODEC_ID,
+            MaterializationUnavailable::NoRuntimeReceipt,
+        )
+        .expect("a declared source with no receipt is valid");
+        let json = serde_json::to_string(&facts).expect("serializes");
+        assert!(
+            json.contains("\"schemaVersion\":1"),
+            "the version must be on the wire: {json}"
+        );
+        // Round-trip is unchanged: the version survives instead of being dropped and re-stamped.
+        let decoded: CheckpointWeightFactsV1 = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(decoded, facts);
+        assert_eq!(decoded.schema_version(), CHECKPOINT_WEIGHT_FACTS_VERSION);
+
+        // A payload predating the field decodes as v1 — the only version ever written.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("schemaVersion");
+        let without: CheckpointWeightFactsV1 =
+            serde_json::from_value(value.clone()).expect("an absent version defaults to v1");
+        assert_eq!(without.schema_version(), 1);
+
+        // A newer writer's payload is refused rather than decoded as v1.
+        for version in [
+            serde_json::json!(CHECKPOINT_WEIGHT_FACTS_VERSION + 1),
+            serde_json::json!(99),
+            serde_json::json!(0),
+        ] {
+            let mut future = value.clone();
+            future
+                .as_object_mut()
+                .expect("object")
+                .insert("schemaVersion".to_owned(), version.clone());
+            let error = serde_json::from_value::<CheckpointWeightFactsV1>(future)
+                .expect_err("an unreadable schemaVersion is refused");
+            assert!(
+                error.to_string().contains("schemaVersion"),
+                "unexpected error for {version}: {error}"
+            );
+        }
+    }
+
+    /// `NativeExecutionCapabilityFact::new` refuses a request-tier spelling; deserialization must
+    /// refuse it too, or a persisted receipt round-trips a capability the constructor forbids.
+    #[test]
+    fn a_persisted_tier_spelling_is_refused_by_the_capability_deserializer() {
+        let error = serde_json::from_str::<NativeExecutionCapabilityFact>(
+            r#"{"nativeCodecIds":["nvfp4"]}"#,
+        )
+        .expect_err("`nvfp4` is a request tier, not a codec id");
+        assert!(
+            error.to_string().contains("nvfp4"),
+            "unexpected error: {error}"
+        );
+        // The codec spelling still decodes, and an absent/empty set is the dense-only host.
+        let ok = serde_json::from_str::<NativeExecutionCapabilityFact>(
+            r#"{"nativeCodecIds":["nvfp4-v1"]}"#,
+        )
+        .expect("the codec spelling is accepted");
+        assert!(ok.executes_natively(NVFP4_CODEC_ID));
+        assert!(serde_json::from_str::<NativeExecutionCapabilityFact>("{}")
+            .expect("an absent set decodes")
+            .is_dense_only());
+
+        // And the whole fact set inherits the refusal, so a tampered receipt cannot smuggle one in.
+        let facts = CheckpointWeightFactsV1::declared_source(
+            None,
+            sm_120(),
+            NVFP4_CODEC_ID,
+            MaterializationUnavailable::NoRuntimeReceipt,
+        )
+        .expect("valid");
+        let tampered = serde_json::to_string(&facts)
+            .expect("serializes")
+            .replace("\"nvfp4-v1\"]", "\"nvfp4\"]");
+        serde_json::from_str::<CheckpointWeightFactsV1>(&tampered)
+            .expect_err("a tier spelling in the capability is refused on deserialize");
     }
 }
