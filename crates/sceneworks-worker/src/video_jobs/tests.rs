@@ -15917,13 +15917,12 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
 
 /// The `VideoRoute::MiniMaxH3` tail arm is REACHED once the engine is ready (sc-19508).
 ///
-/// Without this the arm would be untestable dead code until sc-18650 lands: `minimax_h3_available`
-/// requires the engine to be REGISTERED, which is false at the pinned revision, so every MiniMax job
-/// falls to `Stub` and deleting the arm entirely would be green in every other test. Declaration is
-/// not reachability — this drives the real ladder with the readiness the pin bump will supply.
+/// Without this the arm would be untestable: `minimax_h3_available` requires the engine to be
+/// REGISTERED, and the permanent pin supplies that provider. Declaration is not reachability —
+/// this drives the real ladder with the readiness seam so the live arm cannot be deleted unnoticed.
 ///
-/// The `false` half is equally load-bearing: it pins today's behavior (Stub, where the fail-loud
-/// gate runs) so the arm cannot be made unconditionally live by mistake.
+/// The false half remains load-bearing for the separate readiness seam: it proves that an unavailable
+/// provider still falls to `Stub`, while the true half proves the registered Candle/MLX route arm.
 #[cfg(target_os = "macos")]
 #[test]
 fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
