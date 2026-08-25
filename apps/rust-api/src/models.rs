@@ -7498,6 +7498,26 @@ fn project_imported_operation_surface(
     }
 
     object.remove("runtimeQuantTiers");
+
+    // A checkpoint STORED as NVFP4 has exactly one runtime tier: its own (sc-11043, epic 11037).
+    // The q4/q8/bf16 sweep below describes what a route can quantize a dense import TO, which is a
+    // question that does not arise here — these bytes are already packed E2M1 and nothing
+    // re-quantizes them. Offering the sweep for such an entry advertised `q4` for an NVFP4
+    // checkpoint, which is precisely the alias E2 forbids, and the admission gate then refused
+    // every job the offer produced: the picker showed tiers the router would not accept.
+    //
+    // Keyed on the SOURCE codec — what the weights are stored in — never on what a load would
+    // materialize them as, which is a per-run receipt this catalog projection cannot know.
+    if sceneworks_core::jobs_store::imported_entry_source_codec(object)
+        == Some(sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID)
+    {
+        object.insert(
+            "runtimeQuantTiers".to_owned(),
+            Value::Array(vec![Value::String("nvfp4".to_owned())]),
+        );
+        return;
+    }
+
     let mut runtime_quant_tiers = Vec::new();
     for tier in ["q4", "q8"] {
         if routes.iter().any(|route| {
@@ -12607,6 +12627,33 @@ mod imported_lora_advertisement_tests {
         assert!(wrong_shape["ui"].get("editReferences").is_none());
         assert!(wrong_shape.get("runtimeQuantTiers").is_none());
         assert_eq!(wrong_shape["macSupport"]["supported"], json!(false));
+    }
+
+    /// sc-11043 (epic 11037): a checkpoint STORED as NVFP4 offers exactly its own tier.
+    ///
+    /// The q4/q8/bf16 sweep describes what a route can quantize a dense import TO; these bytes are
+    /// already packed E2M1 and nothing re-quantizes them. Offering the sweep advertised `q4` for an
+    /// NVFP4 checkpoint — the alias E2 forbids — and every job the offer produced was then refused
+    /// by the admission gate, so the picker showed tiers the router would not accept.
+    #[test]
+    fn an_nvfp4_import_offers_its_own_tier_and_never_q4() {
+        let mut native = entry("user_krea_nvfp4", "krea_2");
+        native.insert("importQuantFormat".to_owned(), json!("nvfp4"));
+        apply_imported_provider_surface_for_lanes(&mut native, false, true);
+        assert_eq!(native["runtimeQuantTiers"], json!(["nvfp4"]));
+
+        // A dense sibling through the same route is untouched: the projection keys on the entry's
+        // own source codec, not on the family or the route's advertised quants.
+        let mut dense = entry("user_krea_bf16", "krea_2");
+        dense.insert("importQuantFormat".to_owned(), json!("bf16"));
+        apply_imported_provider_surface_for_lanes(&mut dense, false, true);
+        assert_eq!(dense["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+
+        // A classification with no proved engine codec is not an NVFP4 claim.
+        let mut packed = entry("user_krea_packed", "krea_2");
+        packed.insert("importQuantFormat".to_owned(), json!("comfy_quant_packed"));
+        apply_imported_provider_surface_for_lanes(&mut packed, false, true);
+        assert_eq!(packed["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
     }
 
     #[test]

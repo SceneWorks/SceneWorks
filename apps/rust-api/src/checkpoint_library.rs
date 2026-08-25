@@ -32,7 +32,7 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -44,6 +44,9 @@ use sceneworks_core::checkpoint_derivative::{
 use sceneworks_core::checkpoint_plan_store::{
     ApprovedRootV1, CheckpointPlanError, CheckpointPlanStore, LinkedCheckpointStatusV1,
     LinkedRootScanV1,
+};
+use sceneworks_core::managed_checkpoint_variants::{
+    managed_nvfp4_variants, ManagedCheckpointVariantV1, MANAGED_VARIANT_SOURCE_SHAPE,
 };
 
 /// The typed `code` every plan-store refusal is returned under. The actionable discriminant is
@@ -117,6 +120,77 @@ pub(crate) struct RemoveLibraryRootResponse {
     /// so this is never a partial list of successes beside silent failures.
     removed_derivatives: Vec<String>,
     reclaimed_derivative_bytes: u64,
+}
+
+/// `GET /api/v1/models/managed-variants` — the explicitly named managed NVFP4 checkpoint variants
+/// SceneWorks offers to install for itself (sc-11043, epic 11037).
+///
+/// A **listing**, never a chooser. Each row names the artifact, its tier, its pin, and the exact
+/// `POST /api/v1/models/import` body that installs it — so installing a curated variant runs
+/// through the same managed ownership lifecycle a user-supplied import does, with no second
+/// install path to keep in step and no conversion anywhere in it.
+///
+/// Nothing here maps a MODEL onto a variant. The client renders the list and the user picks one by
+/// name; that is what keeps NVFP4 an explicit choice rather than something a tier heuristic can
+/// land on (E2).
+///
+/// Static, so it takes no state and cannot be mistaken for `/api/v1/models/:model_id`.
+pub(crate) async fn list_managed_variants() -> Json<ManagedVariantsResponse> {
+    Json(ManagedVariantsResponse {
+        variants: managed_nvfp4_variants()
+            .iter()
+            .map(managed_variant_view)
+            .collect(),
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedVariantsResponse {
+    variants: Vec<Value>,
+}
+
+/// One registered variant as the wire sees it.
+///
+/// `importRequest` is assembled here rather than left to the client so the pin cannot drift
+/// between what is advertised and what is fetched: the repo, revision, file and `expectedSha256`
+/// in the body are the registration's own.
+fn managed_variant_view(variant: &ManagedCheckpointVariantV1) -> Value {
+    json!({
+        "variantId": variant.variant_id,
+        "displayName": variant.display_name,
+        "provider": variant.provider,
+        "family": variant.family,
+        "modelId": variant.imported_model_id(),
+        "checkpointId": variant.checkpoint_id(),
+        // The tier's own name and the engine's codec id, carried separately and never merged:
+        // one is what the user picked, the other is what the bytes are stored in.
+        "quantTier": variant.quant_tier,
+        "sourceCodec": variant.source_codec,
+        "sourceShape": MANAGED_VARIANT_SOURCE_SHAPE,
+        "sizeBytes": variant.size_bytes,
+        "pinnedArtifact": {
+            "repo": variant.repo,
+            "revision": variant.revision,
+            "file": variant.repo_file,
+            "sha256": variant.sha256,
+            "url": variant.source_url(),
+        },
+        "importRequest": {
+            "ownershipMode": "managed",
+            "modelId": variant.imported_model_id(),
+            "name": variant.display_name,
+            "type": "image",
+            "family": variant.family,
+            "source": {
+                "kind": "huggingFace",
+                "repo": variant.repo,
+                "revision": variant.revision,
+                "files": [variant.repo_file],
+            },
+            "expectedSha256": variant.sha256,
+        },
+    })
 }
 
 /// `GET /api/v1/models/library-roots` — every approved linked-library root.
@@ -379,4 +453,59 @@ fn plan_error_to_api_error(error: CheckpointPlanError) -> ApiError {
         CHECKPOINT_LIBRARY_REJECTED_CODE,
         json!({ "reason": code }),
     )
+}
+
+#[cfg(test)]
+mod managed_variant_tests {
+    use super::*;
+    use sceneworks_core::managed_checkpoint_variants::managed_nvfp4_variant;
+
+    /// Every advertised row names its tier explicitly and carries the registration's own pin in
+    /// the body that installs it, so what the product offers and what it fetches cannot drift.
+    #[test]
+    fn every_advertised_variant_names_nvfp4_and_carries_its_own_pin() {
+        let rows = managed_nvfp4_variants()
+            .iter()
+            .map(managed_variant_view)
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+
+        for row in &rows {
+            assert_eq!(row["quantTier"], json!("nvfp4"));
+            assert_eq!(row["sourceCodec"], json!("nvfp4-v1"));
+            assert_eq!(row["sourceShape"], json!(MANAGED_VARIANT_SOURCE_SHAPE));
+            assert!(row["displayName"].as_str().unwrap().contains("NVFP4"));
+
+            let pinned = &row["pinnedArtifact"];
+            let request = &row["importRequest"];
+            assert_eq!(request["ownershipMode"], json!("managed"));
+            assert_eq!(request["source"]["kind"], json!("huggingFace"));
+            assert_eq!(request["source"]["repo"], pinned["repo"]);
+            assert_eq!(request["source"]["revision"], pinned["revision"]);
+            assert_eq!(request["source"]["files"], json!([pinned["file"]]));
+            assert_eq!(request["expectedSha256"], pinned["sha256"]);
+            assert_eq!(request["family"], row["family"]);
+            // The advertised install is the managed lifecycle, never a per-tier catalog download:
+            // no `variant` key can steer it into the builtin quant matrix, so registering these
+            // artifacts adds a tier to nothing and replaces a tier on nothing.
+            assert!(request.get("variant").is_none());
+            assert!(
+                pinned["url"]
+                    .as_str()
+                    .unwrap()
+                    .contains(pinned["revision"].as_str().unwrap()),
+                "the download URL must pin the revision"
+            );
+        }
+
+        let krea = &rows[0];
+        assert_eq!(krea["variantId"], json!("nvfp4-krea-2-turbo"));
+        assert_eq!(
+            krea["checkpointId"],
+            json!(managed_nvfp4_variant("nvfp4-krea-2-turbo")
+                .unwrap()
+                .checkpoint_id())
+        );
+        assert_eq!(rows[1]["variantId"], json!("nvfp4-flux2-klein-9b-true-v2"));
+    }
 }

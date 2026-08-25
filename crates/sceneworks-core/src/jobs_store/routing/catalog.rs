@@ -1257,7 +1257,12 @@ pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
 /// family and supported request shape. Seeded by the descriptor-gated Krea single-file lane
 /// (sc-14023).
 #[cfg(test)]
-pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
+/// `flux2` (sc-11043, epic 11037) is Candle-only and NVFP4-only: the single-file Klein import is
+/// served through the shared codec and the Klein dialect, and MLX has no consumer for its packed
+/// E2M1 weights — which is exactly why it is NOT in [`MLX_ROUTED_FAMILIES`]. Family membership is
+/// not a claim about encodings; `base_weights::import_supported` still refuses every non-NVFP4
+/// FLUX.2 single file.
+pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
 
 /// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
 /// path applies only to non-builtin (imported/user) ids, so a builtin's id-keyed routing is never
@@ -2637,7 +2642,7 @@ mod tests {
     /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
     /// mirrored here — the guardrail that a family is never silently added to the import surface.
     const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
-    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
+    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
 
     #[test]
     fn mlx_routed_families_match_snapshot() {
