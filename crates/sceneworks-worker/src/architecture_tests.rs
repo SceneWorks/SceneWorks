@@ -468,3 +468,45 @@ fn real_image_job_modules_import_the_json_macro_they_invoke() {
         );
     }
 }
+
+/// sc-21534 — the pre-loader source guard (sc-19708) can re-verify a multi-GB resolved bundle,
+/// which outlasts the API's 90s stale-worker timeout. `run_utility_job` must therefore await the
+/// guard's blocking task through the `heartbeat_while_blocking` keepalive (whose behavior is
+/// pinned by `heartbeat_while_blocking_keeps_worker_live_through_a_long_pass`), never bare —
+/// a bare `.await` is exactly how the Krea bf16 lost-heartbeat incident swept a healthy worker.
+/// Source-structure assertion in the same style as the dispatch-matrix test above: behavior lives
+/// in the wrapper's own test; this pins the WIRING at the one admission call site.
+#[test]
+fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
+    let code = code_without_comments_or_literals(WORKER);
+    let function = code
+        .split_once("async fn run_utility_job(")
+        .expect("worker must declare run_utility_job")
+        .1;
+    let after_guard_spawn = function
+        .split_once("RuntimeSourceGuard::begin(")
+        .expect("run_utility_job must admit every job through the source guard")
+        .1;
+    let between_guard_and_dispatch = after_guard_spawn
+        .split_once("match job.job_type {")
+        .expect("the guard must run before the job-type dispatch")
+        .0;
+    let after_wrapper = between_guard_and_dispatch
+        .split_once("heartbeat_while_blocking(")
+        .expect(
+            "the source-guard blocking task must be awaited via heartbeat_while_blocking, not \
+             bare — a guard pass longer than the stale-worker timeout would get the worker swept \
+             mid-verify",
+        )
+        .1;
+    // The wrapper must be wrapping THE GUARD's handle, not some other blocking task that later
+    // lands in the same window while the guard goes back to a bare await.
+    assert!(
+        after_wrapper
+            .split_once(')')
+            .expect("the keepalive call must close its argument list")
+            .0
+            .contains("guard_task"),
+        "heartbeat_while_blocking must receive the source guard's own JoinHandle (guard_task)"
+    );
+}

@@ -233,6 +233,67 @@ fn the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refu
     );
 }
 
+/// sc-21534 — one `acquire_complete` call re-reads each closure file exactly ONCE.
+///
+/// The load boundary is the single full-strength check that keeps every cheap paths-and-sizes
+/// read safe, but before this pin it hashed the closure FOUR times per load: twice inside
+/// `validate_complete_metadata` (the shape check duplicated the content check), once more in
+/// `acquire_runtime_lease`, and once more in the usage-stamp journal write — all under the same
+/// locks in the same call, so the extras closed no window. On a 33 GB bundle that multiple turned
+/// one ~70 s verify into the ~4.5-minute pass that outlasted the API's 90 s stale-worker sweep.
+/// Stated as an operation count, like
+/// `the_availability_decision_never_re_reads_the_artifact_it_admits`: a duration cannot see this
+/// on a small fixture.
+#[test]
+fn the_load_boundary_hashes_the_closure_exactly_once() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    let published = match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("fixture bundle was not published: {other:?}"),
+    };
+    let hashed_files = published
+        .artifact
+        .closure
+        .members
+        .iter()
+        .flat_map(|member| member.files.iter())
+        .filter(|file| file.sha256.is_some())
+        .count() as u64;
+    assert!(
+        hashed_files >= 1,
+        "the fixture must record content digests or the count below is vacuous"
+    );
+
+    let registry = ActiveArtifactLeaseRegistry::default();
+    let resolver = resolver(&source, registry.clone());
+    let (lease, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(
+        lease.unwrap().is_some(),
+        "the boundary must still issue the lease it is charging one hash pass for"
+    );
+    assert_eq!(
+        hashes, hashed_files,
+        "acquiring a complete entry must hash each closure file exactly once — the shape check, \
+         the runtime lease, and the usage stamp must all reuse the one full-strength verdict"
+    );
+}
+
 /// A submission's availability read must not park behind the sweep's expensive verification
 /// (sc-19712, the coupled residue).
 ///
@@ -684,9 +745,10 @@ fn reservation_is_exclusive_unrelated_keys_progress_and_drop_interrupts() {
     assert_eq!(active.reservation_owner.as_deref(), Some("image:model-a"));
     let mut traversing = active.clone();
     traversing.session_id = Some("../../outside".to_owned());
-    assert!(validate_metadata_shape(
+    assert!(validate_metadata_shape_with(
         &traversing,
-        &cache_key_digest(&candidate_a.cache_key).unwrap()
+        &cache_key_digest(&candidate_a.cache_key).unwrap(),
+        ContentVerification::PathsAndSizesOnly
     )
     .is_err());
     assert!(matches!(
@@ -1070,6 +1132,87 @@ fn pin_owners_aggregate_exactly() {
     assert!(store
         .set_model_pin(&candidate.cache_key, "\n", true)
         .is_err());
+}
+
+/// sc-21534 — the older-slot recovery must not PIN a content-altered bundle.
+///
+/// The listings (including `recover()`'s opening `enumerate()`) validate on paths and sizes only,
+/// so this branch is the last reader before an entry recovered from its older journal slot gets
+/// re-pinned. A same-size alteration pinned here would be refused at every load yet never
+/// evicted — a permanent disk leak — so the branch must prove the bytes at full strength first
+/// and, on failure, leave the entry UNPINNED: still refused at the load boundary, but evictable,
+/// so retention can reclaim it and the next use re-materializes clean.
+#[test]
+fn older_slot_recovery_refuses_to_pin_altered_bytes() {
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    // Materialize through the real promotion path: it enriches the recorded closure with content
+    // digests post-copy, which is what lets the full-strength check see the alteration below (the
+    // `source_candidate` shortcut records no digests, so it cannot exercise this branch).
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(_) => {}
+        other => panic!("fixture bundle was not published: {other:?}"),
+    }
+    // Unpin twice so BOTH journal slots record `artifact_pinned: false` — otherwise the older
+    // slot the recovery falls back to still carries the materialization-era pin, and the assert
+    // below could not tell an inherited pin from the recovery-added one under test.
+    store.set_artifact_pin(&candidate.cache_key, false).unwrap();
+    store.set_artifact_pin(&candidate.cache_key, false).unwrap();
+    let entry = store.entry_path(&candidate.cache_key).unwrap();
+    let newest = [entry.join("metadata.0.json"), entry.join("metadata.1.json")]
+        .into_iter()
+        .max_by_key(|path| {
+            read_journal(path)
+                .map(|value| value.generation)
+                .unwrap_or(0)
+        })
+        .unwrap();
+    std::fs::write(newest, b"corrupt").unwrap();
+    // Same length, different bytes: paths-and-sizes reads cannot see it, only the full-strength
+    // check this branch must run before pinning can.
+    let bundle_file = store
+        .bundle_path(&candidate.cache_key)
+        .unwrap()
+        .join(&candidate.artifact.closure.members[0].destination)
+        .join("weights.bin");
+    assert_eq!(std::fs::read(&bundle_file).unwrap(), b"model-weights");
+    std::fs::write(&bundle_file, b"MODEL-WEIGHTS").unwrap();
+
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered.len(), 1);
+    let metadata = recovered[0].metadata.as_ref().unwrap();
+    assert!(
+        !metadata.effective_pin,
+        "an older-slot recovery of altered bytes must never pin the entry — pinned it would be \
+         refused at every load yet blocked from eviction forever"
+    );
+    assert_ne!(
+        metadata.recovery_status,
+        RecoveryStatus::RecoveredFromOlderSlot,
+        "the recovery must not claim it recovered content it could not verify"
+    );
+
+    // The unpinned entry is still refused where it matters: the load boundary.
+    let registry = ActiveArtifactLeaseRegistry::default();
+    let resolver = resolver(&source, registry.clone());
+    assert!(
+        store
+            .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+            .is_err(),
+        "altered bytes stay refused at the load boundary"
+    );
 }
 
 #[test]
