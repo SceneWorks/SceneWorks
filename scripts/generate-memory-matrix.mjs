@@ -1787,7 +1787,8 @@ export const OUT_OF_MATRIX_CELL_STATES = Object.freeze([
  *
  * Rung 4's only shared prerequisite is `LoadShape::DeferredMaterialization`
  * (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, inference
- * `crates/contracts/gen-core/src/memory_strategy.rs:310-313` at the pinned f17c82544). SC-15998
+ * `crates/contracts/gen-core/src/memory_strategy.rs:310-313` at the permanent pin
+ * 28f0563baa03640ade1635356d2d54fe8a477f1a). SC-15998
  * removed the rung-1 edge the
  * survey's notes asserted, because it had encoded one provider's coupled loader shape as universal
  * arithmetic.
@@ -1972,7 +1973,7 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
       // dates every path in it. These records are surveyed at a revision of their own —
       // MiniMax-H3's MLX paths resolve at e09f46aaf and its Candle ones at 79f02e6d0, two DIFFERENT
       // trees, and neither is the pin. What the field asserts has moved since it was introduced: at
-      // the pinned f17c82544 both H3 crates exist and both anchors are ANCESTORS of it, so the
+      // the permanent pin 28f0563baa03640ade1635356d2d54fe8a477f1a carries both H3 crates and both anchors are ANCESTORS of it, so the
       // field now reads "last surveyed here, not re-surveyed since" rather than "the pinned tree
       // has no such crate yet". Without it the record silently mixes revisions and reads as if the
       // matrix's own pin dated it (sc-18664; meaning restated sc-18650 pre-merge review).
@@ -2716,7 +2717,7 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
  * a `Rung { .. EngagedInSameRequest }` prerequisite when `MemoryProviderContract::engages` holds,
  * and for an edge the realization itself appended, `engages` reduces to that rung being declared
  * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1346-1362` at the
- * pinned rev `f17c82544`: `required_by_realization` is true by construction, so the conjunction is
+ * pinned rev `28f0563baa03640ade1635356d2d54fe8a477f1a`: `required_by_realization` is true by construction, so the conjunction is
  * the `matches!(self.support(rung), Some(Implemented))` term).
  *
  * This is the reduction of ONE of `validate_selection`'s two accepting arms, not of the whole
@@ -2840,7 +2841,7 @@ export function stagedResidencyIsAvailable({
  * gen-core's `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, mirrored (sc-19542).
  *
  * `&[MemoryStrategyPrerequisite::LoadShape(LoadShape::DeferredMaterialization)]` at the pinned rev
- * `f17c82544` — inference `crates/contracts/gen-core/src/memory_strategy.rs:310-313`, the identifier
+ * `28f0563baa03640ade1635356d2d54fe8a477f1a` — inference `crates/contracts/gen-core/src/memory_strategy.rs:310-313`, the identifier
  * on line 312. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
  * a provider demands of rung 4 it appends itself, which is what
  * `config/rung4-contract-prerequisites.json` records per (family, backend).
@@ -2876,7 +2877,7 @@ const RUNG4_PREREQUISITE_EVALUATORS = Object.freeze({
   /**
    * gen-core's `EngagedInSameRequest` arm has TWO ways to be satisfied, and this mirrors both —
    * inference `crates/contracts/gen-core/src/memory_strategy.rs:1862-1873` at the pinned
-   * `f17c82544`.
+   * `28f0563baa03640ade1635356d2d54fe8a477f1a`.
    *
    * 1. `if self.engages(selection.strategy, rung) { continue }`. For an edge the realization itself
    *    appended, `engages`'s `required_by_realization` term is true by construction, so the
@@ -2940,13 +2941,13 @@ export const RUNG4_DECLARED_SUPPORTS = Object.freeze([
  * evaluator.
  *
  * `record.additionalPrerequisites` is derived from the pinned revision by
- * `scripts/rung4-contract-prerequisites.mjs`, and 21 of the catalog's 40 (family, backend) pairs
- * carry the rung-1 edge while 19 do not — so which families this consults the rung-1 predicate for
+ * `scripts/rung4-contract-prerequisites.mjs`, and 23 of the catalog's 40 (family, backend) pairs
+ * carry the rung-1 edge while 17 do not — so which families this consults the rung-1 predicate for
  * is now a property of the providers rather than a blanket rule.
  *
- * WHAT THAT 21/19 IS AND IS NOT (measured, sc-19542 review f6)
+ * WHAT THAT 23/17 IS AND IS NOT (measured, sc-19542 review f6)
  *
- * 21/19 is a fact about the RECORD SET, not about this catalog. Instrumenting this arm over a full
+ * 23/17 is a fact about the RECORD SET, not about this catalog. Instrumenting this arm over a full
  * generation run measures the difference it actually makes:
  *
  *   * 426 evaluations reach `rung4ContractAdmits`, spanning 17 of the 40 (family, backend) pairs.
@@ -2961,11 +2962,11 @@ export const RUNG4_DECLARED_SUPPORTS = Object.freeze([
  *   * Old and new therefore agree on 40/40 probed keys, which is why the generated artifact is
  *     BYTE-IDENTICAL across this change.
  *
- * So "19 lanes no longer consult the rung-1 proxy" is true of the record set and reaches 2 lanes in
+ * So "17 lanes no longer consult the rung-1 proxy" is true of the record set and reaches 2 lanes in
  * practice. The fix is still the right one — it replaces a proxy that happens to agree today with
  * the graph the contract actually walks, and the divergence it prevents is the first time a
  * provider's prerequisites change — but it is a correctness change with a byte-identical artifact,
- * not a change in what this catalog admits. Stated here because a reader who takes 21/19 as the
+ * not a change in what this catalog admits. Stated here because a reader who takes 23/17 as the
  * blast radius will over-read every one of those numbers.
  *
  * An edge flagged `conditional` — appended by a `then_some` on a runtime condition, or inside a
@@ -4033,9 +4034,10 @@ function minimaxPlanRank(entries) {
 /**
  * Validate the terminal MiniMax-H3 video grid while that family remains out of matrix.
  *
- * One exact 2-area x 3-frame grid per implemented (tier, rung) family is the smallest surface
- * that can identify the video affine form.  It deliberately replaces the superseded 14-duration
- * cross-product: frames are regressors (`pixels * frames`), not a per-duration matrix identity.
+ * The checked-in plan has 72 rows: one exact 2-area x 3-frame spanning grid per implemented
+ * (tier, rung) family. It deliberately replaces the superseded 14-duration cross-product: frames
+ * are regressors (`pixels * frames`), not a per-duration matrix identity. The plan is evidence
+ * structure only; zero accepted SceneWorks calibration receipts exist until the terminal campaign.
  */
 export function assertMinimaxH3CalibrationPlan(calibrationPlan) {
   const rows = calibrationPlan.providers.filter((entry) => entry.target?.modelId === "minimax_h3");
@@ -4488,7 +4490,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // MINUS the survey's declared OUT-OF-MATRIX entries (sc-18664 × sc-18815, reconciled by the
   // sc-17137 main sync). Those records name catalog entries the matrix cannot yet carry a verdict
   // for — MiniMax-H3 is the live case: `familyGroup` has no arm for it, no video-route resolver row
-  // exists, and its providers are absent at the pinned inference revision, so admitting it here
+  // exists, and its providers are present at the permanent pinned inference revision, so admitting it here
   // fails generation at `resolveRoute` rather than producing a row. The records are NOT unvalidated
   // escape hatches: `parseOutOfMatrixRung4Families` (run inside `parseRung4Survey` above) validates
   // every one on every generation and throws the day `familyGroup` learns one of the named entries,
