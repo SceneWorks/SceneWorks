@@ -912,6 +912,25 @@ fn resolve_checkpoint_plan_component(
         // seam, not anywhere this route could guess. Ask that family's own resolver, so the plan
         // route and the family's other consumers refuse a missing component with one message.
         _ => {
+            // A fused SDXL checkpoint's model-agnostic CLIP tokenizers under CANDLE's spelling
+            // (`tokenizer_clip_l` / `tokenizer_clip_bigg`, where MLX spells the pair
+            // `ldm_tokenizer` above). Same staging root, same pinned revisions, and the same one
+            // table the bespoke candle lane stages from, so both routes hand the loader the
+            // identical directory rather than two copies (sc-20651). `None` here means "not an
+            // SDXL component id", which falls through to the family resolvers below.
+            if let Some(dir) = resolve_sdxl_imported_component_dir_cache_only(
+                settings,
+                family,
+                component,
+                &resolved.checkpoint_id,
+            )? {
+                return Ok(CheckpointPlanComponent {
+                    id: component,
+                    source: WeightsSource::Dir(dir),
+                    consumed: None,
+                    pin: None,
+                });
+            }
             let resolved_components =
                 checkpoint_plan_family_components(family, component, &resolved.checkpoint_id, settings)?;
             Ok(CheckpointPlanComponent {

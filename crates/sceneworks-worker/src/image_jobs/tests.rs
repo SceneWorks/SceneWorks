@@ -22115,12 +22115,18 @@ fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
     );
 }
 
-/// Populate the isolated Hugging Face cache with CLIP-L's two model-agnostic tokenizer assets at
-/// the exact pinned revision the SDXL lane and the plan route both resolve against. Without them
-/// the fused route's `ldm_tokenizer` component is genuinely absent and every claim probe below
-/// would be measuring a missing install rather than the routing rule.
+/// Populate the isolated Hugging Face cache with the model-agnostic CLIP tokenizer assets — at the
+/// exact pinned revisions the SDXL lane and the plan route both resolve against — that a fused SDXL
+/// checkpoint borrows from outside itself. Without them the fused route's tokenizer components are
+/// genuinely absent and every claim probe below would be measuring a missing install rather than
+/// the routing rule.
+///
+/// BOTH backends' spellings are installed, because the two declare the same assets differently:
+/// MLX's single `ldm_tokenizer` (CLIP-L `vocab.json` + `merges.txt`) and candle's
+/// `tokenizer_clip_l` + `tokenizer_clip_bigg` (one `tokenizer.json` per repo). Installing only the
+/// MLX pair left every candle-side caller measuring the missing bigG install (sc-20651).
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-fn install_sdxl_clip_l_tokenizer(settings: &Settings) {
+fn install_sdxl_clip_tokenizer_assets(settings: &Settings) {
     let snapshot = settings
         .data_dir
         .join("hub")
@@ -22130,6 +22136,15 @@ fn install_sdxl_clip_l_tokenizer(settings: &Settings) {
     std::fs::create_dir_all(&snapshot).unwrap();
     std::fs::write(snapshot.join("vocab.json"), b"{}").unwrap();
     std::fs::write(snapshot.join("merges.txt"), b"#version: 0.2\n").unwrap();
+    std::fs::write(snapshot.join("tokenizer.json"), b"{}").unwrap();
+    let bigg = settings
+        .data_dir
+        .join("hub")
+        .join("models--laion--CLIP-ViT-bigG-14-laion2B-39B-b160k")
+        .join("snapshots")
+        .join(SDXL_CLIP_BIGG_REVISION);
+    std::fs::create_dir_all(&bigg).unwrap();
+    std::fs::write(bigg.join("tokenizer.json"), b"{}").unwrap();
 }
 
 /// sc-20644 SDXL row, AC1 + AC2 — a plan-backed fused SDXL checkpoint runs its full surface off the
@@ -22150,7 +22165,7 @@ fn install_sdxl_clip_l_tokenizer(settings: &Settings) {
 #[test]
 fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
     let fx = CheckpointPlanFixture::new("sdxl-single-claim", true);
-    install_sdxl_clip_l_tokenizer(&fx.settings);
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
     let checkpoint_id = fx.compile("communityxl.safetensors", &sdxl_ldm_entries());
     let resolved = fx.store.resolve(&checkpoint_id).unwrap();
     assert_eq!(
@@ -22998,7 +23013,7 @@ fn write_gguf_checkpoint(path: &Path, architecture: &str) {
 fn a_gguf_backed_plan_is_refused_by_container_and_never_reaches_the_safetensors_loader() {
     let fx = CheckpointPlanFixture::new("gguf-container", true);
     // Both halves of the "no other refusal can mask this one" setup.
-    install_sdxl_clip_l_tokenizer(&fx.settings);
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
     write_gguf_checkpoint(&fx.library_dir.join("communityxl.gguf"), "sdxl");
 
     let checkpoint_id = fx
@@ -23125,7 +23140,7 @@ fn a_managed_gguf_plan_keeps_the_container_refusal_across_the_unclaimed_refusal_
     // Same "no other refusal can mask this one" setup as the linked twin: with the tokenizer absent
     // the route would refuse `[checkpoint-plan:missing-component]` instead and the mutation red
     // would point at the tokenizer rather than at the GGUF.
-    install_sdxl_clip_l_tokenizer(&fx.settings);
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
     let staged = fx.library_dir.join("communityxl.gguf");
     write_gguf_checkpoint(&staged, "sdxl");
 
@@ -23488,19 +23503,10 @@ fn a_quantized_plan_is_gated_on_the_providers_advertised_tiers_not_on_its_layer_
 #[test]
 fn a_linked_and_a_managed_sdxl_checkpoint_take_one_route_and_get_one_load_spec_shape() {
     let fx = CheckpointPlanFixture::new("sdxl-parity", true);
-    // The model-agnostic CLIP tokenizer assets the fused-SDXL binding declares as its only required
-    // component. Staged into the isolated hub at the pinned revision the lane resolves against, so
-    // the row measures routing rather than a missing install.
-    let clip = sceneworks_core::hf_home::huggingface_repo_cache_path(
-        &fx.settings.data_dir,
-        "openai/clip-vit-large-patch14",
-    )
-    .expect("safe repo cache path")
-    .join("snapshots")
-    .join("32bd64288804d66eefd0ccbe215aa642df71cc41");
-    std::fs::create_dir_all(&clip).unwrap();
-    std::fs::write(clip.join("vocab.json"), b"{}").unwrap();
-    std::fs::write(clip.join("merges.txt"), b"#\n").unwrap();
+    // The model-agnostic CLIP tokenizer assets the fused-SDXL binding declares as its required
+    // components — BOTH backends' spellings, staged into the isolated hub at the pinned revisions
+    // the lane resolves against, so the row measures routing rather than a missing install.
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
 
     let fused = sdxl_fused_entries();
     let linked_id = fx.compile("sdxlmania.safetensors", &fused);

@@ -18,13 +18,12 @@ const SDXL_EDIT_STRENGTH: f32 = 0.6;
 const SDXL_INPAINT_STRENGTH: f32 = 0.85;
 const SDXL_CLIP_L_REPO: &str = "openai/clip-vit-large-patch14";
 const SDXL_CLIP_L_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Compiled on every platform: `SDXL_IMPORTED_COMPONENT_SOURCES` is now the ONE table both the
+// bespoke candle lane and the backend-agnostic plan route read, so its cells cannot be gated to one
+// backend without splitting it in two.
 const SDXL_CLIP_BIGG_REPO: &str = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SDXL_CLIP_BIGG_REVISION: &str = "743c27bd53dfe508a0ade0f50698f99b39d03bec";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SDXL_VAE_REPO: &str = "madebyollin/sdxl-vae-fp16-fix";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SDXL_VAE_REVISION: &str = "207b116dae70ace3637169f1ddd2434b91b3a8cd";
 
 struct PreparedSdxlImportedSources {
@@ -406,45 +405,63 @@ fn resolve_sdxl_ldm_tokenizer_root_cache_only(
         .join("cache")
         .join("sdxl-imported-components");
     let tokenizer_dir = root.join("tokenizer");
+    for file in ["vocab.json", "merges.txt"] {
+        mirror_cached_sdxl_component_file(
+            settings,
+            checkpoint_id,
+            SDXL_CLIP_L_REPO,
+            SDXL_CLIP_L_REVISION,
+            file,
+            &tokenizer_dir,
+        )?;
+    }
+    Ok(root)
+}
+
+/// Mirror ONE already-installed Hugging Face asset into the SDXL staging root, cache-only.
+///
+/// The single copy-and-rename both cache-only resolvers use, so the two of them cannot drift in how
+/// they refuse a missing install or in how they avoid publishing a half-written file.
+fn mirror_cached_sdxl_component_file(
+    settings: &Settings,
+    checkpoint_id: &str,
+    repo: &str,
+    revision: &str,
+    file: &str,
+    destination_dir: &Path,
+) -> WorkerResult<()> {
+    let destination = destination_dir.join(file);
+    if destination.is_file() {
+        return Ok(());
+    }
     let staging_failed = |path: &Path, error: std::io::Error| {
         WorkerError::Engine(format!(
             "Checkpoint plan source preparation failed: {} ({error})",
             path.display()
         ))
     };
-    for file in ["vocab.json", "merges.txt"] {
-        let destination = tokenizer_dir.join(file);
-        if destination.is_file() {
-            continue;
-        }
-        let cached = crate::downloads::resolve_hf_component_file(
-            settings,
-            SDXL_CLIP_L_REPO,
-            SDXL_CLIP_L_REVISION,
-            file,
-        )
+    let cached = crate::downloads::resolve_hf_component_file(settings, repo, revision, file)
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
                 "[checkpoint-plan:missing-component] checkpoint {checkpoint_id:?} (sdxl family) \
-                 requires the fused-checkpoint tokenizer assets, and {SDXL_CLIP_L_REPO}/{file} is \
-                 not installed — install it from the Model Manager, then run this checkpoint \
-                 again. A fused SDXL checkpoint carries its own UNet, encoders and VAE; only the \
+                 requires the fused-checkpoint tokenizer assets, and {repo}/{file} is not \
+                 installed — install it from the Model Manager, then run this checkpoint again. A \
+                 fused SDXL checkpoint carries its own UNet, encoders and VAE; only the \
                  model-agnostic CLIP tokenizer vocabulary comes from outside it."
             ))
         })?;
-        std::fs::create_dir_all(&tokenizer_dir)
-            .map_err(|error| staging_failed(&tokenizer_dir, error))?;
-        // Copy to a pid-keyed sibling and rename, so two concurrent jobs can never observe a
-        // half-written vocabulary at the destination path.
-        let staging = tokenizer_dir.join(format!("{file}.{}.partial", std::process::id()));
-        std::fs::copy(&cached, &staging)
-            .and_then(|_| std::fs::rename(&staging, &destination))
-            .map_err(|error| {
-                let _ = std::fs::remove_file(&staging);
-                staging_failed(&destination, error)
-            })?;
-    }
-    Ok(root)
+    std::fs::create_dir_all(destination_dir)
+        .map_err(|error| staging_failed(destination_dir, error))?;
+    // Copy to a pid-keyed sibling and rename, so two concurrent jobs can never observe a
+    // half-written vocabulary at the destination path.
+    let staging = destination_dir.join(format!("{file}.{}.partial", std::process::id()));
+    std::fs::copy(&cached, &staging)
+        .and_then(|_| std::fs::rename(&staging, &destination))
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&staging);
+            staging_failed(&destination, error)
+        })?;
+    Ok(())
 }
 
 /// Where each SDXL component id's bytes come from: `(component id, repo, revision, file, subdir)`.
@@ -457,7 +474,11 @@ fn resolve_sdxl_ldm_tokenizer_root_cache_only(
 /// handed the loader a component it drops: `SdxlComponents::from_spec` makes `vae_fp16_fix` optional
 /// for a fused source and `load_components` takes the VAE from `ldm.vae`. A pure dead download,
 /// removed by asking the descriptor (sc-20644 SDXL row).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+///
+/// Read by BOTH SDXL routes: the bespoke candle lane stages from it over the network
+/// ([`attach_imported_sdxl_components`]), and the universal plan route mirrors from it cache-only
+/// ([`resolve_sdxl_imported_component_dir_cache_only`]). One table, so the two routes can never
+/// disagree about which repo or pinned revision a component id means (sc-20651).
 const SDXL_IMPORTED_COMPONENT_SOURCES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "tokenizer_clip_l",
@@ -524,6 +545,55 @@ async fn attach_imported_sdxl_components(
         spec = spec.with_component(*component, WeightsSource::Dir(destination_dir));
     }
     Ok(spec)
+}
+
+/// The staging directory a table-declared SDXL component resolves to for the PLAN route, cache-only.
+///
+/// The candle sibling of [`resolve_sdxl_ldm_tokenizer_root_cache_only`]. Candle's fused-SDXL
+/// binding declares `tokenizer_clip_l` + `tokenizer_clip_bigg` where MLX declares the single
+/// `ldm_tokenizer`, and the plan route special-cased only the MLX spelling — so on the candle lane
+/// a plan-backed fused SDXL request was CLAIMED by the route and then refused by name with
+/// `[checkpoint-plan:missing-component] … 'tokenizer_clip_l'`, leaving the family no servable shape
+/// at all on the universal route (sc-20651).
+///
+/// Resolution goes through [`SDXL_IMPORTED_COMPONENT_SOURCES`] — the same rows, same staging root
+/// and same subdirectories the bespoke lane stages into — so the two routes hand the loader the
+/// identical directory rather than two divergent copies. `None` means "not an SDXL component id
+/// this build knows", which is the caller's cue to fall through to the family resolvers rather than
+/// to load a neighbour's bytes (E8).
+///
+/// This never DOWNLOADS: it mirrors assets already in the app-managed Hugging Face cache, and
+/// refuses during PLANNING with an actionable install-it-from-the-Model-Manager diagnostic when
+/// they are absent (epic 17625 AC9 / E7).
+fn resolve_sdxl_imported_component_dir_cache_only(
+    settings: &Settings,
+    family: &str,
+    component: &str,
+    checkpoint_id: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    if family != "sdxl" {
+        return Ok(None);
+    }
+    let Some((_, repo, revision, file, subdir)) = SDXL_IMPORTED_COMPONENT_SOURCES
+        .iter()
+        .find(|(id, ..)| *id == component)
+    else {
+        return Ok(None);
+    };
+    let destination_dir = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components")
+        .join(subdir);
+    mirror_cached_sdxl_component_file(
+        settings,
+        checkpoint_id,
+        repo,
+        revision,
+        file,
+        &destination_dir,
+    )?;
+    Ok(Some(destination_dir))
 }
 
 async fn generate_sdxl_imported_stream(
