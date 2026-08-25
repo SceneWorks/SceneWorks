@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:8ca16b8d7e179c0545c775c2fb26bcc7bce04a2ecdb6d8e3308caab3a3f7756e",
+    "sceneWorksRevision": "source-tree:c02aa6efb7297392d53e3e569f77624ddf3a6b54f98844a86b69e9db4b3f1b08",
     "inferenceRevision": "28f0563baa03640ade1635356d2d54fe8a477f1a",
     "sources": {
       "manifest": {
@@ -46,7 +46,7 @@
       },
       "videoRouteScail2": {
         "path": "crates/sceneworks-worker/src/video_jobs/scail2.rs",
-        "sha256": "a4ea65a7fbfb476d89371041d55e1f78098fccf3ff1efe25d8d06cc059fe23c4"
+        "sha256": "5890b354f08733d03b76cc30604e715694bbd19881a8beed7675e280635a0fc0"
       },
       "videoRouteKreaRealtime": {
         "path": "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
