@@ -186,13 +186,17 @@ use dto::{
     FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
     ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
     LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
-    ModelImportRequest, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
-    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
-    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
-    StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
-    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    ModelImportRequest, ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest,
+    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
+    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
+    SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
+    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
+    VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
+// The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
+// and forget an approved checkpoint library. AC1's six verbs, reachable from a client.
+mod checkpoint_library;
 // The single model-source seam every job-creation path calls (sc-19708): generic carrier
 // attachment + typed external-library availability preflight, all data-driven.
 mod model_library;
@@ -1760,6 +1764,27 @@ fn create_app_with_state_mode(
             post(model_library::relocate_model_library),
         )
         .route("/api/v1/models", get(list_models))
+        // Linked checkpoint libraries (epic 20398, sc-20635). A STATIC sibling of
+        // `/api/v1/models/:model_id`, exactly like `/api/v1/models/import`, so a library
+        // operation is never mistaken for a model id.
+        .route(
+            "/api/v1/models/library-roots",
+            get(checkpoint_library::list_library_roots)
+                .post(checkpoint_library::approve_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id",
+            patch(checkpoint_library::update_library_root)
+                .delete(checkpoint_library::remove_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id/scan",
+            get(checkpoint_library::scan_library_root),
+        )
+        .route(
+            "/api/v1/models/library-roots/:root_id/rescan",
+            post(checkpoint_library::rescan_library_checkpoint),
+        )
         .route("/api/v1/models/:model_id", delete(delete_model))
         .route(
             "/api/v1/models/:model_id/variants/:variant",
@@ -5336,6 +5361,95 @@ const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
 /// 3 — Ref2VA's audio-reference ceiling. No model declares more; models that declare
 /// nothing take none at all (`DEFAULT_MAX_REFERENCE_AUDIO_ASSETS` is 0).
 const MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS: usize = 3;
+
+/// Validate the exact model/mode spelling and reference array every video creation boundary will
+/// persist. The typed submit route and retry/duplicate all call this after preset/patch merging and
+/// current manifest resolution, so replay cannot drift into the worker parser's deliberately
+/// tolerant behavior (which trims strings and drops blank/non-string list entries for legacy reads).
+///
+/// This helper is validation-only: it never trims, filters, sorts, or truncates, preserving every
+/// accepted id byte-for-byte and in caller order. SCAIL-2 additionally consumes strict ordered
+/// Reference/Mask pairs, has six source positions, and may expose multiple characters only once the
+/// current server-owned entry says the paired inference descriptor is installed.
+pub(crate) fn validate_video_reference_asset_ids_payload(
+    payload: &JsonObject,
+    model_manifest_entry: &Value,
+) -> Result<(), ApiError> {
+    let reference_asset_ids = match payload.get("referenceAssetIds") {
+        None => &[][..],
+        Some(Value::Array(values)) => values.as_slice(),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must be an array of string ids",
+            ));
+        }
+    };
+    for value in reference_asset_ids {
+        let id = value.as_str().ok_or_else(|| {
+            ApiError::bad_request("referenceAssetIds must contain only string ids")
+        })?;
+        if id.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must not contain blank ids",
+            ));
+        }
+        if id != id.trim() {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must not contain leading or trailing whitespace",
+            ));
+        }
+    }
+    if reference_asset_ids.len() > MAX_VIDEO_REFERENCE_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
+        )));
+    }
+
+    let model = match payload.get("model") {
+        None => "",
+        Some(Value::String(model)) if model == model.trim() => model.as_str(),
+        Some(Value::String(_)) => {
+            return Err(ApiError::bad_request(
+                "model must not contain leading or trailing whitespace",
+            ));
+        }
+        Some(_) => return Err(ApiError::bad_request("model must be a string")),
+    };
+    let mode = match payload.get("mode") {
+        None => "",
+        Some(Value::String(mode)) if mode == mode.trim() => mode.as_str(),
+        Some(Value::String(_)) => {
+            return Err(ApiError::bad_request(
+                "mode must not contain leading or trailing whitespace",
+            ));
+        }
+        Some(_) => return Err(ApiError::bad_request("mode must be a string")),
+    };
+    let reference_count = reference_asset_ids.len();
+    if model == "scail2_14b"
+        && mode == "animate_character"
+        && reference_count > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+    {
+        return Err(ApiError::bad_request(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    if model == "scail2_14b"
+        && mode == "animate_character"
+        && reference_count > 1
+        && !model_manifest_entry
+            .get("ui")
+            .and_then(|ui| ui.get("scail2MultiReference"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(ApiError::bad_request(
+            "SCAIL-2 Animate Character multi-reference is unavailable until the paired inference descriptor is installed.",
+        ));
+    }
+    Ok(())
+}
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {

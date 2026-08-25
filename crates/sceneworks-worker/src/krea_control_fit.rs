@@ -494,13 +494,16 @@ fn fit_ladder_for_tier(
         let verified = dimensions.all_satisfied();
         MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: KREA_CONTROL_ROUTE.to_owned(),
                 resolved_route: KREA_CONTROL_ROUTE.to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
                 load_shape: contract.load_shape,
                 mode: crate::memory_strategy::memory_mode_from_mode_key(KREA_CONTROL_MODE),
+                reference_shape: gen_core::MemoryReferenceShape::Image,
                 overlay: Some(overlay.clone()),
                 geometry: measured_geometry,
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),
                 parameters: selection.parameters,
@@ -662,13 +665,16 @@ fn fit_ladder_for_tier(
                 selection,
                 MemoryEvidence {
                     key: MemoryEvidenceKey {
+                        model_family: KREA_CONTROL_ROUTE.to_owned(),
                         resolved_route: KREA_CONTROL_ROUTE.to_owned(),
                         backend: gen_core::MemoryBackend::Candle,
                         tier: numeric_tier,
                         load_shape: contract.load_shape,
                         mode: crate::memory_strategy::memory_mode_from_mode_key(KREA_CONTROL_MODE),
+                        reference_shape: gen_core::MemoryReferenceShape::Image,
                         overlay: Some(overlay.clone()),
                         geometry: request_geometry,
+                        frames_per_second: None,
                         strategy,
                         engaged_composition: engaged,
                         parameters: selection.parameters,

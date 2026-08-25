@@ -79,6 +79,31 @@ const SHAPES = [
         .collect(),`,
     ["BoundedTransformerResidency?"],
   ],
+  [
+    // SHAPE 5 (sc-20799, inference ebcdc7da). One array of candidates, filtered down to the members
+    // this build can execute. The filtered-out member is conditional; its siblings are not — a
+    // distinction a shape that read the array alone would lose, and reading the filter as "keeps
+    // everything" would present a streamable-only edge as unconditional.
+    "filter + map — candle-gen-sana/src/memory_strategy.rs",
+    `contract.additional_prerequisites = [
+        MemoryStrategy::BoundedDecode,
+        MemoryStrategy::BoundedAttention,
+        MemoryStrategy::BoundedTransformerResidency,
+    ]
+    .into_iter()
+    .filter(|strategy| streamable || *strategy != MemoryStrategy::BoundedTransformerResidency)
+    .map(|strategy| {
+        (
+            strategy,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        )
+    })
+    .collect();`,
+    ["BoundedDecode", "BoundedAttention", "BoundedTransformerResidency?"],
+  ],
 ];
 
 test("every construction shape present at the pinned revision is read, individually", () => {
@@ -126,6 +151,56 @@ test("an unrecognised construction or edge fails closed rather than reading as n
         "other rung",
       ),
     /unrecognised prerequisite edge/,
+  );
+  // Shape 5's filter is recognised for exactly ONE predicate. A predicate the extractor cannot read
+  // must throw, not fall through to "keeps every member" — that would report a conditional edge as
+  // unconditional, which is the same fail-open direction as reading a new construction as no edges.
+  assert.throws(
+    () =>
+      additionalPrerequisiteEdges(
+        `contract.additional_prerequisites = [
+             MemoryStrategy::BoundedDecode,
+             MemoryStrategy::BoundedTransformerResidency,
+         ]
+         .into_iter()
+         .filter(|strategy| spec.supports(*strategy))
+         .map(|strategy| {
+             (
+                 strategy,
+                 MemoryStrategyPrerequisite::Rung {
+                     rung: MemoryStrategy::StagedResidency,
+                     scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+                 },
+             )
+         })
+         .collect();`,
+        "unreadable filter predicate",
+      ),
+    /unrecognised `additional_prerequisites` construction/,
+  );
+  // And a predicate that excludes a strategy the array never contained is not a shape the extractor
+  // can attribute, so it fails closed too rather than guessing which member the filter governs.
+  assert.throws(
+    () =>
+      additionalPrerequisiteEdges(
+        `contract.additional_prerequisites = [
+             MemoryStrategy::BoundedDecode,
+         ]
+         .into_iter()
+         .filter(|strategy| streamable || *strategy != MemoryStrategy::BoundedTransformerResidency)
+         .map(|strategy| {
+             (
+                 strategy,
+                 MemoryStrategyPrerequisite::Rung {
+                     rung: MemoryStrategy::StagedResidency,
+                     scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+                 },
+             )
+         })
+         .collect();`,
+        "filter excludes an absent member",
+      ),
+    /which the mapped array does not contain/,
   );
   // A read is not a construction, and must contribute nothing rather than throw — three provider
   // test modules assert `is_empty()` on the vector.

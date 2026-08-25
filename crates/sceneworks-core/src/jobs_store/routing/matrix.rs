@@ -703,9 +703,9 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
         // Each file compiles one shared sink-bearing request closure around backend-specific MLX
         // and Candle loader arms. Ordered, comment-stripped fragments keep an unrelated helper or
         // comment from preserving this claim after the production request drops its sink.
-        // Imported Krea builds its request in helper functions that sit ABOVE the per-item driver
-        // and generates through the memory-scoped seam rather than calling `model.generate`
-        // directly, so both the fragments and their order differ from the SDXL lane. The claim
+        // Imported Krea builds its request in helper functions that sit ABOVE the per-item driver;
+        // Krea and Mage generate through the memory-scoped seam rather than calling
+        // `model.generate` directly, so their fragments and order differ from the SDXL lane. The claim
         // being proven is unchanged: the production request literal carries `preview`, that request
         // is what actually generates, and the per-item driver is what supplies the live sink.
         // The chain is required TWICE because this lane has two production request builders — the
@@ -737,11 +737,11 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
             source,
             &[
                 "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
-                "let request = mage_finetuned_generation_request(",
+                "let mut request = mage_finetuned_generation_request(",
                 "guidance,",
                 "preview,",
                 "&cancel,",
-                "model.generate(&request",
+                "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
             ],
         ),
         _ => false,
@@ -1304,6 +1304,14 @@ fn bespoke_image_lane_support(
                         | ("conditioning", "control")
                         | ("conditioning", "reference")
                 )
+        }
+        // The terminal CUDA campaign accepted this exact five-model route. Keep the semantic
+        // supplement tied to the production route table rather than the shared `sdxl` descriptor:
+        // the latter is intentionally broader than the product's OpenPose admission boundary.
+        CandleImageLane::SdxlControl => {
+            super::candle::is_sdxl_control_model(model)
+                && category == "conditioning"
+                && capability == "control"
         }
         CandleImageLane::QwenEdit => {
             matches!(
@@ -2039,9 +2047,18 @@ fn precision_cell(
         let backend = facts.snapshot.backend.as_str();
         let descriptor = descriptor_tier_support(facts, &model.id, video_mode, tier);
         // Runtime descriptors and exact backend-specific manifest artifacts are independent
-        // authorities. A macOS-only exact tier must not veto a native Candle descriptor merely
-        // because Candle installs an unvarianted whole-repository snapshot (and vice versa).
-        // The production scheduler predicate below remains mandatory for either source of truth.
+        // authorities for WHICH TIER a lane serves: a macOS-only exact tier must not veto a native
+        // Candle descriptor merely because Candle installs an unvarianted whole-repository
+        // snapshot (and vice versa).
+        //
+        // They are NOT the whole cell: `manifest_artifact_tier_support` reads only
+        // `model.downloads[].variant` and `.platforms`, a SHIPPING fact that says nothing about a
+        // route existing. What supplies the missing conjunct is `backend_supports` below, which
+        // runs the production scheduler predicate `worker_supports_job` — the same per-model
+        // `job_is_mlx_eligible` / candle-eligibility tables the real router uses. The join is
+        // therefore `(descriptor || artifact) && production route`, and the per-family probe in
+        // `rich_runtime_mutations_change_descriptor_and_dispatch_answers` proves it holds for
+        // every family rather than for one spot-checked model (sc-20799).
         descriptor || manifest_artifact_tier_support(model, tier, backend)
     };
     let mlx = support(mlx_facts) && backend_supports(&job, mlx_facts)?;
@@ -3548,12 +3565,25 @@ mod tests {
     #[test]
     fn sc19059_resolved_candle_conditioning_is_not_left_in_the_residual_register() {
         let baseline = backend_capability_matrix().expect("production matrix derives");
+        // `scail2_14b`/`multiReference` was here until epic 20398's pin refresh (sc-20644). It was
+        // a genuine sc-19059 row while SCAIL-2 declared the shape on both engines. At inference
+        // `725c6bc59` BOTH authoritative dumps drop it — MLX's runtime snapshot no longer lists it
+        // under `scail2_14b`, the Candle snapshot does not either, and upstream pins the absence
+        // deliberately rather than incidentally:
+        //
+        //     // candle-gen-scail2/src/pipeline.rs, at the pinned revision
+        //     assert!(!d.capabilities.accepts(ConditioningKind::MultiReference));
+        //
+        // So the derivation emits no such cell at all, and a row asserting the cell is RESOLVED on
+        // both backends has lost its subject. It is removed rather than flipped to an expectation
+        // of absence: this test's question is "did a cell Candle actually resolved get left behind
+        // in the residual register", which a retired capability cannot be an instance of. The
+        // symmetric retirement itself is held by
+        // `scail2_replace_person_still_routes_to_mlx_without_a_multireference_declaration`, which
+        // proves the modes SCAIL-2 serves still route end to end without the declaration.
         let resolved = [
-            ("illustrious_xl_v1", "control"),
-            ("illustrious_xl_v2", "control"),
             ("realvisxl", "control"),
             ("realvisxl_lightning", "control"),
-            ("scail2_14b", "multiReference"),
             ("sdxl", "control"),
         ];
         for (model, shape) in resolved {
@@ -3583,8 +3613,9 @@ mod tests {
         );
 
         // Mutate the actual Candle runtime snapshot and feed it through the production derivation;
-        // this is deliberately not a copied matrix fixture. Removing a native fact must restore
-        // precisely its MLX-only parity obligation and make the checked-in matrix mismatch.
+        // this is deliberately not a copied matrix fixture. The accepted SDXL OpenPose product
+        // route is now an independent authority, so losing the shared descriptor's conditioning
+        // annotation must not revoke any of the exact five claims or recreate a residual gap.
         let mut missing_candle_control: Value = serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
         let generators = missing_candle_control["snapshot"]["generator_capabilities"]
             .as_array_mut()
@@ -3600,11 +3631,11 @@ mod tests {
         )
         .expect("mutated production facts still derive a matrix");
         for model in [
-            "illustrious_xl_v1",
-            "illustrious_xl_v2",
+            "sdxl",
             "realvisxl",
             "realvisxl_lightning",
-            "sdxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
         ] {
             let cell = mutated
                 .models
@@ -3616,36 +3647,44 @@ mod tests {
                         .find(|cell| cell.capability == "control")
                 })
                 .unwrap_or_else(|| panic!("mutated derivation emits {model}/control"));
-            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
-            assert_eq!(
-                cell.parity_obligation
-                    .as_ref()
-                    .map(|obligation| obligation.work_item.as_str()),
-                Some("epic-8588")
-            );
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
+            assert!(cell.parity_obligation.is_none());
         }
         let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
         assert!(
-            checked_in_matrix_matches_live(checked_in, mutated).is_err(),
-            "removing Candle SDXL control must break the checked-in matrix/residual relationship"
+            checked_in_matrix_matches_live(checked_in, mutated).is_ok(),
+            "the route-backed exact five must survive descriptor-only capture drift"
         );
 
-        let mut missing_scail_multi_reference: Value =
-            serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
-        let scail = missing_scail_multi_reference["snapshot"]["generator_capabilities"]
+        // The asymmetry guard, INVERTED at epic 20398's pin refresh (sc-20644).
+        //
+        // This block used to strip `multiReference` from the CANDLE snapshot and prove the cell
+        // became an MLX-only residual carrying a parity obligation. That mutation depended on MLX
+        // still DECLARING the shape — and at inference `725c6bc59` it no longer does: both engines
+        // retired it symmetrically, upstream pinning the absence with a negative assertion. So the
+        // old mutation produced no cell at all and the guard silently lost its subject.
+        //
+        // The property being guarded is unchanged and is still worth guarding: an ASYMMETRIC
+        // declaration must surface as a flagged residual rather than pass quietly. Against the new
+        // baseline the way to create that asymmetry is to add the shape back on the MLX side, so
+        // the mutation is inverted rather than deleted. Deleting it would have removed the only
+        // check that SCAIL-2 conditioning asymmetry still fails closed.
+        let mut extra_mlx_multi_reference: Value = serde_json::from_str(MLX_RUNTIME_FACTS).unwrap();
+        let scail = extra_mlx_multi_reference["snapshot"]["generator_capabilities"]
             .as_array_mut()
-            .expect("Candle snapshot has generator capabilities")
+            .expect("MLX snapshot has generator capabilities")
             .iter_mut()
             .find(|entry| entry["id"] == "scail2_14b")
-            .expect("Candle snapshot has the SCAIL-2 provider");
+            .expect("MLX snapshot has the SCAIL-2 provider");
         scail["conditioning"] = Value::Array(vec![
             Value::String("reference".to_owned()),
             Value::String("mask".to_owned()),
+            Value::String("multiReference".to_owned()),
             Value::String("controlClip".to_owned()),
         ]);
         let mutated_scail = backend_capability_matrix_from_runtime_sources(
-            MLX_RUNTIME_FACTS,
-            &serde_json::to_string(&missing_scail_multi_reference).unwrap(),
+            &serde_json::to_string(&extra_mlx_multi_reference).unwrap(),
+            CANDLE_RUNTIME_FACTS,
         )
         .expect("mutated SCAIL-2 facts still derive a matrix");
         let scail_cell = mutated_scail
@@ -4061,6 +4100,28 @@ mod tests {
         );
         assert_ne!(without_mage_sink, normalized_mage);
         assert!(!imported_preview_sink("mage-flow", &without_mage_sink));
+
+        let without_mage_scope = normalized_mage.replacen(
+            "crate::memory_strategy::generate_with_scope(",
+            "removed_memory_scope(",
+            1,
+        );
+        assert_ne!(without_mage_scope, normalized_mage);
+        assert!(
+            !imported_preview_sink("mage-flow", &without_mage_scope),
+            "Mage preview support must remain bound to the request-scoped production generator",
+        );
+
+        let crossed_mage_request = normalized_mage.replacen(
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
+            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut unrelated_request,",
+            1,
+        );
+        assert_ne!(crossed_mage_request, normalized_mage);
+        assert!(
+            !imported_preview_sink("mage-flow", &crossed_mage_request),
+            "Mage preview support must not borrow a scope that generates another request",
+        );
     }
 
     #[test]
@@ -4124,7 +4185,7 @@ mod tests {
     }
 
     #[test]
-    fn sc18481_strict_pose_control_uses_only_real_base_model_lanes() {
+    fn sc20739_strict_pose_control_uses_only_real_product_lanes() {
         let matrix = backend_capability_matrix().unwrap();
         for model in [
             "z_image_turbo",
@@ -4148,6 +4209,60 @@ mod tests {
             );
             assert!(control.parity_obligation.is_none());
         }
+
+        let exact_sdxl_openpose_models = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
+        for model in exact_sdxl_openpose_models {
+            let row = matrix.models.iter().find(|row| row.id == model).unwrap();
+            let control = row
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == "control")
+                .expect("promoted OpenPose model must expose the control axis");
+            assert_eq!(
+                (control.mlx, control.candle),
+                (Some(true), Some(true)),
+                "{model} must preserve the accepted cross-backend OpenPose claim"
+            );
+            assert!(control.parity_obligation.is_none());
+        }
+
+        assert_eq!(
+            super::super::candle::SDXL_CONTROL_MODELS,
+            exact_sdxl_openpose_models.as_slice(),
+            "the generic SDXL OpenPose model allowlist must remain the accepted exact five"
+        );
+        let manifest: ManifestRoot =
+            serde_json::from_str(&strip_jsonc_comments(MANIFEST)).expect("manifest parses");
+        let actual_sdxl_openpose_models: BTreeSet<_> = manifest
+            .models
+            .iter()
+            .filter_map(|model| {
+                let job = probe_job(
+                    JobType::ImageGenerate,
+                    &model.id,
+                    json!({
+                        "mode": "text_to_image",
+                        "prompt": "probe",
+                        "advanced": { "poses": [{}] }
+                    }),
+                )
+                .expect("control probe is structurally valid");
+                (super::super::candle::image_job_candle_lane(&job)
+                    == Some(super::super::candle::CandleImageLane::SdxlControl))
+                .then_some(model.id.as_str())
+            })
+            .collect();
+        assert_eq!(
+            actual_sdxl_openpose_models,
+            exact_sdxl_openpose_models.into_iter().collect(),
+            "the generic SDXL OpenPose route must not broaden beyond the accepted exact five"
+        );
 
         // These edit models consume the pose image as an ordinary reference; they do not own the
         // strict control lane and must not inherit the base-model supplement above.
@@ -4965,7 +5080,7 @@ mod tests {
         let expected_records = BTreeMap::from([
             (
                 "epic-9083-precision-sequencing",
-                ("epic-9083", "precision", 27usize),
+                ("epic-9083", "precision", 14usize),
             ),
             (
                 "epic-8433-krea-realtime-operation-sequencing",
@@ -4992,8 +5107,16 @@ mod tests {
                 ("epic-18803", "operation", 6usize),
             ),
             (
+                // 4 -> 5 at epic 20398's pin refresh (sc-20644). This count is a frozen-shape
+                // assertion, so it moves in the same PR as the register it pins. The MLX
+                // `ltx_2_3` engine gained `multiReference` at inference `725c6bc59`, and
+                // `engines.rs` maps `ltx_2_3_eros` to that MLX engine and to no Candle engine at
+                // all, so Eros's conditioning surface grew a fifth member that the already-approved
+                // route-level Candle withdrawal covers. No new approval: same approver, authority
+                // and date, and no Candle control becomes newly hidden because Eros has no Candle
+                // route to hide one on.
                 "epic-18803-eros-candle-conditioning-withdrawal",
-                ("epic-18803", "conditioning", 4usize),
+                ("epic-18803", "conditioning", 5usize),
             ),
             (
                 "epic-18803-eros-candle-adapter-withdrawal",
@@ -5214,20 +5337,21 @@ mod tests {
             .find(|model| model.id == "sana_1600m")
             .unwrap();
         assert!(manifest_artifact_tier_support(sana, "bf16", "mlx"));
-        assert!(!manifest_artifact_tier_support(sana, "bf16", "candle"));
+        assert!(manifest_artifact_tier_support(sana, "bf16", "candle"));
         let dense = precision_cell(sana, "bf16", &original, &candle).unwrap();
         assert_eq!((dense.mlx, dense.candle), (Some(true), Some(true)));
 
-        // Removing the Candle descriptor loses Candle dense support even though the manifest still
-        // contains a macOS bf16 artifact. Conversely, removing the MLX descriptor does not erase the
-        // exact macOS artifact. These mutations guard both independent sides of the union.
+        // The exact platform artifact independently preserves each lane's dense support when its
+        // runtime descriptor is removed, because the PRODUCTION SCHEDULER PREDICATE still routes
+        // the model. That second authority is what makes the artifact disjunct legitimate; the
+        // per-family probe below proves it is load-bearing for every family, not just this one.
         let mut no_candle_descriptor = candle.clone();
         no_candle_descriptor.model_mappings.remove("sana_1600m");
         no_candle_descriptor
             .video_model_mappings
             .retain(|mapping| mapping.model_id != "sana_1600m");
         let dense = precision_cell(sana, "bf16", &original, &no_candle_descriptor).unwrap();
-        assert_eq!(dense.candle, Some(false));
+        assert_eq!(dense.candle, Some(true));
 
         let mut no_mlx_descriptor = original.clone();
         no_mlx_descriptor.model_mappings.remove("sana_1600m");
@@ -5236,6 +5360,92 @@ mod tests {
             .retain(|mapping| mapping.model_id != "sana_1600m");
         let dense = precision_cell(sana, "bf16", &no_mlx_descriptor, &candle).unwrap();
         assert_eq!(dense.mlx, Some(true));
+
+        // sc-20799: the artifact row is a SHIPPING fact, not a routing one. Joined with nothing it
+        // let `"variant": "bf16"` on a `["windows","linux"]` download entry claim the candle cell
+        // outright. Prove the join is actually constructed by keeping the artifact rows EXACTLY as
+        // they are and removing only the routing: a family id in neither the runtime descriptors
+        // nor the production route tables must claim no cell on either lane.
+        //
+        // The probe manifest is the real one with every model id suffixed: identical download rows
+        // (so `manifest_artifact_tier_support` answers exactly as before), an id nothing routes.
+        let mut probe_value: Value = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        for entry in probe_value["models"].as_array_mut().unwrap() {
+            let renamed = format!("{}_unrouted_probe", entry["id"].as_str().unwrap());
+            entry["id"] = Value::String(renamed);
+        }
+        let probe_manifest: ManifestRoot = serde_json::from_value(probe_value).unwrap();
+        let unrouted_twin = |model: &ManifestModel| {
+            let id = format!("{}_unrouted_probe", model.id);
+            probe_manifest
+                .models
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .unwrap()
+        };
+        let unrouted = unrouted_twin(sana);
+        assert!(
+            manifest_artifact_tier_support(unrouted, "bf16", "candle"),
+            "the probe must keep the exact candle artifact row that used to sustain the cell"
+        );
+        assert!(
+            manifest_artifact_tier_support(unrouted, "bf16", "mlx"),
+            "the probe must keep the exact mlx artifact row that used to sustain the cell"
+        );
+        let unrouted_cell = precision_cell(unrouted, "bf16", &original, &candle).unwrap();
+        assert_eq!(
+            (unrouted_cell.mlx, unrouted_cell.candle),
+            (Some(false), Some(false)),
+            "a shipped tier artifact must not claim a lane that routes nothing"
+        );
+
+        // The join has to hold for EVERY family the matrix can claim a precision cell for, not
+        // only the one that exposed the hole. The family set is DERIVED from the manifest and the
+        // live fixtures — never a hand-typed list, never a population count — so it grows with the
+        // corpus. Each family must land in the partition: a claimed cell is backed by a runtime
+        // descriptor or by the production router, and stripping BOTH always drops it.
+        let mut asserted_families = BTreeSet::new();
+        for model in &manifest.models {
+            for tier in ["bf16", "q8", "q4"] {
+                let Ok(baseline) = precision_cell(model, tier, &original, &candle) else {
+                    continue;
+                };
+                let (job_type, payload) =
+                    precision_payload(model, tier, &original, &candle).unwrap();
+                let job = probe_job(job_type, &model.id, payload).unwrap();
+                for (lane, claimed) in [("mlx", baseline.mlx), ("candle", baseline.candle)] {
+                    if claimed != Some(true) {
+                        continue;
+                    }
+                    let facts = if lane == "mlx" { &original } else { &candle };
+                    assert!(
+                        backend_supports(&job, facts).unwrap(),
+                        "{} {tier} {lane}: a claimed precision cell must satisfy the production \
+                         scheduler predicate, never the artifact row alone",
+                        model.id
+                    );
+                    // Removing the routing while KEEPING the artifact row must drop the cell. A
+                    // video model fails even earlier — the probe cannot resolve a routed canonical
+                    // mode — which is the same fail-closed conclusion, so `Err` counts as dropped.
+                    let stripped = precision_cell(unrouted_twin(model), tier, &original, &candle)
+                        .map(|cell| if lane == "mlx" { cell.mlx } else { cell.candle })
+                        .unwrap_or(Some(false));
+                    assert_eq!(
+                        stripped,
+                        Some(false),
+                        "{} {tier} {lane}: the artifact row must not sustain the cell once nothing \
+                         routes the model",
+                        model.id
+                    );
+                    asserted_families.insert(model.id.clone());
+                }
+            }
+        }
+        assert!(
+            asserted_families.contains("sana_1600m"),
+            "the derived family set must cover the family that exposed this hole, got \
+             {asserted_families:?}"
+        );
 
         // Neither authority bypasses production routing: a snapshot without image dispatch cannot
         // claim the precision cell even when both its descriptor and manifest artifact remain.

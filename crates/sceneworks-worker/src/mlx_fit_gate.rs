@@ -42,9 +42,9 @@ use gen_core::{
     MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
     MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
-    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
-    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
-    TransformerComponent, WeightsSource,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryReferenceShape,
+    MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision,
+    Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -62,7 +62,10 @@ use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
-const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+// Must remain identical to mlx-gen-mage's loaded provider contract. The prior generation-peak
+// token predated the shared ladder and caused every exact Mage request to fail the provider/gate
+// handshake before selection.
+const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-mlx-shared-ladder-2026-08-03-v1";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1311,6 +1314,15 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
         "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
+        // sc-20799 round 2: unlike the video lane's reference-shape `"other"`, this `"other"` is
+        // IDENTITY-BEARING and must stay. `mode_key` is matched against `binding.mode` when
+        // resolving packaged evidence and is round-tripped by `memory_mode_from_mode_key`, whose
+        // catch-all arm reconstructs `MemoryMode::Other("other")`. Renaming it (to "none" or
+        // anything else) would silently repoint every non-standard image mode at a different
+        // admission coordinate. The real asymmetry worth knowing about is that the typed value
+        // keeps the concrete mode while the key collapses to a single bucket, so two distinct
+        // non-standard modes share one evidence key; narrowing that is a calibration-corpus change,
+        // not a rename, and is out of scope for this pass.
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
     }
 }
@@ -1496,13 +1508,20 @@ fn resident_evidence(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -1888,6 +1907,7 @@ fn evidence_admission_route(
                 })?;
                 let memory_evidence = MemoryEvidence {
                     key: MemoryEvidenceKey {
+                        model_family: plan.model_id.to_owned(),
                         resolved_route: plan.engine_id.to_owned(),
                         backend: gen_core::MemoryBackend::Mlx,
                         tier: plan.tier,
@@ -1895,8 +1915,14 @@ fn evidence_admission_route(
                             record.load_shape,
                         ),
                         mode: memory_mode_from_mode_key(mode_key),
+                        reference_shape: if inputs.reference_count == 0 {
+                            MemoryReferenceShape::None
+                        } else {
+                            MemoryReferenceShape::Image
+                        },
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
+                        frames_per_second: None,
                         strategy: evidence_strategy(binding.rung),
                         engaged_composition: record
                             .strategy
@@ -2161,13 +2187,20 @@ pub(crate) fn estimate_evidence(
 ) -> MemoryEvidence {
     MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -4156,16 +4189,16 @@ pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumer
 /// Resolve the numeric tier that the loaded video checkpoint actually carries.
 ///
 /// Provider-owned resolution runs first for video loaders that carry their tier outside
-/// `LoadSpec.quantize` (currently Wan TI2V-5B). LTX then resolves its immutable `split_model.json`.
+/// `LoadSpec.quantize` (Wan TI2V-5B and Bernini). LTX then resolves its immutable `split_model.json`.
 /// An explicit assertion that disagrees with the checkpoint fails closed before selection.
 pub(crate) fn resolved_video_numeric_tier(
     engine_id: &str,
     spec: &LoadSpec,
 ) -> WorkerResult<MemoryNumericTier> {
-    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. MLX Wan
-    // TI2V-5B reads its immutable packed config/header surface and also carries the Q4 text-encoder
-    // Q8 floor; deriving from `LoadSpec.quantize` here would misprice the normal prepacked load,
-    // whose request-side quant hint is deliberately `None`.
+    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. Wan and
+    // Bernini read immutable packed config/header surfaces (Wan also carries the Q4 text-encoder Q8
+    // floor); deriving from `LoadSpec.quantize` would misprice their normal prepacked loads, whose
+    // request-side quant hint is deliberately `None`.
     #[cfg(target_os = "macos")]
     if let Some(tier) =
         runtime_macos::resolved_video_memory_numeric_tier(engine_id, spec).map_err(|error| {
@@ -4398,6 +4431,45 @@ fn weights_source_bytes(src: &WeightsSource) -> u64 {
     }
 }
 
+fn weights_source_path(source: &WeightsSource) -> &Path {
+    match source {
+        WeightsSource::Dir(path) | WeightsSource::File(path) => path.as_path(),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedTextEncoderSource {
+    path: PathBuf,
+    direct_shard_bytes: u64,
+}
+
+/// Resolve the selected encoder exactly as gen-core's loader does. In particular, a complete
+/// snapshot remains the requested `LoadSpec` source for identity/replay, while admission follows
+/// only its direct `text_encoder/` shards and never recursively prices sibling transformer/VAE
+/// trees.
+fn resolved_text_encoder_source(
+    source: &WeightsSource,
+) -> gen_core::Result<ResolvedTextEncoderSource> {
+    gen_core::read_text_encoder_source_unchanged(source, |resolved| {
+        Ok(ResolvedTextEncoderSource {
+            path: weights_source_path(resolved).to_path_buf(),
+            direct_shard_bytes: gen_core::text_encoder_source_bytes(resolved)?,
+        })
+    })
+}
+
+fn adapter_path_bytes(path: &Path) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => sum_safetensors_bytes(path),
+        Ok(metadata)
+            if path.extension().and_then(|extension| extension.to_str()) == Some("safetensors") =>
+        {
+            metadata.len()
+        }
+        _ => 0,
+    }
+}
+
 fn adapter_source_bytes_for_gate(engine_id: &str, spec: &LoadSpec) -> u64 {
     adapter_source_bytes_for_gate_where(engine_id, spec, |_| true)
 }
@@ -4418,19 +4490,7 @@ fn adapter_source_bytes_for_gate_where(
         if !include(&adapter.path) {
             return total;
         }
-        let bytes = match std::fs::metadata(&adapter.path) {
-            Ok(metadata) if metadata.is_dir() => sum_safetensors_bytes(&adapter.path),
-            Ok(metadata)
-                if adapter
-                    .path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    == Some("safetensors") =>
-            {
-                metadata.len()
-            }
-            _ => 0,
-        };
+        let bytes = adapter_path_bytes(&adapter.path);
         total.saturating_add(bytes)
     });
     adapter_resident_source_bytes(engine_id, spec, source_bytes)
@@ -4927,6 +4987,7 @@ fn generic_mlx_shared_observation(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
+            model_family: "generic_mlx_cold_load".into(),
             resolved_route: "generic_mlx_cold_load".into(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
@@ -4934,8 +4995,10 @@ fn generic_mlx_shared_observation(
             // defers transformer materialization.
             load_shape: gen_core::LoadShape::EagerMaterialization,
             mode: memory_mode_from_mode_key("image_generation"),
+            reference_shape: MemoryReferenceShape::None,
             overlay: Some("resolved_load_spec".into()),
             geometry,
+            frames_per_second: None,
             strategy: MemoryStrategy::Resident,
             engaged_composition: vec![MemoryStrategy::Resident],
             parameters: Default::default(),
@@ -5145,12 +5208,23 @@ fn spec_component_bytes_with_provider_footprint(
     footprint: Option<PerComponentBytes>,
 ) -> (u64, u64, HeadroomAllowance) {
     let external_adapter_bytes = external_adapter_source_bytes_for_gate(engine_id, spec);
+    // The infallible compatibility/planning seam predates prepared specs. Valid selected encoders
+    // resolve through gen-core; an invalid ad-hoc spec retains the old conservative recursive
+    // estimate and will still fail contract validation before a real provider load.
+    let selected_text_encoder = spec.text_encoder.as_ref().map(|source| {
+        resolved_text_encoder_source(source).unwrap_or_else(|_| ResolvedTextEncoderSource {
+            path: weights_source_path(source).to_path_buf(),
+            direct_shard_bytes: weights_source_bytes(source),
+        })
+    });
     spec_component_bytes_with_provider_footprint_and_sizes(
         engine_id,
         spec,
         footprint,
+        selected_text_encoder.as_ref(),
         weights_source_bytes,
         external_adapter_bytes,
+        adapter_path_bytes,
     )
 }
 
@@ -5158,8 +5232,10 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
     engine_id: &str,
     spec: &LoadSpec,
     footprint: Option<PerComponentBytes>,
+    selected_text_encoder: Option<&ResolvedTextEncoderSource>,
     source_bytes: impl Fn(&WeightsSource) -> u64,
     external_adapter_bytes: u64,
+    adapter_source_bytes: impl Fn(&Path) -> u64,
 ) -> (u64, u64, HeadroomAllowance) {
     let footprint_te = footprint.map(|fp| fp.text_encoder);
     // A provider that accepts a primary single-file checkpoint owns the meaning of its named
@@ -5201,14 +5277,29 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
             },
         ),
     };
+    // Every directory source in this set was priced recursively. A selected encoder at the same
+    // path or below one is already covered; a selected encoder above one is not, because its exact
+    // loader inventory contains direct shards only and excludes nested descendants.
+    let mut recursively_priced_paths = vec![weights_source_path(&spec.weights)];
     if let Some(control) = &spec.control {
-        total_bytes += source_bytes(control);
+        let bytes = source_bytes(control);
+        total_bytes = total_bytes.saturating_add(bytes);
+        recursively_priced_paths.push(weights_source_path(control));
     }
     // Read the actual adapter sources at the same pre-load seam as controls. Provider-specific
     // residency matters: packed Wan keeps additive residuals, while dense Wan folds them into the
     // base and adds zero independent bytes. Other providers conservatively retain the source bytes;
     // a typed component contract may replace them with a more exact resident measurement below.
     total_bytes = total_bytes.saturating_add(external_adapter_bytes);
+    if external_adapter_bytes > 0 {
+        recursively_priced_paths.extend(spec.adapters.iter().filter_map(|adapter| {
+            let inside = match &spec.weights {
+                WeightsSource::Dir(root) => adapter.path.starts_with(root),
+                WeightsSource::File(_) => false,
+            };
+            (!inside && adapter_source_bytes(&adapter.path) > 0).then_some(adapter.path.as_path())
+        }));
+    }
     // Caller-provisioned components (epic 13657) are staged from a DIFFERENT snapshot than
     // `spec.weights`, so the dir scan above cannot see them (sc-15154). Mage-Flow's per-tier dir
     // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
@@ -5256,6 +5347,7 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
         if !inside {
             let component_bytes = source_bytes(source);
             total_bytes = total_bytes.saturating_add(component_bytes);
+            recursively_priced_paths.push(weights_source_path(source));
             if matches!(&spec.weights, WeightsSource::File(_))
                 && component_id == gen_core::COMFYUI_TEXT_ENCODER_COMPONENT
             {
@@ -5294,6 +5386,29 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
             }
         }
     }
+    // The optional selected encoder is a typed source, not a named component. Include its exact
+    // resolved direct-shard bytes in the resident total. Equal/child paths are already covered by a
+    // recursively priced source. A selected encoder that is a parent of the base/control/component
+    // still adds all of its direct shards: gen-core's loader does not recurse into those descendants.
+    // A selection-aware provider owns the staged/materialized TE footprint; exact direct-shard bytes
+    // are the fallback only when that provider fact is absent or zero. Provider-owned File
+    // footprints are complete assemblies and remain authoritative.
+    if provider_owned_file_footprint.is_none() {
+        if let Some(selected) = selected_text_encoder {
+            let already_priced = recursively_priced_paths
+                .iter()
+                .any(|path| selected.path.starts_with(path));
+            let additional_bytes = if already_priced {
+                0
+            } else {
+                selected.direct_shard_bytes
+            };
+            total_bytes = total_bytes.saturating_add(additional_bytes);
+            te_bytes = footprint_te
+                .filter(|bytes| *bytes > 0)
+                .unwrap_or(selected.direct_shard_bytes);
+        }
+    }
     (total_bytes, te_bytes, headroom)
 }
 
@@ -5303,24 +5418,44 @@ fn spec_component_bytes_with_provider_footprint_checked(
     footprint: Option<PerComponentBytes>,
 ) -> gen_core::Result<(u64, u64, HeadroomAllowance)> {
     let file_sizes = prepared_file_sizes(spec)?;
-    // Keep the provider's component layout/materialization facts, but replace every generic File
-    // slot it reports with the exact prepared target size. Compatibility-mode provider code may
-    // still stat a path while producing its fact; that stat never becomes prepared admission
-    // identity or overrides the caller's token.
+    let selected_text_encoder = spec
+        .text_encoder
+        .as_ref()
+        .map(resolved_text_encoder_source)
+        .transpose()?;
+    // Fill a File slot the provider left EMPTY with the exact prepared target size — and only such a
+    // slot. A non-zero value in a File slot is a provider fact about the assembly it will actually
+    // materialize (the checkpoint-import lane prices the DECODED plan: an fp8/int8 single-file import
+    // is resident at its decode width, not at its on-disk width), so overwriting it with the raw file
+    // length under-prices the modeled side of the resident-attribution guard by exactly the decode
+    // delta and refuses imports that fit (sc-20651).
+    //
+    // The overwrite was introduced to stop compatibility-mode provider code from smuggling its own
+    // `stat` into prepared admission identity. It never bought that: `prepared_file_sizes` above runs
+    // `validate_prepared_file_pins` → `ensure_unchanged` on every configured File, so a prepared spec
+    // whose file no longer matches its token is a hard error before any byte is priced, and for a
+    // genuinely byte-preserving provider the substituted value is the value already there. What the
+    // overwrite did buy was silently discarding every plan-priced fact. The infallible sibling
+    // `spec_component_bytes_with_provider_footprint` never had it; the two seams now agree.
     let footprint = footprint.map(|mut footprint| {
+        let fill = |slot: &mut u64, source: &WeightsSource| {
+            if *slot == 0 {
+                *slot = prepared_source_bytes(source, &file_sizes);
+            }
+        };
         if matches!(spec.weights, WeightsSource::File(_)) {
-            footprint.dit = prepared_source_bytes(&spec.weights, &file_sizes);
+            fill(&mut footprint.dit, &spec.weights);
         }
         if let Some(source @ WeightsSource::File(_)) = spec
             .components
             .get(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT)
         {
-            footprint.text_encoder = prepared_source_bytes(source, &file_sizes);
+            fill(&mut footprint.text_encoder, source);
         }
         if let Some(source @ WeightsSource::File(_)) =
             spec.components.get(gen_core::COMFYUI_VAE_COMPONENT)
         {
-            footprint.vae = prepared_source_bytes(source, &file_sizes);
+            fill(&mut footprint.vae, source);
         }
         footprint
     });
@@ -5335,8 +5470,15 @@ fn spec_component_bytes_with_provider_footprint_checked(
         engine_id,
         spec,
         footprint,
+        selected_text_encoder.as_ref(),
         |source| prepared_source_bytes(source, &file_sizes),
         external_adapter_bytes,
+        |path| {
+            std::path::absolute(path)
+                .ok()
+                .and_then(|path| file_sizes.get(&path).copied())
+                .unwrap_or(0)
+        },
     ))
 }
 
@@ -5810,7 +5952,21 @@ mod tests {
         spec.prepare_with_file_pins([pin])
             .expect("prepared spec finalizes");
 
+        // An EMPTY File slot is filled from the caller's prepared token, not from a fresh stat.
         let (total, _, _) = spec_component_bytes_with_provider_footprint_checked(
+            "fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: 0,
+                dit: 0,
+                vae: 0,
+            }),
+        )
+        .expect("prepared accounting succeeds");
+        assert_eq!(total, 23, "primary File size comes from its prepared token");
+
+        // A provider that DID price the slot owns it: the prepared token never overwrites a fact.
+        let (planned, _, _) = spec_component_bytes_with_provider_footprint_checked(
             "fixture",
             &spec,
             Some(PerComponentBytes {
@@ -5820,11 +5976,63 @@ mod tests {
             }),
         )
         .expect("prepared accounting succeeds");
-        assert_eq!(total, 23, "primary File size comes from its prepared token");
+        assert_eq!(
+            planned, 9_999,
+            "a plan-priced dit survives prepared accounting for a File source"
+        );
 
         std::fs::write(&path, vec![1_u8; 31]).expect("weights replacement writes");
         spec_component_bytes_with_provider_footprint_checked("fixture", &spec, None)
             .expect_err("stale prepared source errors are propagated, not restatted or swallowed");
+    }
+
+    /// sc-20651. The checkpoint-import lane prices the DECODED plan for a quantized single-file
+    /// import: an fp8 checkpoint is resident at its decode width, well above its on-disk width. The
+    /// prepared accounting seam used to overwrite that provider fact with the raw file length, so the
+    /// modeled side of the resident-attribution guard came in short by exactly the decode delta and
+    /// the guard refused a real import that fits.
+    ///
+    /// The numbers are the measured kreamania_variant1_fp8 case scaled onto a synthetic plan: the
+    /// live resident total was 33_483_838_240 against a modeled 31_875_544_875 — a 1_608_293_365-byte
+    /// shortfall that is exactly the fp8→bf16 (`fpmm`) decode delta the provider had already priced.
+    ///
+    /// Mutation: restore `footprint.dit = prepared_source_bytes(&spec.weights, &file_sizes);` and this
+    /// goes RED reporting `PLAN_DIT - ON_DISK_DIT` too few bytes.
+    #[test]
+    fn a_plan_priced_dit_is_not_overwritten_by_the_on_disk_file_length() {
+        const ON_DISK_DIT: u64 = 64;
+        const PLAN_DIT: u64 = ON_DISK_DIT + 1_608_293_365;
+        const PLAN_TE: u64 = 5_000;
+        const PLAN_VAE: u64 = 700;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("checkpoint.safetensors");
+        std::fs::write(&path, vec![0_u8; ON_DISK_DIT as usize]).expect("weights write");
+        let pin = gen_core::PinnedWeightsFile::pin(&path).expect("weights pin");
+        let mut spec = LoadSpec::new(WeightsSource::File(path.clone()));
+        spec.prepare_with_file_pins([pin])
+            .expect("prepared spec finalizes");
+
+        let (total, te, _) = spec_component_bytes_with_provider_footprint_checked(
+            "fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: PLAN_TE,
+                dit: PLAN_DIT,
+                vae: PLAN_VAE,
+            }),
+        )
+        .expect("prepared accounting succeeds");
+
+        let expected = PLAN_TE + PLAN_DIT + PLAN_VAE;
+        assert_eq!(
+            total,
+            expected,
+            "the modeled total must carry the plan-priced dit; on-disk substitution under-prices it \
+             by {} bytes",
+            expected.saturating_sub(total)
+        );
+        assert_eq!(te, PLAN_TE, "the provider's encoder split is untouched");
     }
 
     #[test]
@@ -13455,10 +13663,12 @@ mod tests {
             // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
             // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
             // those providers reachable rung-4 ladders, so they are no longer Resident-only and
-            // have no estimate band left to flip. The four that remain have no ladder yet, which is
-            // what keeps this list a live audit rather than a formality.
+            // have no estimate band left to flip. sc-20799 removed the fourth row the same way:
+            // retiring `flux2_dev`'s `exhaustive` reading gave its T2I route a declared
+            // `staged_residency` rung across bf16/q4/q8, so the bf16 cell is no longer
+            // Resident-only and has no band to flip. The three that remain have no ladder yet,
+            // which is what keeps this list a live audit rather than a formality.
             vec![
-                ("flux2_dev", "flux2_dev", "bf16", 128),
                 ("flux2_dev", "flux2_dev_control", "q4", 64),
                 ("ideogram_4", "ideogram_4", "q8", 48),
                 ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
@@ -15095,6 +15305,16 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
+        assert_eq!(
+            MAGE_CALIBRATION_FINGERPRINT,
+            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
+            "the worker's Mage peak estimator must fail at compile/test time when the linked provider identity moves",
+        );
+    }
+
     #[test]
     fn mage_adapter_requests_require_and_consume_declared_residency() {
         use gen_core::{
@@ -15289,11 +15509,17 @@ mod tests {
         };
         let evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "mage_flow".to_owned(),
                 resolved_route: "mage_flow".to_owned(),
                 backend: gen_core::MemoryBackend::Mlx,
                 tier: plan.tier,
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: memory_mode_from_mode_key("edit"),
+                reference_shape: if inputs.reference_count == 0 {
+                    MemoryReferenceShape::None
+                } else {
+                    MemoryReferenceShape::Image
+                },
                 overlay: inputs.overlay.clone(),
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -15302,6 +15528,7 @@ mod tests {
                     frames: 1,
                     reference_count: inputs.reference_count,
                 },
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),
                 parameters: selection.parameters,
@@ -15837,6 +16064,97 @@ mod tests {
         let flat = LoadSpec::new(WeightsSource::Dir(tier))
             .with_component("text_encoder", WeightsSource::Dir(flat_te));
         assert_eq!(spec_component_bytes("mage_flow_edit", &flat).0, 3_700);
+    }
+
+    #[test]
+    fn external_selected_text_encoder_is_counted_once_across_containment_shapes() {
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_selected_te_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
+        let write = |dir: std::path::PathBuf, bytes: usize| {
+            std::fs::create_dir_all(&dir).expect("mk dir");
+            std::fs::write(dir.join("model.safetensors"), vec![0_u8; bytes]).expect("write");
+            dir
+        };
+        let base = write(root.join("base"), 1_000);
+
+        // A nested named component is not part of the selected encoder's direct-shard inventory.
+        // Both sources are loaded and priced, but only the direct shard belongs to the TE phase.
+        let external_te = write(root.join("selected-te"), 500);
+        let nested_component = write(external_te.join("projection"), 200);
+        let external = LoadSpec::new(WeightsSource::Dir(base.clone()))
+            .with_component("projection", WeightsSource::Dir(nested_component))
+            .with_text_encoder(WeightsSource::Dir(external_te));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &external);
+        assert_eq!(total, 1_000 + 500 + 200);
+        assert_eq!(te_bytes, 500);
+
+        // A selected source nested under the primary directory is already covered by the base scan.
+        let nested_te = write(base.join("selected-te"), 300);
+        let nested = LoadSpec::new(WeightsSource::Dir(base.clone()))
+            .with_text_encoder(WeightsSource::Dir(nested_te.clone()));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &nested);
+        assert_eq!(total, 1_000 + 300);
+        assert_eq!(te_bytes, 300);
+
+        // Equal is likewise already covered, but the TE phase is only the base directory's direct
+        // shard and excludes the nested selected-te descendant.
+        let equal = LoadSpec::new(WeightsSource::Dir(base.clone()))
+            .with_text_encoder(WeightsSource::Dir(base));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &equal);
+        assert_eq!(total, 1_000 + 300);
+        assert_eq!(te_bytes, 1_000);
+
+        // Parent is intentionally asymmetric: the exact selected inventory contains only direct
+        // shards, so the nested primary remains separately priced and is never subtracted from TE.
+        let selected_parent = write(root.join("selected-parent"), 400);
+        let nested_base = write(selected_parent.join("base"), 600);
+        let parent = LoadSpec::new(WeightsSource::Dir(nested_base))
+            .with_text_encoder(WeightsSource::Dir(selected_parent));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &parent);
+        assert_eq!(total, 600 + 400);
+        assert_eq!(te_bytes, 400);
+    }
+
+    #[test]
+    fn complete_snapshot_selection_prices_only_resolved_encoder_direct_shards() {
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_selected_snapshot_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
+        let write = |path: std::path::PathBuf, bytes: usize| {
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mk dir");
+            std::fs::write(&path, vec![0_u8; bytes]).expect("write");
+        };
+        let base = root.join("base");
+        write(base.join("model.safetensors"), 1_000);
+        let snapshot = root.join("complete-selected-snapshot");
+        write(snapshot.join("text_encoder/model.safetensors"), 500);
+        write(snapshot.join("text_encoder/config.json"), 2);
+        write(snapshot.join("transformer/model.safetensors"), 700);
+        write(snapshot.join("vae/model.safetensors"), 300);
+
+        let spec =
+            LoadSpec::new(WeightsSource::Dir(base)).with_text_encoder(WeightsSource::Dir(snapshot));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &spec);
+        assert_eq!(total, 1_000 + 500);
+        assert_eq!(te_bytes, 500);
+
+        // A selection-aware provider owns materialized residency. Its smaller projection must not
+        // be overwritten by either the exact stored bytes or the snapshot's unrelated siblings.
+        let (_, projected_te, _) = spec_component_bytes_with_provider_footprint(
+            "unregistered_fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: 450,
+                dit: 1_000,
+                vae: 0,
+            }),
+        );
+        assert_eq!(projected_te, 450);
     }
 
     /// sc-17137 — MiniMax-H3's INVERTED staging must not price the dense upstream it supersedes.

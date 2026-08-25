@@ -1440,7 +1440,7 @@ fn the_retention_scan_classifies_without_holding_the_lock_that_blocks_status_rea
         let observed = Arc::clone(&observed);
         let seen = Arc::clone(&seen);
         let lock_paths = lock_paths.clone();
-        move || {
+        move |_digest: &str| {
             seen.store(true, Ordering::SeqCst);
             observed.store(
                 lock_paths.iter().all(|path| {
@@ -1454,6 +1454,7 @@ fn the_retention_scan_classifies_without_holding_the_lock_that_blocks_status_rea
     set_scan_classification_observer(probe);
 
     let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    clear_scan_classification_observer();
     assert!(seen.load(Ordering::SeqCst), "the observer must have run");
     assert!(
         observed.load(Ordering::SeqCst),
@@ -1464,6 +1465,117 @@ fn the_retention_scan_classifies_without_holding_the_lock_that_blocks_status_rea
         !report.evicted.is_empty(),
         "the sweep must still evict with the lock released"
     );
+}
+
+/// `evict_candidate`'s PHASE-TWO artifact-lock guard, on its own (sc-20635).
+///
+/// Eviction is protected from an in-flight load twice: the scan phase probes
+/// `artifact_lock_is_contended` before an entry ever becomes a candidate, and phase two takes the
+/// artifact lock exclusively and retains on contention. A lease taken before the sweep starts is
+/// caught by the FIRST guard, so every test that leases up front leaves the second one uncovered —
+/// it can be deleted and those tests stay green.
+///
+/// This test closes that window by leasing in the gap the two guards straddle: the scan
+/// classification observer fires for each entry, and on the SECOND entry it takes the shared
+/// artifact lock of the FIRST — which has already passed its scan-phase probe and is sitting in
+/// `candidates`. Only phase two can still save it. `enforce_retention` scans every entry before it
+/// evicts any, so the gap is deterministic rather than a race.
+///
+/// Failing mutation: replace phase two's `Err(error) if is_lock_contended(&error) => return
+/// retained(RetentionHold::ActiveUse, None)` arm with `Ok(())`/a no-op and the leased entry is
+/// evicted out from under its reader — red here, and green in every lease test that leases before
+/// the sweep.
+#[test]
+fn the_phase_two_artifact_lock_retains_an_entry_leased_after_it_was_classified() {
+    use std::sync::Mutex;
+
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate_a = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    let candidate_b = flat_candidate(&library, "SceneWorks/m-b", REV_B, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate_a);
+    materialize_complete(&store, &library, &candidate_b);
+    stamp_activity(&store, &candidate_a.cache_key, Some(1_000), 500);
+    stamp_activity(&store, &candidate_b.cache_key, Some(1_000), 500);
+
+    // Which entry gets leased depends on scan order, so the test does not assume one: it records
+    // the digest it locked and reads the verdict back against that.
+    let held: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let leased: Arc<Mutex<Option<(String, File)>>> = Arc::new(Mutex::new(None));
+    let probe = {
+        let held = Arc::clone(&held);
+        let leased = Arc::clone(&leased);
+        let store = store.clone();
+        move |digest: &str| {
+            let mut held = held.lock().unwrap();
+            if held.iter().any(|seen| seen == digest) {
+                return;
+            }
+            held.push(digest.to_owned());
+            let mut leased = leased.lock().unwrap();
+            if held.len() < 2 || leased.is_some() {
+                return;
+            }
+            // Exactly what an active load holds: the artifact lock, SHARED.
+            let already_classified = held[0].clone();
+            let handle = open_lock_file(&store.artifact_lock_path(&already_classified)).unwrap();
+            FileExt::lock_shared(&handle).unwrap();
+            *leased = Some((already_classified, handle));
+        }
+    };
+    set_scan_classification_observer(probe);
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    clear_scan_classification_observer();
+
+    let (leased_digest, handle) =
+        leased.lock().unwrap().take().expect(
+            "the observer must have leased the first-classified entry after it was classified",
+        );
+    let leased_key = [&candidate_a, &candidate_b]
+        .into_iter()
+        .find(|candidate| cache_key_digest(&candidate.cache_key).unwrap() == leased_digest)
+        .map(|candidate| candidate.cache_key.clone())
+        .expect("the leased digest names one of the two fixture entries");
+    let other_key = [&candidate_a, &candidate_b]
+        .into_iter()
+        .map(|candidate| candidate.cache_key.clone())
+        .find(|key| key != &leased_key)
+        .unwrap();
+
+    // SANITY: the lease was taken AFTER the scan-phase guard, so that guard cannot be what saved
+    // it — the entry reached the eviction phase as a candidate.
+    assert!(
+        !report
+            .retained
+            .iter()
+            .any(|record| record.cache_key == leased_key
+                && record.detail.as_deref() == Some("entry was used after it was scanned")),
+        "the lease must not have moved the entry's activity: {report:?}"
+    );
+    assert_eq!(
+        report
+            .retained
+            .iter()
+            .find(|record| record.cache_key == leased_key)
+            .map(|record| record.hold.clone()),
+        Some(RetentionHold::ActiveUse),
+        "phase two alone must retain an entry leased after it was classified: {report:?}"
+    );
+    assert!(
+        store.lookup_complete(&leased_key).unwrap().is_some(),
+        "the leased bundle is still there"
+    );
+    assert_eq!(
+        report
+            .evicted
+            .iter()
+            .map(|record| record.cache_key.as_str())
+            .collect::<Vec<_>>(),
+        vec![other_key.as_str()],
+        "the unleased entry still evicts, so the sweep is not simply doing nothing: {report:?}"
+    );
+    drop(handle);
 }
 
 /// The sweep's scan phase judges on paths and sizes, not by re-hashing the cache (sc-19712 F-2).
@@ -1510,8 +1622,10 @@ fn the_retention_scan_judges_on_paths_and_sizes_rather_than_rehashing_the_cache(
 /// The split exists because journal reads are on hot, user-facing surfaces — the catalog GET, the
 /// Settings storage status, every pin read — and re-hashing a whole bundle to decide which slot to
 /// read puts the bundle's byte count behind each of them while proving nothing a reader may act
-/// on. Safety is unchanged where it matters: content that no longer matches its recorded hash is
-/// still refused before it can reach a runtime, and every write validates at full strength.
+/// on. sc-21534 extended the cheap mode to every read surface (`lookup_complete`, `enumerate`,
+/// the reservation short-circuit): they now see a same-size-altered entry as complete, and the
+/// ONE place that refuses it is the load boundary, `acquire_complete`, before any bytes reach a
+/// runtime.
 #[test]
 fn journal_reads_skip_content_hashing_while_the_load_path_still_refuses_altered_bytes() {
     let scratch = TempDir::new().unwrap();
@@ -1533,8 +1647,17 @@ fn journal_reads_skip_content_hashing_while_the_load_path_still_refuses_altered_
     assert_eq!(inspected[0].cache_key, candidate.cache_key);
     assert_eq!(inspected[0].state, ResolvedCacheEntryState::Complete);
     assert!(store.effective_pin(&candidate.cache_key).is_ok());
+    // sc-21534: the point lookup and the runtime listing are reads too — they must offer the
+    // entry without paying a content hash, exactly like the scan and the status listing.
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_some());
+    assert_eq!(store.enumerate().unwrap().len(), 1);
 
     // The load path is unmoved: altered bytes are refused before an artifact reaches a runtime.
-    assert!(store.lookup_complete(&candidate.cache_key).is_err());
-    assert!(store.enumerate().is_err());
+    let resolver = resolver(&library, ActiveArtifactLeaseRegistry::default());
+    assert!(store
+        .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+        .is_err());
 }

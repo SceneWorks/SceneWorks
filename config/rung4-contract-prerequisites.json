@@ -1,8 +1,8 @@
 {
   "story": "sc-19542",
   "epic": 17137,
-  "description": "Per-(family, backend) rung-4 prerequisite records, derived from the pinned inference revision by scripts/rung4-contract-prerequisites.mjs. `additionalPrerequisites` is what that provider appends through `MemoryProviderContract::additional_prerequisites` for `MemoryStrategy::BoundedTransformerResidency`; the shared edge every provider carries regardless lives in the generator as SHARED_RUNG4_PREREQUISITES, mirroring gen-core BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES. `conditional` is true when the construction appending the edge is not in every production build — a `then_some` on a runtime condition (mlx-gen-anima, mlx-gen-krea) or a `#[cfg]`-gated contract function (candle-gen-z-image, candle-gen-lens and candle-gen-krea are `#[cfg(any(feature = \"cuda\", test))]`). The gate evaluates a conditional edge as PRESENT, because for an admission gate \"this provider may demand rung 1\" is the fail-closed reading. `stagedResidencySupport` is the provider's own MemoryStrategySupport for the rung those edges name, needed because gen-core validate_selection satisfies an EngagedInSameRequest edge VACUOUSLY when the prerequisite rung is StructurallyNotApplicable; null means the extractor could not read one declaration for the crate, and null falls through to the engagement term rather than admitting.",
-  "inferenceRevision": "c943f0e60ba70586dfe5309f60af7d6164f893d3",
+  "description": "Per-(family, backend) rung-4 prerequisite records, derived from the pinned inference revision by scripts/rung4-contract-prerequisites.mjs. `additionalPrerequisites` is what that provider appends through `MemoryProviderContract::additional_prerequisites` for `MemoryStrategy::BoundedTransformerResidency`; the shared edge every provider carries regardless lives in the generator as SHARED_RUNG4_PREREQUISITES, mirroring gen-core BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES. `conditional` is true when the construction appending the edge is not in every production build — a `then_some` on a runtime condition (mlx-gen-anima, mlx-gen-krea) or a `#[cfg]`-gated contract function (candle-gen-z-image, candle-gen-lens and candle-gen-krea are `#[cfg(any(feature = \"cuda\", test))]`). It is also true for a filtered list (`[A, B, C].into_iter().filter(..).map(..)`, candle-gen-sana), where the listed strategies are a ceiling the predicate narrows rather than a declaration; the extractor does not read the predicate, so it marks the whole list. The gate evaluates a conditional edge as PRESENT, because for an admission gate \"this provider may demand rung 1\" is the fail-closed reading. `stagedResidencySupport` is the provider's own MemoryStrategySupport for the rung those edges name, needed because gen-core validate_selection satisfies an EngagedInSameRequest edge VACUOUSLY when the prerequisite rung is StructurallyNotApplicable; null means the extractor could not read one declaration for the crate, and null falls through to the engagement term rather than admitting.",
+  "inferenceRevision": "28f0563baa03640ade1635356d2d54fe8a477f1a",
   "families": {
     "15509": {
       "name": "Mage-Flow",
@@ -131,7 +131,7 @@
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-sensenova",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "stagedResidencySupport": "structurally_not_applicable"
         }
       }
     },
@@ -176,8 +176,16 @@
         },
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-ideogram",
-          "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": "implemented"
         }
       }
     },
@@ -315,7 +323,7 @@
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-chroma",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "stagedResidencySupport": "implemented"
         }
       }
     },
@@ -338,7 +346,7 @@
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-kolors",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "stagedResidencySupport": "implemented"
         }
       }
     },
@@ -361,7 +369,7 @@
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-sd3",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "stagedResidencySupport": "implemented"
         }
       }
     },
@@ -383,7 +391,15 @@
         },
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-sana",
-          "additionalPrerequisites": [],
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
+              "conditional": true
+            }
+          ],
           "stagedResidencySupport": null
         }
       }
@@ -440,12 +456,12 @@
         "mlx": {
           "crate": "crates/media/mlx-gen/mlx-gen-instantid",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "stagedResidencySupport": "implemented"
         },
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-instantid",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "stagedResidencySupport": "implemented"
         }
       }
     },
@@ -470,12 +486,12 @@
         "mlx": {
           "crate": "crates/media/mlx-gen/mlx-gen-bernini",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": "implemented"
+          "stagedResidencySupport": "missing"
         },
         "candle": {
           "crate": "crates/media/candle-gen/candle-gen-bernini",
           "additionalPrerequisites": [],
-          "stagedResidencySupport": null
+          "stagedResidencySupport": "missing"
         }
       }
     }

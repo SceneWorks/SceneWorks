@@ -44,7 +44,8 @@ pub(crate) use routing::mlx::*;
 // External re-export surface: `apps/rust-api/src/lib.rs` and the integration test
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
-    candle_routed_image_models, imported_control_intent_is_material,
+    candle_routed_image_models, checkpoint_plan_checkpoint_id, imported_control_intent_is_material,
+    imported_entry_installed_path, imported_entry_loadable_path,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
     imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
     mac_capabilities, model_candle_support, model_mac_support, video_job_type_for_mode,
@@ -4005,7 +4006,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     }
     // No-silent-T2I / no-fallback (sc-5968, epic 5483): any non-candle, non-mlx GPU descriptor must
     // DECLINE the unsupported-pose shapes the candle worker owns-to-reject (an `advanced.poses` job
-    // on a candle model with no pose lane, e.g. sdxl), so no generic claimant can silently render an
+    // on a candle model with no pose lane), so no generic claimant can silently render an
     // unconditioned T2I image and the candle worker reliably wins
     // them (then rejects with a typed error). Mac is unaffected: those shapes are MLX-served there
     // (model_mac_support pose), so the `mlx` worker still claims them and other descriptors decline.
@@ -4025,8 +4026,8 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if worker_is_candle(worker) {
         // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
         // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
-        // worker must OWN to reject (a `advanced.poses` job on a candle model with no pose lane, e.g.
-        // sdxl) — so those fail loudly on candle instead of silently rendering an unconditioned T2I
+        // worker must OWN to reject (an `advanced.poses` job on a candle model with no pose lane) — so
+        // those fail loudly on candle instead of silently rendering an unconditioned T2I
         // image (sc-5968, the no-fallback / no-silent-T2I directive). Every other unsupported shape is
         // declined and remains queued. `image_edit` is gated
         // here too (mirroring the mlx `JobType::ImageGenerate | JobType::ImageEdit` claim arm): without

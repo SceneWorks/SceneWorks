@@ -491,6 +491,7 @@ pub(super) async fn generate_candle_pulid_stream(
             runtime_overlay_bytes,
             gen_core::MemoryCacheState::Cold,
             pulid_contract,
+            crate::candle_memory_strategy::PULID_FLUX_REQUEST_EVIDENCE_REVISION,
         )?
     } else {
         None

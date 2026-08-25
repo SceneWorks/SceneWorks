@@ -373,9 +373,12 @@ jobs:
         # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
         # commit (`prebuilt-<sha12>` releases, cell = target × deployment target × Debug/Release);
         # scripts/fetch-prebuilt-mlx.sh picks the asset for the mlx-rs rev pinned in Cargo.lock
-        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and build.rs
-        # links it from PMETAL_MLX_PREBUILT_DIR only after checking the manifest against its own
-        # key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
+        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and exports
+        # PMETAL_MLX_PREBUILT_DIR and PMETAL_METALLIB_PATH (sc-20799 -- with a prebuilt or a warm
+        # cargo cache pmetal-mlx-sys's build.rs does not re-run, so nothing populates
+        # ~/.cache/pmetal/lib and the test/dump binaries, which have no compiled-in metallib,
+        # cannot load one). build.rs links the archives only after checking the manifest against
+        # its own key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
         # published for this rev" (exit 1): the right answer then is the source build, surfaced
         # as a workflow annotation. Anything else is an error. Same step as inference ci.yml.
         run: |
@@ -564,9 +567,12 @@ jobs:
         # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
         # commit (`prebuilt-<sha12>` releases, cell = target × deployment target × Debug/Release);
         # scripts/fetch-prebuilt-mlx.sh picks the asset for the mlx-rs rev pinned in Cargo.lock
-        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and build.rs
-        # links it from PMETAL_MLX_PREBUILT_DIR only after checking the manifest against its own
-        # key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
+        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and exports
+        # PMETAL_MLX_PREBUILT_DIR and PMETAL_METALLIB_PATH (sc-20799 -- with a prebuilt or a warm
+        # cargo cache pmetal-mlx-sys's build.rs does not re-run, so nothing populates
+        # ~/.cache/pmetal/lib and the test/dump binaries, which have no compiled-in metallib,
+        # cannot load one). build.rs links the archives only after checking the manifest against
+        # its own key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
         # published for this rev" (exit 1): the right answer then is the source build, surfaced
         # as a workflow annotation. Anything else is an error. Same step as inference ci.yml.
         run: |

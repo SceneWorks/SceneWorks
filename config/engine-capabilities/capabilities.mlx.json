@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
+    "inferenceRevision": "1caa6863673c0a6be33115506b059e25238d2011",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -2182,7 +2182,7 @@
     {
       "id": "bernini",
       "composed": false,
-      "selectorDigest": "sha256:c6b95a7272ba813982908a39ba8b821d67cefbf0665ae4d77ea37030beb96387",
+      "selectorDigest": "sha256:a9db084aaff4a509430a52a9520127dda893c74116c240012927c0c1d5279c0d",
       "surfaces": [
         {
           "selector": {
@@ -2194,8 +2194,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2211,8 +2210,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2227,8 +2225,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2244,8 +2241,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2260,8 +2256,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2277,8 +2272,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2293,8 +2287,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2310,8 +2303,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2326,8 +2318,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2343,8 +2334,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2359,8 +2349,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2376,8 +2365,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2387,7 +2375,7 @@
     {
       "id": "bernini_renderer",
       "composed": false,
-      "selectorDigest": "sha256:c6b95a7272ba813982908a39ba8b821d67cefbf0665ae4d77ea37030beb96387",
+      "selectorDigest": "sha256:a9db084aaff4a509430a52a9520127dda893c74116c240012927c0c1d5279c0d",
       "surfaces": [
         {
           "selector": {
@@ -2399,8 +2387,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2416,8 +2403,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2432,8 +2418,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2449,8 +2434,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2465,8 +2449,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2482,8 +2465,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2498,8 +2480,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2515,8 +2496,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2531,8 +2511,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2548,8 +2527,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -2564,8 +2542,7 @@
             "bounded_attention",
             "bounded_decode",
             "bounded_transformer_residency",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": [
@@ -2581,8 +2558,7 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
-            "resident",
-            "staged_residency"
+            "resident"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -3672,6 +3648,160 @@
     {
       "id": "flux2_dev",
       "composed": false,
+      "selectorDigest": "sha256:3ce5d507f97724e6bbef439195b0e8e4e5f10f03d5b40b64a063515e76fd46ae",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "flux2_dev_control",
+      "composed": false,
       "selectorDigest": "sha256:fc971226df944b8287b61c964650dc8b0640a3cf071e92b6af7dca058252ad7c",
       "surfaces": [
         {
@@ -3823,7 +3953,7 @@
     {
       "id": "flux2_dev_edit",
       "composed": false,
-      "selectorDigest": "sha256:fc971226df944b8287b61c964650dc8b0640a3cf071e92b6af7dca058252ad7c",
+      "selectorDigest": "sha256:3ce5d507f97724e6bbef439195b0e8e4e5f10f03d5b40b64a063515e76fd46ae",
       "surfaces": [
         {
           "selector": {
@@ -3868,7 +3998,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -3916,7 +4047,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -3964,7 +4096,8 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
-            "resident"
+            "resident",
+            "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
@@ -11794,6 +11927,132 @@
       "loadProfile": "lora_pid"
     },
     {
+      "provider": "flux2_dev",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "flux2_dev_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "flux2_dev_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "flux2_dev_edit",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
       "provider": "flux2_klein_9b",
       "tier": "bf16",
       "mode": "text_to_image",
@@ -13682,6 +13941,195 @@
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow_edit",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit_base",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit_base",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit_base",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_edit_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "mage_flow_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "mage_flow_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "pulid_flux",

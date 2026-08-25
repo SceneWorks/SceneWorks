@@ -947,6 +947,10 @@
               "img2img": { "type": "boolean" },
               "multiReference": { "type": "boolean" },
               "sourceWithMultiReference": { "type": "boolean" },
+              "scail2MultiReference": {
+                "type": "boolean",
+                "description": "Enables SCAIL-2 Animate Character's ordered Reference/Mask-pair UI only after the matching inference descriptor is pinned."
+              },
               "poseLibrary": { "type": "boolean" },
               "poseControlScale": { "type": "boolean" },
               "controlOverlay": { "type": "boolean" },
@@ -1045,6 +1049,10 @@
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "measuredSiblingActiveDiskFraction" }],
                 "description": "Opt in only when every selectable MLX quant tier preserves the same load topology. This is the fraction of precision-dependent disk growth active at once (for example 0.5 when one of two equal experts is resident). The web estimator anchors an unmeasured tier at a smaller compatible sibling's measured peak and scales only the disk delta by this fraction. Absence keeps the calibrated dense fallback; a shared model id alone is not compatibility evidence."
+              },
+              "memoryStrategyStructuralExemptions": {
+                "$ref": "#/properties/models/items/properties/candle/properties/memoryStrategyStructuralExemptions",
+                "description": "MLX sibling of the Candle structural-exemption block (sc-20799). Same shape, same semantics: architecture evidence rendering Structurally N/A matrix cells, never enabling a runtime strategy."
               },
               "calibrations": {
                 "type": "array",
@@ -1256,7 +1264,7 @@
                             "additionalProperties": false,
                             "properties": {
                               "mode": { "type": "string", "minLength": 1 },
-                              "providerMode": { "enum": ["text_to_image", "image_to_image", "edit_image"] },
+                              "providerMode": { "enum": ["text_to_image", "image_to_image", "edit_image", "character_image"] },
                               "referenceCounts": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 0 } },
                               "pid": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "boolean" } },
                               "hasPhases": { "type": "boolean" }
@@ -1369,8 +1377,9 @@
               "memoryStrategyStructuralExemptions": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "Static architecture evidence for rungs that cannot apply to this provider. These declarations produce Structurally N/A matrix cells and never enable a runtime strategy.",
+                "description": "Static architecture evidence for rungs that cannot apply to this provider. These declarations produce Structurally N/A matrix cells and never enable a runtime strategy. staged_residency joined the admissible set with sc-20799: SenseNova's fused dual-path transformer has no separable conditioning component, so its staged rung is an architecture fact, not undelivered work.",
                 "properties": {
+                  "staged_residency": { "$ref": "#/$defs/structuralMemoryStrategyExemption" },
                   "bounded_decode": { "$ref": "#/$defs/structuralMemoryStrategyExemption" },
                   "bounded_attention": { "$ref": "#/$defs/structuralMemoryStrategyExemption" },
                   "bounded_transformer_residency": { "$ref": "#/$defs/structuralMemoryStrategyExemption" }

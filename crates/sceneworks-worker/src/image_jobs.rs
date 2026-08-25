@@ -796,6 +796,25 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::CheckpointPlan => {
+                // Plan-driven checkpoint (epic 20398, sc-20634): a persisted ImportPlanV1 resolved
+                // and re-verified before load; provider selected by family/source/operation through
+                // the registry. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::CheckpointPlan(sources) = route else {
+                    unreachable!("checkpoint plan route missing its prepared sources")
+                };
+                generate_checkpoint_plan_stream(
+                    api,
+                    settings,
+                    job,
+                    *sources,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::KreaImportedControl => {
                 // Imported single-file Krea 2 checkpoint + strict-pose set: the trained pose
                 // control-branch overlay rides the file-loaded imported DiT (the imported twin of
@@ -889,6 +908,18 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::SdxlControl => {
+                generate_sdxl_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::PulidFlux => {
                 // PuLID-FLUX face-identity character image (sc-3344): FLUX.1-dev backbone +
                 // EVA/IDFormer/CA injection via the native face stack, one image per seed.
@@ -959,14 +990,13 @@ pub(crate) async fn run_image_generate_job(
                 )));
             }
             ImageRoute::PoseReject => {
-                // No-silent-T2I (sc-5968): a strict-pose job on an MLX model with NO pose-control lane
-                // (e.g. a plain `sdxl` pose job with no reference — SDXL identity-pose ships via InstantID /
-                // IP-Adapter) that `mlx_available` would otherwise render as plain txt2img, dropping the
-                // poses. Refuse loudly — the MLX twin of the candle `PoseReject` reject.
+                // No-silent-T2I (sc-5968): control intent on an MLX model with NO pose-control lane
+                // that `mlx_available` would otherwise render as plain txt2img, dropping the intent.
+                // Refuse loudly — the MLX twin of the candle `PoseReject` reject.
                 return Err(WorkerError::InvalidPayload(format!(
-                    "strict pose (advanced.poses) is not supported for model '{}' on the MLX backend — \
-                     refusing rather than silently generating an unconditioned image (wired MLX pose \
-                     families: {}; SDXL identity-pose runs via InstantID)",
+                    "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the MLX backend — \
+                     refusing rather than silently generating an unconditioned image (wired MLX control \
+                     families: {})",
                     request.model,
                     WIRED_MLX_POSE_FAMILIES.join(", ")
                 )));
@@ -1002,6 +1032,18 @@ pub(crate) async fn run_image_generate_job(
                 // off-Mac sibling of the macOS `ImageRoute::InstantId` arm).
                 CandleImageRoute::InstantId => {
                     generate_instantid_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::SdxlControl => {
+                    generate_sdxl_control_stream(
                         api,
                         settings,
                         job,
@@ -1231,6 +1273,11 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::KolorsCompositeReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "Kolors Candle does not compose IP-Adapter identity with pose ControlNet or PiD; refusing the crossed request before model load".to_owned(),
+                    ));
+                }
                 // Z-Image strict-pose Fun-ControlNet (sc-5489).
                 CandleImageRoute::ZimageControl => {
                     generate_candle_zimage_control_stream(
@@ -1373,6 +1420,22 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::CheckpointPlan => {
+                    let PreparedCandleImageRoute::CheckpointPlan(sources) = route else {
+                        unreachable!("checkpoint plan route missing its prepared sources")
+                    };
+                    generate_checkpoint_plan_stream(
+                        api,
+                        settings,
+                        job,
+                        *sources,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 CandleImageRoute::MageFinetuned => {
                     let PreparedCandleImageRoute::MageFinetuned(transformer) = route else {
                         unreachable!("Mage fine-tuned route missing its prepared transformer")
@@ -1407,16 +1470,15 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
-                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
-                // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
-                // dropped) and not rerouted. The candle worker CLAIMS these (jobs_store
-                // `image_job_candle_pose_reject`) precisely to fail them loudly here. SDXL identity-pose
-                // ships via InstantID; the wired candle pose families are `WIRED_CANDLE_POSE_FAMILIES`.
+                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane must be
+                // REJECTED with a clear error, not silently rendered as plain txt2img (poses dropped) and
+                // not rerouted. The candle worker CLAIMS these (jobs_store `image_job_candle_pose_reject`)
+                // precisely to fail them loudly here.
                 CandleImageRoute::PoseReject => {
                     return Err(WorkerError::InvalidPayload(format!(
-                        "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
-                         refusing rather than silently generating an unconditioned image (wired candle pose \
-                         families: {}; SDXL identity-pose runs via InstantID)",
+                        "control intent (advanced.poses/controlMode/controlImage/controlWeights) is not supported for model '{}' on the candle backend — \
+                         refusing rather than silently generating an unconditioned image (wired candle control \
+                         families: {})",
                         request.model,
                         WIRED_CANDLE_POSE_FAMILIES.join(", ")
                     )));
@@ -3131,6 +3193,13 @@ include!("image_jobs/pid.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 include!("image_jobs/strict_control.rs");
+// Generic SDXL OpenPose ControlNet. One backend-neutral route drives the registered `sdxl`
+// provider on both MLX and Candle; platform bundles select the implementation behind the registry.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+include!("image_jobs/sdxl_control.rs");
 #[cfg(target_os = "macos")]
 // Z-Image strict-pose and prompt augmentation helpers.
 include!("image_jobs/zimage.rs");
@@ -3181,6 +3250,16 @@ include!("image_jobs/krea_control.rs");
 // loaded through the selected runtime's native single-file entrypoint, bypassing the registry
 // snapshot-dir path. Shared by MLX and Candle so global import acceptance always has a real route.
 include!("image_jobs/krea_imported.rs");
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+// Plan-driven checkpoint routing (epic 20398, sc-20634): a user model bound to a persisted
+// `ImportPlanV1` (`importPlan.checkpointId` on its manifest entry) is resolved and re-verified
+// through the checkpoint plan store, its provider selected by family + source shape + operation
+// through the registry's imported-model authority, and rendered through the shared cached-generator
+// seam. Backend-neutral: the same file serves MLX and Candle.
+include!("image_jobs/checkpoint_plan.rs");
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3290,8 +3369,8 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor, admit_candle_base_floor_with_resident_overlay,
-    admit_candle_load_spec_floor, has_candle_tier_peak_row, prepare_cached_candle_base_floor,
+    admit_candle_base, admit_candle_base_floor_with_resident_overlay, admit_candle_load_spec_floor,
+    has_candle_tier_peak_row, prepare_cached_candle_base_floor,
     safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one

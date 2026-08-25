@@ -20,8 +20,10 @@ pub use retention::{
 };
 
 use crate::model_artifacts::{
-    ActiveArtifactLease, ArtifactLocation, ModelArtifactResolver, PromotionCandidate,
-    ResolvedModelArtifact,
+    ActiveArtifactLease, ArtifactAvailability, ArtifactCompleteness, ArtifactIdentity,
+    ArtifactLocation, ArtifactProvenance, ModelArtifactResolver, PromotionCandidate,
+    ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+    MODEL_ARTIFACT_CONTRACT_VERSION,
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,22 @@ pub const RESOLVED_CACHE_MAX_BYTES_ENV: &str = "SCENEWORKS_RESOLVED_CACHE_MAX_BY
 pub const RESOLVED_CACHE_INACTIVITY_SECONDS_ENV: &str =
     "SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS";
 pub const RESOLVED_CACHE_STORE_VERSION: u32 = 1;
+/// The journal version a DERIVED entry is written at (sc-20635).
+///
+/// `production` and `derivedFrom` widen the metadata document, and `ResolvedCacheMetadata` is
+/// `deny_unknown_fields`, so a binary that predates them cannot read a derived journal. Declaring
+/// the higher version on exactly the documents that carry the new fields is what makes that a
+/// version statement rather than an unexplained decode failure: a reader that knows about versions
+/// but not about these fields refuses with [`UNSUPPORTED_JOURNAL_VERSION`] naming the version it
+/// found.
+///
+/// A SOURCE-COPY entry keeps writing [`RESOLVED_CACHE_STORE_VERSION`] and, because both new fields
+/// are `skip_serializing_if`-defaulted, its document is byte-for-byte what it was before this
+/// story. That is what makes the bump safe to land warm: an existing cache full of v1 source
+/// copies is still read, still leased and still evicted by this binary.
+pub const RESOLVED_CACHE_DERIVED_STORE_VERSION: u32 = 2;
+/// The typed refusal a journal from a NEWER writer gets, instead of "decode cache metadata: …".
+const UNSUPPORTED_JOURNAL_VERSION: &str = "cache metadata was written by a newer SceneWorks";
 
 const STORE_MARKER: &str = ".sceneworks-resolved-cache-v1";
 const STORE_MARKER_BODY: &[u8] = b"sceneworks-resolved-cache\nschema=1\n";
@@ -252,7 +270,7 @@ pub enum ResolvedCacheEntryState {
     Complete,
     Corrupt,
     /// Summary-only state for an entry with a durable eviction tombstone whose removal has not
-    /// finished yet. Never persisted into the metadata journal; `validate_metadata_shape` rejects
+    /// finished yet. Never persisted into the metadata journal; `validate_metadata_shape_with` rejects
     /// it there.
     Evicting,
 }
@@ -285,11 +303,68 @@ pub struct SourceVolumeObservation {
     pub observed_at: u64,
 }
 
+/// How an entry's bundle came to exist, and therefore what retention may assume about it.
+///
+/// The distinction is load-bearing exactly once, in [`retention`]'s eviction proof. A
+/// [`Self::SourceCopy`] entry is only evictable while the source library still holds a verified
+/// second copy of every byte — deleting it would otherwise destroy the user's only copy. A
+/// [`Self::Derived`] entry has no second copy anywhere by construction: it was COMPUTED from an
+/// input the cache does not hold, so demanding a second copy would make it permanently unevictable
+/// and the cache would grow without bound. Its safety property is the other one — it is
+/// reproducible from its input, and worthless without it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedCacheProduction {
+    /// Copied from a complete second copy in the configured source library.
+    #[default]
+    SourceCopy,
+    /// Computed by a producer (epic 20398 checkpoint derivatives: derived indexes, normalised
+    /// layouts, backend repacks).
+    Derived,
+}
+
+impl ResolvedCacheProduction {
+    /// Journals written before sc-20635 carry no `production` field and are all source copies, so
+    /// the default round-trips byte-for-byte and only derived entries widen the document.
+    fn is_source_copy(&self) -> bool {
+        *self == Self::SourceCopy
+    }
+
+    pub fn is_derived(&self) -> bool {
+        *self == Self::Derived
+    }
+
+    /// The journal version a document with this production mode is written at, and the only
+    /// version a reader accepts for it.
+    fn store_version(&self) -> u32 {
+        match self {
+            Self::SourceCopy => RESOLVED_CACHE_STORE_VERSION,
+            Self::Derived => RESOLVED_CACHE_DERIVED_STORE_VERSION,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedCacheMetadata {
     pub schema_version: u32,
     pub cache_key: String,
+    #[serde(
+        default,
+        skip_serializing_if = "ResolvedCacheProduction::is_source_copy"
+    )]
+    pub production: ResolvedCacheProduction,
+    /// For a derived entry, the logical input whose producer created this bundle — a checkpoint id
+    /// for epic-20398 derivatives.
+    ///
+    /// Deliberately NOT part of the cache key: a derivative is content-addressed, so two
+    /// checkpoints with byte-identical inputs share one entry and the second one is a cache hit
+    /// rather than a second copy. This field is lifecycle bookkeeping only, so a "forget this
+    /// checkpoint" action can reach the derivatives that were produced for it. Scoping a removal
+    /// this way can cost a checkpoint that was sharing the entry a re-production; it can never
+    /// lose data, because a derivative is reproducible from its input by definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
     pub artifact: ResolvedModelArtifact,
     pub source_configured_path: PathBuf,
     pub source_canonical_path: PathBuf,
@@ -351,6 +426,94 @@ pub enum ReservationOutcome {
     Acquired(Box<ResolvedCacheReservation>),
     AlreadyComplete(Box<ResolvedCacheMetadata>),
     Contended,
+}
+
+/// A bundle the cache will hold that no source library holds a second copy of, described BEFORE
+/// its bytes exist (epic 20398, sc-20635).
+///
+/// A [`PromotionCandidate`] carries a validated artifact because its bytes are already installed;
+/// a derivative's are not, so the plan carries only what the cache key is computed from — identity,
+/// closure and provenance — and the file digests are enriched from the staged bytes at publication,
+/// exactly as the copy path enriches them after copying. The key is therefore known before any work
+/// is done, which is what makes the cache lookup meaningful.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedArtifactPlan {
+    identity: ArtifactIdentity,
+    closure: ResolvedBundleClosure,
+    provenance: ArtifactProvenance,
+}
+
+impl DerivedArtifactPlan {
+    /// `members` is the full closure, with `size_bytes`/`sha256` left unset: the producer has not
+    /// written the bytes yet, and those fields are deliberately excluded from the cache key.
+    pub fn new(
+        identity: ArtifactIdentity,
+        members: Vec<ResolvedBundleMember>,
+    ) -> Result<Self, ResolvedCacheError> {
+        identity
+            .validate()
+            .map_err(|error| ResolvedCacheError::request(error.to_string()))?;
+        let closure = ResolvedBundleClosure::new(members)
+            .map_err(|error| ResolvedCacheError::request(error.to_string()))?;
+        Ok(Self {
+            provenance: ArtifactProvenance {
+                identity: identity.clone(),
+                fixed_artifact_tier: None,
+            },
+            identity,
+            closure,
+        })
+    }
+
+    pub fn identity(&self) -> &ArtifactIdentity {
+        &self.identity
+    }
+
+    pub fn closure(&self) -> &ResolvedBundleClosure {
+        &self.closure
+    }
+
+    /// The key this derivative will occupy. Computable with nothing on disk.
+    pub fn cache_key(&self) -> Result<String, ResolvedCacheError> {
+        self.artifact_at(Path::new("/"), ArtifactState::Pending)
+            .cache_key()
+            .map_err(|error| ResolvedCacheError::request(error.to_string()))
+    }
+
+    /// The artifact document for this plan rooted at `root`.
+    ///
+    /// While the producer is still running the bundle genuinely does not exist, so the pending form
+    /// says so (`Incomplete`/`Missing`). Neither field is part of the cache key, so the pending and
+    /// published forms occupy the same entry.
+    fn artifact_at(&self, root: &Path, state: ArtifactState) -> ResolvedModelArtifact {
+        let (completeness, availability) = match state {
+            ArtifactState::Pending => (
+                ArtifactCompleteness::Incomplete,
+                ArtifactAvailability::Missing,
+            ),
+            ArtifactState::Published => (
+                ArtifactCompleteness::Complete,
+                ArtifactAvailability::Available,
+            ),
+        };
+        ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: self.identity.clone(),
+            location: ArtifactLocation::ResolvedLocal {
+                root: root.to_path_buf(),
+            },
+            closure: self.closure.clone(),
+            provenance: self.provenance.clone(),
+            completeness,
+            availability,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArtifactState {
+    Pending,
+    Published,
 }
 
 #[derive(Clone)]
@@ -736,6 +899,55 @@ impl ResolvedCacheStore {
         logical_model_owner: &str,
     ) -> Result<ReservationOutcome, ResolvedCacheError> {
         validate_candidate(candidate)?;
+        self.reserve_inner(
+            &candidate.cache_key,
+            source_configured_path,
+            logical_model_owner,
+            ResolvedCacheProduction::SourceCopy,
+            None,
+            |_staging| candidate.artifact.clone(),
+        )
+    }
+
+    /// Reserve an entry for a bundle that will be PRODUCED rather than copied (sc-20635).
+    ///
+    /// Same entry, same locks, same journal, same staging directory, same atomic publication and
+    /// the same receipt as [`Self::reserve`] — the only differences are that no source-library
+    /// second copy is required to exist and the entry records
+    /// [`ResolvedCacheProduction::Derived`] so retention judges it by the right rule.
+    ///
+    /// `source_configured_path` is the input the derivative was derived FROM (for a linked
+    /// checkpoint, its approved library root). It must exist: a derivative of an absent input is
+    /// not something to start producing, and recording it is what lets source-lifecycle
+    /// reconciliation reach the derivative when that input goes away.
+    pub fn reserve_derived(
+        &self,
+        plan: &DerivedArtifactPlan,
+        source_configured_path: &Path,
+        derived_from: &str,
+        logical_model_owner: &str,
+    ) -> Result<ReservationOutcome, ResolvedCacheError> {
+        let cache_key = plan.cache_key()?;
+        self.reserve_inner(
+            &cache_key,
+            source_configured_path,
+            logical_model_owner,
+            ResolvedCacheProduction::Derived,
+            Some(derived_from.to_owned()),
+            |staging| plan.artifact_at(staging, ArtifactState::Pending),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reserve_inner(
+        &self,
+        cache_key: &str,
+        source_configured_path: &Path,
+        logical_model_owner: &str,
+        production: ResolvedCacheProduction,
+        derived_from: Option<String>,
+        artifact_for_staging: impl FnOnce(&Path) -> ResolvedModelArtifact,
+    ) -> Result<ReservationOutcome, ResolvedCacheError> {
         let logical_model_owner = validate_model_owner(logical_model_owner)?.to_owned();
         let source_canonical_path =
             std::fs::canonicalize(source_configured_path).map_err(|error| {
@@ -747,7 +959,7 @@ impl ResolvedCacheStore {
         if !source_canonical_path.is_dir() {
             return Err(ResolvedCacheError::new("source root is not a directory"));
         }
-        let digest = cache_key_digest(&candidate.cache_key)?;
+        let digest = cache_key_digest(cache_key)?;
         let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
         match FileExt::try_lock_exclusive(&artifact_lock) {
             Ok(()) => {}
@@ -756,7 +968,7 @@ impl ResolvedCacheStore {
             }
             Err(error) => return Err(error.into()),
         }
-        let entry = self.entry_path(&candidate.cache_key)?;
+        let entry = self.entry_path(cache_key)?;
         ensure_managed_entry_dir(&entry)?;
         let _metadata_lock = self.lock_metadata(&digest)?;
         let existing = match self.read_metadata_unlocked(&digest)? {
@@ -773,7 +985,16 @@ impl ResolvedCacheStore {
         if let Some(mut metadata) = existing {
             match metadata.state {
                 ResolvedCacheEntryState::Complete => {
-                    validate_complete_metadata(self, &metadata)?;
+                    // Paths and sizes only (sc-21534): "already complete" is a read verdict that
+                    // skips materialization; the load boundary still re-hashes before use. A
+                    // same-size alteration is therefore refused at load (falling back to the
+                    // source tier) rather than re-materialized here — the same posture as the
+                    // local-tier scan.
+                    validate_complete_metadata_inner(
+                        self,
+                        &metadata,
+                        ContentVerification::PathsAndSizesOnly,
+                    )?;
                     return Ok(ReservationOutcome::AlreadyComplete(Box::new(metadata)));
                 }
                 ResolvedCacheEntryState::Materializing => {
@@ -805,9 +1026,13 @@ impl ResolvedCacheStore {
         })?;
         let now = now_seconds()?;
         let mut metadata = ResolvedCacheMetadata {
-            schema_version: RESOLVED_CACHE_STORE_VERSION,
-            cache_key: candidate.cache_key.clone(),
-            artifact: candidate.artifact.clone(),
+            // The document's own version, not the store's: only a derived entry carries the
+            // widened fields, so only it declares the higher version.
+            schema_version: production.store_version(),
+            cache_key: cache_key.to_owned(),
+            production,
+            derived_from,
+            artifact: artifact_for_staging(&staging),
             source_configured_path: source_configured_path.to_path_buf(),
             source_canonical_path,
             entry_relative_path: PathBuf::from("entries").join(&digest),
@@ -835,7 +1060,7 @@ impl ResolvedCacheStore {
         self.write_metadata_unlocked(&digest, &metadata)?;
         let record = SessionRecord {
             schema_version: RESOLVED_CACHE_STORE_VERSION,
-            cache_key: candidate.cache_key.clone(),
+            cache_key: cache_key.to_owned(),
             operation_id: reservation_id.clone(),
             model_owner: logical_model_owner.clone(),
             kind: SessionRecordKind::Reservation,
@@ -845,7 +1070,7 @@ impl ResolvedCacheStore {
         Ok(ReservationOutcome::Acquired(Box::new(
             ResolvedCacheReservation {
                 store: self.clone(),
-                cache_key: candidate.cache_key.clone(),
+                cache_key: cache_key.to_owned(),
                 digest,
                 reservation_id,
                 reservation_owner: logical_model_owner,
@@ -868,7 +1093,14 @@ impl ResolvedCacheStore {
             JournalRead::Valid { metadata, .. }
                 if metadata.state == ResolvedCacheEntryState::Complete =>
             {
-                validate_complete_metadata(self, &metadata)?;
+                // Paths and sizes only (sc-21534): this is a read — callers use it to decide
+                // whether materialization can be skipped, and the load boundary
+                // ([`Self::acquire_complete`]) still re-hashes before any bytes reach a runtime.
+                validate_complete_metadata_inner(
+                    self,
+                    &metadata,
+                    ContentVerification::PathsAndSizesOnly,
+                )?;
                 Some(*metadata)
             }
             _ => None,
@@ -877,9 +1109,10 @@ impl ResolvedCacheStore {
         Ok(result)
     }
 
-    /// Full runtime listing: complete entries are re-hashed, and any entry that fails validation
-    /// fails the whole listing. Recovery, staging cleanup and byte accounting depend on that
-    /// strictness, so it is the internal default.
+    /// Full runtime listing: complete entries are validated on identity, shape, confinement, file
+    /// presence and sizes (not content — see [`EntryListing`]), and any entry that fails fails the
+    /// whole listing. Recovery, staging cleanup and byte accounting depend on that fail-fast
+    /// semantics, so it is the internal default.
     pub fn enumerate(&self) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
         self.list(EntryListing::Runtime)
     }
@@ -1028,22 +1261,20 @@ impl ResolvedCacheStore {
             }
             _ => return Ok(None),
         };
-        // FULL STRENGTH, deliberately: this is the load boundary. The scan
-        // ([`Self::valid_local_artifacts`]) and the retention sweep both validate on paths and
-        // sizes only, and this re-hash under the entry's locks is precisely what makes that safe —
-        // it is the check that must refuse an altered bundle before any bytes reach a runtime.
-        //
-        // The boundary is defended three times over, so do not read a green suite as licence to
-        // relax any one of them: this call, `acquire_runtime_lease`'s own
-        // `ResolvedModelArtifact::validate` just below, and the full-strength
-        // `write_metadata_unlocked` that stamps usage all re-hash the closure. The *property* is
-        // pinned by
-        // `the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes`;
-        // because of the redundancy that test stays green if only one of the three is downgraded.
+        // FULL STRENGTH, deliberately — and exactly ONCE (sc-21534): this is the load boundary.
+        // The scan ([`Self::valid_local_artifacts`]), the listings, and the retention sweep all
+        // validate on paths and sizes only, and this re-hash under the entry's locks is precisely
+        // what makes that safe — it is the ONE check that must refuse an altered bundle before any
+        // bytes reach a runtime. The lease acquisition and the usage stamp below run under these
+        // same locks in this same call, so re-hashing there added no window this check does not
+        // already close; it only multiplied the cost (4 full hashes of a 33 GB bundle = the Krea
+        // bf16 4.5-minute verify that outlasted the stale-worker sweep). The property is pinned by
+        // `the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes`
+        // and the single-pass cost by `the_load_boundary_hashes_the_closure_exactly_once`.
         validate_complete_metadata(self, &metadata)?;
         let artifact = Arc::new(metadata.artifact.clone());
         let runtime_lease = resolver
-            .acquire_runtime_lease(&artifact)
+            .acquire_runtime_lease_prevalidated(&artifact)
             .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
         let lease_id = random_id()?;
         let now = now_seconds()?;
@@ -1085,10 +1316,26 @@ impl ResolvedCacheStore {
                 }) => {
                     let mut changed = false;
                     if had_invalid_slot {
-                        metadata.recovery_status = RecoveryStatus::RecoveredFromOlderSlot;
-                        metadata.artifact_pinned = true;
-                        metadata.refresh_effective_pin();
-                        changed = true;
+                        // FULL STRENGTH before the pin (sc-21534, same defense as the receipt
+                        // resurrection below): this branch re-pins a Complete entry recovered
+                        // from its older journal slot, and the listings — including this
+                        // method's opening `enumerate()` — no longer hash content. A
+                        // content-altered bundle pinned here would be refused at every load yet
+                        // never evicted — a permanent disk leak — so prove the bytes first. On
+                        // failure, record the observation and leave the entry UNPINNED and
+                        // unhealed: the load boundary refuses it regardless, and staying
+                        // unpinned is what lets retention reclaim it (after proving the source
+                        // holds a complete second copy) so the next use re-materializes clean.
+                        if metadata.state == ResolvedCacheEntryState::Complete
+                            && validate_complete_metadata(self, &metadata).is_err()
+                        {
+                            self.write_corrupt_marker(&digest)?;
+                        } else {
+                            metadata.recovery_status = RecoveryStatus::RecoveredFromOlderSlot;
+                            metadata.artifact_pinned = true;
+                            metadata.refresh_effective_pin();
+                            changed = true;
+                        }
                     }
                     let materializing_session_is_stale =
                         if metadata.state == ResolvedCacheEntryState::Materializing {
@@ -1133,6 +1380,10 @@ impl ResolvedCacheStore {
                     }
                 }
                 Err(_) => {
+                    // FULL STRENGTH kept here (sc-21534): unlike the listings, this path
+                    // resurrects an entry from its receipt and PINS it. A content-corrupt bundle
+                    // resurrected pinned would be refused at every load yet never evicted, so the
+                    // rare invalid-tombstone recovery proves the bytes before it re-pins them.
                     let receipt = self.read_complete_receipt(&digest).and_then(|metadata| {
                         validate_complete_metadata(self, &metadata)?;
                         Ok(metadata)
@@ -1401,6 +1652,7 @@ impl ResolvedCacheStore {
         let mut valid = Vec::new();
         let mut had_file = false;
         let mut had_invalid_slot = false;
+        let mut unsupported_version: Option<ResolvedCacheError> = None;
         for slot in 0..=1 {
             let path = entry.join(format!("metadata.{slot}.json"));
             if !path.exists() {
@@ -1424,6 +1676,10 @@ impl ResolvedCacheStore {
                 {
                     valid.push(envelope)
                 }
+                Err(error) if error.to_string().contains(UNSUPPORTED_JOURNAL_VERSION) => {
+                    had_invalid_slot = true;
+                    unsupported_version = Some(error);
+                }
                 _ => had_invalid_slot = true,
             }
         }
@@ -1433,6 +1689,13 @@ impl ResolvedCacheStore {
                 metadata: Box::new(envelope.metadata),
                 had_invalid_slot,
             });
+        }
+        // A journal a NEWER build wrote is not a corrupt store, and saying so matters: the
+        // corrupt classification is the one manual removal is allowed to clear, so reporting a
+        // forward-version entry as corrupt would invite deleting an entry this binary simply
+        // cannot read yet (sc-20635).
+        if let Some(error) = unsupported_version {
+            return Err(error);
         }
         if had_file {
             Err(ResolvedCacheError::new(BOTH_METADATA_SLOTS_CORRUPT))
@@ -1446,7 +1709,13 @@ impl ResolvedCacheStore {
         digest: &str,
         metadata: &ResolvedCacheMetadata,
     ) -> Result<(), ResolvedCacheError> {
-        validate_metadata_shape(metadata, digest)?;
+        // Shape only (sc-21534): a journal write records a state or usage transition; it never
+        // changes bundle bytes, and re-hashing the closure here charged a full-bundle SHA-256 to
+        // every usage stamp and pin flip. Every boundary that STAMPS `Complete` content proves it
+        // itself immediately before writing (`record_complete` / `publish_staged` / `recover`'s
+        // receipt path run a full `artifact.validate()`), and the load boundary
+        // (`acquire_complete`) re-hashes before any bytes reach a runtime.
+        validate_metadata_shape_with(metadata, digest, ContentVerification::PathsAndSizesOnly)?;
         let generation = match self.read_metadata_unlocked(digest) {
             Ok(JournalRead::Valid { .. }) => {
                 highest_generation(&self.inner.root.join("entries").join(digest))?
@@ -1683,6 +1952,52 @@ impl ResolvedCacheReservation {
         self.record_complete(artifact)
     }
 
+    /// Publish a bundle the producer wrote into [`Self::staging_path`] (sc-20635).
+    ///
+    /// The producer declares its outputs up front in `plan`; this reads back exactly those staged
+    /// files, enriches the closure with their measured size and SHA-256, and hands the result to
+    /// the same [`Self::publish_staged`] the copy path uses — so the artifact is re-validated
+    /// against the bytes on disk, its cache key is proven unchanged, the tree is fsynced, and the
+    /// staging directory is atomically renamed into place.
+    ///
+    /// Every way a producer can leave a partial or wrong bundle refuses here rather than being
+    /// published: a declared file it did not write, a declared path that is a symlink or a
+    /// directory, or a file it wrote that the plan does not declare (which would leave bytes the
+    /// entry's own accounting never counts and retention would over-reclaim against).
+    pub(crate) fn publish_produced(
+        self,
+        plan: &DerivedArtifactPlan,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        let mut artifact = plan.artifact_at(&self.staging_path, ArtifactState::Published);
+        let mut declared = BTreeSet::new();
+        for member in &mut artifact.closure.members {
+            for file in &mut member.files {
+                let relative = member.destination.join(&file.relative_path);
+                let path = self.staging_path.join(&relative);
+                let (size_bytes, sha256) = measure_produced_file(&path)?;
+                file.size_bytes = Some(size_bytes);
+                file.sha256 = Some(sha256);
+                declared.insert(relative);
+            }
+        }
+        artifact.closure = ResolvedBundleClosure::new(artifact.closure.members)
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+        reject_undeclared_produced_files(&self.staging_path, &declared)?;
+        self.publish_staged(artifact)
+    }
+
+    /// Abandon a reservation whose producer failed: drop whatever it staged and record the entry
+    /// as interrupted, so the next attempt starts from an empty staging directory rather than
+    /// inheriting a half-written one.
+    pub(crate) fn discard(mut self) -> Result<(), ResolvedCacheError> {
+        if self.staging_path.exists() {
+            let staging_root = self.store.root().join("staging");
+            remove_managed_tree(&self.staging_path, &staging_root)?;
+        }
+        self.mark_interrupted()?;
+        Ok(())
+    }
+
     /// Marks only this still-owned reservation interrupted. The private reservation/session
     /// identities and held artifact lock prevent key-only or cross-owner invalidation.
     pub fn mark_interrupted(&mut self) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
@@ -1851,7 +2166,9 @@ impl JournalEnvelope {
     fn new(generation: u64, metadata: ResolvedCacheMetadata) -> Result<Self, ResolvedCacheError> {
         let checksum = journal_checksum(generation, &metadata)?;
         Ok(Self {
-            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            // The envelope declares the version of the document it carries: an older reader stops
+            // at the envelope, so a derived document's higher version has to be visible there.
+            schema_version: metadata.schema_version,
             generation,
             checksum,
             metadata,
@@ -1859,7 +2176,7 @@ impl JournalEnvelope {
     }
 
     fn validate(&self) -> Result<(), ResolvedCacheError> {
-        if self.schema_version != RESOLVED_CACHE_STORE_VERSION
+        if self.schema_version != self.metadata.schema_version
             || self.checksum != journal_checksum(self.generation, &self.metadata)?
         {
             return Err(ResolvedCacheError::new(
@@ -1882,14 +2199,14 @@ impl ReceiptEnvelope {
     fn new(metadata: ResolvedCacheMetadata) -> Result<Self, ResolvedCacheError> {
         let checksum = metadata_checksum(&metadata)?;
         Ok(Self {
-            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            schema_version: metadata.schema_version,
             checksum,
             metadata,
         })
     }
 
     fn validate(&self) -> Result<(), ResolvedCacheError> {
-        if self.schema_version != RESOLVED_CACHE_STORE_VERSION
+        if self.schema_version != self.metadata.schema_version
             || self.metadata.state != ResolvedCacheEntryState::Complete
             || self.checksum != metadata_checksum(&self.metadata)?
         {
@@ -2139,6 +2456,122 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
         || fs2_contended.is_some() && error.raw_os_error() == fs2_contended
 }
 
+/// Everything [`ResolvedModelArtifact::validate`] proves except what needs the bundle to exist.
+///
+/// Used for exactly one shape: a derived entry still being produced. It must be `Incomplete` /
+/// `Missing` — a pending derivative that claims to be complete is the shape a stale journal would
+/// have, and admitting it would let an unfinished bundle be treated as loadable.
+fn validate_pending_derivative_shape(
+    artifact: &ResolvedModelArtifact,
+) -> Result<(), ResolvedCacheError> {
+    let refuse = |message: &str| ResolvedCacheError::new(message.to_owned());
+    if artifact.schema_version != MODEL_ARTIFACT_CONTRACT_VERSION {
+        return Err(refuse(
+            "pending derivative has an unsupported contract version",
+        ));
+    }
+    artifact
+        .identity
+        .validate()
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    artifact
+        .provenance
+        .identity
+        .validate()
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    if artifact.identity != artifact.provenance.identity {
+        return Err(refuse("pending derivative identity and provenance differ"));
+    }
+    if artifact.completeness != ArtifactCompleteness::Incomplete
+        || artifact.availability != ArtifactAvailability::Missing
+    {
+        return Err(refuse(
+            "pending derivative must be recorded as incomplete and missing until it publishes",
+        ));
+    }
+    if !matches!(artifact.location, ArtifactLocation::ResolvedLocal { .. }) {
+        return Err(refuse("pending derivative is not app-owned"));
+    }
+    let canonical = ResolvedBundleClosure::new(artifact.closure.members.clone())
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    if canonical != artifact.closure {
+        return Err(refuse(
+            "pending derivative closure is not in canonical form",
+        ));
+    }
+    Ok(())
+}
+
+/// Measure one file a producer staged. Never follows a link and never accepts anything but a
+/// regular file, so a producer cannot publish bytes that live outside the staging directory.
+fn measure_produced_file(path: &Path) -> Result<(u64, String), ResolvedCacheError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ResolvedCacheError::new(format!(
+            "produced derivative file {} is missing: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+        || !metadata.is_file()
+    {
+        return Err(ResolvedCacheError::new(format!(
+            "produced derivative file {} is linked, reparsed, or not a file",
+            path.display()
+        )));
+    }
+    let mut file = File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut size_bytes = 0_u64;
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        size_bytes = size_bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| ResolvedCacheError::new("produced derivative byte count overflow"))?;
+    }
+    if size_bytes != metadata.len() {
+        return Err(ResolvedCacheError::new(format!(
+            "produced derivative file {} changed while it was being measured",
+            path.display()
+        )));
+    }
+    Ok((size_bytes, format!("sha256:{:x}", digest.finalize())))
+}
+
+/// Refuse a staged tree holding anything the plan did not declare.
+fn reject_undeclared_produced_files(
+    staging: &Path,
+    declared: &BTreeSet<PathBuf>,
+) -> Result<(), ResolvedCacheError> {
+    let mut stack = vec![staging.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(staging).map_err(|_| {
+                ResolvedCacheError::new("produced derivative file escaped its staging directory")
+            })?;
+            if !declared.contains(relative) {
+                return Err(ResolvedCacheError::new(format!(
+                    "produced derivative staged an undeclared file {}",
+                    relative.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_candidate(candidate: &PromotionCandidate) -> Result<(), ResolvedCacheError> {
     candidate
         .artifact
@@ -2164,13 +2597,6 @@ fn validate_candidate(candidate: &PromotionCandidate) -> Result<(), ResolvedCach
     Ok(())
 }
 
-fn validate_metadata_shape(
-    metadata: &ResolvedCacheMetadata,
-    digest: &str,
-) -> Result<(), ResolvedCacheError> {
-    validate_metadata_shape_with(metadata, digest, ContentVerification::RehashEveryFile)
-}
-
 fn validate_metadata_shape_with(
     metadata: &ResolvedCacheMetadata,
     digest: &str,
@@ -2180,15 +2606,28 @@ fn validate_metadata_shape_with(
         .artifact
         .cache_key()
         .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
-    match verification {
-        ContentVerification::RehashEveryFile => metadata
-            .artifact
-            .validate()
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
-        ContentVerification::PathsAndSizesOnly => {
-            artifact_without_content_hashes(&metadata.artifact)
+    // A derived entry that has not published yet has no bytes anywhere — that is what its producer
+    // is running to create, and an interrupted one had its staging tree removed — so there is
+    // nothing on disk for `validate` to read. Its identity, provenance agreement and canonical
+    // closure are still checked (and so, below, is its cache key), and the pending shape check
+    // requires it to say `Incomplete`/`Missing`, so an unfinished bundle can never be mistaken for
+    // a loadable one. The exemption is exactly as narrow as the fact: only Derived, and only while
+    // the entry is not Complete.
+    let is_pending_derivative =
+        metadata.production.is_derived() && metadata.state != ResolvedCacheEntryState::Complete;
+    if is_pending_derivative {
+        validate_pending_derivative_shape(&metadata.artifact)?;
+    } else {
+        match verification {
+            ContentVerification::RehashEveryFile => metadata
+                .artifact
                 .validate()
-                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
+            ContentVerification::PathsAndSizesOnly => {
+                artifact_without_content_hashes(&metadata.artifact)
+                    .validate()
+                    .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+            }
         }
     }
     let reservation_shape_is_valid = match metadata.state {
@@ -2203,7 +2642,7 @@ fn validate_metadata_shape_with(
                 && metadata.session_id.is_none()
         }
     };
-    if metadata.schema_version != RESOLVED_CACHE_STORE_VERSION
+    if metadata.schema_version != metadata.production.store_version()
         || metadata.state == ResolvedCacheEntryState::Evicting
         || cache_key_digest(&metadata.cache_key)? != digest
         || artifact_key != metadata.cache_key
@@ -2244,7 +2683,12 @@ fn validate_complete_metadata(
 }
 
 /// How a whole-store listing treats complete entries. `Runtime` is the strict internal listing
-/// (recovery, staging cleanup, byte accounting); `Inspect` is the read-only status listing.
+/// (recovery, staging cleanup, byte accounting); `Inspect` is the read-only status listing. Both
+/// validate on paths and sizes only (sc-21534: recovery re-hashed every complete entry in the
+/// cache at startup, the same whole-cache cost sc-19712 F-3 removed from job submission; byte
+/// accounting needs sizes, and every caller that ACTS on a summary re-proves it under fresh
+/// locks). They differ in failure semantics: a `Runtime` listing fails on the first invalid
+/// entry, an `Inspect` listing degrades that entry to `Corrupt` and keeps going.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryListing {
     Runtime,
@@ -2254,8 +2698,7 @@ enum EntryListing {
 impl EntryListing {
     fn verification(self) -> ContentVerification {
         match self {
-            Self::Runtime => ContentVerification::RehashEveryFile,
-            Self::Inspect => ContentVerification::PathsAndSizesOnly,
+            Self::Runtime | Self::Inspect => ContentVerification::PathsAndSizesOnly,
         }
     }
 }
@@ -2275,8 +2718,10 @@ enum ContentVerification {
     ///
     /// This mode is safe on a read path only because it is never the last word: the load boundary
     /// ([`ResolvedCacheStore::acquire_complete`]) re-verifies at [`Self::RehashEveryFile`] under
-    /// the entry's locks before any bytes reach a runtime, and every journal write validates at
-    /// full strength. Do not weaken that boundary — it is what this mode leans on.
+    /// the entry's locks before any bytes reach a runtime, and every boundary that stamps
+    /// `Complete` content (`record_complete`, `publish_staged`, `recover`'s receipt resurrection)
+    /// proves the bytes itself immediately before writing. Do not weaken the load boundary — it
+    /// is what this mode leans on.
     PathsAndSizesOnly,
 }
 
@@ -2286,7 +2731,10 @@ fn validate_complete_metadata_inner(
     verification: ContentVerification,
 ) -> Result<(), ResolvedCacheError> {
     let digest = cache_key_digest(&metadata.cache_key)?;
-    validate_metadata_shape_with(metadata, &digest, verification)?;
+    // Shape only here: the mode-specific content check is the `match verification` below, so
+    // passing `verification` through would hash the whole closure TWICE per full-strength call
+    // (sc-21534 — half of the 4x-per-load multiple behind the Krea bf16 4.5-minute verify).
+    validate_metadata_shape_with(metadata, &digest, ContentVerification::PathsAndSizesOnly)?;
     if metadata.state != ResolvedCacheEntryState::Complete
         || metadata.reservation_id.is_some()
         || metadata.reservation_owner.is_some()
@@ -2779,8 +3227,29 @@ fn metadata_checksum(metadata: &ResolvedCacheMetadata) -> Result<String, Resolve
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
+/// The envelope's declared version, read WITHOUT decoding the document it wraps.
+///
+/// `ResolvedCacheMetadata` is `deny_unknown_fields`, so a journal a future writer widened fails to
+/// decode before anything gets to look at its version. Probing the version first turns that into a
+/// version statement — the reader can say "this was written by a newer SceneWorks" instead of
+/// reporting the store as corrupt, which is the difference between "upgrade" and "your cache is
+/// broken". sc-20635's derived entries are the first documents to use it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JournalVersionProbe {
+    schema_version: u32,
+}
+
 fn read_journal(path: &Path) -> Result<JournalEnvelope, ResolvedCacheError> {
     let body = std::fs::read(path)?;
+    if let Ok(probe) = serde_json::from_slice::<JournalVersionProbe>(&body) {
+        if probe.schema_version > RESOLVED_CACHE_DERIVED_STORE_VERSION {
+            return Err(ResolvedCacheError::new(format!(
+                "{UNSUPPORTED_JOURNAL_VERSION} (journal version {}, newest supported {})",
+                probe.schema_version, RESOLVED_CACHE_DERIVED_STORE_VERSION
+            )));
+        }
+    }
     let envelope: JournalEnvelope = serde_json::from_slice(&body)
         .map_err(|error| ResolvedCacheError::new(format!("decode cache metadata: {error}")))?;
     envelope.validate()?;

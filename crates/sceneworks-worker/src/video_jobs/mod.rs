@@ -61,12 +61,18 @@ mod prelude {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[allow(unused_imports)]
+    pub(super) use super::scail2::scail2_segment_blocking;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
     pub(super) use super::{
         advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
-        resolve_dense_adapters, resolve_lora_file, scail2_segment_blocking, video_frame_count,
-        wan_frame_count, AdapterSpec, CancelFlag, CharacterStore, Conditioning, GenerationMetrics,
-        GenerationOutput, GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy,
-        Precision, Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
+        resolve_dense_adapters, resolve_lora_file, video_frame_count, wan_frame_count, AdapterSpec,
+        CancelFlag, CharacterStore, Conditioning, GenerationMetrics, GenerationOutput,
+        GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision,
+        Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
     };
     #[allow(unused_imports)]
     pub(super) use super::{
@@ -413,21 +419,62 @@ fn reject_unsupported_candle_video_route(route: CandleVideoRoute) -> Result<(), 
 
 /// Run the candle video dispatch predicate ladder ONCE and return the [`CandleVideoRoute`]. Mirrors the
 /// historical inline ladder EXACTLY — same predicate order + `backend_candle_enabled` gating — so
-/// routing is byte-identical (sc-8828). Pure decision: no I/O, no generation.
+/// routing is byte-identical (sc-8828).
+///
+/// # Why this is fallible (sc-20644 review blocker 2)
+///
+/// The ladder's terminal arm is [`CandleVideoRoute::Stub`], which COMPLETES a job with procedural
+/// video. That is the right answer for a model this backend does not serve, and the wrong answer for
+/// a lane that had a typed refusal to give: `wan_comfyui_available` used to answer a `bool`, so
+/// every refusal the Wan plan route raises — a drifted or tampered plan, a missing snapshot tier, a
+/// missing or ambiguous expert role, an unconsumed layer — turned into `false` and the job SUCCEEDED
+/// with stub output.
+///
+/// This is the video lane's version of what `CheckpointPlanSelection::into_unclaimed_refusal` does
+/// on the image side: a lane's refusal is retained rather than discarded, and reaching the end of
+/// the ladder re-raises it instead of stubbing. Every other arm is unchanged and still infallible;
+/// only a lane that can REFUSE participates.
+/// Test-facing accessor for [`resolve_candle_video_route`], so a lane's own test module can assert
+/// that its refusal reaches the ROUTER rather than only its resolver. The distinction matters: a
+/// refusal that stops at the resolver and is swallowed on the way out is exactly the defect
+/// (review blocker 2).
+/// Returns only whether the route RESOLVED, not which route, so the accessor does not have to leak
+/// the private `CandleVideoRoute` out of this module. The distinction the caller needs is exactly
+/// "did this refuse or did it fall through", and the refusal message is the interesting half.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_video_route_for_test(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    resolve_candle_video_route(request, settings).map(|_| ())
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> CandleVideoRoute {
+fn resolve_candle_video_route(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<CandleVideoRoute> {
     // This precedes the backend gate and every mode arm deliberately. A replayed Eros job must fail
     // even on a disabled Candle worker, never misroute to Wan-VACE or procedural stub output.
     if request.model == "ltx_2_3_eros" {
-        return CandleVideoRoute::UnsupportedEros;
+        return Ok(CandleVideoRoute::UnsupportedEros);
+    }
+    // A plan-backed entry is decided HERE, ahead of the backend gate and every mode arm — each of
+    // those is wrong for it in its own way, and exactly one candle video lane loads a plan. See
+    // [`candle::plan_backed_wan_video_route`], which claims that lane or refuses by name (sc-20651).
+    if let Some(checkpoint_id) =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+    {
+        candle::plan_backed_wan_video_route(request, settings, checkpoint_id)?;
+        return Ok(CandleVideoRoute::WanComfyui);
     }
     if !settings.backend_candle_enabled {
-        return CandleVideoRoute::Stub;
+        return Ok(CandleVideoRoute::Stub);
     }
     if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
-        return CandleVideoRoute::Stub;
+        return Ok(CandleVideoRoute::Stub);
     }
-    if request.mode == "replace_person" {
+    Ok(if request.mode == "replace_person" {
         match scail2_engine_id(&request.model) {
             Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
             None if request.model == "wan_2_2_vace_fun_14b" => {
@@ -456,9 +503,12 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         // unprovisioned (sc-11003), never degrading to a stub. The per-mode source media is validated when
         // the conditioning is assembled (`resolve_candle_bernini_conditioning`), mirroring the MLX lane.
         CandleVideoRoute::Bernini(engine_id)
-    } else if wan_comfyui_available(request, settings) {
-        // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, so it matches no
-        // `is_candle_video_engine` arm below — route it off the forwarded `modelManifestEntry`.
+    } else if wan_comfyui_claims(request, settings)? {
+        // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, or a plan-backed entry
+        // (sc-20644), so it matches no `is_candle_video_engine` arm below — route it off the
+        // forwarded `modelManifestEntry`. `?` rather than a bool: a refusal this lane raises must
+        // reach the job as a typed error, never fall past here into `Stub` and COMPLETE as
+        // procedural video (review blocker 2).
         CandleVideoRoute::WanComfyui
     } else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {
         CandleVideoRoute::MiniMaxH3(engine_id)
@@ -466,7 +516,7 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         CandleVideoRoute::CandleVideo
     } else {
         CandleVideoRoute::Stub
-    }
+    })
 }
 
 /// The payload invariants every video job must satisfy before the worker does anything expensive —
@@ -932,7 +982,7 @@ pub(crate) async fn run_video_generate_job(
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (decoded, adapter, raw_settings, replacement_status) = {
-        let candle_route = resolve_candle_video_route(&request, settings);
+        let candle_route = resolve_candle_video_route(&request, settings)?;
         reject_unsupported_candle_video_route(candle_route)?;
         match candle_route {
             // The rejection above is the execution backstop. Keep this arm unreachable so adding a
@@ -2071,7 +2121,7 @@ use bernini::{
 use candle::{
     generate_candle_scail2, generate_candle_scail2_replace, generate_candle_video,
     generate_candle_wan_comfyui, generate_candle_wan_vace, generate_candle_wan_vace_extend_bridge,
-    generate_candle_wan_vace_fun, is_candle_video_engine, wan_comfyui_available,
+    generate_candle_wan_vace_fun, is_candle_video_engine, wan_comfyui_claims,
     CANDLE_SCAIL2_ADAPTER, CANDLE_WAN_VACE_ADAPTER, CANDLE_WAN_VACE_FUN_ADAPTER,
 };
 mod scail2;
@@ -2175,13 +2225,6 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     if model == "ltx_2_3_eros" {
         return Vec::new();
     }
-    // The executor is present for direct/replayed jobs, but the user-facing Candle capability is
-    // deliberately still withheld pending the MiniMax-H3 VRAM measurement. Keep the generated
-    // capability facts on that product truth; otherwise merely adding the dispatch arm would make
-    // the backend-capability matrix advertise a route before the separate one-line flip.
-    if matches!(model, "minimax_h3" | "minimax_h3_ref") {
-        return Vec::new();
-    }
     if model == "wan_2_2_vace_fun_14b" {
         return if mode == "replace_person" {
             vec!["wan2_2_vace_fun_14b"]
@@ -2207,6 +2250,7 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     }
     bernini_engine_id(model)
         .or_else(|| candle::candle_video_engine_id(model))
+        .or_else(|| minimax_h3_engine_id(model))
         .into_iter()
         .collect()
 }
@@ -2380,56 +2424,10 @@ fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
     }
 }
 
-/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
-
-/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
-/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
-/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
-/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
-/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
-/// `person_segment_sam3` vs candle `person_segment_sam3_candle`) plus the paint background, so the
-/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-async fn scail2_segment_blocking<R, F>(
-    api: &ApiClient,
-    settings: &Settings,
-    job_id: &str,
-    task_label: &'static str,
-    segment: F,
-) -> WorkerResult<R>
-where
-    R: Send + 'static,
-    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
-{
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    run_blocking_with_heartbeat(
-        api,
-        settings,
-        job_id,
-        Some(cancel),
-        SCAIL2_SEGMENT_CANCEL_MESSAGE,
-        task_label,
-        crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || segment(flag)),
-    )
-    .await
-}
-
-/// Assemble the SCAIL-2 `animate_character` conditioning (`Reference` + reference `Mask` +
-/// `ControlClip`) from an already-loaded reference image + driving frames. The two SAM3
-/// segmentation passes (reference → single painted mask, driving clip → per-frame painted masks)
-/// are supplied as closures so the backend-specific SAM3 module + paint background convention live
-/// at the call site while this orchestration (heartbeat, `ControlClip` shape) is shared (sc-8830 —
-/// collapses the ~100-line MLX/candle `resolve_scail2_conditioning` twin).
+/// Assemble SCAIL-2 `animate_character` conditioning from already-loaded character images +
+/// driving frames. Each reference is independently segmented into its paired color mask; the
+/// backend-specific SAM3 module and background convention stay at the call site while this
+/// orchestration remains shared between MLX and Candle.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2442,10 +2440,10 @@ async fn assemble_scail2_animate_conditioning<FR, FD>(
     segment_driving: FD,
 ) -> WorkerResult<Vec<Conditioning>>
 where
-    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Image, Image)> + Send + 'static,
+    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<(Image, Image)>> + Send + 'static,
     FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Vec<Image>, Vec<Image>)> + Send + 'static,
 {
-    let (reference, ref_mask) = scail2_segment_blocking(
+    let reference_pairs = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -2453,7 +2451,7 @@ where
         segment_reference,
     )
     .await?;
-    let (driving, driving_mask) = scail2_segment_blocking(
+    let (driving, driving_mask) = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -2461,20 +2459,7 @@ where
         segment_driving,
     )
     .await?;
-    Ok(vec![
-        Conditioning::Reference {
-            image: reference,
-            strength: None,
-        },
-        Conditioning::Mask { image: ref_mask },
-        Conditioning::ControlClip {
-            frames: driving,
-            mask: driving_mask,
-            masking_strength: 1.0,
-            start_frame: 0,
-            mode: ReplacementMode::default(),
-        },
-    ])
+    scail2::scail2_animate_conditioning(reference_pairs, driving, driving_mask)
 }
 
 // `pub(crate)` so `media_jobs`' own ffmpeg-backed tests can reuse `tests::ffmpeg_reachable` —
