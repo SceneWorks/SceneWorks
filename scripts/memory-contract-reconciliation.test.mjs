@@ -412,6 +412,73 @@ test("survey and engine scope mismatches carry exact coordinates in both directi
   );
 });
 
+test("a loaded overlay withheld at a different mode is still a withheld overlay, not an underclaim", () => {
+  // sc-21510: FLUX.1's identity coordinates ride `character_image` while the survey's clean-base
+  // claim rides `text_to_image`. Rung capability is a property of the loaded overlay spec, not the
+  // request mode, so the mode difference must not demote the withhold to an underclaim.
+  const input = fixture();
+  input.cells.push({ ...input.cells[0], mode: "character_image", overlay: "identity" });
+  input.engineFacts[0].memoryRouteWitnesses.push({
+    provider: "mlx_alpha",
+    tier: "q4",
+    mode: "character_image",
+    overlay: "identity",
+    loadProfile: "ip_adapter",
+  });
+  const rows = collectMemoryContractMismatches(input).filter((row) => row.leg === "survey_engine");
+  assert.deepEqual(
+    rows.map((row) => [row.mode, row.overlay, row.cause]),
+    [["character_image", "identity", "survey_withholds_loaded_overlay"]],
+  );
+
+  // Mutation: drop the clean-base cell (and with it the survey's clean-base claim), and the same
+  // coordinate is an ordinary underclaim again — the relaxation must not fire without a real claim.
+  const noBase = structuredClone(input);
+  noBase.cells.splice(0, 1);
+  const bare = collectMemoryContractMismatches(noBase).filter((row) => row.leg === "survey_engine");
+  assert.deepEqual(
+    bare.map((row) => [row.mode, row.overlay, row.cause]),
+    [["character_image", "identity", "survey_scope_underclaims"]],
+  );
+});
+
+test("a coordinate the request-peak record marks unmeasured is a recorded withhold", () => {
+  // sc-21510: SC-15525 marks illustrious entries `unmeasured` in `requestPeak.scopes`; publishing
+  // the coordinates would overturn that record, so the absence is a verdict rather than drift.
+  const input = fixture();
+  const verdict = input.survey.families[100].backends.mlx;
+  verdict.implementedEntries = [];
+  verdict.requestPeak = {
+    finding: "moves",
+    scopes: [{ entries: ["mlx_model"], tiers: ["q4"], finding: "unmeasured" }],
+  };
+  const rows = collectMemoryContractMismatches(input).filter((row) => row.leg === "survey_engine");
+  assert.deepEqual(
+    rows.map((row) => [row.modelId, row.cause]),
+    [["mlx_model", "survey_withholds_unmeasured_entry"]],
+  );
+
+  // Mutation 1: the scope names a different tier, so it says nothing about this coordinate.
+  const wrongTier = structuredClone(input);
+  wrongTier.survey.families[100].backends.mlx.requestPeak.scopes[0].tiers = ["q8"];
+  assert.deepEqual(
+    collectMemoryContractMismatches(wrongTier)
+      .filter((row) => row.leg === "survey_engine")
+      .map((row) => row.cause),
+    ["survey_scope_underclaims"],
+  );
+
+  // Mutation 2: no scope at all — a bare unmeasured finding is not a per-coordinate record.
+  const noScope = structuredClone(input);
+  noScope.survey.families[100].backends.mlx.requestPeak = { finding: "unmeasured" };
+  assert.deepEqual(
+    collectMemoryContractMismatches(noScope)
+      .filter((row) => row.leg === "survey_engine")
+      .map((row) => row.cause),
+    ["survey_scope_underclaims"],
+  );
+});
+
 test("independent valid revision labels do not invalidate capability content", () => {
   const input = fixture();
   input.engineFacts[0].generatedFrom.inferenceRevision = "f".repeat(40);

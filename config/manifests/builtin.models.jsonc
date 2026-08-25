@@ -1965,7 +1965,11 @@
               "rung": "bounded_transformer_residency",
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "edit_image", "image_to_image"],
+              // sc-21510: t2i only. This entry's catalog produces text_to_image cells alone, and the
+              // edit/image_to_image rung-4 coordinates are declared where their cells live — on the
+              // `z_image_edit` alias entry's own contract row — so the width here declared cells
+              // this entry never produces.
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -1977,7 +1981,10 @@
               "runtimeProvider": "z_image_turbo_control",
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "edit_image", "image_to_image"],
+              // sc-21510: t2i only. The strict-pose control lane gates on plain text_to_image
+              // requests (image_jobs/zimage.rs), and no control cell exists on any edit-capable
+              // entry — the wide mode list here declared cells the catalog never produces.
+              "modes": ["text_to_image"],
               "overlays": ["control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -3203,7 +3210,12 @@
               "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
-              "overlays": ["none", "lora", "identity"],
+              // sc-21510: `identity` removed. No MLX qwen load path ever sets an identity/ip-adapter
+              // component — qwen identity ships as a character LoRA on the base transformer
+              // (image_jobs/qwen.rs), the route registry's qwen_image_edit row is plain+lora only,
+              // and the engine-projected rows below agree. The overlay was a declared load profile
+              // production never takes.
+              "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
@@ -3441,7 +3453,12 @@
               "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
-              "overlays": ["none", "lora", "identity"],
+              // sc-21510: `identity` removed. No MLX qwen load path ever sets an identity/ip-adapter
+              // component — qwen identity ships as a character LoRA on the base transformer
+              // (image_jobs/qwen.rs), the route registry's qwen_image_edit row is plain+lora only,
+              // and the engine-projected rows below agree. The overlay was a declared load profile
+              // production never takes.
+              "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
@@ -13202,7 +13219,7 @@
             // hand edits inside this region are overwritten.
             {
               "rung": "staged_residency",
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q8", "q4"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora"],
@@ -13473,7 +13490,7 @@
             // hand edits inside this region are overwritten.
             {
               "rung": "staged_residency",
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q8", "q4"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora"],
@@ -13715,7 +13732,7 @@
             // hand edits inside this region are overwritten.
             {
               "rung": "staged_residency",
-              "tiers": ["q4"],
+              "tiers": ["bf16", "q8", "q4"],
               "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "loadProfiles": ["plain", "lora"],
