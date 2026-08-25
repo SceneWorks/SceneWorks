@@ -665,6 +665,145 @@ fn generation_metrics_upsert_get_list_and_merge() {
         .is_empty());
 }
 
+/// Telemetry keeps the source codec and the execution representation as two separate columns
+/// beside the request tier, and carries both through the retention sweep into the history mirror
+/// (sc-21484, epic 11037).
+///
+/// The three are correlated but independent: `quantLabel` is the tier that was *requested*,
+/// `sourceCodec` is what the file *stores*, and `executionRepresentation` is what this host
+/// *materialized* it as. The failure this pins is a stats row that says `nvfp4` and leaves a reader
+/// to assume the run executed NVFP4 natively when it took the dense BF16 fallback.
+#[test]
+fn generation_metrics_separate_source_codec_from_execution_representation() {
+    let db = temp_db("gen-metrics-facts");
+    let path = db.path();
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+
+    let connection = Connection::open(&path).expect("db opens");
+    connection
+        .execute(
+            "insert into jobs (
+               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+               attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values ('dense-run','image_generate','completed','{}','{}','auto',1,'completed','',
+                       1,0,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("terminal job seeds");
+    drop(connection);
+
+    // A pre-Blackwell / sm_100 / CPU host running an NVFP4-stored checkpoint: the tier the user
+    // picked and the codec the file stores both say NVFP4, and the run was still dense.
+    let dense = GenerationMetrics {
+        model: Some("kreamania-v7".to_owned()),
+        quant_label: Some("nvfp4".to_owned()),
+        source_codec: Some("nvfp4-v1".to_owned()),
+        execution_representation: Some("dense-fallback".to_owned()),
+        backend: Some("cuda".to_owned()),
+        ..Default::default()
+    };
+    store
+        .upsert_generation_metrics("dense-run", &dense)
+        .expect("metrics upsert");
+
+    let read = store
+        .get_generation_metrics("dense-run")
+        .expect("metrics read")
+        .expect("metrics present");
+    assert_eq!(read.quant_label.as_deref(), Some("nvfp4"));
+    assert_eq!(read.source_codec.as_deref(), Some("nvfp4-v1"));
+    assert_eq!(
+        read.execution_representation.as_deref(),
+        Some("dense-fallback"),
+        "the source tier must not stand in for what actually ran"
+    );
+    assert_ne!(
+        read.source_codec.as_deref(),
+        read.quant_label.as_deref(),
+        "the codec id and the tier are different vocabularies"
+    );
+
+    // The wire shape the web stats screen reads.
+    let wire = serde_json::to_value(&read).expect("metrics serialize");
+    assert_eq!(wire["sourceCodec"], json!("nvfp4-v1"));
+    assert_eq!(wire["executionRepresentation"], json!("dense-fallback"));
+
+    // A partial re-report must not wipe either fact.
+    store
+        .upsert_generation_metrics(
+            "dense-run",
+            &GenerationMetrics {
+                total_ms: Some(1234),
+                ..Default::default()
+            },
+        )
+        .expect("partial upsert");
+    let merged = store
+        .get_generation_metrics("dense-run")
+        .expect("metrics reread")
+        .expect("still present");
+    assert_eq!(merged.source_codec.as_deref(), Some("nvfp4-v1"));
+    assert_eq!(
+        merged.execution_representation.as_deref(),
+        Some("dense-fallback")
+    );
+
+    // Retention materializes the row into the history mirror. The insert names every column on
+    // both sides; a positional `select m.*` would have the same arity here and would silently
+    // write the job's type into `source_codec`.
+    store
+        .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+        .expect("retention sweep");
+    let historical = store
+        .list_generation_metrics(None, None, None, 100)
+        .expect("history queryable");
+    let row = historical
+        .iter()
+        .find(|row| row.job_id == "dense-run")
+        .expect("the purged run survives in Generation Stats");
+    assert_eq!(row.job_type, JobType::ImageGenerate);
+    assert_eq!(row.metrics.source_codec.as_deref(), Some("nvfp4-v1"));
+    assert_eq!(
+        row.metrics.execution_representation.as_deref(),
+        Some("dense-fallback"),
+        "the history mirror must carry the representation, not a shifted column"
+    );
+    assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
+    assert_eq!(row.metrics.total_ms, Some(1234));
+}
+
+/// A historical row records neither fact, and absence must stay absence — an unmeasured run is not
+/// a dense run (sc-21484).
+#[test]
+fn generation_metrics_omit_both_facts_when_nothing_classified_or_measured() {
+    let store = store("gen-metrics-absent");
+    let job = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store
+        .upsert_generation_metrics(
+            &job.id,
+            &GenerationMetrics {
+                quant_label: Some("q8".to_owned()),
+                ..Default::default()
+            },
+        )
+        .expect("metrics upsert");
+
+    let read = store
+        .get_generation_metrics(&job.id)
+        .expect("metrics read")
+        .expect("present");
+    assert_eq!(read.source_codec, None);
+    assert_eq!(read.execution_representation, None);
+    let wire = serde_json::to_value(&read).expect("serializes");
+    assert!(
+        wire.get("sourceCodec").is_none() && wire.get("executionRepresentation").is_none(),
+        "an unclassified, unmeasured run omits both facts rather than defaulting them: {wire}"
+    );
+}
+
 #[test]
 fn job_lifecycle_create_claim_complete() {
     let store = store("lifecycle");

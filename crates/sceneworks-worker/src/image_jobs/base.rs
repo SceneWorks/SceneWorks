@@ -12301,10 +12301,23 @@ fn image_settings_metrics(
             .and_then(serde_json::Number::from_f64)
     };
     let loras: Vec<String> = request.loras.iter().filter_map(lora_label).collect();
+    // Two more facts beside the tier (sc-21484, epic 11037). `quant_label` answers "which variant
+    // was selected"; it does NOT answer "what is this checkpoint stored in" or "what did this host
+    // execute", and a stats row that reports only the tier lets a reader conclude that a
+    // `nvfp4`-tier run executed NVFP4 natively on a box that in fact took the dense BF16 fallback.
+    //
+    // Both come from the verified source classification and the load receipt, never from
+    // `quant_label` and never from the host's capability — see `checkpoint_weight_facts_host`.
+    let (source_codec, execution_representation) =
+        crate::checkpoint_weight_facts_host::manifest_entry_metrics_pair(
+            &request.model_manifest_entry,
+        );
     GenerationMetrics {
         model: (!request.model.is_empty()).then(|| request.model.clone()),
         quant_label,
         quant_bits: quant_bits.map(|bits| bits as u32),
+        source_codec,
+        execution_representation,
         sampler: string_or("sampler", "default"),
         scheduler: string_or("scheduler", "default"),
         scheduler_shift: number_field("schedulerShift"),

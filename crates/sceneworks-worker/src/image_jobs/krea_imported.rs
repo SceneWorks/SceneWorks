@@ -43,12 +43,17 @@ fn krea_imported_operation(request: &ImageRequest) -> gen_core::ImportedModelOpe
     checkpoint_plan_operation(request)
 }
 
+/// Whether this request's checkpoint is **stored** in the NVFP4 source codec.
+///
+/// Reads the same `imported_entry_source_codec` the scheduler's admission gate reads (sc-21484,
+/// epic 11037), so claim and dispatch cannot disagree about what the checkpoint is. The name says
+/// what it means: this is the SOURCE fact. It does not say the run will execute the packed W4A4
+/// operand — that depends on the host's probed capability and on the load receipt, neither of which
+/// exists at route-selection time, and both of which are reported separately on the asset receipt
+/// and the telemetry row.
 fn krea_imported_native_nvfp4(request: &ImageRequest) -> bool {
-    request
-        .model_manifest_entry
-        .get("importQuantFormat")
-        .and_then(Value::as_str)
-        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
+    sceneworks_core::jobs_store::imported_entry_source_codec(&request.model_manifest_entry)
+        == Some(sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID)
 }
 
 /// Resolve the exact imported source shape and operation through the live provider registry. An
@@ -715,8 +720,9 @@ fn krea_imported_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
     adapter_count: usize,
+    dit: Option<&Path>,
 ) -> JsonObject {
-    let mut raw = krea_imported_raw_settings(request, steps, false, adapter_count);
+    let mut raw = krea_imported_raw_settings(request, steps, false, adapter_count, dit);
     raw.insert("guidanceScale".to_owned(), Value::Null);
     raw.insert("controlScale".to_owned(), json!(control_scale));
     raw.insert("poseCount".to_owned(), json!(pose_count));
@@ -818,8 +824,14 @@ async fn generate_krea_imported_control_stream(
 
     let poses = parse_poses(request);
     let count = poses.len();
-    let mut raw_settings =
-        krea_imported_control_raw_settings(request, steps, control_scale, count, adapters.len());
+    let mut raw_settings = krea_imported_control_raw_settings(
+        request,
+        steps,
+        control_scale,
+        count,
+        adapters.len(),
+        Some(dit.as_path()),
+    );
     raw_settings.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(Value::from).unwrap_or(Value::Null),
@@ -1063,8 +1075,14 @@ async fn generate_krea_imported_control_stream(
 
     let poses = parse_poses(request);
     let count = poses.len();
-    let raw_settings =
-        krea_imported_control_raw_settings(request, steps, control_scale, count, adapters.len());
+    let raw_settings = krea_imported_control_raw_settings(
+        request,
+        steps,
+        control_scale,
+        count,
+        adapters.len(),
+        Some(dit.as_path()),
+    );
     // Strict pose shares one seed across the set so noise-derived attributes stay constant.
     let seed = resolve_seed(request, 0);
 
@@ -1271,13 +1289,33 @@ fn imported_model_quant(
 /// are CFG-free (the Turbo descriptor advertises `supports_guidance=false`). `is_edit` records the
 /// Kontext edit lane (sc-14119) vs plain t2i/img2img, and `adapter_count` the number of applied
 /// LoRA/LoKr adapters (sc-14111 — the edit identity LoRA included).
+///
+/// # The three checkpoint facts
+///
+/// `checkpointWeightFacts` (sc-21484, epic 11037) records what the imported checkpoint's weights
+/// are **stored** in, what this **host** can execute in that packing, and — separately — what the
+/// load actually **materialized**, rather than letting the single `quantTier`/`mlxQuantize` value
+/// stand for all three. `advanced.quantTier: "nvfp4"` says which variant the user asked for; it
+/// does not say the run executed NVFP4 natively, and on a pre-Blackwell host, a datacenter
+/// `sm_100`, a Mac or a CPU box it did not. The facts object is absent when the entry carries no
+/// verified source classification — absent, never defaulted.
 fn krea_imported_raw_settings(
     request: &ImageRequest,
     steps: u32,
     is_edit: bool,
     adapter_count: usize,
+    dit: Option<&Path>,
 ) -> JsonObject {
     let mut raw = request.advanced.clone();
+    crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
+        &mut raw,
+        crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
+            &request.model_manifest_entry,
+            dit,
+            crate::checkpoint_weight_facts_host::materialization_from_runtime(),
+        )
+        .as_ref(),
+    );
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert(
@@ -1856,7 +1894,8 @@ async fn generate_krea_imported_stream(
     );
     let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
     let text_style_gain = resolve_text_style_gain(request);
-    let mut raw_settings = krea_imported_raw_settings(request, steps, is_edit, adapter_count);
+    let mut raw_settings =
+        krea_imported_raw_settings(request, steps, is_edit, adapter_count, Some(dit.as_path()));
     raw_settings.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(Value::from).unwrap_or(Value::Null),

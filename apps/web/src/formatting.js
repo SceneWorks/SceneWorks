@@ -78,6 +78,49 @@ export function quantLabel(label) {
   return label && String(label).trim() ? String(label) : "—";
 }
 
+// Source codec vs execution representation (sc-21484, epic 11037) — the two facts `quantLabel`
+// used to be silently asked to carry on top of the requested tier.
+//
+// `quantLabel` says which variant was SELECTED. `sourceCodec` says what the checkpoint's weights
+// are STORED in ("nvfp4-v1"), which is the same answer on every host. `executionRepresentation`
+// says what this run actually MATERIALIZED them as — and it is the only one of the three that can
+// justify the words "native NVFP4".
+
+// Display names for the engine's stable execution-representation labels. Anything else — including
+// an absent value — renders as "not measured" rather than being guessed at: a run with no load
+// receipt is not a dense run, and rendering it as one would be the same untruth in the other
+// direction.
+const EXECUTION_REPRESENTATION_LABELS = {
+  "native-packed": "native (packed)",
+  "dense-fallback": "dense fallback",
+};
+
+export function executionRepresentationLabel(representation) {
+  const key = representation && String(representation).trim();
+  if (!key) return "not measured";
+  return EXECUTION_REPRESENTATION_LABELS[key] ?? key;
+}
+
+// Source-codec display. Passes the engine's codec id through unchanged — it is a precise identifier
+// and shortening it to "nvfp4" would re-create exactly the tier/codec collision the id exists to
+// avoid. Absent renders as a dash, never as the requested tier.
+export function sourceCodecLabel(codecId) {
+  return codecId && String(codecId).trim() ? String(codecId) : "—";
+}
+
+// The one-line rendering of the two facts together, for a stats row.
+//
+// Deliberately never collapses to a single word. When the codec is known but the run was not
+// measured it says so ("nvfp4-v1 · not measured") rather than letting the codec stand in for the
+// execution, which is the reading this story exists to prevent.
+export function weightFactsLabel(metrics) {
+  const codec = metrics?.sourceCodec;
+  if (!codec) return "—";
+  return `${sourceCodecLabel(codec)} · ${executionRepresentationLabel(
+    metrics?.executionRepresentation,
+  )}`;
+}
+
 export function liveElapsedSeconds(job, nowMs = Date.now()) {
   if (terminalStatuses.has(job.status) || !job.startedAt) {
     return job.elapsedSeconds;

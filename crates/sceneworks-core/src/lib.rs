@@ -10,6 +10,7 @@ pub mod checkpoint_import;
 pub mod checkpoint_ingest;
 pub mod checkpoint_inspector;
 pub mod checkpoint_plan_store;
+pub mod checkpoint_weight_facts;
 pub mod contracts;
 pub mod control_weights;
 pub mod credentials;
