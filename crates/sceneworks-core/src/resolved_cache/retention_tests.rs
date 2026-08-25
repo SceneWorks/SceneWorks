@@ -1510,8 +1510,10 @@ fn the_retention_scan_judges_on_paths_and_sizes_rather_than_rehashing_the_cache(
 /// The split exists because journal reads are on hot, user-facing surfaces — the catalog GET, the
 /// Settings storage status, every pin read — and re-hashing a whole bundle to decide which slot to
 /// read puts the bundle's byte count behind each of them while proving nothing a reader may act
-/// on. Safety is unchanged where it matters: content that no longer matches its recorded hash is
-/// still refused before it can reach a runtime, and every write validates at full strength.
+/// on. sc-21534 extended the cheap mode to every read surface (`lookup_complete`, `enumerate`,
+/// the reservation short-circuit): they now see a same-size-altered entry as complete, and the
+/// ONE place that refuses it is the load boundary, `acquire_complete`, before any bytes reach a
+/// runtime.
 #[test]
 fn journal_reads_skip_content_hashing_while_the_load_path_still_refuses_altered_bytes() {
     let scratch = TempDir::new().unwrap();
@@ -1533,8 +1535,17 @@ fn journal_reads_skip_content_hashing_while_the_load_path_still_refuses_altered_
     assert_eq!(inspected[0].cache_key, candidate.cache_key);
     assert_eq!(inspected[0].state, ResolvedCacheEntryState::Complete);
     assert!(store.effective_pin(&candidate.cache_key).is_ok());
+    // sc-21534: the point lookup and the runtime listing are reads too — they must offer the
+    // entry without paying a content hash, exactly like the scan and the status listing.
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_some());
+    assert_eq!(store.enumerate().unwrap().len(), 1);
 
     // The load path is unmoved: altered bytes are refused before an artifact reaches a runtime.
-    assert!(store.lookup_complete(&candidate.cache_key).is_err());
-    assert!(store.enumerate().is_err());
+    let resolver = resolver(&library, ActiveArtifactLeaseRegistry::default());
+    assert!(store
+        .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+        .is_err());
 }
