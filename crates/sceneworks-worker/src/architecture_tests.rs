@@ -503,6 +503,16 @@ fn real_image_job_modules_import_the_json_macro_they_invoke() {
 // is closed as far as source text can close it by
 // `the_family_token_vocabulary_covers_every_family_the_live_tables_name`, which fails the moment a
 // new family reaches any of the three live tables without reaching the vocabulary.
+//
+// A second hole is not closable from source text at all, and is stated rather than papered over: a
+// constant naming exactly ONE token, and that token an AMBIGUOUS one, is not judged a family
+// allow-list ([`FAMILY_TOKENS_THAT_ARE_ALSO_BUILTIN_MODEL_IDS`]). `sdxl` is that token, and a
+// genuine single-family `sdxl` gate is byte-identical to a builtin-model-id list holding the one
+// word `sdxl` — the sweep sees a set of one ambiguous token in both cases and cannot tell them
+// apart. It resolves that tie toward NOT an offender, so an SDXL-only family gate would pass this
+// audit unrecorded. Widening the judgment the other way is the worse trade (it would record ten
+// non-offenders and bury the four that matter), and no amount of token analysis distinguishes the
+// two: only a reader can. Any second vocabulary token puts the constant back in the sweep's view.
 
 /// The plan-family vocabulary: every value `sceneworks_core::checkpoint_inspector::normalize_family`
 /// can return.

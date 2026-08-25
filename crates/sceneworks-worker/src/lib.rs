@@ -1055,6 +1055,7 @@ pub async fn run() -> WorkerResult<()> {
                         migrated = summary.migrated,
                         failed = summary.failed(),
                         declined = summary.declined_containers.len(),
+                        vanished = summary.vanished.len(),
                         skipped = summary.skipped,
                         "migrated pre-epic imported models into the checkpoint plan store"
                     ),

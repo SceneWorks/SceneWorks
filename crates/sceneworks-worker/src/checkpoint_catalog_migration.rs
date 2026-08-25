@@ -50,7 +50,7 @@ const LEGACY_IMPORT_PROVENANCE_SOURCE: &str = "local-copy";
 /// filesystem side channel.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CatalogMigrationSummary {
-    /// Entries a compile was actually run for. Always `migrated + failed()`.
+    /// Entries a compile was actually run for. Always `migrated + failed() + vanished.len()`.
     pub attempted: usize,
     /// Entries whose `importPlan` stamp landed in the manifest.
     pub migrated: usize,
@@ -68,6 +68,12 @@ pub(crate) struct CatalogMigrationSummary {
     /// model still renders — conflating the two would make a healthy catalog look broken and would
     /// make a real refusal harder to find.
     pub declined_containers: Vec<(String, String)>,
+    /// Model ids whose catalog entry was DELETED while their compile ran. A compile is four full
+    /// passes over a multi-gigabyte checkpoint, so the window is minutes wide; the write-back finds
+    /// the id gone and writes nothing rather than re-creating the model as a stub row. Reported as
+    /// its own outcome because it is neither a migration nor a refusal — the compiled plan simply
+    /// has no entry left to belong to.
+    pub vanished: Vec<String>,
 }
 
 impl CatalogMigrationSummary {
@@ -123,8 +129,23 @@ pub(crate) async fn migrate_legacy_checkpoint_catalog(
                 let mut update = JsonObject::new();
                 update.insert("id".to_owned(), Value::String(candidate.model_id.clone()));
                 update.insert("importPlan".to_owned(), stamp);
-                match upsert_manifest_entry(&manifest_path, "models", update).await {
-                    Ok(()) => summary.migrated += 1,
+                // UPDATE-ONLY, never an upsert: the compile above ran for minutes, and if the user
+                // deleted this model while it did, appending the stamp would RESURRECT it as a stub
+                // row holding only `id` and `importPlan` — a broken entry with no name, no paths and
+                // no type. The absence check happens inside the same manifest lock the write takes,
+                // so the deletion cannot land between the two.
+                match update_manifest_entry_if_present(&manifest_path, "models", update).await {
+                    Ok(true) => summary.migrated += 1,
+                    Ok(false) => {
+                        tracing::info!(
+                            event = "checkpoint_catalog_migration_entry_vanished",
+                            modelId = %candidate.model_id,
+                            installId = %candidate.install_id,
+                            "the catalog entry was deleted while its checkpoint compiled; the \
+                             migration stamp was not written back"
+                        );
+                        summary.vanished.push(candidate.model_id.clone());
+                    }
                     Err(error) => {
                         tracing::warn!(
                             event = "checkpoint_catalog_migration_failed",
@@ -224,7 +245,25 @@ fn migration_candidate(
     if derived != install_path {
         return None;
     }
-    let relative_path = lone_top_level_weight_file(&install_path)?;
+    // A RECOGNIZED managed install (the `install_dir` round-trip above proved it) that the pass
+    // nonetheless declines to migrate is logged rather than dropped silently: without this, an
+    // install that never migrates is indistinguishable from one that was never looked at, and the
+    // reason it was declined lives nowhere at all. `info`, not `warn`: this is a legitimate skip —
+    // the entry keeps the bespoke lane that already loads it.
+    let relative_path = match lone_top_level_weight_file(&install_path) {
+        Ok(relative_path) => relative_path,
+        Err(reason) => {
+            tracing::info!(
+                event = "checkpoint_catalog_migration_skipped",
+                modelId = %model_id,
+                installId = %install_id,
+                reason = %reason,
+                "left a recognized managed install unmigrated: it is not the single-file shape a \
+                 pre-epic import has"
+            );
+            return None;
+        }
+    };
     // Validated the way the store validates it, so a name that could never address a layer is not
     // paid for with a full checkpoint read.
     sceneworks_core::checkpoint_plan_store::validate_linked_relative_path(&relative_path).ok()?;
@@ -235,8 +274,9 @@ fn migration_candidate(
     })
 }
 
-/// The file name of the LONE top-level weight file in `dir`, or `None` when there is not exactly
-/// one.
+/// The file name of the LONE top-level weight file in `dir`, or the reason there is not exactly
+/// one. The reason is carried rather than flattened to `None` so the caller can say WHY an install
+/// it recognized was left alone.
 ///
 /// This is the shape the pre-epic import job wrote and the shape the bespoke imported lanes load
 /// (`krea_imported::imported_dit_file`): the checkpoint plus an install marker. Requiring exactly
@@ -247,9 +287,11 @@ fn migration_candidate(
 /// import must be RECOGNIZED so [`declined_container`] can decline it as the typed outcome it is;
 /// leaving it out would silently fold it into the "not a managed install" skip and lose the
 /// distinction.
-fn lone_top_level_weight_file(dir: &Path) -> Option<String> {
+fn lone_top_level_weight_file(dir: &Path) -> Result<String, String> {
     let mut found: Option<String> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    let listing = std::fs::read_dir(dir)
+        .map_err(|error| format!("the install directory could not be read: {error}"))?;
+    for entry in listing.flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -263,13 +305,15 @@ fn lone_top_level_weight_file(dir: &Path) -> Option<String> {
         if !is_weights {
             continue;
         }
-        let name = path.file_name().and_then(|name| name.to_str())?.to_owned();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return Err("a top-level weight file has a non-UTF-8 name".to_owned());
+        };
         if found.is_some() {
-            return None;
+            return Err("the install holds several top-level weight files".to_owned());
         }
-        found = Some(name);
+        found = Some(name.to_owned());
     }
-    found
+    found.ok_or_else(|| "the install holds no top-level weight file".to_owned())
 }
 
 /// The container name when `candidate`'s primary is NOT safetensors, `None` when it is (or when the
@@ -667,6 +711,99 @@ mod tests {
             fx.catalog_entry("imported_fluxmania"),
             before,
             "a declined entry must be left byte-identical, keeping the bespoke lane that loads it"
+        );
+    }
+
+    /// AC (write-back safety): the entry is deleted WHILE its checkpoint compiles, and the stamp
+    /// must not bring it back. An upsert appends when the id is absent, so the write-back would
+    /// have re-created the model as a stub row carrying only `id` and `importPlan` — no name, no
+    /// `paths`, no `type` — and a deleted model would reappear in the catalog broken.
+    ///
+    /// The race is driven for real, and ORDERED rather than hoped for. The test holds the manifest's
+    /// own cross-process lock from before the pass starts: the pass's up-front catalog read is
+    /// unlocked, so it still sees the entry and selects the candidate (proved below by
+    /// `attempted == 1`, which only a selected candidate produces), while its write-back cannot
+    /// proceed until the lock is released. The deletion is made under that lock — the same
+    /// entry-less `models` array the API's delete route leaves behind — once the compile is
+    /// observably past the catalog read, so the interleaving is fixed rather than timing-dependent.
+    ///
+    /// Failing mutation (run): put `upsert_manifest_entry` back in place of
+    /// `update_manifest_entry_if_present` in `migrate_legacy_checkpoint_catalog`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_entry_deleted_while_its_checkpoint_compiles_is_not_resurrected_by_the_write_back() {
+        use fs2::FileExt as _;
+
+        let fx = MigrationFixture::new();
+        let install = fx.install("legacy-kreamania", &krea_native_entries());
+        fx.write_catalog(json!([{
+            "id": "imported_kreamania",
+            "name": "Kreamania",
+            "type": "image",
+            "catalogScope": "user",
+            "family": "krea_2",
+            "paths": { "model": install.to_str().unwrap() }
+        }]));
+
+        let manifest_path = fx.manifest_path();
+        let lock_path = manifest_path.with_file_name("user.models.jsonc.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock_exclusive()
+            .expect("fixture check: nothing else holds this manifest lock");
+
+        let config_dir = fx.config_dir.clone();
+        let data_dir = fx.data_dir.clone();
+        let pass =
+            tokio::spawn(
+                async move { migrate_legacy_checkpoint_catalog(&config_dir, &data_dir).await },
+            );
+
+        // The compiled record is written by `compile_managed`, which runs strictly AFTER the
+        // catalog read — so observing it proves the candidate was selected from a catalog that
+        // still held the entry. The write-back cannot have run: this test holds its lock.
+        let store = CheckpointPlanStore::open(&fx.data_dir);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while store.record("managed/legacy-kreamania").is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture check: the compile never reached the write-back"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&json!({"schemaVersion": 1, "models": []})).unwrap(),
+        )
+        .unwrap();
+        fs2::FileExt::unlock(&lock).unwrap();
+
+        let summary = pass
+            .await
+            .unwrap()
+            .expect("the migration pass must not abort on a readable catalog");
+        assert_eq!(
+            (summary.attempted, summary.migrated, summary.failed()),
+            (1, 0, 0),
+            "premise: the compile must have been ATTEMPTED for this row to say anything, and a \
+             vanished entry is neither migrated nor a failure: {summary:?}"
+        );
+        assert_eq!(
+            summary.vanished,
+            vec!["imported_kreamania".to_owned()],
+            "the deleted entry must be REPORTED, not silently counted as migrated: {summary:?}"
+        );
+
+        let payload = std::fs::read_to_string(fx.manifest_path()).unwrap();
+        let manifest: Value = serde_json::from_str(&strip_jsonc_comments(&payload)).unwrap();
+        assert_eq!(
+            manifest["models"].as_array().unwrap(),
+            &Vec::<Value>::new(),
+            "the write-back must not add a row for a model the user deleted: {manifest}"
         );
     }
 

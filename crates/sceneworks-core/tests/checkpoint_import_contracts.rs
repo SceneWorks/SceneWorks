@@ -1426,6 +1426,56 @@ fn schema_requires_the_published_serde_semantic_validation_step() {
     assert!(serde_json::from_value::<CheckpointCatalogRecordV1>(mismatched_summary).is_err());
 }
 
+/// `ImportLayerV1::container` is REQUIRED on the wire, deliberately: an absent `container` must be
+/// a hard failure rather than an assumed `Safetensors`, because defaulting would silently re-open
+/// the GGUF-served-to-a-safetensors-loader hole the field was added to close (sc-20651).
+///
+/// Pinned in BOTH directions — serde and the published schema — so that neither a
+/// `#[serde(default)]` on the field nor a dropped `"container"` entry from the schema's `required`
+/// list can restore the hole without turning this test red.
+#[test]
+fn an_absent_layer_container_is_rejected_by_both_serde_and_the_published_schema() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/schemas/checkpoint-import.schema.json");
+    let schema: Value = serde_json::from_str(&fs::read_to_string(path).expect("read schema"))
+        .expect("schema JSON parses");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    let import_plan = plan(linked("root", "transformer/model.safetensors"));
+    let complete = serde_json::to_value(&import_plan).expect("plan serializes");
+    assert_eq!(
+        complete["layers"][0]["container"],
+        json!("safetensors"),
+        "fixture check: the serialized plan must carry a container to have one to remove"
+    );
+    assert!(
+        validator.is_valid(&complete),
+        "the complete plan is the control and must validate"
+    );
+    assert!(serde_json::from_value::<ImportPlanV1>(complete.clone()).is_ok());
+
+    let mut without_container = complete;
+    assert!(
+        without_container["layers"][0]
+            .as_object_mut()
+            .expect("fixture check: layers[0] must be a JSON object")
+            .remove("container")
+            .is_some(),
+        "fixture check: removing container must actually remove a present key"
+    );
+
+    assert!(
+        !validator.is_valid(&without_container),
+        "the published schema must list container as required for a layer"
+    );
+    let serde_error = serde_json::from_value::<ImportPlanV1>(without_container)
+        .expect_err("serde must reject a layer with no container, never default it to safetensors");
+    assert!(
+        serde_error.to_string().contains("container"),
+        "the deserialization failure must name the missing field, got: {serde_error}"
+    );
+}
+
 #[test]
 fn frozen_exact_u32_lexemes_cover_every_versioned_occurrence_and_field_order() {
     let surfaces = [

@@ -5209,6 +5209,138 @@ async fn deleting_a_managed_model_removes_its_checkpoint_so_the_id_can_be_import
     .expect("the install id must be free for a re-import after the delete");
 }
 
+/// sc-20651 feature-end review, MAJOR 2: the derivatives-first teardown REFUSES while a derivative
+/// is pinned, and that refusal must not be honoured HERE.
+///
+/// Everywhere else it is right — a pinned derivative's source bytes are still on disk, so holding
+/// the teardown keeps it usable. By this point in the delete route the bytes are ALREADY gone
+/// (`remove_whole_model_artifacts` ran) and so is the manifest entry, so honouring the refusal
+/// strands the plan record with nothing under it and `ManagedIngest::begin` then refuses the install
+/// id forever with `InstallIdTaken`, naming a path that no longer exists — the user can never
+/// re-import the model. Strictly worse than the orphaned derivative the ordering was fixing, which
+/// is orphaned either way once the bytes are gone.
+///
+/// So: the delete succeeds, the record is cleared regardless, and the warning NAMES both the
+/// checkpoint and the derivative cache entry left behind, because a named orphan is one the user can
+/// find and evict and a silent one is not.
+#[tokio::test]
+async fn a_pinned_derivative_does_not_strand_the_record_of_a_deleted_managed_model() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let source_file = temp_dir.path().join("library/krea.safetensors");
+    write_krea_checkpoint_file(&source_file);
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let ingest = sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("ingest opens");
+    ingest
+        .stage_copy_file(&source_file, "krea.safetensors")
+        .expect("bytes stage");
+    let install = ingest
+        .finalize("krea.safetensors", None)
+        .expect("ingest finalizes");
+
+    // A REAL published derivative of that install, then pinned — the same pin the cache's own
+    // removal refuses on, not a mocked failure.
+    let derivatives =
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)
+            .expect("derivative store opens");
+    let derivative_request =
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeRequestV1 {
+            kind: sceneworks_core::checkpoint_derivative::CheckpointDerivativeKindV1::DerivedIndex,
+            adapter_id: "krea_2".to_owned(),
+            adapter_version: "1".to_owned(),
+            codec_id: "dense-bf16".to_owned(),
+            codec_version: "1".to_owned(),
+            backend: "mlx".to_owned(),
+            outputs: vec!["index.json".to_owned()],
+        };
+    derivatives
+        .ensure(&install.checkpoint_id, &derivative_request, |outputs| {
+            use std::io::Write as _;
+            let mut file = outputs.create("index.json").map_err(|e| e.to_string())?;
+            file.write_all(b"{}").map_err(|error| error.to_string())
+        })
+        .expect("the derivative is produced and published");
+    let resolved = store
+        .resolve(&install.checkpoint_id)
+        .expect("the managed checkpoint resolves");
+    let cache_key = derivatives
+        .cache_key(&resolved, &derivative_request)
+        .expect("the derivative has a cache key");
+    derivatives
+        .cache()
+        .set_artifact_pin(&cache_key, true)
+        .expect("the derivative pins");
+    assert!(
+        derivatives.remove_managed_install("managed_model").is_err(),
+        "fixture check: a pinned derivative must make the derivatives-first teardown REFUSE, or \
+         this test proves nothing about the fallback"
+    );
+
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "managed_model",
+                    "name": "Managed Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "managed/managed_model" }}
+                  }}]
+                }}"#,
+            install
+                .install_path
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/managed_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a pinned derivative must not fail the delete: {deleted:?}"
+    );
+    assert_eq!(deleted["removedManifestEntry"], true);
+
+    let warnings = deleted["warnings"].to_string();
+    assert!(
+        warnings.contains("managed/managed_model") && warnings.contains(&cache_key),
+        "the warning must name the checkpoint AND the orphaned derivative: {warnings}"
+    );
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    assert!(
+        store.record("managed/managed_model").is_err(),
+        "the record must be cleared even though the derivative teardown refused: {:?}",
+        store.inventory().expect("inventory reads")
+    );
+    // The claim that actually matters, made the way the worker makes it.
+    sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("the install id must be free for a re-import after the delete");
+}
+
 /// The other half of the discrimination: a LINKED checkpoint's bytes are the user's own library
 /// copy, which this route never owned, so deleting the model must not reach `remove_managed` at all.
 ///
