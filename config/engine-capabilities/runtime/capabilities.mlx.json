@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751",
+    "inferenceRevision": "1caa6863673c0a6be33115506b059e25238d2011",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -208,6 +208,34 @@
       ]
     },
     {
+      "modelId": "minimax_h3",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "image_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "text_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3_ref",
+      "mode": "reference_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
       "modelId": "scail2_14b",
       "mode": "animate_character",
       "engineIds": [
@@ -383,6 +411,7 @@
       "mage_flow_edit",
       "mage_flow_edit_base",
       "mage_flow_edit_turbo",
+      "minimax_h3",
       "mochi_1",
       "pulid_flux",
       "qwen_image",
@@ -1581,6 +1610,7 @@
         "modality": "video",
         "conditioning": [
           "reference",
+          "multiReference",
           "keyframe",
           "videoClip",
           "controlClip"
@@ -1709,6 +1739,29 @@
         "conditioning": [
           "reference",
           "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "minimax_h3",
+        "family": "minimax_h3",
+        "backend": "mlx",
+        "modality": "video",
+        "conditioning": [
+          "keyframe",
+          "reference",
+          "referenceVideo",
+          "referenceAudio"
         ],
         "supports_lora": true,
         "supports_lokr": true,
@@ -1977,7 +2030,6 @@
         "conditioning": [
           "reference",
           "mask",
-          "multiReference",
           "controlClip"
         ],
         "supports_lora": true,

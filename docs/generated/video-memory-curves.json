@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 4,
   "generatedBy": "scripts/fit-ltx-temporal-form.mjs",
   "sourceFit": "docs/generated/ltx-temporal-form-fit-sc-18810.json",
   "sourceCatalog": [
@@ -8,15 +8,39 @@
       "sha256": "1d8ebc3048b42f5f0d325fff5ec9a3e6db422b6d181790528ac68a9fdad7f0da"
     }
   ],
+  "unmodeledRecords": [
+    {
+      "reason": "insufficient_geometries",
+      "selectorKey": "[\"ltx_2_3\",\"ltx-video\",\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"none\",0,24,null,\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",3,\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",\"single_pass\"]",
+      "distinctGeometries": 1,
+      "sources": [
+        {
+          "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
+          "sha256": "1d8ebc3048b42f5f0d325fff5ec9a3e6db422b6d181790528ac68a9fdad7f0da",
+          "recordIds": [
+            "imc-60f463ae74a2d3cd7fc5",
+            "imc-f3ef6ea4a4033293f99f"
+          ]
+        }
+      ]
+    }
+  ],
   "curves": [
     {
-      "id": "ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "id": "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
       "modelId": "ltx_2_3",
       "modelFamily": "ltx-video",
+      "route": "ltx_2_3",
       "provider": "ltx_2_3",
       "backend": "mlx",
       "tier": "q8",
       "mode": "text_to_video",
+      "referenceShape": "none",
+      "referenceCount": 0,
+      "framesPerSecond": [
+        30
+      ],
+      "overlay": null,
       "rung": "staged_residency",
       "loadShape": "eager_materialization",
       "batch": 1,
@@ -63,9 +87,9 @@
         }
       },
       "evidence": {
-        "records": 13,
+        "records": 11,
         "fitPoints": 7,
-        "heldOutPoints": 6,
+        "heldOutPoints": 4,
         "sources": [
           {
             "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
@@ -75,14 +99,12 @@
               "imc-3b8b84711b810ff12c89",
               "imc-4502c367ad50b19be74f",
               "imc-5aff3e74b46b30fb797c",
-              "imc-60f463ae74a2d3cd7fc5",
               "imc-624c0e5c472b3ba92c78",
               "imc-7defacb76cdfeaa95e92",
               "imc-9af21f4be28530a6e5b0",
               "imc-c74655ab0699898fb6b7",
               "imc-c7bf2b2ff37d73d6d1a1",
               "imc-ed4386179ee8edd3776b",
-              "imc-f3ef6ea4a4033293f99f",
               "imc-f6e97ce0817a6f697d1d"
             ]
           }

@@ -1,8 +1,14 @@
 import React, { useMemo, useState } from "react";
+import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
+import {
+  borrowedLicenseAcknowledgmentBlocked,
+  licenseAcknowledgmentBlocked,
+} from "../licenseAcknowledgment.js";
+import { modelLoraFamilies } from "../presetUtils.js";
 import { blanketFloorGb, declaredFloorHostGb, installedFloorHostGb } from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -11,7 +17,14 @@ import { useSimpleUi } from "./SimpleUiContext.js";
 // LoRAs) of one-line rows — glyph, name, "size · needs N GB", and a right-aligned
 // Manage (installed) or Download (missing) action.
 //
-// "Manage" hands off to the full Models screen (openInAdvanced — which switches the SHELL
+// Adding a model is the ONE exception to that handoff (epic 20398, sc-20650). Choosing between
+// "Use existing model library" and "Add to SceneWorks" is the first decision a new user makes about
+// their models, and a Simple shell that could only send them to the advanced screen for it would
+// make the reduced shell unusable for exactly the person it exists for. It renders the SAME panel
+// the advanced screen does — one experience, not a reduced second copy — collapsed by default so
+// the catalog stays the page's subject.
+//
+// Everything else: "Manage" hands off to the full Models screen (openInAdvanced — which switches the SHELL
 // as well as the view, since pointing the workspace at a screen while Simple is rendering
 // would be inert): per-tier downloads, conversion, repair, import and delete are exactly
 // the surface Simple is meant to hide, and duplicating a reduced version of them here would
@@ -30,9 +43,13 @@ export function SimpleModelManager() {
     models = [],
     loras = [],
     jobs = [],
+    token = "",
     createModelDownloadJob,
     createLoraDownloadJob,
+    createModelImportJob,
+    jobAction,
     macCapabilities,
+    refreshData,
     visibleWorkers = [],
   } = useAppContext();
   const { toast, openInAdvanced } = useSimpleUi();
@@ -102,12 +119,63 @@ export function SimpleModelManager() {
     if (typeof enqueue !== "function") {
       return;
     }
+    // Licence gate (sc-17227). Simple renders no licence UI — by design, it is the reduced shell —
+    // so a model whose licence must be accepted cannot be accepted HERE. `createModelDownloadJob`
+    // refuses it either way; hand off to the Models screen, which owns the notice and the
+    // checkbox, instead of toasting a refusal the user has no way to act on.
+    //
+    // A LoRA row takes the same handoff, on the BORROWED acknowledgment (sc-17227). Its gating
+    // model is stamped onto the row by the server (`annotate_license_acknowledgment_sources`) and
+    // the ack lives in the same store, so accepting once on that model's card clears the LoRA too.
+    // Without this branch the refusal is a dead end HERE specifically: `createLoraDownloadJob`'s
+    // own gate returns null and writes the real reason to `loraError`, which Simple renders
+    // nowhere, so the user saw only "Could not start the … download" with no way to act on it.
+    const blocked =
+      row.kind === "lora"
+        ? borrowedLicenseAcknowledgmentBlocked(row.entry)
+        : licenseAcknowledgmentBlocked(row.entry);
+    if (blocked) {
+      toast(`${row.name} needs its license accepted first — opening Models.`);
+      openInAdvanced("Models");
+      return;
+    }
     const job = await enqueue(row.entry);
     toast(job ? `Downloading ${row.name}…` : `Could not start the ${row.name} download`);
   }
 
+  const modelImportJobs = useMemo(() => jobs.filter((job) => job.type === "model_import"), [jobs]);
+
+  // The SAME family list the advanced screen's import form offers, derived the same way: from each
+  // model's LoRA-compatibility set rather than its `family` identity, because that is what the
+  // import validator keys off. Without it Simple's Family select was permanently disabled — a
+  // reduced copy of the panel, which is exactly what mounting the shared component is meant to
+  // prevent.
+  const families = useMemo(
+    () => Array.from(new Set(models.flatMap((model) => modelLoraFamilies(model)).filter(Boolean))).sort(),
+    [models],
+  );
+
   return (
     <div className="su-screen su-screen--tight">
+      <CheckpointImportPanel
+        compact
+        completedJobs={modelImportJobs.filter((job) => job.status === "completed")}
+        families={families}
+        headingId="simple-checkpoint-import-heading"
+        macCapabilities={macCapabilities}
+        models={models}
+        onCancelJob={jobAction ? (job) => jobAction(job, "cancel") : undefined}
+        onImportModel={createModelImportJob}
+        onOpenQueue={() => openInAdvanced("Queue")}
+        onOpenSettings={() => openInAdvanced("Settings")}
+        // Simple renders no linked-status badge of its own, but its rows ARE the catalog: a relink
+        // or forget inside the panel changes which models exist and whether they are usable, so the
+        // catalog has to be re-read rather than left showing the pre-relink answer.
+        onRefreshCatalog={refreshData}
+        onRetryJob={jobAction ? (job, payload) => jobAction(job, "retry", { body: payload ?? {} }) : undefined}
+        pendingJobs={modelImportJobs.filter((job) => !terminalStatuses.has(job.status))}
+        token={token}
+      />
       <div className="su-tabs su-scroll" role="tablist">
         {TABS.map((entry) => (
           <button

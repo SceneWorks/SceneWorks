@@ -1,8 +1,8 @@
 use super::{
-    admit_conditioning_paths, consume_gen_events, curated_image_menu, dense_tier_subdir,
-    drive_gen_items_scored, load_reference_image, non_empty, normalize_sampling_knob,
-    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    admit_sdxl_bespoke_memory, candle_certified_hf_artifact_path, consume_gen_events,
+    curated_image_menu, dense_tier_subdir, drive_gen_items_scored, load_reference_image, non_empty,
+    normalize_sampling_knob, pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
     resolve_character_image_likeness_source, resolve_pid_weights, resolve_sdxl_components,
     resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream,
     uses_standard_tier_layout, ApiClient, Image, ImagePlan, ImageRequest, IpAdapterSdxl,
@@ -369,23 +369,58 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
         resolve_sdxl_components(&request.model_manifest_entry, settings)?;
 
-    // Conditioning-overlay VRAM admission (sc-16069, epic 15448). This lane loads through the UNcached
-    // `start_gen_stream` with a bespoke `IpAdapterSdxlPaths`, so it is diverted around BOTH the
-    // `generate_candle_stream` `vram_gate` and the `generator_cache` `apply_residency_policy` â€” before
-    // this it allocated with no pre-flight check at all and died on a reactive CUDA OOM. Gated here, once
-    // every resident path is resolved and before anything is moved into the load closure. The IP-Adapter
-    // bundle + its CLIP image encoder are the overlay; the fp16-fix VAE and an opted-in PiD pair are
-    // priced too, because they are held alongside the base (the tokenizers are JSON â€” no weights to sum).
-    {
-        let mut overlays = vec![
-            ip_bundle.as_path(),
-            image_encoder.as_path(),
-            crate::conditioning_fit::weights_source_path(&vae_fp16_fix),
-        ];
-        overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
-        overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
-        admit_conditioning_paths(settings, "SDXL", "IP-Adapter", &sdxl_base, &overlays).await?;
+    let mut provider_spec =
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(sdxl_base.clone()))
+            .with_resolved_route(request.model.clone())
+            .with_component("tokenizer_clip_l", tokenizer_clip_l.clone())
+            .with_component("tokenizer_clip_bigg", tokenizer_clip_bigg.clone())
+            .with_component("vae_fp16_fix", vae_fp16_fix.clone())
+            .with_component(
+                "sdxl_ip_image_encoder",
+                gen_core::WeightsSource::Dir(image_encoder.clone()),
+            )
+            .with_ip_adapter(gen_core::WeightsSource::File(ip_bundle.clone()))
+            .with_adapters(adapters.clone());
+    if let Some(pid) = &pid_weights {
+        provider_spec = provider_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
+    let ip_artifacts_certified = candle_certified_hf_artifact_path(
+        settings,
+        SDXL_IPADAPTER_REPO,
+        SDXL_IPADAPTER_REVISION,
+        Path::new(SDXL_IPADAPTER_BUNDLE_SRC),
+        &ip_bundle,
+    ) && candle_certified_hf_artifact_path(
+        settings,
+        SDXL_IPADAPTER_REPO,
+        SDXL_IPADAPTER_REVISION,
+        Path::new("models/image_encoder"),
+        &image_encoder,
+    );
+    let (memory_evaluation, provider_spec) = admit_sdxl_bespoke_memory(
+        request,
+        settings,
+        provider_spec,
+        "character_image",
+        width,
+        height,
+        1,
+        use_pid,
+        ip_artifacts_certified,
+    )
+    .await?;
+    raw_settings.insert(
+        "memoryStrategy".to_owned(),
+        Value::String(format!(
+            "{:?}",
+            memory_evaluation.context.selection.strategy
+        )),
+    );
+    raw_settings.insert(
+        "memoryEvidenceRevision".to_owned(),
+        Value::String(memory_evaluation.context.evidence_revision.clone()),
+    );
+    let memory_context = memory_evaluation.context;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -401,9 +436,10 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                 vae_fp16_fix,
                 adapters,
             };
-            let model = IpAdapterSdxl::load(&paths).map_err(|error| {
-                WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))
-            })?;
+            let model = IpAdapterSdxl::load_admitted(&paths, &provider_spec, memory_context)
+                .map_err(|error| {
+                    WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))
+                })?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
             // snapshots are cached, so a native-VAE generation is a no-op here.
             let model = match &pid_weights {

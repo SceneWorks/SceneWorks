@@ -891,7 +891,7 @@ describe("catalog memory floors: the two backend lanes are independent", () => {
 
   it("never answers the candle lane from MLX evidence when candle declares none", () => {
     // The pre-fix failure shape: a windows/linux-served tier with an MLX footprint and NO candle
-    // evidence. z_image and sdxl are the shipped examples. Silence is required — NOT the MLX number.
+    // evidence. z_image_edit is the remaining shipped example. Silence is required — NOT the MLX number.
     let checked = 0;
     for (const model of manifestModels) {
       const tiers = tiersOn(model, "windows");
@@ -907,7 +907,7 @@ describe("catalog memory floors: the two backend lanes are independent", () => {
       expect(cheapestDeclaredTierPeakGb(entry, { backend: "candle" }), `${model.id}`).toBeNull();
       expect(blanketFloorGb(entry, "candle"), `${model.id}`).toBeNull();
     }
-    expect(checked, "z_image / sdxl / illustrious_xl_* have this shape").toBeGreaterThanOrEqual(3);
+    expect(checked, "z_image_edit keeps this cross-lane guard non-vacuous").toBeGreaterThanOrEqual(1);
   });
 
   // The reason the MLX blanket may NOT be reused as a "conservative" candle default. This is a manifest
@@ -1294,19 +1294,36 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect(bf16Host, "bf16 must not inherit q8's figure").toBeGreaterThan(q8Host);
   });
 
-  it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
-    // MINOR 4. `candle.measured === false` is the uncalibrated inventory. It is false on 21 entries;
-    // twelve of those also carry `vramGbByTier`, which is the set the rule is about. Both numbers are
-    // pinned so the prose cannot drift from the catalog again. sc-16025 adds the six Mage profiles to
-    // this set because their q4/q8 numeric identity changed and the historical samples are no longer
-    // valid current measurements. sc-18478 adds the uncalibrated VACE-Fun blanket-only lane.
+  it("enumerates the candle.measured === false entries the way tierSuggestion.js describes them", () => {
+    // MINOR 4. `candle.measured === false` is the uncalibrated inventory; the subset that also
+    // carries `vramGbByTier` is the set the rule is about. Membership is pinned by id so the prose
+    // cannot drift from the catalog again. sc-16025 adds the Mage profiles to this set because
+    // their q4/q8 numeric identity changed and the historical samples are no longer valid current
+    // measurements. sc-18478 adds the uncalibrated VACE-Fun blanket-only lane.
+    //
+    // sc-17156 introduced a THIRD shape that did not exist before, so the split below is asserted
+    // rather than lumped in. `minimax_h3` carries `measured: false` with NEITHER `vramGbByTier` NOR
+    // `minMemoryGb`: the candle generator exists but has never been measured, because the CUDA lane
+    // that would measure it is gated on operator action (an unset `CANDLE_MINIMAX_H3_SNAPSHOT`, and
+    // a pinned snapshot allow-list that omits the components a render reads). Calling it
+    // "blanket-only" would be wrong — there is no blanket either, and that is deliberate: with no
+    // number at all, `predicted_peak_gb` returns null and the fit gate stays best-effort instead of
+    // admitting a card against a guess.
+    //
+    // sc-20799 round 2: the population is pinned as a SET derived from its rule, not as a
+    // head-count. `expect(uncalibratedLane.length).toBe(30)` said nothing about which models are
+    // uncalibrated — adding one model and dropping another kept it green — and every legitimate
+    // catalog edit was resolved by bumping the integer. The three shapes below partition the lane
+    // exhaustively, so their id lists ARE the membership claim and no integer is needed.
     const uncalibratedLane = manifestModels.filter((model) => model.candle?.measured === false);
-    expect(uncalibratedLane.length).toBe(21);
     const withPerTier = uncalibratedLane.filter(
       (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length > 0,
     );
     expect(withPerTier.map((model) => model.id).sort()).toEqual(
       [
+        "chroma1_base",
+        "chroma1_flash",
+        "chroma1_hd",
         "flux_schnell",
         "flux2_dev",
         "krea_2_raw",
@@ -1317,16 +1334,50 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "mage_flow_edit_base",
         "mage_flow_edit_turbo",
         "mage_flow_turbo",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+        "realvisxl",
+        "realvisxl_lightning",
+        "sdxl",
         "sd3_5_large_turbo",
         "sd3_5_medium",
       ].sort(),
     );
-    // The other nine are blanket-only, so the flag has nothing per-tier to qualify on them.
-    const blanketOnly = uncalibratedLane.filter(
+    // The rest split two ways, and the split is the point. Main defined `blanketOnly` as simply
+    // "no vramGbByTier"; post-merge that predicate also selects `minimax_h3`. Folding the
+    // no-number-at-all shape into the blanket-only one would have hidden a real third shape, so the
+    // three-way split below keeps both claims true and separable — each as an id set, no counts.
+    const rest = uncalibratedLane.filter(
       (model) => Object.keys(model.candle?.vramGbByTier ?? {}).length === 0,
     );
-    expect(blanketOnly.map((model) => model.id)).toContain("wan_2_2_vace_fun_14b");
-    expect(blanketOnly.length).toBe(9);
+    // Blanket-only — a curated `minMemoryGb` with nothing per-tier for the flag to qualify. The
+    // audio lane dominates it (candle-native, never per-tier calibrated); sc-18478's VACE-Fun lane
+    // is the one video member.
+    const blanketOnly = rest.filter((model) => Number.isFinite(model.candle?.minMemoryGb));
+    expect(blanketOnly.map((model) => model.id).sort()).toEqual(
+      [
+        "acestep_v15_turbo",
+        "chatterbox_tts",
+        "chatterbox_ve",
+        "kokoro_82m",
+        "moss_sfx_v2",
+        "moss_tts_realtime",
+        "moss_ttsd_v05",
+        "openvoice_v2",
+        "wan_2_2_vace_fun_14b",
+      ].sort(),
+    );
+    // And exactly one declares the lane with NO number of any kind (sc-17156, above).
+    const unmeasured = rest.filter((model) => !Number.isFinite(model.candle?.minMemoryGb));
+    expect(unmeasured.map((model) => model.id)).toEqual(["minimax_h3"]);
+
+    // The three shapes are exhaustive over the lane: `withPerTier ∪ blanketOnly ∪ unmeasured` is
+    // exactly `uncalibratedLane`. With each subset pinned by id above, this closes the population
+    // without naming its size — a model that joins or leaves the uncalibrated lane now has to be
+    // reflected in a NAMED list, which is a reviewable claim, rather than in an integer.
+    expect(uncalibratedLane.map((model) => model.id).sort()).toEqual(
+      [...withPerTier, ...blanketOnly, ...unmeasured].map((model) => model.id).sort(),
+    );
   });
 
   it("pins the shipped shapes the SimpleModelManager fixtures claim", () => {

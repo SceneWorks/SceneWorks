@@ -15,14 +15,16 @@
 // `krea_2_raw`, both in `MODEL_TABLE`) resolves through `mlx_model` and loads from its snapshot turnkey —
 // `resolve_imported_krea_dit` returns `None` for it, so the existing snapshot-dir Krea path is untouched.
 //
-// Scope (S0c + sc-14023 + sc-14071): dense bf16 or descriptor-gated plain-int8-per-row single-file DiT,
+// Scope (S0c + sc-14023 + sc-14071): dense bf16, descriptor-gated plain-int8-per-row, or native
+// NVIDIA Kitchen NVFP4 single-file DiT,
 // txt2img plus img2img (reference-guided latent-init off a single `referenceAssetId` + strength, resolved
 // through the shared cross-platform `resolve_img2img_init_generic` on the SAME Turbo t2i descriptor — the
 // engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
 // imported lanes get img2img). Both native backends also claim adapters, Kontext edit, and strict pose
 // conditioning through the pinned runtime's file-loaded entrypoints. Descriptor contents and per-row
 // scale shapes are validated by the inference loader before dequantization; ConvRot descriptors remain
-// on their separate loader arm.
+// on their separate loader arm. Native NVFP4 is deliberately narrower: Candle/NVIDIA t2i + img2img,
+// without adapters, edit, pose, or multi-phase assembly.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
@@ -30,16 +32,23 @@
 const KREA_IMPORTED_ENGINE: &str = "mlx_krea_imported";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
+/// The registry operation this request asks for — the SAME discrimination the plan-driven route
+/// makes ([`checkpoint_plan_operation`]), not a second copy of it.
+///
+/// The two used to differ on one input: a pose set INSIDE edit mode resolved to `Pose` here and to
+/// `Edit` there. Both lanes then refused that request, so nothing was mis-served, but two lanes
+/// answering "which operation is this" differently is precisely the drift a per-request single-claim
+/// discriminator cannot afford (sc-20644), so there is now one answer.
 fn krea_imported_operation(request: &ImageRequest) -> gen_core::ImportedModelOperation {
-    if request_has_multiphase(request) {
-        gen_core::ImportedModelOperation::MultiPhase
-    } else if !pose_entries(request).is_empty() {
-        gen_core::ImportedModelOperation::Pose
-    } else if request.mode == "edit_image" {
-        gen_core::ImportedModelOperation::Edit
-    } else {
-        gen_core::ImportedModelOperation::Generate
-    }
+    checkpoint_plan_operation(request)
+}
+
+fn krea_imported_native_nvfp4(request: &ImageRequest) -> bool {
+    request
+        .model_manifest_entry
+        .get("importQuantFormat")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
 }
 
 /// Resolve the exact imported source shape and operation through the live provider registry. An
@@ -172,6 +181,21 @@ fn resolve_imported_krea_dit_pin(
     {
         return Ok(None);
     }
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) whose REQUEST the plan-driven
+    // route claims belongs to that route; this lane never also claims it, so one REQUEST has exactly
+    // one owner (the single-claim discriminator).
+    if request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
+    // A plan-backed entry whose request the plan route does NOT claim still runs here — Krea 2's
+    // full surface is LoRA, img2img, Kontext edit, strict pose, multi-phase and Hires.fix, and the
+    // plan route's body serves none of them. Its bytes are the plan's verified backbone layer, not a
+    // directory scan, so the two routes hand this family's generation bodies identical inputs and a
+    // fixed seed renders equal either way (sc-20644 AC1). This is also the ONLY way a LINKED
+    // checkpoint reaches those shapes: it has no installed path for the scan below to find.
+    if let Some(pin) = checkpoint_plan_bespoke_primary_pin(request, settings, "krea_2")? {
+        return Ok(Some(pin));
+    }
     // A builtin Krea engine id (in `MODEL_TABLE`) loads from its snapshot turnkey via the normal MLX
     // lane — never through the single-file entrypoint. Leaving those to the existing path is what keeps
     // builtin Krea rendering byte-identical (S0c requirement #3).
@@ -236,9 +260,16 @@ fn resolve_imported_krea_dit_pin(
 fn resolve_krea_imported_base_tier(settings: &Settings) -> WorkerResult<PathBuf> {
     let base_missing = || {
         WorkerError::InvalidPayload(
-            "Krea 2 base model is not installed — install the Krea 2 (Turbo) base model first. An \
-             imported Krea 2 checkpoint is the transformer only; it is paired with the base model's \
-             text encoder, VAE, and tokenizer to run."
+            // Tagged, not bare prose (sc-20651 feature-end review): this resolver is registered in
+            // the plan route's `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS` table, so a plan-backed Krea 2
+            // job surfaces this exact string as a checkpoint-plan refusal. The tag is what tests
+            // and callers key on. The prose is what the user reads and may be reworded freely with
+            // one exception: the ACTIONABLE INSTRUCTION "install the Krea 2 (Turbo) base model
+            // first" is asserted, so that this refusal can never decay into a correctly-tagged
+            // message that leaves the user with no next step.
+            "[checkpoint-plan:missing-component] Krea 2 base model is not installed — install the \
+             Krea 2 (Turbo) base model first. An imported Krea 2 checkpoint is the transformer \
+             only; it is paired with the base model's text encoder, VAE, and tokenizer to run."
                 .to_owned(),
         )
     };
@@ -310,6 +341,18 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// Mirrors the shape of the other `…_available` predicates.
 fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
     let operation = krea_imported_operation(request);
+    if krea_imported_native_nvfp4(request) {
+        #[cfg(target_os = "macos")]
+        {
+            return false;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if operation != gen_core::ImportedModelOperation::Generate || !request.loras.is_empty() {
+                return false;
+            }
+        }
+    }
     if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
         && operation != gen_core::ImportedModelOperation::Pose
     {
@@ -1173,7 +1216,22 @@ fn imported_model_quant(
             .as_i64()
             .or_else(|| value.as_str()?.trim().parse().ok())
     });
-    let selected = if let Some(named) = named.as_deref() {
+    let selected = if krea_imported_native_nvfp4(request) {
+        match named.as_deref() {
+            None if bits.is_none() => Some(Quant::Nvfp4),
+            Some("nvfp4") if bits.is_none() => Some(Quant::Nvfp4),
+            Some(other) => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{label} is stored as native NVFP4 and cannot be loaded as '{other}'."
+                )))
+            }
+            None => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{label} is stored as native NVFP4 and does not accept mlxQuantize."
+                )))
+            }
+        }
+    } else if let Some(named) = named.as_deref() {
         match named {
             "nvfp4" => Some(Quant::Nvfp4),
             "q4" => Some(Quant::Q4),
@@ -1181,7 +1239,7 @@ fn imported_model_quant(
             "bf16" | "dense" => None,
             other => {
                 return Err(WorkerError::InvalidPayload(format!(
-                    "{label} quant tier '{other}' is unknown; use bf16, q8, or q4."
+                    "{label} quant tier '{other}' is unknown; use bf16, nvfp4, q8, or q4."
                 )))
             }
         }
@@ -1862,13 +1920,9 @@ async fn generate_krea_imported_stream(
     let cold_admission = {
         // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
         // not be double-priced. A selected encoder is already represented by the spec's prepared
-        // contract receipt, so only admit the bundled encoder dir for the default path.
-        let text_encoder = base_dir.join("text_encoder");
-        let vae = base_dir.join("vae");
-        let mut companions = vec![vae];
-        if spec.text_encoder.is_none() {
-            companions.push(text_encoder);
-        }
+        // contract receipt, so only admit the bundled encoder dir for the default path. Shared with
+        // the plan-driven route so both are admitted on the identical floor (sc-20634).
+        let companions = imported_base_snapshot_companions(&base_dir, spec.text_encoder.is_some());
         let companion_refs = companions
             .iter()
             .map(PathBuf::as_path)

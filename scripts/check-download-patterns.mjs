@@ -46,15 +46,17 @@
 // The usual objection to a recorded fixture is decay. It does not apply here, for two
 // structural reasons:
 //
-//  1. **95 of 95 keys are pinned to immutable lowercase 40-hex revisions.** A git SHA's file
+//  1. **All 100 current keys and two frozen legacy-import keys are pinned to immutable lowercase
+//     40-hex revisions.** A git SHA's file
 //     listing is timeless — re-reading it in a year returns the same bytes. There is nothing to
 //     decay. sc-18924 closed the last 11-key moving-default-branch window, and the offline gate now
 //     rejects every missing, branch, or tag revision before it can reintroduce that class.
 //  2. **Coverage is graded as a set, in both directions.** Adding an entry, or re-pinning
 //     one, changes its `repo@revision` key, and a key with no recorded listing is a hard
-//     failure naming the re-record command. Conversely a recorded key that nothing claims
-//     any more is also a failure. So the fixture cannot drift out of alignment with the
-//     catalog without the gate saying so — no digest needed, because the set comparison is
+//     failure naming the re-record command. Conversely a recorded key that nothing claims is also
+//     a failure, except for the two exact SC-21306 legacy-import authorities; those must match their
+//     current successor's reviewed file census and fail if missing or altered. So the fixture cannot
+//     drift out of alignment with the catalog without the gate saying so — no digest needed, because the set comparison is
 //     strictly more precise and names the offending key.
 //
 // That is why this is not a "detection lags by a cron interval" design: the gate fires on
@@ -129,6 +131,27 @@ const LORA_MANIFEST = "config/manifests/builtin.loras.jsonc";
 export const EVIDENCE_FILE = "config/download-pattern-evidence.json";
 const RECORD_COMMAND = "node scripts/check-download-patterns.mjs --write";
 const CHECK_COMMAND = "npm run check:download-patterns:offline";
+
+// SC-21306 retains the exact pre-marker Illustrious listings solely so artifact 9492288293 can be
+// validated against the authorities that produced it. These are not manifest claims or general
+// orphan waivers: each old row is closed over one current immutable successor whose reviewed commit
+// changes config marker bytes but not the file census. Missing, extra, re-keyed, or file-divergent
+// historical evidence fails closed.
+export const FROZEN_LEGACY_EVIDENCE_AUTHORITIES = [
+  {
+    repo: "SceneWorks/illustrious-xl-v1-mlx",
+    legacyRevision: "c5a92a902dd4e6ee99c2a57981ecf66209905dd1",
+    currentRevision: "778c3f02b7703b0c2755d0c0447592897193c6b5",
+  },
+  {
+    repo: "SceneWorks/illustrious-xl-v2-mlx",
+    legacyRevision: "7c5c8b2bb75a8f38a7365e70bdf84d38d6204473",
+    currentRevision: "672e9851ede4dc856fa945649b6691975c9d74a3",
+  },
+];
+const FROZEN_LEGACY_EVIDENCE_KEYS = new Set(FROZEN_LEGACY_EVIDENCE_AUTHORITIES.map(
+  ({ repo, legacyRevision }) => claimKey(repo, legacyRevision),
+));
 
 const STORY_REF_PATTERN = /^sc-\d+$/;
 
@@ -564,8 +587,30 @@ export function gradeRecordedEvidence({ claims, evidence, waivers, repoCondition
     }
   }
 
+  for (const { repo, legacyRevision, currentRevision } of FROZEN_LEGACY_EVIDENCE_AUTHORITIES) {
+    const legacyKey = claimKey(repo, legacyRevision);
+    const currentKey = claimKey(repo, currentRevision);
+    const legacy = recorded.get(legacyKey);
+    const current = recorded.get(currentKey);
+    if (!claimedKeys.has(currentKey) && !legacy) continue;
+    if (!legacy) {
+      fail("legacy-evidence-missing", `${legacyKey}  frozen SC-21306 importer authority is missing`);
+      continue;
+    }
+    if (!claimedKeys.has(currentKey) || !current) {
+      fail("legacy-evidence-current-missing", `${legacyKey}  current successor ${currentKey} is not claimed and recorded`);
+      continue;
+    }
+    if (legacy.key !== legacyKey || legacy.repo !== repo || legacy.revision !== legacyRevision
+      || legacy.resolvedSha !== legacyRevision || legacy.servedRepo !== repo || legacy.gated !== false
+      || legacy.error !== undefined || JSON.stringify(legacy.files) !== JSON.stringify(current.files)) {
+      fail("legacy-evidence-drift", `${legacyKey}  frozen importer row drifted from its exact identity or reviewed file census`);
+    }
+  }
+
   for (const key of recorded.keys()) {
     if (claimedKeys.has(key)) continue;
+    if (FROZEN_LEGACY_EVIDENCE_KEYS.has(key)) continue;
     fail(
       "evidence-orphan-key",
       `${key}  recorded but no manifest entry claims it — re-record with \`${RECORD_COMMAND}\``,
@@ -740,6 +785,17 @@ async function runLive({ only, write, dryRun }) {
       );
       process.exitCode = 1;
       return;
+    }
+    for (const { repo, legacyRevision, currentRevision } of FROZEN_LEGACY_EVIDENCE_AUTHORITIES) {
+      const current = recorded.get(claimKey(repo, currentRevision));
+      if (!current || current.error) continue;
+      const key = claimKey(repo, legacyRevision);
+      recorded.set(key, {
+        ...current,
+        key,
+        revision: legacyRevision,
+        resolvedSha: legacyRevision,
+      });
     }
     const repos = [...recorded.values()].sort((a, b) => (a.key < b.key ? -1 : 1));
     // No timestamp: the content is a pure function of the catalog and upstream state, so a

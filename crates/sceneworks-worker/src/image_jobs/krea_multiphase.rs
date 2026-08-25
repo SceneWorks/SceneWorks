@@ -644,7 +644,9 @@ async fn generate_krea_multiphase_stream(
             evaluation
                 .as_ref()
                 .and_then(|evaluation| evaluation.memory),
-            evaluation.and_then(|evaluation| optimized_shared_memory_context(evaluation.context)),
+            evaluation.and_then(|evaluation| {
+                optimized_shared_memory_context(engine_id, evaluation.context)
+            }),
         )
     };
     #[cfg(target_os = "macos")]

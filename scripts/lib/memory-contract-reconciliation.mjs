@@ -40,7 +40,7 @@ function requireObject(value, at) {
   return value;
 }
 
-function engineContractIndex(engineFacts, pin) {
+function engineContractIndex(engineFacts) {
   const out = new Map();
   const seenBackends = new Set();
   for (const document of engineFacts) {
@@ -51,11 +51,8 @@ function engineContractIndex(engineFacts, pin) {
     }
     if (seenBackends.has(backend)) throw new Error(`duplicate engine capability facts backend ${backend}`);
     seenBackends.add(backend);
-    if (document.generatedFrom?.inferenceRevision !== pin) {
-      throw new Error(
-        `engine capability facts for ${backend} are keyed to ` +
-          `${document.generatedFrom?.inferenceRevision ?? "(unset)"}, but Cargo pins ${pin}`,
-      );
+    if (!/^[0-9a-f]{40}$/.test(document.generatedFrom?.inferenceRevision ?? "")) {
+      throw new Error(`engine capability facts for ${backend} have no valid inference revision`);
     }
     if (!Array.isArray(document.memoryContracts) || document.memoryContracts.length === 0) {
       throw new Error(`engine capability facts for ${backend} have no memoryContracts inventory`);
@@ -139,8 +136,8 @@ function engineContractIndex(engineFacts, pin) {
   return out;
 }
 
-export function validateMemoryContractFacts(engineFacts, pin) {
-  const providers = engineContractIndex(engineFacts, pin).size;
+export function validateMemoryContractFacts(engineFacts) {
+  const providers = engineContractIndex(engineFacts).size;
   routeEligibilityFromEngineFacts(engineFacts);
   return providers;
 }
@@ -309,6 +306,10 @@ const ROUTE_MODES = new Set([
   "character_image",
 ]);
 const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
+// Ordered views of the two vocabularies, for the axis probes in `collectMemoryContractMismatches`
+// that need to vary one axis while holding the other.
+const ROUTE_MODES_LIST = Object.freeze([...ROUTE_MODES]);
+const ROUTE_OVERLAYS_LIST = Object.freeze([...ROUTE_OVERLAYS]);
 // Which matrix overlay cell each load profile serves. A profile can COMPOSE several load-time
 // concerns, and the cell it lands in follows one precedence: identity > control > lora > none. That
 // is not invented here — it is what the existing rows already encode (`lora_pid` -> `lora`, because
@@ -321,13 +322,24 @@ const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
 // check COVERS; it does not widen what satisfies a manifest declaration — `MANIFEST_ROUTE_PROFILES`
 // below is deliberately left alone, so a bare `identity` cell is still served only by the plain
 // identity profiles and never by `lora_ip_adapter`.
+//
+// sc-20799: the two PiD-composed CONTROL profiles were the same gap one lane later. The epic's
+// Kolors control work made `candle_kolors_control` emit them, and the first authoritative candle
+// dump at pin ebcdc7da carries 9 `single_control_pid` and 9 `lora_single_control_pid` witnesses.
+// Both map to `control` here because that is what `MemoryRouteLoadProfile::overlay()` — the
+// authority this map exists to CHECK against — returns for them; the witnesses independently
+// declare `control` too, so the equality assertion below still does real work rather than being
+// satisfied by construction. This map now covers all 14 registry profiles, so a composed profile
+// can no longer blank the whole reconciliation.
 const ROUTE_LOAD_PROFILES = new Map([
   ["plain", "none"],
   ["lora", "lora"],
   ["lora_pid", "lora"],
   ["single_control", "control"],
+  ["single_control_pid", "control"],
   ["multi_control", "control"],
   ["lora_single_control", "control"],
+  ["lora_single_control_pid", "control"],
   ["ip_adapter", "identity"],
   ["ip_adapter_pid", "identity"],
   ["lora_ip_adapter", "identity"],
@@ -344,7 +356,7 @@ const MANIFEST_ROUTE_PROFILES = new Map([
   ["identity", new Set(["ip_adapter", "identity"])],
 ]);
 
-/** Read the executable worker registry's pin-bound route witness, never Rust source text. */
+/** Read the executable worker registry's dumped route witness, never Rust source text. */
 export function routeEligibilityFromEngineFacts(engineFacts) {
   const rows = [];
   const seen = new Set();
@@ -408,7 +420,6 @@ function closureRows(closures) {
 }
 
 export function collectMemoryContractMismatches({
-  pin,
   engineFacts,
   manifest,
   cells,
@@ -416,10 +427,22 @@ export function collectMemoryContractMismatches({
   closures,
   survey,
 }) {
-  const engine = engineContractIndex(engineFacts, pin);
+  const engine = engineContractIndex(engineFacts);
   const routeEligibility = routeEligibilityFromEngineFacts(engineFacts);
   const declarations = manifestContracts(manifest);
   const out = [];
+  // Why each coordinate was emitted, recorded at the emit site because that is the only place the
+  // discriminator is still in scope. Kept OUT of the finding objects themselves so the eleven AXES
+  // stay the whole identity of a coordinate: `reconciliationMismatchKey` is the dedupe key and the
+  // survey leg round-trips its coordinates through `JSON.parse(key)`, both of which a twelfth field
+  // would silently change. Merged onto the unique findings at the end instead. First writer wins, so
+  // a coordinate reached twice keeps the reason it was first found for.
+  const causes = new Map();
+  const because = (entry, cause) => {
+    const key = reconciliationMismatchKey(entry);
+    if (!causes.has(key)) causes.set(key, cause);
+    return entry;
+  };
 
   for (const contract of engine.values()) {
     for (const [tier, implemented] of contract.implementedByTier) {
@@ -430,7 +453,11 @@ export function collectMemoryContractMismatches({
           row.rung === rung &&
           row.tiers.includes(tier)
         )) {
-          out.push(mismatch({
+          // No sub-cause is available here: WHY the manifest carries no declaration is a property of
+          // the projection (unhosted provider, tier not in the catalog, no route witness, MLX
+          // request-context lane), which lives in `scripts/lib/manifest-memory-declarations.mjs`.
+          // `triageMemoryContractMismatches` joins it back on.
+          out.push(because(mismatch({
             leg: "engine_manifest",
             direction: "engine_to_manifest",
             backend: contract.backend,
@@ -438,7 +465,7 @@ export function collectMemoryContractMismatches({
             tier,
             rung,
             selectorDigest: contract.selectorDigest,
-          }));
+          }), "undeclared_in_manifest"));
         }
       }
     }
@@ -472,8 +499,9 @@ export function collectMemoryContractMismatches({
             candidate.tier === tier &&
             candidate.overlay === overlay,
           );
-          if (!cell || !eligible(row.backend, row.provider, tier, mode, overlay, row.loadProfiles)) {
-            out.push(mismatch({
+          const routed = eligible(row.backend, row.provider, tier, mode, overlay, row.loadProfiles);
+          if (!cell || !routed) {
+            out.push(because(mismatch({
               leg: "manifest_route",
               direction: "manifest_to_route",
               backend: row.backend,
@@ -485,7 +513,7 @@ export function collectMemoryContractMismatches({
               overlay,
               rung: row.rung,
               selectorDigest: contract.selectorDigest,
-            }));
+            }), cell ? "declared_route_unwitnessed" : "declared_cell_absent"));
           }
         }
       }
@@ -495,13 +523,13 @@ export function collectMemoryContractMismatches({
   const plans = planRows(calibrationPlan);
   for (const row of plans) {
     if (!engine.has(laneKey(row.backend, row.provider))) {
-      out.push(mismatch({ leg: "plan_closure_engine", direction: "plan_to_engine", ...row }));
+      out.push(because(mismatch({ leg: "plan_closure_engine", direction: "plan_to_engine", ...row }), "no_engine_contract"));
     }
   }
   const closure = closureRows(closures);
   for (const row of closure) {
     if (!engine.has(laneKey(row.backend, row.provider))) {
-      out.push(mismatch({ leg: "plan_closure_engine", direction: "closure_to_engine", ...row }));
+      out.push(because(mismatch({ leg: "plan_closure_engine", direction: "closure_to_engine", ...row }), "no_engine_contract"));
     }
   }
 
@@ -529,13 +557,29 @@ export function collectMemoryContractMismatches({
               overlays: verdict.implementedOverlays,
             }];
       const surveyCoordinates = new Map();
+      // A survey scope that OMITS an axis claims every value of it — `scope.tiers ?? [cell.tier]`
+      // above matches whatever the cell happens to carry. So a coordinate the survey reaches only
+      // through an omitted axis is not a per-coordinate assertion the survey ever made; it is the
+      // wildcard being expanded against a per-coordinate engine fact. That distinction is the whole
+      // difference between "the survey is wrong here" and "the two sides are keyed differently", so
+      // it is recorded rather than flattened.
+      //
+      // The test is PER AXIS, not per scope. A first cut asked only whether the scope omitted *some*
+      // axis, which excused a contradiction on an axis the verdict had named outright: the qwen and
+      // SDXL verdicts name `tiers` explicitly and omit only `modes`, and 50 coordinates where the
+      // contract implements the rung at bf16 ALONE were filed "count of work: 0" on the strength of
+      // the unrelated `modes` omission. So: find the axes on which the two sides actually differ,
+      // and call it benign only when every one of them is an axis this scope left open.
+      const claimedScopes = new Map();
       for (const cell of familyCells) {
-        const claimed = scopes.some((scope) =>
+        const matched = scopes.filter((scope) =>
           scope.entries.includes(cell.modelId) &&
           (scope.tiers ?? [cell.tier]).includes(cell.tier) &&
           (scope.modes ?? [cell.mode]).includes(cell.mode) &&
           (scope.overlays ?? [cell.overlay]).includes(cell.overlay),
         );
+        const claimed = matched.length > 0;
+        if (claimed) claimedScopes.set(cell, matched);
         if (claimed) surveyCoordinates.set(reconciliationMismatchKey(mismatch({
           leg: "survey_engine",
           direction: "survey_to_engine",
@@ -570,22 +614,78 @@ export function collectMemoryContractMismatches({
           selectorDigest: contract.selectorDigest,
         })), cell);
       }
-      for (const key of surveyCoordinates.keys()) {
-        if (!engineCoordinates.has(key)) out.push(JSON.parse(key));
+      /**
+       * On which axes do the survey and the engine actually disagree about this cell?
+       *
+       * The engine supports a rung-4 coordinate when its contract implements the rung AT THE CELL'S
+       * TIER and a production route reaches (tier, mode, overlay). Those are two different failures
+       * and they blame different axes, so they are probed separately rather than collapsed into one
+       * "unsupported" bit.
+       */
+      const disagreeingAxes = (cell) => {
+        const contract = engine.get(laneKey(backend, cell.provider));
+        if (!contract?.implementedByTier.get(cell.tier)?.has("bounded_transformer_residency")) {
+          return ["tiers"];
+        }
+        // The rung is implemented at this tier, so the miss is in the route. Hold each of mode and
+        // overlay while varying the other: whichever one has no reachable partner is the axis that
+        // carries the disagreement. When neither alone explains it, the PAIR does, and both axes are
+        // blamed — being able to name either one is enough to make the claim an assertion.
+        const modeReaches = ROUTE_MODES_LIST.some((mode) =>
+          eligible(backend, cell.provider, cell.tier, mode, cell.overlay));
+        const overlayReaches = ROUTE_OVERLAYS_LIST.some((overlay) =>
+          eligible(backend, cell.provider, cell.tier, cell.mode, overlay));
+        const axes = [];
+        if (!modeReaches) axes.push("overlays");
+        if (!overlayReaches) axes.push("modes");
+        return axes.length ? axes : ["modes", "overlays"];
+      };
+      for (const [key, cell] of surveyCoordinates) {
+        if (engineCoordinates.has(key)) continue;
+        const axes = disagreeingAxes(cell);
+        // Benign only if EVERY disagreeing axis was left open by every scope that claimed this cell.
+        // If any scope named one of them, the survey asserted that value and is simply wrong.
+        const openEverywhere = axes.every((axis) =>
+          (claimedScopes.get(cell) ?? []).every((scope) => !scope[axis]),
+        );
+        out.push(because(
+          JSON.parse(key),
+          openEverywhere ? "survey_wildcard_axis" : "survey_scope_overclaims",
+        ));
       }
       for (const [key] of engineCoordinates) {
         if (surveyCoordinates.has(key)) continue;
         const row = JSON.parse(key);
         row.direction = "engine_to_survey";
-        out.push(row);
+        // Does the survey claim this same coordinate at CLEAN BASE and withhold only the loaded
+        // overlay? Then the two sides are not in conflict — the engine side simply cannot express
+        // the distinction. A dump's contract surface is keyed (tier, offloadPolicy, loadShape) with
+        // NO overlay axis, so `implementedByTier` cannot say "rung 4 at overlay none only", while
+        // the providers routinely mean exactly that: FLUX.1's `structurally_streamable` requires
+        // `adapters.is_empty() && identity.is_none() && ip_adapter.is_none()`, FLUX.2 Klein's
+        // `klein_streamable` requires `klein_overlay(spec).is_none()`, and Mage's
+        // `surface_streamable` requires `spec.adapters.is_empty()`. The route witnesses DO reach
+        // those overlays — routing is not rung capability — so the engine side over-approximates.
+        const baseKey = reconciliationMismatchKey({ ...row, direction: "survey_to_engine", overlay: "none" });
+        const withheldOverlay = row.overlay !== "none" && surveyCoordinates.has(baseKey);
+        out.push(because(
+          row,
+          verdict.implementation === "none"
+            ? "survey_records_none"
+            : withheldOverlay
+              ? "survey_withholds_loaded_overlay"
+              : "survey_scope_underclaims",
+        ));
       }
     }
   }
 
   const unique = new Map(out.map((entry) => [reconciliationMismatchKey(entry), entry]));
-  return [...unique.values()].sort((left, right) =>
-    reconciliationMismatchKey(left).localeCompare(reconciliationMismatchKey(right)),
-  );
+  return [...unique.entries()]
+    .map(([key, entry]) => ({ ...entry, cause: causes.get(key) ?? null }))
+    .sort((left, right) =>
+      reconciliationMismatchKey(left).localeCompare(reconciliationMismatchKey(right)),
+    );
 }
 
 /**
@@ -620,7 +720,7 @@ export function collectMemoryContractMismatches({
  * `load(id, LoadSpec)` registration. It is engine facts, not human paperwork.
  */
 export function reconcileMemoryContracts(input) {
-  const engine = engineContractIndex(input.engineFacts, input.pin);
+  const engine = engineContractIndex(input.engineFacts);
   const declarations = manifestContracts(input.manifest);
   const bespokeWaivers = validateBespokeMemoryRouteWaivers(
     input.engineFacts,

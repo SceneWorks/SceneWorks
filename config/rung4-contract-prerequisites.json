@@ -1,0 +1,500 @@
+{
+  "story": "sc-19542",
+  "epic": 17137,
+  "description": "Per-(family, backend) rung-4 prerequisite records, derived from the pinned inference revision by scripts/rung4-contract-prerequisites.mjs. `additionalPrerequisites` is what that provider appends through `MemoryProviderContract::additional_prerequisites` for `MemoryStrategy::BoundedTransformerResidency`; the shared edge every provider carries regardless lives in the generator as SHARED_RUNG4_PREREQUISITES, mirroring gen-core BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES. `conditional` is true when the construction appending the edge is not in every production build — a `then_some` on a runtime condition (mlx-gen-anima, mlx-gen-krea) or a `#[cfg]`-gated contract function (candle-gen-z-image, candle-gen-lens and candle-gen-krea are `#[cfg(any(feature = \"cuda\", test))]`). It is also true for a filtered list (`[A, B, C].into_iter().filter(..).map(..)`, candle-gen-sana), where the listed strategies are a ceiling the predicate narrows rather than a declaration; the extractor does not read the predicate, so it marks the whole list. The gate evaluates a conditional edge as PRESENT, because for an admission gate \"this provider may demand rung 1\" is the fail-closed reading. `stagedResidencySupport` is the provider's own MemoryStrategySupport for the rung those edges name, needed because gen-core validate_selection satisfies an EngagedInSameRequest edge VACUOUSLY when the prerequisite rung is StructurallyNotApplicable; null means the extractor could not read one declaration for the crate, and null falls through to the engagement term rather than admitting.",
+  "inferenceRevision": "1caa6863673c0a6be33115506b059e25238d2011",
+  "families": {
+    "15509": {
+      "name": "Mage-Flow",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-mage",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": "implemented"
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-mage",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15510": {
+      "name": "Z-Image",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-z-image",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-z-image",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15511": {
+      "name": "Qwen-Image",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-qwen-image",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15512": {
+      "name": "Lens",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-lens",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-lens",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-lens/src/lib.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15513": {
+      "name": "SenseNova U1",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-sensenova",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "structurally_not_applicable"
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-sensenova",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "structurally_not_applicable"
+        }
+      }
+    },
+    "15514": {
+      "name": "FLUX.1",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-flux",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-flux",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15515": {
+      "name": "Ideogram 4",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-ideogram",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-ideogram",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": "implemented"
+        }
+      }
+    },
+    "15516": {
+      "name": "Boogu",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-boogu",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-boogu",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15517": {
+      "name": "Krea 2",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-krea",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
+              "conditional": false
+            },
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
+              "conditional": true
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-krea",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-krea/src/lib.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15518": {
+      "name": "FLUX.2 Klein",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-flux2",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-flux2",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15519": {
+      "name": "FLUX.2 dev",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-flux2",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-flux2",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15520": {
+      "name": "Chroma1",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-chroma",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": "implemented"
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-chroma",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "implemented"
+        }
+      }
+    },
+    "15521": {
+      "name": "Kolors",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-kolors",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-kolors",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "implemented"
+        }
+      }
+    },
+    "15522": {
+      "name": "SD3.5",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-sd3",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-sd3",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "implemented"
+        }
+      }
+    },
+    "15523": {
+      "name": "SANA",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-sana",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-sana",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
+              "conditional": true
+            }
+          ],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15524": {
+      "name": "Anima",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-anima",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-anima",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15525": {
+      "name": "SDXL U-Net (SDXL / RealVisXL / Illustrious)",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-sdxl",
+          "additionalPrerequisites": [
+            {
+              "kind": "rung",
+              "rung": "staged_residency",
+              "scope": "engaged_in_same_request",
+              "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+              "conditional": false
+            }
+          ],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-sdxl",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15526": {
+      "name": "InstantID (SDXL backbone)",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-instantid",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "implemented"
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-instantid",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "implemented"
+        }
+      }
+    },
+    "15527": {
+      "name": "PuLID (FLUX.1 backbone)",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-pulid",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-pulid",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": null
+        }
+      }
+    },
+    "15528": {
+      "name": "Bernini",
+      "backends": {
+        "mlx": {
+          "crate": "crates/media/mlx-gen/mlx-gen-bernini",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "missing"
+        },
+        "candle": {
+          "crate": "crates/media/candle-gen/candle-gen-bernini",
+          "additionalPrerequisites": [],
+          "stagedResidencySupport": "missing"
+        }
+      }
+    }
+  },
+  "granularity": "One record per (FAMILY, backend), which is coarser than the contracts it summarises, and the join is a UNION over the crate. Two limits follow, both live at the pinned revision. (1) Several catalog families share one inference crate — FLUX.2 klein and FLUX.2 dev are both candle-gen-flux2/mlx-gen-flux2 — so those families cannot hold different edge sets even if the crate declares different ones per entry. (2) One crate may declare several contract VARIANTS: candle-gen-krea/src/lib.rs builds krea_2_turbo at :1396 with the rung-4 edge and krea_2_turbo_control at :1700 without it, and the record carries the union, so the base variant's edge is attributed to the whole family. Today that over-attribution decides nothing — the control variant declares rung 4 StructurallyNotApplicable, so its cells never reach the prerequisite check — but it is an over-count and not a fact about the control provider. Splitting the key by variant is what would fix it, and no consumer needs that yet."
+}

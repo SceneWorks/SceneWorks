@@ -350,6 +350,11 @@ mod flux2_composition_audit;
 // in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod scail2_gpu_smoke;
+// SC-20945's single terminal epic-20738 CUDA entrypoint. Test-only, candle-only, and #[ignore]d:
+// the checked-in controller selects one reviewed profile cell per fresh process and serializes all
+// 19 cells in one workflow job. Ordinary tests compile the source but never touch weights/hardware.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod epic_20738_terminal_cuda_smoke;
 // Real-weight GPU smoke for the candle RealVisXL Lightning lane (sc-7176). Test-only + candle-only;
 // drives `crate::inference_runtime::load("sdxl")` with the forced `lightning` sampler against the distilled checkpoint.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -784,6 +789,7 @@ use pose_jobs::*;
 ))]
 use upscale_jobs::*;
 
+mod checkpoint_catalog_migration;
 mod credentials;
 pub use credentials::*;
 mod error;
@@ -1025,6 +1031,41 @@ pub async fn run() -> WorkerResult<()> {
     // Child restarts must never sweep while sibling utility workers may be converting.
     if !settings.is_child_worker {
         recover_stranded_model_conversions(&settings.data_dir).await?;
+        // sc-20651 (epic 20398): compile pre-epic imported catalog entries into the checkpoint
+        // plan store. Started here rather than in `run_worker_loop` for the same reason
+        // `recover_stranded_model_conversions` is: the loop runs in every child utility worker
+        // too, and four of them re-reading every legacy checkpoint at once would be four times
+        // the disk for one result. Started and NEVER awaited — an unmigrated entry still routes
+        // through the bespoke lane it always did, so nothing downstream waits on this.
+        {
+            let config_dir = settings.config_dir.clone();
+            let data_dir = settings.data_dir.clone();
+            tokio::spawn(async move {
+                match checkpoint_catalog_migration::migrate_legacy_checkpoint_catalog(
+                    &config_dir,
+                    &data_dir,
+                )
+                .await
+                {
+                    Ok(summary)
+                        if summary.attempted == 0 && summary.declined_containers.is_empty() => {}
+                    Ok(summary) => tracing::info!(
+                        event = "checkpoint_catalog_migrated",
+                        attempted = summary.attempted,
+                        migrated = summary.migrated,
+                        failed = summary.failed(),
+                        declined = summary.declined_containers.len(),
+                        vanished = summary.vanished.len(),
+                        skipped = summary.skipped,
+                        "migrated pre-epic imported models into the checkpoint plan store"
+                    ),
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        "pre-epic imported-model catalog migration failed"
+                    ),
+                }
+            });
+        }
         if settings.gpu_id == "auto" {
             return supervise_auto_workers(settings).await;
         }
@@ -1358,6 +1399,33 @@ async fn recheck_gpu_health(
     Ok(())
 }
 
+/// How long a managed-import staging tree must have gone untouched before a worker treats it as a
+/// crash orphan rather than another process's live transfer (sc-20636).
+///
+/// Generous on purpose: reclaiming late costs disk, reclaiming early destroys a running import.
+const IMPORT_STAGING_ORPHAN_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Reclaim managed-import staging trees left behind by a crash (sc-20636).
+///
+/// The crash is the one ingest failure no destructor covers: the commit rename never ran, so no
+/// install, plan, or catalog record exists — only the staging bytes, which nothing references and
+/// nothing else will ever remove. Age-gated via
+/// [`sceneworks_core::checkpoint_ingest::active_staging_ids`] because several worker processes share one data dir,
+/// so "in flight" is not knowable from this process's own state.
+///
+/// Separate from [`spawn_retention_checkpoint`]: that recovers the resolved-model cache, a
+/// different store with its own interval and its own maintenance slot. This one is startup-only —
+/// a crash is the only thing that produces an orphan.
+fn reclaim_import_staging(
+    data_dir: &Path,
+) -> Result<usize, sceneworks_core::checkpoint_ingest::ManagedIngestError> {
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir);
+    let active =
+        sceneworks_core::checkpoint_ingest::active_staging_ids(&store, IMPORT_STAGING_ORPHAN_AGE);
+    let in_flight: Vec<&str> = active.iter().map(String::as_str).collect();
+    sceneworks_core::checkpoint_ingest::sweep_staging(&store, &in_flight)
+}
+
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
@@ -1406,6 +1474,21 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // the first job claim must not queue behind a recover-plus-retention pass.
     let mut maintenance_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
     let mut next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
+    // sc-20636: the other startup reclamation. Spawned blocking and never awaited, for the same
+    // reason the retention checkpoint is not: removing an abandoned multi-gigabyte staging tree
+    // must not delay the first job claim.
+    {
+        let data_dir = settings.data_dir.clone();
+        tokio::task::spawn_blocking(move || match reclaim_import_staging(&data_dir) {
+            Ok(0) => {}
+            Ok(reclaimed) => tracing::info!(
+                event = "import_staging_reclaimed",
+                reclaimed,
+                "reclaimed abandoned model-import staging directories"
+            ),
+            Err(error) => tracing::warn!(error = %error, "model-import staging sweep failed"),
+        });
+    }
     loop {
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
             next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
@@ -1860,20 +1943,25 @@ async fn run_utility_job(
         let guard_job_type = job.job_type.clone();
         let guard_payload = job.payload.clone();
         let guard_settings = settings.clone();
-        let source_guard = tokio::task::spawn_blocking(move || {
+        let guard_task = tokio::task::spawn_blocking(move || {
             external_library_runtime::RuntimeSourceGuard::begin(
                 &guard_job_type,
                 &guard_payload,
                 &guard_settings,
             )
-        })
+        });
+        // The guard's admission pass can re-verify a multi-GB resolved bundle, which outlasts the
+        // API's stale-worker timeout — the sc-13856 hazard at a new call site. Awaiting the handle
+        // bare let the sweep mark a still-healthy worker offline mid-verification (the Krea bf16
+        // 90s lost-heartbeat incident), so the wait must pump heartbeats on the progress interval.
+        let source_guard = progress::heartbeat_while_blocking(
+            api,
+            settings,
+            &job.id,
+            "model source guard",
+            guard_task,
+        )
         .await
-        .map_err(|error| {
-            (
-                "Model source unavailable.",
-                WorkerError::Io(std::io::Error::other(error.to_string())),
-            )
-        })?
         .map_err(|error| ("Model source unavailable.", error))?;
         let dispatch_result = match job.job_type {
             JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
@@ -2265,6 +2353,12 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
 
 #[cfg(test)]
 mod test_env;
+
+// NTFS disk discipline for the multi-gigabyte weight fixtures (StorageFull incident, 2026-08-20).
+// The `set_len`-extended fixtures the memory gates need are holes on APFS/ext4 and FULL allocations
+// on NTFS, so on Windows they have to be marked sparse explicitly. See the module docs.
+#[cfg(test)]
+mod test_fixture_disk;
 
 // Reads pinned download entries (repo/revision/files) out of the embedded builtin catalog so
 // provisioning harnesses follow a manifest pin bump instead of mirroring it (sc-13810).

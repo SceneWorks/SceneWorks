@@ -22,9 +22,9 @@ name: Windows Candle worker
 # time. (embed-web is left off — it needs a built web bundle; see the step comment.)
 #
 # And because linking candle is what it takes to produce them, this is the only PR
-# lane that can prove `config/engine-capabilities/capabilities.candle.json` is a real
-# dump rather than a restamped stale one — the last step in the job (sc-17592), the
-# off-Mac mirror of the MLX step in macos-mlx.yml.
+# lane that can prove `config/engine-capabilities/capabilities.candle.json` still
+# matches a native dump apart from its independently recorded revision label — the last step in the
+# job (sc-17592), the off-Mac mirror of the MLX step in macos-mlx.yml.
 #
 # RUNS ON A SELF-HOSTED Windows + NVIDIA (CUDA) RUNNER (label `cuda`). GitHub's
 # hosted windows runners have no GPU and only compile; a real candle build also
@@ -73,14 +73,13 @@ on:
       # turn the candle suite red — gate on it.
       - "config/manifests/**"
       # The stage-1 candle facts dump this lane is the sole PR-triggered producer of
-      # (sc-17592). Without this entry the "real dump, not a restamp" step below is
-      # unreachable for the one edit it exists to catch: a restamp touches ONLY
-      # config/engine-capabilities/capabilities.candle.json, which matches no other path
-      # here, so the lane would not run at all on the PR that made the file wrong. Same
-      # gap sc-17119 closed on the macOS side.
+      # (sc-17592). Without this entry the native content-verification step below is
+      # unreachable when an edit touches ONLY config/engine-capabilities/capabilities.candle.json,
+      # which matches no other path here, so the lane would not run at all on the PR that made the
+      # file wrong. Same gap sc-17119 closed on the macOS side.
       #
       # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also
-      # matched capabilities.mlx.json, so an mlx-only restamp woke this ENTIRE job — every
+      # matched capabilities.mlx.json, so an mlx-only facts edit woke this ENTIRE job — every
       # step below, ~24m median on the `cuda` pool — for a file the verify step never
       # opens. Nothing in this lane reads it: no Rust reads the facts directory at all
       # (`default_facts_dir()` only builds the dumper bin's default OUTPUT path; a repo-wide
@@ -89,11 +88,10 @@ on:
       # Linux `web` job, while `generate-preview-support.mjs` and `bump-inference.mjs` are
       # manual developer scripts that no workflow invokes at all.
       #
-      # Narrowing costs no coverage. A restamp is the ONLY edit this drops, and it is
-      # precisely the edit this lane cannot check; any *material* change to the sibling dump
+      # Narrowing costs no coverage. Any *material* change to the sibling dump
       # also regenerates config/manifests/builtin.preview-support.jsonc, and
       # `config/manifests/**` above still wakes both lanes. Path filters match DELETES and
-      # ADDS as well as modifications, so a restamp, a delete or a re-add of this file still
+      # ADDS as well as modifications, so a delete or a re-add of this file still
       # triggers the lane, and a rename is a delete+add that still matches.
       - "config/engine-capabilities/capabilities.candle.json"
       - "config/engine-capabilities/runtime/capabilities.candle.json"
@@ -107,6 +105,9 @@ on:
       # matching the audio file. Demonstrated on `97a7655a9`, an audio-only re-dump that woke neither
       # stage-1 lane -- declared but unreachable, for exactly the edit the step exists to catch.
       - "config/engine-capabilities/audio/capabilities.candle.json"
+      # The native producer below delegates its content comparison to this script. A script-only
+      # change must exercise the lane it governs.
+      - "scripts/compare-engine-capability-facts.mjs"
       - "Cargo.toml"
       - "Cargo.lock"
       # The toolchain and cargo-config seams (sc-17703, Michael's call — these are
@@ -132,6 +133,28 @@ on:
   pull_request:
     branches: [main]
     paths: *candle_paths
+  # PROVISIONING IS MODEL-PARAMETERIZED (sc-18677). It used to be hardcoded to the Krea q4
+  # reference: a `provision_krea_snapshot` boolean, a `snapshot_download` literal naming
+  # `SceneWorks/krea-2-turbo-mlx` with `allow_patterns=["q4/**"]`, and a resolve step that
+  # rebuilt `models--SceneWorks--krea-2-turbo-mlx\snapshots\<rev>\q4` by hand. The machinery
+  # was sound; only the model was welded in. Epic 17137 needs the same machinery pointed at
+  # `MiniMaxAI/MiniMax-H3` so sc-17153/sc-17156 can measure per-tier VRAM on real weights.
+  #
+  # The Krea inputs were RENAMED, not duplicated, so there is exactly one provisioning path:
+  #   provision_krea_snapshot -> provision_snapshot
+  #   krea_repository         -> provision_repository   (same default)
+  #   krea_revision           -> provision_revision
+  # A Krea five-rung dispatch that sets only run_five_rung_reference / provision_snapshot /
+  # provision_revision / inference_revision leaves every provision_* default in place and
+  # resolves byte-identically to the old hardcoded path. `platform-review-contracts.test.mjs`
+  # pins that equivalence field by field so it cannot rot.
+  #
+  # The `SCENEWORKS_KREA_*` env names below are NOT renamed: they are the memory-adapter
+  # binary's contract (`crates/sceneworks-memory-adapter/src/bin/{candle,mlx}.rs` read them
+  # via `required_env`), so renaming them would break the five-rung capture at runtime.
+  #
+  # GitHub caps workflow_dispatch at 10 inputs. Renaming rather than adding a parallel
+  # provision_* family keeps the generalized provisioning and terminal profiles within that cap.
   workflow_dispatch:
     inputs:
       run_five_rung_reference:
@@ -139,8 +162,8 @@ on:
         required: false
         type: boolean
         default: false
-      provision_krea_snapshot:
-        description: "Provision the exact public Krea q4 snapshot before capture"
+      provision_snapshot:
+        description: "Provision the exact snapshot named by the provision_* inputs (defaults to the Krea q4 reference)"
         required: false
         type: boolean
         default: false
@@ -148,17 +171,36 @@ on:
         description: "Exact 40-hex inference revision pinned by the adapter"
         required: false
         type: string
-      krea_repository:
-        description: "Published Krea MLX artifact repository identity"
+      provision_repository:
+        description: "Hugging Face repo id to provision, owner/name (was krea_repository)"
         required: false
         type: string
         default: "SceneWorks/krea-2-turbo-mlx"
-      krea_revision:
-        description: "Exact 40-hex Krea artifact revision"
+      provision_revision:
+        description: "Exact 40-hex artifact revision to provision (was krea_revision)"
+        required: false
+        type: string
+      provision_patterns:
+        description: "Allow-patterns, one component per line or comma-separated (e.g. transformer/*). Default is the Krea q4 tier."
+        required: false
+        type: string
+        default: "q4/**"
+      provision_subdir:
+        description: "Tier/subdirectory under the snapshot the resolve step must prove. Use '.' for a model whose components sit at the snapshot ROOT (H3); an empty value cannot override this default."
+        required: false
+        type: string
+        default: "q4"
+      provision_cache_dir:
+        description: "Hub cache dir. Empty uses %USERPROFILE%\\.cache\\huggingface\\hub, the historical Krea location."
         required: false
         type: string
       run_ltx_eros_acceptance:
         description: "Reproduce the fixed SC-18902 rejected historical LTX-2.3 10Eros CUDA baseline"
+        required: false
+        type: boolean
+        default: false
+      run_epic_20738_terminal_cuda:
+        description: "Run the frozen SC-20945 19-cell terminal CUDA profile once"
         required: false
         type: boolean
         default: false
@@ -262,14 +304,27 @@ on:
 # under RUNNER_TEMP is re-downloaded every run -- see "Isolate Cargo dependency checkout")
 # and the three separate compile graphs, not the test filter.
 concurrency:
-  group: windows-candle-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: windows-candle-${{ github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   candle-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [self-hosted, Windows, X64, cuda]
+    # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
+    # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
+    # adds `weights` for `run_memory_calibration || run_five_rung_reference` and is the convention
+    # this lane was missing -- the asymmetry epic 17137 recorded as "no weights label and no HF
+    # provisioning input, unlike the Mac lane".
+    #
+    # It matters because the `cuda` pool is FOUR runners across TWO registration levels: org-level
+    # `cuda-windows` / `cuda-windows-2` carry `real-weights`, repo-level `cuda-windows-3` /
+    # `cuda-windows-4` do NOT. All four happen to be listener processes on the same physical box
+    # today, so this narrowing changes nothing observable right now. It is what keeps a weights job
+    # correct the day a `cuda` runner is added on a second machine: without it the job lands on a
+    # box with no snapshot and fails at the resolve step, which is loud but wasteful; with it the
+    # job simply queues for a box that has the weights.
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
@@ -281,9 +336,367 @@ jobs:
     # that box and starves every queued PR/main run on it until the cap fires
     # (sc-13603). Well above the healthy ~11-14 min build+test+clippy — a cold
     # candle-kernels (nvcc) rebuild still fits comfortably.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
+    #
+    # Provisioning now keys the 240m budget on its OWN input rather than on the five-rung
+    # conjunction (sc-18677): a provision-only dispatch is a supported mode, and H3's
+    # component set is 144.051 GB (210.332 GB once transformer_ref joins in sc-17149) against
+    # Krea q4's ~14 GB, so it is the branch that most
+    # needs the long budget. Krea's two dispatch shapes keep their exact previous values --
+    # five-rung + provision 240, five-rung alone 120, everything else 45.
+    # The LTX Eros acceptance capture (sc-18902, from main) keeps its own six-hour ceiling.
+    # The strictly serial 19-cell epic-20738 terminal campaign gets a job-level twelve-hour
+    # ceiling; no individual step receives a timeout above GitHub's 360-minute step limit.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse combined manual measurement profiles
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: powershell
+        env:
+          RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+        run: |
+          if ($env:RUN_EPIC_20738_TERMINAL_CUDA -eq 'true' -and ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:PROVISION_SNAPSHOT -eq 'true')) {
+            throw 'the epic-20738 terminal profile cannot share a dispatch with another measurement flag'
+          }
+      # PROVISIONING RUNS BEFORE ANY CARGO INVOCATION (sc-18691). It used to sit BELOW the three
+      # compile steps with no guard, so an unrelated build break made landing weights on this box
+      # impossible rather than merely slow -- the fetch was never reached. That is not hypothetical
+      # for this epic: sc-17149 must provision `transformer_ref` (+66.28 GB, taking the resident set
+      # from 144.051 GB to 210.332 GB) onto this exact runner, and a red candle lane at that moment
+      # would block it for reasons that have nothing to do with the weights.
+      #
+      # TWO changes make provisioning independent, and BOTH are load-bearing:
+      #   1. ORDER. This whole block moved above `Fetch the pinned inference release` -- above even
+      #      `prepare-rust-runner`, which fails loudly on a broken rustup, because a weights fetch
+      #      has no business depending on toolchain discovery either. Every step below needs only
+      #      the checkout and the box's Python.
+      #   2. SKIP. A weights-only dispatch (`provision_snapshot` without `run_five_rung_reference`)
+      #      now skips the compile chain entirely -- see the guard on `Fetch the pinned inference
+      #      release` below. Order ALONE would still drag a provision-only run red on an unrelated
+      #      break, and still burn the ~24m of box time this lane costs, which is the scarce
+      #      resource the whole story is about.
+      #
+      # WHAT DID NOT CHANGE, deliberately: there is no `continue-on-error`, no `if: always()` and no
+      # swallowed exit code anywhere in this block. sc-18677's whole point was that provisioning
+      # fails LOUDLY, and decoupling must not turn a genuine provisioning failure into a silent
+      # skip. Every `throw` below is still fatal, and platform-review-contracts.test.mjs COUNTS them
+      # per step, so a `throw` -> `Write-Warning` downgrade goes red instead of passing with the
+      # message string still present.
+      #
+      # Consequence worth knowing: a five-rung dispatch whose provisioning fails no longer runs the
+      # compile steps at all, since they are now downstream. That loses nothing -- those steps are
+      # PR/push guards, and a five-rung dispatch that cannot resolve its snapshot produces no
+      # capture either way.
+      #
+      # PYTHON HOSTING DECISION (sc-18691). The `huggingface_hub` body below stays inline Python on
+      # this lane, deliberately, and this comment is the record. Epic 3482 is Done and was
+      # macOS-runtime-scoped, so it gives this no home. Both alternatives are worse HERE
+      # specifically: a Rust downloader would have to be produced by the very compile chain this
+      # story just decoupled provisioning from, which reintroduces the coupling under a new name,
+      # and a vendored .py file still needs the same interpreter while moving the logic away from
+      # the step that owns it. `huggingface_hub` is also the reference implementation of the
+      # `models--<owner>--<name>\snapshots\<rev>` cache layout the resolve step asserts against, so
+      # replacing it means reimplementing the thing the proof is written in terms of. It is pinned
+      # exactly (`huggingface_hub==0.36.0`), anonymous (`token=False`), and its exit code is checked
+      # -- which is the whole of what a hosted implementation would buy. Revisit if a SECOND lane
+      # ever needs the same fetch; at that point a composite action is the move, not a rewrite.
+      # Two independent validations, in one step because both are pure input checks.
+      #
+      # (1) PROVISIONING. `provision_snapshot` no longer requires `run_five_rung_reference`
+      # (sc-18677). The old throw existed because provisioning had exactly one consumer -- the
+      # Krea capture -- so provisioning without it was necessarily a mistake. Epic 17137 makes
+      # provisioning a first-class outcome: sc-17153/sc-17156 need H3 weights resident on this
+      # box, and there is no H3 five-rung fixture to run. Everything the old guard actually
+      # protected is still enforced, just against the generalized inputs.
+      #
+      # `provision_subdir` is validated for CONTAINMENT here, not merely for shape. The resolve
+      # step joins it onto the cache path, and the same trap sc-17139 documented for the
+      # manifest `subdir` key applies verbatim: `..` is spelled entirely from characters a
+      # naive path pattern allows. The EndsWith assertion downstream already fails closed on a
+      # traversal (Resolve-Path normalizes `..` away, so the suffix stops matching), but a
+      # rejected input gives the operator the real reason instead of a confusing path mismatch.
+      #
+      # (2) FIVE-RUNG. Unchanged in substance -- still an exact 40-hex inference revision, an
+      # exact 40-hex artifact revision, the fixed Krea repository, and an INFERENCE_PIN match.
+      # Only the input NAMES moved (krea_revision -> provision_revision, krea_repository ->
+      # provision_repository), so a five-rung dispatch is rejected under exactly the same
+      # conditions as before.
+      - name: Validate dispatch inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: powershell
+        env:
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          PROVISION_REPOSITORY: ${{ inputs.provision_repository }}
+          PROVISION_REVISION: ${{ inputs.provision_revision }}
+          PROVISION_PATTERNS: ${{ inputs.provision_patterns }}
+          PROVISION_SUBDIR: ${{ inputs.provision_subdir }}
+          PROVISION_CACHE_DIR_INPUT: ${{ inputs.provision_cache_dir }}
+        run: |
+          # Gate on the SAME condition as the steps that consume these values (the params and
+          # resolve steps run on `run_five_rung_reference || provision_snapshot`), not on
+          # provision_snapshot alone. Scoping the containment checks to the provisioning branch
+          # left them unreachable for a five-rung-only dispatch, which consumes provision_subdir
+          # and provision_patterns just the same -- it failed closed downstream on the EndsWith
+          # assertion, but reported a confusing path mismatch instead of the real reason.
+          if ($env:PROVISION_SNAPSHOT -eq 'true' -or $env:RUN_FIVE_RUNG_REFERENCE -eq 'true') {
+            if ($env:PROVISION_REPOSITORY -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$') {
+              throw 'provision_repository must be a Hugging Face owner/name repo id'
+            }
+            if ($env:PROVISION_REVISION -notmatch '^[0-9a-f]{40}$') {
+              throw 'provision_revision must be an exact lowercase 40-hex artifact revision'
+            }
+            $patterns = @($env:PROVISION_PATTERNS -split '[,\r\n]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($patterns.Count -eq 0) {
+              throw 'provision_patterns must name at least one allow-pattern; an empty list would fetch the whole repository'
+            }
+            # Each pattern's leading literal segment is joined onto the snapshot root by the
+            # resolve step's component-presence assertion. Without containment, `../../foo/*` lets
+            # that assertion be satisfied by a directory outside the snapshot entirely -- which
+            # is the one assertion that makes a root-resolved model's proof real.
+            #
+            # Validate the HEAD, computed with the identical expression the resolve step uses, and
+            # decide containment by CANONICALIZING rather than by matching path segments. Textual
+            # segment-equality is the wrong tool on Windows and was demonstrably bypassable two
+            # ways: `..*` yields head `..` while the pattern itself contains no `..` segment
+            # (moving the wildcard one character left defeats a check on `$pattern`), and `.. `
+            # survives `-contains '..'` yet Win32 strips trailing spaces and dots from path
+            # components, so it resolves to the parent anyway. GetFullPath collapses every such
+            # spelling, including the ones nobody has thought of yet.
+            $probe = Join-Path 'C:\__sw_containment_probe__' 'snapshot'
+            foreach ($pattern in $patterns) {
+              if ($pattern -match '^[\\/]' -or $pattern -match '^[A-Za-z]:') {
+                throw "provision_patterns entries must be relative to the snapshot root: $pattern"
+              }
+              $head = (($pattern -split '[\*\?\[]')[0]).TrimEnd('/')
+              if (-not $head) { continue }
+              # TWO checks, because neither alone is sufficient.
+              #
+              # (a) Segment shape. Win32 strips trailing spaces and dots from every path
+              # component, so `.. ` names the parent while comparing equal to nothing -- and
+              # [System.IO.Path]::GetFullPath does NOT strip it, so (b) alone accepts it. Any
+              # segment that is empty once trailing dots and spaces are removed is a disguised
+              # `.`/`..` and has no legitimate use in a component name.
+              foreach ($segment in ($head -split '[\\/]')) {
+                if (-not $segment.TrimEnd(' ', '.')) {
+                  throw "provision_patterns entries must not traverse out of the snapshot: $pattern"
+                }
+              }
+              # (b) Canonical containment, which catches every ordinary spelling including the
+              # wildcard-adjacent ones a check on `$pattern` misses (`..*` has head `..` while the
+              # pattern itself contains no `..` segment).
+              $full = [System.IO.Path]::GetFullPath((Join-Path $probe $head.Replace('/', '\')))
+              if (-not $full.StartsWith($probe + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw "provision_patterns entries must not traverse out of the snapshot: $pattern"
+              }
+            }
+            if ($env:PROVISION_SUBDIR) {
+              # The shape regex alone is NOT containment: '.' is inside the character class, so
+              # '..' matches it. The -contains check below is load-bearing.
+              if ($env:PROVISION_SUBDIR -notmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$') {
+                throw 'provision_subdir must be a relative path of [A-Za-z0-9._-] segments'
+              }
+              if (($env:PROVISION_SUBDIR -split '/') -contains '..') {
+                throw 'provision_subdir must not traverse out of the snapshot'
+              }
+            }
+            if ($env:PROVISION_CACHE_DIR_INPUT) {
+              # This value is written verbatim into $GITHUB_ENV, where a newline would inject
+              # arbitrary job-scoped variables into every later step.
+              if ($env:PROVISION_CACHE_DIR_INPUT -match '[\r\n]') {
+                throw 'provision_cache_dir must be a single line'
+              }
+              # NOT IsPathRooted: it accepts `\foo` and `C:foo`, which are rooted but not
+              # absolute, so the check would not mean what its message says. .NET Framework 4.x
+              # (PowerShell 5.1) has no IsPathFullyQualified, hence the explicit drive pattern.
+              if ($env:PROVISION_CACHE_DIR_INPUT -notmatch '^[A-Za-z]:\\') {
+                throw 'provision_cache_dir must be an absolute path with a drive letter'
+              }
+            }
+          }
+          if ($env:RUN_FIVE_RUNG_REFERENCE -ne 'true') { exit 0 }
+          if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'inference_revision must be an exact lowercase 40-hex commit'
+          }
+          if ($env:PROVISION_REPOSITORY -ne 'SceneWorks/krea-2-turbo-mlx') {
+            throw 'provision_repository must be the fixed SceneWorks/krea-2-turbo-mlx reference artifact for a five-rung capture'
+          }
+          $pinLine = Select-String -Path 'crates/sceneworks-memory-adapter/src/lib.rs' -Pattern '^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";$'
+          if (-not $pinLine -or $pinLine.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
+            throw "input inference_revision does not match the adapter's compiled INFERENCE_PIN"
+          }
+      # Derives the cache dir and the exact snapshot suffix ONCE, so the provisioning step and
+      # the resolve step below cannot drift apart on where the snapshot is meant to land. That
+      # drift is the concrete failure this centralizes away: before sc-18677 the cache path
+      # `%USERPROFILE%\.cache\huggingface\hub` was written out twice, in two different
+      # languages (a Python `os.path.join` and a PowerShell `Join-Path`), and nothing tied them.
+      #
+      # The empty-input default reproduces the old hardcoded location EXACTLY, and deliberately
+      # ignores HF_HOME even though this box sets it (E:\huggingface). Honoring HF_HOME would
+      # silently relocate Krea's cache and break the "behaves identically" contract; a caller
+      # that wants another cache passes provision_cache_dir explicitly.
+      - name: Resolve snapshot provisioning parameters
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_five_rung_reference || inputs.provision_snapshot) }}
+        shell: powershell
+        env:
+          PROVISION_REPOSITORY: ${{ inputs.provision_repository }}
+          PROVISION_REVISION: ${{ inputs.provision_revision }}
+          PROVISION_SUBDIR: ${{ inputs.provision_subdir }}
+          PROVISION_CACHE_DIR_INPUT: ${{ inputs.provision_cache_dir }}
+        run: |
+          $cache = $env:PROVISION_CACHE_DIR_INPUT
+          if (-not $cache) { $cache = Join-Path $env:USERPROFILE '.cache\huggingface\hub' }
+          $folder = 'models--' + $env:PROVISION_REPOSITORY.Replace('/', '--')
+          # '.' is the ROOT sentinel, and it is load-bearing rather than cosmetic. GitHub applies
+          # an input's `default` whenever the dispatch supplies an empty value, so
+          # `-f provision_subdir=` does NOT mean "no subdir" -- it silently becomes `q4`. Run
+          # 31509409586 proved it: H3 provisioned correctly, then the resolve step looked for
+          # ...\snapshots\939557dc...\q4 and threw. Because the default has to stay `q4` to keep a
+          # Krea dispatch identical, a model whose components sit at the snapshot root is
+          # otherwise INEXPRESSIBLE. Empty is still honored for any caller that can send it.
+          $subdirTail = ''
+          if ($env:PROVISION_SUBDIR -and $env:PROVISION_SUBDIR -ne '.') {
+            $subdirTail = '\' + $env:PROVISION_SUBDIR.Replace('/', '\')
+          }
+          $suffix = '\' + $folder + '\snapshots\' + $env:PROVISION_REVISION + $subdirTail
+          # -Encoding utf8 is not cosmetic: Windows PowerShell 5.1's Add-Content defaults to the
+          # ANSI code page, and these three values carry operator-supplied paths. The resolve step
+          # writes the same file with `Out-File -Encoding utf8 -Append`; both halves must agree.
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_CACHE_DIR=$cache"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_SNAPSHOT_SUFFIX=$suffix"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_SUBDIR_TAIL=$subdirTail"
+          Write-Host "cache dir       : $cache"
+          Write-Host "snapshot suffix : $suffix"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        with:
+          node-version: 22
+      - name: Validate runner Python for snapshot provisioning
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot }}
+        shell: powershell
+        run: |
+          $version = python --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Python 3\.(?<minor>\d+)\.') {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
+          if ([int]$Matches.minor -lt 12) {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
+      # ONE allow-pattern per component, never a bare repo fetch. MiniMaxAI/MiniMax-H3 is
+      # 498.475 GB because it ships the root (modular) layout plus FL2VA/ and Ref2VA/ partition
+      # re-packagings of the same components; only the root layout is referenced by
+      # `modular_model_index.json` and only it is the conversion source (sc-17139 section 2).
+      # Fetching by component takes that to 210.332 GB, and to 144.051 GB for the set sc-18677
+      # actually provisions (transformer_ref is sc-17149's, deferred). Note this is the OPPOSITE of the rule for
+      # `config/manifests` download rows, where an empty `files` list (whole repo) is correct --
+      # those name SceneWorks-built artifacts that contain only what a user needs, whereas this
+      # provisions a third-party repo with three overlapping copies of every component.
+      - name: Provision exact snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot }}
+        shell: powershell
+        env:
+          PROVISION_REPOSITORY: ${{ inputs.provision_repository }}
+          PROVISION_REVISION: ${{ inputs.provision_revision }}
+          PROVISION_PATTERNS: ${{ inputs.provision_patterns }}
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          if ($LASTEXITCODE -ne 0) { throw "installing huggingface_hub failed with exit code $LASTEXITCODE" }
+          @'
+          import os
+          from huggingface_hub import snapshot_download
+
+          patterns = [p.strip() for p in os.environ["PROVISION_PATTERNS"].replace(",", "\n").splitlines() if p.strip()]
+          if not patterns:
+              raise SystemExit("provision_patterns resolved to an empty allow-list")
+
+          repo = os.environ["PROVISION_REPOSITORY"]
+          revision = os.environ["PROVISION_REVISION"]
+          path = snapshot_download(
+              repo_id=repo,
+              repo_type="model",
+              revision=revision,
+              allow_patterns=patterns,
+              cache_dir=os.environ["PROVISION_CACHE_DIR"],
+              token=False,
+              max_workers=4,
+          )
+          print(f"Exact public snapshot provisioned: {repo}@{revision}")
+          print(f"  path: {path}")
+          for pattern in patterns:
+              print(f"  allow-pattern: {pattern}")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "snapshot provisioning failed with exit code $LASTEXITCODE" }
+      # Proves the EXACT snapshot path and fails loudly if absent. Three assertions, not one:
+      #   1. the resolved directory exists;
+      #   2. its canonical path ends with \models--<owner>--<name>\snapshots\<revision>[\<subdir>],
+      #      so a stale cache entry, a different revision or a lookalike repo cannot satisfy it;
+      #   3. every provisioned component directory is present under the SNAPSHOT root.
+      # (3) is what makes this a real proof for a root-resolved model. With provision_subdir
+      # empty the snapshot directory exists as soon as ANY file is fetched -- a README alone
+      # would pass assertions 1 and 2 while every weight was missing. Checking the leading
+      # literal segment of each allow-pattern closes that. For Krea it is exactly equivalent to
+      # the pre-existing check (the sole pattern `q4/**` yields `<snapshot>\q4`, which IS the
+      # resolved root), so it adds no new way for a Krea dispatch to fail.
+      - name: Resolve exact snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_five_rung_reference || inputs.provision_snapshot) }}
+        shell: powershell
+        env:
+          PROVISION_REPOSITORY: ${{ inputs.provision_repository }}
+          PROVISION_PATTERNS: ${{ inputs.provision_patterns }}
+          KREA_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_KREA_ROOT }}
+        run: |
+          $isKrea = $env:PROVISION_REPOSITORY -eq 'SceneWorks/krea-2-turbo-mlx'
+          if ($isKrea -and $env:KREA_ROOT_OVERRIDE) {
+            $root = $env:KREA_ROOT_OVERRIDE
+          } else {
+            $root = Join-Path $env:PROVISION_CACHE_DIR $env:PROVISION_SNAPSHOT_SUFFIX.TrimStart('\')
+          }
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            throw "the exact snapshot is not available on this runner: $root"
+          }
+          $root = (Resolve-Path -LiteralPath $root).Path
+          if (-not $root.EndsWith($env:PROVISION_SNAPSHOT_SUFFIX, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "the resolved root does not match the requested repository and exact revision: $root"
+          }
+          $snapshotRoot = $root
+          if ($env:PROVISION_SUBDIR_TAIL) {
+            $snapshotRoot = $root.Substring(0, $root.Length - $env:PROVISION_SUBDIR_TAIL.Length)
+          }
+          $missing = @()
+          foreach ($pattern in ($env:PROVISION_PATTERNS -split '[,\r\n]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+            $head = ($pattern -split '[\*\?\[]')[0]
+            $head = $head.TrimEnd('/')
+            if (-not $head) { continue }
+            $component = Join-Path $snapshotRoot $head.Replace('/', '\')
+            # Canonical containment, independently of the validation step. -LiteralPath suppresses
+            # globbing, NOT Win32 path normalization, so a probe must be proven to land inside the
+            # snapshot before its existence means anything.
+            $full = [System.IO.Path]::GetFullPath($component)
+            if (-not $full.StartsWith($snapshotRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+              throw "declared component escapes the snapshot root: $pattern"
+            }
+            if (-not (Test-Path -LiteralPath $component)) { $missing += $head }
+          }
+          if ($missing.Count -gt 0) {
+            throw "provisioned snapshot is missing declared components under ${snapshotRoot}: $($missing -join ', ')"
+          }
+          Write-Host "resolved snapshot root: $root"
+          # The model-neutral handle. Nothing in the repo reads it YET -- it is the seam
+          # sc-17153/sc-17156 need, since SCENEWORKS_KREA_ROOT is a Krea-shaped name their
+          # MiniMax measurement steps cannot reuse. Exported without an $isKrea guard so a provision-only
+          # dispatch still names its snapshot to any step added after it.
+          "SCENEWORKS_PROVISIONED_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($isKrea) {
+            "SCENEWORKS_KREA_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
       # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
       # PATH, so cargo/rustc/clippy never dispatch through the fragile
       # %USERPROFILE%\.cargo\bin proxies (0-byte symlinks -> rustup.exe that go dangling
@@ -314,7 +727,22 @@ jobs:
           $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'
           New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
+      # THE COMPILE CHAIN, skipped for a weights-only dispatch (sc-18691). The condition names
+      # exactly one dispatch shape -- `provision_snapshot` true AND `run_five_rung_reference` false
+      # -- and excludes only that. Everything else is untouched: PR and push runs (`github.event_name`
+      # is not `workflow_dispatch`, so the inner conjunction is false), a plain no-input dispatch, and
+      # EVERY five-rung dispatch, which still runs this entire chain exactly as it did before.
+      #
+      # This is a SKIP, not a swallow. A skipped step cannot mask a failure the way
+      # `continue-on-error` can, so a weights-only dispatch's conclusion is decided solely by the
+      # provisioning steps above -- each of which still throws.
+      #
+      # The expression is repeated verbatim on each guarded step rather than hoisted into a job-level
+      # env, because platform-review-contracts.test.mjs asserts it PER STEP with `stepBody()`, and
+      # byte-identical neighbours are precisely why that scoping exists: sc-18677's third review
+      # round found three narrowing mutations green against a file-wide `assert.match`.
       - name: Fetch the pinned inference release
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
@@ -326,6 +754,7 @@ jobs:
       # rejects). Load the BuildTools vcvars in-shell, then build+test in the same
       # cmd invocation so the toolchain env survives (each step is a fresh shell).
       - name: Test the candle GPU worker (backend-candle)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -344,6 +773,7 @@ jobs:
       # release.yml package builds, where web/dist exists. (Release-only codegen/link
       # breaks also still surface first in those builds.)
       - name: Check the candle sidecar builds (rust-api, backend-candle)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -365,101 +795,13 @@ jobs:
       # ran in zero lanes on either platform. The CHECK step above it keeps its selector on purpose:
       # it is the production-typecheck half and the lib compiles on every platform anyway.
       - name: Check and test the candle memory adapter (lib + memory-candle-adapter)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           cargo test -p sceneworks-memory-adapter --features candle
-      - name: Validate five-rung reference inputs
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        shell: powershell
-        env:
-          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
-          PROVISION_KREA_SNAPSHOT: ${{ inputs.provision_krea_snapshot }}
-          INFERENCE_REVISION: ${{ inputs.inference_revision }}
-          KREA_REPOSITORY: ${{ inputs.krea_repository }}
-          KREA_REVISION: ${{ inputs.krea_revision }}
-        run: |
-          if ($env:PROVISION_KREA_SNAPSHOT -eq 'true' -and $env:RUN_FIVE_RUNG_REFERENCE -ne 'true') {
-            throw 'provision_krea_snapshot requires run_five_rung_reference=true'
-          }
-          if ($env:RUN_FIVE_RUNG_REFERENCE -ne 'true') { exit 0 }
-          if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
-            throw 'inference_revision must be an exact lowercase 40-hex commit'
-          }
-          if ($env:KREA_REVISION -notmatch '^[0-9a-f]{40}$') {
-            throw 'krea_revision must be an exact lowercase 40-hex artifact revision'
-          }
-          if ($env:KREA_REPOSITORY -ne 'SceneWorks/krea-2-turbo-mlx') {
-            throw 'krea_repository must be the fixed SceneWorks/krea-2-turbo-mlx reference artifact'
-          }
-          $pinLine = Select-String -Path 'crates/sceneworks-memory-adapter/src/lib.rs' -Pattern '^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";$'
-          if (-not $pinLine -or $pinLine.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
-            throw "input inference_revision does not match the adapter's compiled INFERENCE_PIN"
-          }
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        with:
-          node-version: 22
-      - name: Validate runner Python for Krea provisioning
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
-        shell: powershell
-        run: |
-          $version = python --version
-          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Python 3\.(?<minor>\d+)\.') {
-            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
-          }
-          if ([int]$Matches.minor -lt 12) {
-            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
-          }
-      - name: Provision exact public Krea reference snapshot
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot }}
-        shell: powershell
-        env:
-          KREA_REVISION: ${{ inputs.krea_revision }}
-          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
-          HF_HUB_DISABLE_PROGRESS_BARS: "1"
-          HF_HUB_DISABLE_TELEMETRY: "1"
-          HF_HUB_VERBOSITY: "error"
-        run: |
-          python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
-          @'
-          import os
-          from huggingface_hub import snapshot_download
-
-          snapshot_download(
-              repo_id="SceneWorks/krea-2-turbo-mlx",
-              repo_type="model",
-              revision=os.environ["KREA_REVISION"],
-              allow_patterns=["q4/**"],
-              cache_dir=os.path.join(os.environ["USERPROFILE"], ".cache", "huggingface", "hub"),
-              token=False,
-              max_workers=4,
-          )
-          print("Exact public Krea reference snapshot provisioned")
-          '@ | python -
-      - name: Resolve exact Krea reference snapshot
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        shell: powershell
-        env:
-          KREA_REVISION: ${{ inputs.krea_revision }}
-          KREA_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_KREA_ROOT }}
-        run: |
-          if ($env:KREA_ROOT_OVERRIDE) {
-            $root = $env:KREA_ROOT_OVERRIDE
-          } else {
-            $root = Join-Path $env:USERPROFILE ".cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\$env:KREA_REVISION\q4"
-          }
-          if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-            throw 'the exact Krea reference snapshot is not available on this runner'
-          }
-          $root = (Resolve-Path -LiteralPath $root).Path
-          $suffix = "\models--SceneWorks--krea-2-turbo-mlx\snapshots\$env:KREA_REVISION\q4"
-          if (-not $root.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'the Krea reference root does not match the fixed repository and exact revision'
-          }
-          "SCENEWORKS_KREA_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Check out the exact inference reference source
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -473,8 +815,10 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         shell: cmd
         env:
-          SCENEWORKS_KREA_REPOSITORY: ${{ inputs.krea_repository }}
-          SCENEWORKS_KREA_REVISION: ${{ inputs.krea_revision }}
+          # Env names are the memory-adapter binary's contract and are deliberately NOT
+          # renamed alongside the dispatch inputs; see the workflow_dispatch header.
+          SCENEWORKS_KREA_REPOSITORY: ${{ inputs.provision_repository }}
+          SCENEWORKS_KREA_REVISION: ${{ inputs.provision_revision }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -497,6 +841,7 @@ jobs:
             ${{ runner.temp }}/sc-16059-candle-reuse-comparison.json
           if-no-files-found: error
       - name: Clippy (candle worker)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -517,13 +862,10 @@ jobs:
       # at pin a4f409ae the checked-in file matches a fresh dump BYTE-FOR-BYTE, so the restamps
       # happened to be correct — but nothing proved it until this step existed.
       #
-      # `git diff --no-index --exit-code`, not `fc`: `cmd` has no `diff`, `bash` here resolves to the
-      # box's WSL stub rather than Git Bash (see the header), and `fc`'s exit semantics are unreliable
-      # for this. git is already on PATH — actions/checkout requires it. The byte diff is sound
-      # because the dump is deterministic (BTreeMap grouping + sort_by(id) + a const revision + a
-      # cfg!-derived dumper string; nothing path- or time-dependent) and `.gitattributes`
-      # (`* text=auto eol=lf`) checks the file out LF even on Windows with core.autocrlf=true, so it
-      # cannot false-red on line endings.
+      # The shared Node comparator removes only `generatedFrom.inferenceRevision` after validating
+      # that both labels are concrete SHAs, then deeply compares every remaining field. This keeps
+      # native descriptor drift fail-closed without putting both producer machines on every pin
+      # bump's critical path (the gate-teardown contract from e14171984).
       #
       # Cheap: the steps above already built the candle graph, so this is a link plus a weights-free
       # registry walk. It needs the vcvars preamble anyway because the dumper links runtime-cuda.
@@ -542,22 +884,23 @@ jobs:
       # check, the memory-adapter check and clippy. A missing dump must not suppress unrelated
       # coverage; it is the least urgent signal in this job, so it reports last.
       #
-      # When this fails after a pin bump, the fix is to commit the dump it just produced and re-run
-      # `npm run gen:preview-support` from apps/web — not to restamp the revision line. The diagnostic
+      # When capability content differs, the fix is to commit the dump it just produced and re-run
+      # `npm run gen:preview-support` from apps/web. The diagnostic
       # upload immediately below this step preserves both fresh files on a mismatch so the exact linked
-      # registry output can be reviewed and committed without reconstructing it from the log diff.
+      # registry output can be reviewed and committed without reconstructing it from the log.
       #
       # The AUDIO dump (sc-17593) is verified here too, and in macos-mlx.yml's twin step. Unlike the
       # media files, `audio/capabilities.candle.json` is written by BOTH lanes — `AUDIO_BACKEND` is
-      # `candle` on every platform — so it is the most exposed to a restamp AND the only facts file
+      # `candle` on every platform — so it is the only facts file
       # whose correctness rests on a cross-lane claim: that a Mac and this box produce identical
-      # bytes. That holds by construction (`candle-audio-catalog` gates no registration on the
+      # capability content. That holds by construction (`candle-audio-catalog` gates no registration on the
       # platform, its `metal`/`cuda` features only forward the compute backend, and the audio
       # provenance stamps a lane-NEUTRAL invocation rather than `dumper_invocation()` — deliberately,
       # since a platform-branched string there would make the two lanes flip one line back and forth
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
-      - name: Verify capabilities.candle.json is a real dump, not a restamp
+      - name: Verify capabilities.candle.json content against a fresh dump
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         id: verify_candle_capabilities
         shell: cmd
         run: |
@@ -569,17 +912,11 @@ jobs:
           if exist "%scratch%\capabilities.candle.json" goto :stale_scratch
           cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle -- "%scratch%" || exit /b 1
           if not exist "%scratch%\capabilities.candle.json" goto :no_candle_file
-          git diff --no-index --exit-code -- config\engine-capabilities\capabilities.candle.json "%scratch%\capabilities.candle.json"
-          if errorlevel 2 goto :diff_failed
-          if errorlevel 1 goto :restamped
+          node scripts\compare-engine-capability-facts.mjs config\engine-capabilities\capabilities.candle.json "%scratch%\capabilities.candle.json" || goto :capabilities_mismatch
           if not exist "%scratch%\audio\capabilities.candle.json" goto :no_audio_file
-          git diff --no-index --exit-code -- config\engine-capabilities\audio\capabilities.candle.json "%scratch%\audio\capabilities.candle.json"
-          if errorlevel 2 goto :audio_diff_failed
-          if errorlevel 1 goto :audio_restamped
+          node scripts\compare-engine-capability-facts.mjs config\engine-capabilities\audio\capabilities.candle.json "%scratch%\audio\capabilities.candle.json" || goto :audio_mismatch
           if not exist "%scratch%\runtime\capabilities.candle.json" goto :no_runtime_file
-          git diff --no-index --exit-code -- config\engine-capabilities\runtime\capabilities.candle.json "%scratch%\runtime\capabilities.candle.json"
-          if errorlevel 2 goto :runtime_diff_failed
-          if errorlevel 1 goto :runtime_restamped
+          node scripts\compare-engine-capability-facts.mjs config\engine-capabilities\runtime\capabilities.candle.json "%scratch%\runtime\capabilities.candle.json" || goto :runtime_mismatch
           exit /b 0
           :no_runner_temp
           echo ::error::RUNNER_TEMP is not set, so there is nowhere safe to dump. Refusing to run rather than risk writing into the checked-out tree.
@@ -590,28 +927,19 @@ jobs:
           :no_candle_file
           echo ::error::the dumper exited 0 but wrote no capabilities.candle.json. This lane linked a registry whose backend is not named candle, so nothing was verified - reconcile SCENEWORKS_BACKENDS with the linked backend.
           exit /b 1
-          :diff_failed
-          echo ::error::git could not compare the checked-in capabilities.candle.json against the fresh dump. This is a tooling or missing-file failure, NOT a restamp - read the git error above.
-          exit /b 1
-          :restamped
-          echo ::error::config/engine-capabilities/capabilities.candle.json does not match a fresh dump. DOWNLOAD the backend-capability-facts-candle artifact from this run and commit its capabilities.candle.json - this job already produced the authoritative file, so there is no reason to re-dump by hand on a CUDA box. Then run npm run gen:preview-support from apps/web. Do NOT just rewrite the inferenceRevision line.
+          :capabilities_mismatch
+          echo ::error::config/engine-capabilities/capabilities.candle.json differs in capability content from a fresh dump. DOWNLOAD the backend-capability-facts-candle artifact from this run and commit its capabilities.candle.json - this job already produced the authoritative file, so there is no reason to re-dump by hand on a CUDA box. Then run npm run gen:preview-support from apps/web.
           exit /b 1
           :no_audio_file
           echo ::error::the dumper wrote capabilities.candle.json but no audio/capabilities.candle.json. This build links no audio registry, so every audio route is unverified here - both runtime bundles carry the audio lane default-on, so reconcile the build features with SCENEWORKS_AUDIO_BACKENDS.
           exit /b 1
-          :audio_diff_failed
-          echo ::error::git could not compare the checked-in audio/capabilities.candle.json against the fresh dump. This is a tooling or missing-file failure, NOT a restamp - read the git error above.
-          exit /b 1
-          :audio_restamped
-          echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump. DOWNLOAD the backend-capability-facts-candle artifact from this run and commit its audio/capabilities.candle.json - either box can produce it, the audio registry is candle-native everywhere, but this job already did. Then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
+          :audio_mismatch
+          echo ::error::config/engine-capabilities/audio/capabilities.candle.json differs in capability content from a fresh dump. DOWNLOAD the backend-capability-facts-candle artifact from this run and commit its audio/capabilities.candle.json - either box can produce it, the audio registry is candle-native everywhere, but this job already did. Then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical capability content, which is what the shared file assumes.
           exit /b 1
           :no_runtime_file
           echo ::error::the dumper wrote legacy facts but no runtime/capabilities.candle.json. The rich inference descriptor snapshot required by the backend matrix was not captured.
           exit /b 1
-          :runtime_diff_failed
-          echo ::error::git could not compare the checked-in rich Candle runtime descriptor facts against the fresh dump. This is a tooling or missing-file failure.
-          exit /b 1
-          :runtime_restamped
+          :runtime_mismatch
           echo ::error::config/engine-capabilities/runtime/capabilities.candle.json does not match inference's fresh runtime capability snapshot. Download the backend-capability-facts-candle artifact from this run; never hand-author descriptor facts.
           exit /b 1
       - name: Upload fresh Candle capability facts after a verification failure
@@ -857,3 +1185,181 @@ jobs:
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/runner.json
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/sha256.txt
           if-no-files-found: error
+      # SC-20945 terminal epic evidence. This is deliberately one opt-in profile in this existing
+      # Windows CUDA job: the checked-in controller validates the exact ordered 19-cell semantic
+      # digest and awaits one fresh worker process at a time in isolated per-cell scratch. A
+      # source-reviewed fixed cache root is censused from checked-in immutable download evidence
+      # before transfer: there is no cache input,
+      # snapshot/glob/ref-main fallback, matrix, child workflow, per-cell dispatch, or secret weight
+      # path. Exact archived 19-PASS artifact 9500244306 is revalidated under the capture-time
+      # inference provenance the artifact itself records -- never a second copy of the repository
+      # pin, which no `npm run bump:inference` would ever advance. Its authentic PASS cells 1-14
+      # are imported while only the five OpenPose
+      # cells 15-19 are replaced with same-seed causal-control receipts after their complete source/disk
+      # plan passes and network is forced
+      # offline. Authorities are copied just in time, retained only through their exact last consumer,
+      # rehashed before/after use, and durably cleaned. Exact authority files exclude derivative extras;
+      # component roots carry regular-file sidecar obstructions and Candle writes only to per-authority
+      # namespaces in a campaign-owned derived cache. A target-byte estimator and 40-GiB non-model
+      # reserve enforce the reviewed 106,929,602,242-byte free-space floor at every transition. The four
+      # dismantled pin-keyed gates remain untouched.
+      - name: Set up the pinned terminal Node runtime
+        id: terminal_node
+        continue-on-error: true
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install the pinned terminal Node dependencies
+        id: terminal_npm
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' }}
+        run: npm ci --ignore-scripts
+      - name: Run the targeted cross-platform terminal harness tests
+        id: terminal_tests
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' }}
+        run: |
+          node --test scripts/epic-20738-terminal-cuda-harness.test.mjs scripts/hash-artifact-inventory.test.mjs
+          python -m unittest scripts/provision_epic_20738_terminal_artifact_test.py
+      - name: Validate the frozen epic-20738 terminal dispatch
+        id: terminal_validation
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' }}
+        shell: powershell
+        env:
+          SCENEWORKS_TERMINAL_CACHE_ROOT: 'E:\huggingface\hub'
+          SCENEWORKS_REVISION: ${{ github.sha }}
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+        run: |
+          if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:PROVISION_SNAPSHOT -eq 'true') {
+            throw 'the epic-20738 terminal profile cannot share a dispatch with another measurement flag'
+          }
+          if ($env:SCENEWORKS_REVISION -notmatch '^[0-9a-f]{40}$' -or $env:SCENEWORKS_REVISION -ne $env:GITHUB_SHA) {
+            throw 'the terminal SceneWorks revision must exactly equal this dispatch clean HEAD'
+          }
+          if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'inference_revision must be an exact lowercase 40-hex commit'
+          }
+          $cache = Get-Item -LiteralPath $env:SCENEWORKS_TERMINAL_CACHE_ROOT -Force
+          if (-not $cache.PSIsContainer -or ($cache.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'the fixed terminal cache root must be an existing ordinary directory'
+          }
+          node scripts/epic-20738-terminal-cuda-harness.mjs check
+      - name: Discover the exact audited 19-PASS OpenPose recovery source
+        id: terminal_prefix
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactId = '9500244306'
+          $artifactName = 'sc-20945-epic-20738-7d7a3efa3088204311e3be01330f35702774feb6-32664618999-1'
+          $artifactSize = 17134718
+          $artifactDigest = 'sha256:9af191547befc7833f82f4d9057fff8abfe09b21eada2be2b4f252d73ae30818'
+          $runId = '32664618999'
+          $runAttempt = '1'
+          $headSha = '7d7a3efa3088204311e3be01330f35702774feb6'
+          $root = Join-Path $env:RUNNER_TEMP "sc-20739-openpose-recovery-candidates-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $artifact = gh api "repos/$env:GITHUB_REPOSITORY/actions/artifacts/$artifactId" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.expired -or [string]$artifact.id -ne $artifactId -or $artifact.name -ne $artifactName -or [int64]$artifact.size_in_bytes -ne $artifactSize -or [string]$artifact.digest -ne $artifactDigest -or [string]$artifact.workflow_run.id -ne $runId -or [string]$artifact.workflow_run.head_sha -ne $headSha) { throw 'audited 19-PASS OpenPose recovery artifact identity is missing, expired, or tampered' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$runId" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [string]$run.id -ne $runId -or [string]$run.run_attempt -ne $runAttempt -or [string]$run.head_sha -ne $headSha) { throw 'audited 19-PASS OpenPose recovery workflow run identity drifted' }
+          $candidate = Join-Path $root $artifactId
+          $evidence = Join-Path $candidate 'evidence'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          gh run download $runId --name $artifactName --dir $evidence
+          if ($LASTEXITCODE -ne 0) { throw "failed to download audited 19-PASS OpenPose recovery artifact $artifactId" }
+          # The archived campaign names its own inference revision; the artifact digest asserted
+          # above already pins that value, so read it back out of the evidence instead of carrying
+          # a second copy of the repository pin here.
+          $summary = Get-Content -LiteralPath (Join-Path $evidence 'campaign-summary.json') -Raw | ConvertFrom-Json
+          $inferenceSha = [string]$summary.repositories.inference.sha
+          if ($inferenceSha -notmatch '^[0-9a-f]{40}$') { throw 'archived 19-PASS campaign summary does not record an exact inference revision' }
+          $metadata = [ordered]@{
+            artifactId = $artifactId; artifactName = $artifactName; artifactSize = $artifactSize; artifactDigest = $artifactDigest
+            runId = $runId; runAttempt = $runAttempt; headSha = $headSha
+            inferenceSha = $inferenceSha
+            profile = 'epic-20738-candle-cuda-terminal-v1'
+            cellSemanticsSha256 = '2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1'
+            artifactSemanticsSha256 = '1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255'
+          } | ConvertTo-Json
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText((Join-Path $candidate 'artifact-metadata.json'), $metadata + [Environment]::NewLine, $utf8NoBom)
+          Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_TERMINAL_PREFIX_CANDIDATES=$root"
+      - name: Validate the pinned terminal artifact Python runtime
+        id: terminal_python
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
+        shell: powershell
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP "sc-20974-python-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'Python 3 with venv support is required for terminal artifact staging' }
+          $python = Join-Path $venv 'Scripts\python.exe'
+          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install pinned huggingface_hub 0.36.0 in the isolated terminal venv' }
+          & $python -c "from huggingface_hub import __version__; assert __version__ == '0.36.0', __version__; print('terminal artifact Python ready')"
+          if ($LASTEXITCODE -ne 0) { throw 'isolated terminal Python did not retain exact huggingface_hub 0.36.0' }
+          Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_TERMINAL_PYTHON=$python"
+      - name: Check out the exact terminal inference source
+        id: terminal_inference
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_revision }}
+          path: .terminal/inference
+          persist-credentials: false
+      - name: Run the exact sparse epic-20738 terminal CUDA recovery
+        id: terminal_campaign
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
+        shell: cmd
+        env:
+          SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA: "1"
+          SCENEWORKS_TERMINAL_CACHE_ROOT: 'E:\huggingface\hub'
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          SCENEWORKS_REVISION: ${{ github.sha }}
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          echo .terminal/>>.git\info\exclude
+          node scripts\epic-20738-terminal-cuda-harness.mjs run --profile config\terminal-evidence\epic-20738-cuda.json --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --sceneworks-revision "%SCENEWORKS_REVISION%" --inference-revision "%INFERENCE_REVISION%" --output "%RUNNER_TEMP%\sc-20945-epic-20738-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --scratch "%RUNNER_TEMP%\sc-20945-epic-20738-scratch-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --python "%SCENEWORKS_TERMINAL_PYTHON%" --cache-root "%SCENEWORKS_TERMINAL_CACHE_ROOT%" --prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"
+      - name: Upload every epic-20738 terminal receipt
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-20945-epic-20738-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sc-20945-epic-20738-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+      - name: Enforce the epic-20738 terminal verdict after receipt upload
+        id: terminal_verdict
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        shell: powershell
+        env:
+          NODE_OUTCOME: ${{ steps.terminal_node.outcome }}
+          NPM_OUTCOME: ${{ steps.terminal_npm.outcome }}
+          TESTS_OUTCOME: ${{ steps.terminal_tests.outcome }}
+          VALIDATION_OUTCOME: ${{ steps.terminal_validation.outcome }}
+          PREFIX_OUTCOME: ${{ steps.terminal_prefix.outcome }}
+          PYTHON_OUTCOME: ${{ steps.terminal_python.outcome }}
+          INFERENCE_OUTCOME: ${{ steps.terminal_inference.outcome }}
+          CAMPAIGN_OUTCOME: ${{ steps.terminal_campaign.outcome }}
+        run: |
+          $outcomes = @($env:NODE_OUTCOME, $env:NPM_OUTCOME, $env:TESTS_OUTCOME, $env:VALIDATION_OUTCOME, $env:PREFIX_OUTCOME, $env:PYTHON_OUTCOME, $env:INFERENCE_OUTCOME, $env:CAMPAIGN_OUTCOME)
+          $notSuccessful = @($outcomes | Where-Object { $_ -ne 'success' })
+          if ($notSuccessful.Count -gt 0) {
+            throw "epic-20738 terminal evidence failed after upload: $($outcomes -join ', ')"
+          }

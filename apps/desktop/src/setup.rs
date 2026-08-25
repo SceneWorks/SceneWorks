@@ -612,14 +612,28 @@ fn inject_resolved_cache_env(
 }
 
 fn huggingface_home() -> PathBuf {
+    huggingface_home_selection().0
+}
+
+/// The cache home the sidecars will actually receive at their next spawn, plus whether an ambient
+/// `HF_HOME` in the desktop's own environment is what decides it. When it is, the persisted
+/// Settings override is inert — Settings shows the active path and says so instead of offering a
+/// change that would silently not take effect (`get_storage_setup`).
+pub fn huggingface_home_selection() -> (PathBuf, bool) {
+    let linux_absolute = cfg!(all(unix, not(target_os = "macos")));
     let ambient = std::env::var("HF_HOME").ok();
+    let ambient_wins = ambient
+        .as_deref()
+        .and_then(|value| crate::settings::storage_override_path(value, linux_absolute))
+        .is_some();
     let persisted = crate::settings::load_settings().hf_home;
-    select_huggingface_home(
+    let home = select_huggingface_home(
         ambient.as_deref(),
         persisted.as_deref(),
         shared_huggingface_home(),
-        cfg!(all(unix, not(target_os = "macos"))),
-    )
+        linux_absolute,
+    );
+    (home, ambient_wins)
 }
 
 /// Seed the builtin model/LoRA/recipe-preset catalogs into the desktop's

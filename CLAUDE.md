@@ -11,21 +11,24 @@ here.
   branches, story PR targets, mirrored inference work, final merge ordering, and
   the current ruleset/CI state.
 
-  Read its *Current state* section before acting on any branch protection
-  assumption. As of 2026-08-11 **neither SceneWorks nor inference has a merge
-  queue** — both were removed the same day after the queue was measured catching
-  zero integration failures in 103 groups while adding ~21m per merge. `main` is
-  `strict: false` in both; `feature/*` is `strict: true` in both. Any procedure
-  or memory that mentions staging, activating, or recovering a per-branch queue
-  ruleset is obsolete.
+  Read its *Current repository state* table before acting on any branch
+  protection assumption. **Neither SceneWorks nor inference has a merge queue**
+  (removed 2026-08-11 after catching zero integration failures in 103 groups).
+  `feature/*` and `main` are `strict: false` and merge-commit only in both
+  repos (inference `main` drifted back to `strict: true` twice and was reset on
+  2026-08-23 — do not re-enable it; a strict policy forces a full CI re-run of
+  every open PR after each merge). Any procedure or memory that mentions
+  staging, activating, or recovering a per-branch queue ruleset, a per-story
+  pin bump, a per-story validation matrix, or more than one review + one fix
+  pass per story is obsolete.
 
   Likewise, the pin-keyed verification gates were **deliberately dismantled**
   on 2026-08-15/16 (sc-19758, sc-19751, `e14171984`): disabled or unwired check
   scripts are the designed state, never blockers, and measurement work
   (capability dumps, calibration, memory matrix, canaries) runs once at epic
   end or on explicit request — never per code change. Read the *Gate teardown*
-  note in FEATURE_DEVELOPMENT.md's *Current state* before acting on any
-  regenerate-or-measure instruction found in prose or memory.
+  section of FEATURE_DEVELOPMENT.md before acting on any regenerate-or-measure
+  instruction found in prose or memory.
 
 - **[RELEASING.md](RELEASING.md)** — release, hotfix, inference-pin, publication,
   and failed-candidate recovery.

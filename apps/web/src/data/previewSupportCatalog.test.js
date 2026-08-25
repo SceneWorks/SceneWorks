@@ -452,7 +452,7 @@ describe("preview-support catalog: the audio registry is dumped too", () => {
   });
 
   it.each(audioFactsEntries.map((entry) => [entry.name, entry.facts]))(
-    "audio/%s is a real dump: discriminated, non-vacuous, at the current pin",
+    "audio/%s is a real dump: discriminated, non-vacuous, with valid provenance",
     (name, facts) => {
       expect(`capabilities.${facts.backend}.json`).toBe(name);
       // The discriminator is what stops a file in the wrong directory being read as the other kind:
@@ -464,7 +464,10 @@ describe("preview-support catalog: the audio registry is dumped too", () => {
       // count, so a dump in single digits is truncated rather than merely small.
       expect(facts.engines.length).toBeGreaterThan(10);
       expect(facts.engines.every((engine) => engine.modality === "audio")).toBe(true);
-      expect(facts.generatedFrom.inferenceRevision).toBe(inferencePin);
+      // Native facts are content-checked by the backend workflow. Their revision label records
+      // when the lane last dumped them; a merge-only inference repin must not invalidate identical
+      // content or force another platform campaign.
+      expect(facts.generatedFrom.inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
     },
   );
 

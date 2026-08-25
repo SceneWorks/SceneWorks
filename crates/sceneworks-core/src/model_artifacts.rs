@@ -725,6 +725,18 @@ impl ModelArtifactResolver {
         artifact: &Arc<ResolvedModelArtifact>,
     ) -> Result<ActiveArtifactLease, ArtifactContractError> {
         artifact.validate()?;
+        self.acquire_runtime_lease_prevalidated(artifact)
+    }
+
+    /// [`Self::acquire_runtime_lease`] minus the full-content `validate()`, for the ONE caller
+    /// that has just proven the artifact itself: `ResolvedCacheStore::acquire_complete` validates
+    /// at full strength under the entry's artifact+metadata locks immediately before leasing, in
+    /// the same call — so a second full hash here re-read the whole bundle without closing any
+    /// window (sc-21534). Every other caller must use [`Self::acquire_runtime_lease`].
+    pub(crate) fn acquire_runtime_lease_prevalidated(
+        &self,
+        artifact: &Arc<ResolvedModelArtifact>,
+    ) -> Result<ActiveArtifactLease, ArtifactContractError> {
         let cache_key = artifact.cache_key()?;
         self.lease_registry.acquire(&cache_key);
         Ok(ActiveArtifactLease {

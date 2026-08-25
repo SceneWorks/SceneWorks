@@ -619,23 +619,164 @@ fn write_download_receipt(data_dir: &Path, repo: &str, file: &str) {
     .unwrap();
 }
 
-/// Nothing installed means nothing to relocate. Binding whatever Hugging-Face-shaped directory the
-/// operator happened to pick would be a guess, and it would silently become the identity every
-/// later install is judged against.
+/// Nothing installed means nothing can be orphaned and nothing to check a candidate against: an
+/// EMPTY directory (no `models--*` layout at all) binds as a fresh cache home, and the recorded
+/// identity is then what every later install is judged against — the Settings "change model
+/// library" path for a user who has not downloaded anything yet.
 #[test]
-fn relocation_refuses_outright_when_there_is_no_install_evidence() {
+fn relocation_binds_a_plain_directory_when_there_is_no_install_evidence() {
     let temp = TempDir::new().unwrap();
     let data = temp.path().join("data");
-    let candidate = temp.path().join("someones-cache").join("hub");
+    let candidate = temp.path().join("fresh-cache").join("hub");
     std::fs::create_dir_all(&candidate).unwrap();
-    seed_snapshot(&candidate, "someone/unrelated", "model.safetensors");
 
     let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    assert!(!store.has_install_evidence().unwrap());
+    store.validate_relocation(&candidate).unwrap();
+    let binding = store.relocate_binding(&candidate).unwrap();
+    assert_eq!(binding.canonical_path, candidate.canonicalize().unwrap());
+    assert_eq!(store.load().unwrap(), Some(binding.clone()));
     assert_eq!(
-        store.relocate_binding(&candidate).unwrap_err(),
-        LibraryRelocationError::Rejected(LibraryRelocationRejection::NoInstalledModels)
+        probe_binding(&candidate, &binding).status,
+        ExternalLibraryProbeStatus::Available
     );
-    assert!(store.load().unwrap().is_none());
+    // A later install at that root is judged against the binding just written, not a fresh one.
+    seed_snapshot(&candidate, "owner/model", "model.safetensors");
+    let (bound, probe) = store
+        .bind_or_probe_validated(
+            &candidate,
+            &[requirement("owner/model", "model.safetensors")],
+        )
+        .unwrap();
+    assert_eq!(bound.physical_identity, binding.physical_identity);
+    assert_eq!(probe.status, ExternalLibraryProbeStatus::Available);
+    assert!(store.has_install_evidence().unwrap());
+}
+
+/// The sc-21389 field failure: the per-tier delete reclaims a quant tier's bytes but never rewrites
+/// the download receipt (or prunes the ledger), so a real library legitimately lacks WHOLE variants
+/// its evidence records. Relocation must read that as drift — the repo proves itself through its
+/// other, fully present tier — not as a wrong folder.
+#[test]
+fn relocation_tolerates_a_receipted_tier_the_app_deleted() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("moved").join("hub");
+    // The library carries the bf16 tier; the q4 tier was reclaimed (its files simply do not
+    // exist), yet BOTH tiers are still receipted. (`seed_snapshot` writes flat files; a quant
+    // tier is a subdirectory, so lay it out directly.)
+    let seeded = library
+        .join(format!(
+            "models--{}",
+            safe_repo_dir_name("owner/model").unwrap()
+        ))
+        .join("snapshots")
+        .join(REVISION);
+    std::fs::create_dir_all(seeded.join("bf16")).unwrap();
+    std::fs::write(seeded.join("bf16/model.safetensors"), b"weights").unwrap();
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let q4 = ExternalArtifactRequirement {
+        variant: "q4".to_owned(),
+        files: vec![
+            PathBuf::from("q4/model.safetensors"),
+            PathBuf::from("q4/README.md"),
+        ],
+        ..requirement("owner/model", "bf16/model.safetensors")
+    };
+    store
+        .bind_or_probe_validated(
+            &library,
+            &[requirement("owner/model", "bf16/model.safetensors")],
+        )
+        .unwrap();
+    let mut with_stale_q4 = temp.path().join("data").join("models");
+    with_stale_q4.push(".sceneworks-external-library-closures.json");
+    // Append the stale q4 closure the way history did: it was validated once, then the tier was
+    // deleted from disk. Writing it through the file keeps the store's own append path honest.
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&with_stale_q4).unwrap()).unwrap();
+    ledger["closures"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(vec![q4.clone()]).unwrap());
+    std::fs::write(&with_stale_q4, serde_json::to_vec(&ledger).unwrap()).unwrap();
+
+    // The deleted tier alone must not refuse the true library…
+    store.validate_relocation(&library).unwrap();
+    store.relocate_binding(&library).unwrap();
+
+    // …but a TORN tier still does, even with the healthy sibling present: tier reclaim never
+    // leaves partial files, so partial content stays the wrong-folder signal.
+    let snapshot = library
+        .join("models--owner--model")
+        .join("snapshots")
+        .join(REVISION);
+    std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+    std::fs::write(snapshot.join("q4/README.md"), b"docs").unwrap();
+    let error = store.validate_relocation(&library).unwrap_err();
+    assert_eq!(
+        error,
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::MissingInstalledModels {
+            repositories: vec!["owner/model".to_owned()],
+        })
+    );
+}
+
+/// A repository whose EVERY evidence requirement is absent is still the wrong-folder signal:
+/// deleted-tier tolerance needs the repo to prove itself through some fully present variant.
+#[test]
+fn relocation_still_refuses_a_repository_that_is_entirely_absent() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("original").join("hub");
+    seed_snapshot(&library, "owner/model", "model.safetensors");
+    seed_snapshot(&library, "owner/other", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    store
+        .bind_or_probe_validated(&library, &[requirement("owner/model", "model.safetensors")])
+        .unwrap();
+    store
+        .bind_or_probe_validated(&library, &[requirement("owner/other", "model.safetensors")])
+        .unwrap();
+
+    // A candidate carrying only ONE of the two recorded models: the other repo is wholly absent,
+    // with no present sibling variant to explain it as tier reclaim.
+    let decoy = temp.path().join("decoy").join("hub");
+    seed_snapshot(&decoy, "owner/model", "model.safetensors");
+    let error = store.validate_relocation(&decoy).unwrap_err();
+    assert_eq!(
+        error,
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::MissingInstalledModels {
+            repositories: vec!["owner/other".to_owned()],
+        })
+    );
+}
+
+/// The fresh-home shape: a plain folder is the cache home (its `hub` child is the library root);
+/// a folder named `hub` is the library root (its parent the home). No layout is required.
+#[test]
+fn resolve_fresh_cache_home_pairs_home_and_hub_without_a_layout() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("fresh");
+    std::fs::create_dir_all(home.join("hub")).unwrap();
+    assert_eq!(
+        resolve_fresh_cache_home(&home).unwrap(),
+        RelocationTarget {
+            library_root: home.join("hub"),
+            hf_home: home.clone(),
+        }
+    );
+    assert_eq!(
+        resolve_fresh_cache_home(&home.join("hub")).unwrap(),
+        RelocationTarget {
+            library_root: home.join("hub"),
+            hf_home: home.clone(),
+        }
+    );
+    assert_eq!(
+        resolve_fresh_cache_home(&temp.path().join("absent")).unwrap_err(),
+        LibraryRelocationRejection::NotADirectory
+    );
 }
 
 /// THE fail-open this exists to prevent. Evidence can be RECEIPTS ONLY — an install that predates

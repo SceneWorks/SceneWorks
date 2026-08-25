@@ -4,7 +4,8 @@ use super::prelude::*;
 use super::{
     ltx::{
         resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
-        resolve_video_clip_conditioning,
+        resolve_video_clip_conditioning, LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
     },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
@@ -60,8 +61,6 @@ pub(super) const CANDLE_WAN_5B_REPO: &str = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
 const CANDLE_WAN_T2V_14B_REPO: &str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_LTX_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_GEMMA_REPO: &str = "google/gemma-3-12b-it";
 
@@ -134,7 +133,7 @@ pub(super) fn candle_video_adapter_label(engine_id: &str) -> &'static str {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
     match engine_id {
-        "ltx_2_3_distilled" => CANDLE_LTX_REPO,
+        "ltx_2_3_distilled" => LTX_BUNDLE_REPO,
         "svd_xt" => SVD_REPO,
         "wan2_2_t2v_14b" => CANDLE_WAN_T2V_14B_REPO,
         "wan2_2_i2v_14b" => CANDLE_WAN_I2V_14B_REPO,
@@ -278,23 +277,116 @@ fn candle_wan_tier_key(quant: Option<Quant>) -> &'static str {
     }
 }
 
-/// Resolve the base LTX packed-q4 turnkey tier shared by generation and training. The checkpoint is
-/// already packed, so the returned load quant is deliberately `None`: `LoadSpec::quantize` means
-/// on-the-fly quantization to the Candle LTX provider and must never be set for this tier. Eros has no
-/// Candle route after SC-18902 acceptance, and the SceneWorks model-id guard prevents its dense
-/// standalone checkpoint from being mistaken for this base-LTX turnkey tier.
+/// Whether a Candle LTX tier is complete enough for the packed provider. The Candle engine reads the
+/// packed transformer and its quant marker directly, so a partial on-demand `q8/` download must never
+/// win over a complete tier or be treated as a dense root checkpoint.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_tier_complete(dir: &Path) -> bool {
+    dir.join("transformer.safetensors").is_file() && dir.join("quantize_config.json").is_file()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleLtxTier {
+    Q4,
+    Q8,
+}
+
+/// Parse the Candle LTX tier without conflating an absent override with a present malformed one.
+/// Only an absent value gets the q4 default; every explicit value must parse exactly to 4 or 8.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
+    let Some(value) = request.advanced.get("mlxQuantize") else {
+        return Some(CandleLtxTier::Q4);
+    };
+    let bits = value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    match bits {
+        4 => Some(CandleLtxTier::Q4),
+        8 => Some(CandleLtxTier::Q8),
+        _ => None,
+    }
+}
+
+/// Find an exact packed tier in only the current immutable bundle revision or its approved parent.
+/// The selected root is used only to locate the cache's `snapshots/` directory: it is never itself
+/// admitted, because `huggingface_snapshot_dir` may select a mutable `refs/main` target or an
+/// arbitrary complete sibling by file count.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> Option<PathBuf> {
+    let tier = match tier {
+        CandleLtxTier::Q4 => "q4",
+        CandleLtxTier::Q8 => "q8",
+    };
+    let roots = root
+        .parent()
+        .filter(|parent| parent.file_name().and_then(|name| name.to_str()) == Some("snapshots"))
+        .map(|snapshots| {
+            [
+                snapshots.join(LTX_BUNDLE_REVISION),
+                snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION),
+            ]
+        });
+    let resolve = |candidate: PathBuf| {
+        let dir = candidate.join(tier);
+        candle_ltx_tier_complete(&dir).then_some(dir)
+    };
+    roots.into_iter().flatten().find_map(resolve)
+}
+
+/// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
+/// the returned load quant is deliberately `None`: `LoadSpec::quantize` means on-the-fly
+/// quantization to the Candle LTX provider and must never be set for these tiers. Base LTX supports
+/// only the published q4/q8 Candle tiers; an explicit bf16 or other value returns `None` so callers
+/// fail closed rather than silently loading q4. Eros has no Candle route after SC-18902 acceptance.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,
     engine_id: &str,
     model: &str,
+    request: &VideoRequest,
 ) -> Option<(PathBuf, Option<Quant>)> {
     if engine_id != "ltx_2_3_distilled" || model != "ltx_2_3" {
         return None;
     }
-    let q4 = root.join("q4");
-    (q4.join("transformer.safetensors").is_file() && q4.join("quantize_config.json").is_file())
-        .then_some((q4, None))
+    let tier = candle_ltx_requested_tier(request)?;
+    // Keep the Candle resolver aligned with the immutable bundle compatibility policy: an existing
+    // q4 install may still live at the proven parent while an on-demand q8 fetch lands at the
+    // current revision. Do not scan arbitrary cache siblings, which would let an unpinned checkpoint
+    // satisfy an explicit tier request.
+    candle_ltx_bundle_tier_across_revisions(root, tier).map(|dir| (dir, None))
+}
+
+/// Fetch the base LTX packed `q8/` tier on demand for the off-Mac Candle provider. A q8 request
+/// must resolve q8 after this completes; it may never silently downgrade to the default q4 tier.
+/// The bundle is intentionally fixed to the same immutable revision as the MLX resolver.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) async fn ensure_candle_ltx_q8_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model != "ltx_2_3" || candle_ltx_requested_tier(request) != Some(CandleLtxTier::Q8) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
+        return Ok(());
+    };
+    if candle_ltx_bundle_tier_across_revisions(&root, CandleLtxTier::Q8).is_some() {
+        return Ok(());
+    }
+    crate::model_jobs::ensure_hf_files_cached(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
+        &["q8/*".to_owned()],
+    )
+    .await
+    .map(|_| ())
 }
 
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
@@ -358,7 +450,7 @@ pub(super) fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
         .or_else(|| {
             complete_ltx_bundle_gemma_dir(huggingface_snapshot_dir(
                 &settings.data_dir,
-                CANDLE_LTX_REPO,
+                LTX_BUNDLE_REPO,
             ))
         })
         .or_else(|| huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO))
@@ -903,18 +995,22 @@ pub(crate) async fn candle_video_vram_budget(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) struct Scail2ColdLoadPlan {
     pub(super) model_dir: PathBuf,
+    /// The packed provider contract is part of the cache/load identity. Q4/Q8 are not a request
+    /// hint: they are the exact hosted payload selected by the resolver below.
+    pub(super) quant: Option<Quant>,
     pub(super) admission: crate::generator_cache::GeneratorColdLoadAdmission,
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn scail2_cold_load_plan(
     manifest_entry: &JsonObject,
-    model_dir: PathBuf,
+    resolved: ResolvedCandleScail2Model,
     adapter_bytes: u64,
     gpu_id: &str,
 ) -> Scail2ColdLoadPlan {
     let manifest_entry = manifest_entry.clone();
     let gpu_id = gpu_id.to_owned();
+    let tier_key = resolved.tier.key();
     let admission = crate::generator_cache::GeneratorColdLoadAdmission::new(move || {
         // This executes on the dedicated cache OS thread, after a different resident has been
         // dropped. The helper owns a private bounded runtime, so it cannot deadlock the async worker
@@ -925,6 +1021,7 @@ pub(super) fn scail2_cold_load_plan(
         );
         match crate::vram_gate::scail2_video_fit_error_with_adapter_bytes(
             &manifest_entry,
+            tier_key,
             adapter_bytes,
             &gpu_id,
             budget,
@@ -934,7 +1031,8 @@ pub(super) fn scail2_cold_load_plan(
         }
     });
     Scail2ColdLoadPlan {
-        model_dir,
+        model_dir: resolved.model_dir,
+        quant: resolved.tier.quant(),
         admission,
     }
 }
@@ -1034,6 +1132,12 @@ pub(super) async fn generate_candle_video_using(
         ensure_mochi_q8_present(api, settings, job, request).await?;
         ensure_mochi_bf16_present(api, settings, job, request).await?;
     }
+    // The base LTX turnkey defaults to q4, but an admitted explicit q8 request must first fetch
+    // the published q8 subdir. Keep this ahead of snapshot resolution so the resolver can prove it
+    // selected q8 rather than quietly reusing q4.
+    if engine_id == "ltx_2_3_distilled" {
+        ensure_candle_ltx_q8_present(api, settings, job, request).await?;
+    }
     // sc-14492: gate SVD before even resolving its already-installed snapshot. A full/default
     // 25-frame burst OOMed twice on real 32 GB hardware, while the reduced 8-frame / chunk-1 / 12-step
     // recipe completed. The returned recipe fields are the only ones the SVD generation arm can
@@ -1066,6 +1170,14 @@ pub(super) async fn generate_candle_video_using(
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
     let is_ltx = engine_id == "ltx_2_3_distilled";
+    let ltx_tier = candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model, request);
+    if is_ltx && ltx_tier.is_none() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} requires a complete Candle LTX q4 or q8 packed tier matching advanced.mlxQuantize \
+             from an approved immutable bundle revision; repair this model in Model Manager",
+            request.model
+        )));
+    }
     let (mut model_dir, wan_quant) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
@@ -1080,9 +1192,7 @@ pub(super) async fn generate_candle_video_using(
             candle_video_vram_budget(settings).await,
         )?;
         (snapshot_dir, quant)
-    } else if let Some((dir, quant)) =
-        candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model)
-    {
+    } else if let Some((dir, quant)) = ltx_tier {
         (dir, quant)
     } else {
         let (dir, quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
@@ -1321,6 +1431,10 @@ const WAN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["q8", "q4", "bf16"];
 /// reference-conditioning lane, so this slice serves only T2V experts.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const WAN_T2V_IN_CHANNELS: u64 = 16;
+/// The image-to-video expert's `patch_embedding.weight` in-channels — named so the plan route's
+/// T2V-only refusal can say what the checkpoint it declined actually is (sc-20644 review blocker 3).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_I2V_IN_CHANNELS: u64 = 36;
 
 /// The two in-place ComfyUI expert files + the resident snapshot tier, plus the optional in-place UMT5
 /// TE / VAE files (sc-10909). The snapshot tier always supplies the tokenizer (and the TE/VAE when their
@@ -1443,6 +1557,14 @@ fn resolve_wan_comfyui_paths(
     if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
         return Ok(None);
     }
+    // A plan-backed entry's bytes come from its compiled plan's own verified expert layers, never
+    // from a live `external_base_*` catalog scan — the only source a LINKED Wan tree has, and the
+    // only one the inspector hashed and the store re-checked (sc-20644 Wan row). Reached before the
+    // `usable` / `components[]` gates below, which are properties of a SCANNED catalog row that a
+    // linked checkpoint does not have and never will.
+    if let Some(paths) = resolve_plan_backed_wan_comfyui_paths(request, settings)? {
+        return Ok(Some(paths));
+    }
     if entry.get("usable").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
     }
@@ -1461,20 +1583,7 @@ fn resolve_wan_comfyui_paths(
     else {
         return Ok(None);
     };
-    let Some(snapshot_root) =
-        huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)
-    else {
-        return Ok(None);
-    };
-    let Some(snapshot_dir) = WAN_COMFYUI_SNAPSHOT_TIERS
-        .iter()
-        .map(|tier| snapshot_root.join(tier))
-        .find(|dir| {
-            dir.join("text_encoder").is_dir()
-                && dir.join("vae").is_dir()
-                && dir.join("tokenizer").join("tokenizer.json").is_file()
-        })
-    else {
+    let Some(snapshot_dir) = wan_comfyui_snapshot_dir(settings) else {
         return Ok(None);
     };
     let high = crate::paths::normalize_app_managed_model_path(
@@ -1512,14 +1621,189 @@ fn resolve_wan_comfyui_paths(
     }))
 }
 
+/// The PLAN-sourced counterpart of [`resolve_wan_comfyui_paths`] (epic 20398, sc-20644).
+///
+/// Wan is the family that needed the checkpoint plan to grow a vocabulary. Its ComfyUI checkpoint has
+/// TWO backbones — a high-noise and a low-noise expert, selected per denoise step and not
+/// interchangeable — so it has no single primary to derive, and until the inspector could tell the
+/// two apart a compiled Wan plan said only "two transformer layers" and was unusable. It now
+/// compiles to the named `transformer_high` / `transformer_low` roles this resolves by name.
+///
+/// The in-place UMT5 encoder and Wan VAE stay OPTIONAL, exactly as they are on the catalog path
+/// (sc-10909): a tree that carries them uses them, a tree that does not falls back to the resident
+/// snapshot tier's own. Anything the plan carries that is in NEITHER list refuses rather than going
+/// unloaded.
+///
+/// The T2V-only channel gate is applied here too, against the plan's own verified high expert, so a
+/// plan-backed I2V pair declines for the same reason a scanned one does rather than failing with a
+/// shape error at generate.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_plan_backed_wan_comfyui_paths(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiWanPaths>> {
+    let Some(plan) = crate::image_jobs::checkpoint_plan_bespoke_roles(
+        &request.model_manifest_entry,
+        settings,
+        "wan-video",
+        &[
+            sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+            sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE,
+        ],
+        &["text_encoder", "vae"],
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot_dir) = wan_comfyui_snapshot_dir(settings) else {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] a compiled Wan checkpoint needs the UMT5 encoder, \
+             VAE and tokenizer from a resident {WAN_COMFYUI_SNAPSHOT_REPO} tier, which a ComfyUI \
+             expert pair does not ship — install Wan 2.2 T2V from the Model Manager, then run this \
+             checkpoint again"
+        )));
+    };
+    let high = plan
+        .required(sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE)
+        .loader_path()
+        .to_path_buf();
+    // T2V only. The CATALOG path answers `Ok(None)` here, which is right for a scanned row: some
+    // other lane may want it, and if none does the model was simply never claimed. A PLAN-BACKED
+    // entry is different — it has already been claimed, and the catalog gates below can never
+    // admit a linked checkpoint, so declining sends it to `CandleVideoRoute::Stub` and the job
+    // COMPLETES with procedural video. Refuse by name instead (review blocker 3).
+    let channels = wan_expert_in_channels(&high);
+    if channels != Some(WAN_T2V_IN_CHANNELS) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:unsupported-operation] this compiled Wan checkpoint's high-noise \
+             expert declares {} input channels; the candle ComfyUI Wan lane serves \
+             text-to-video only, which is the {WAN_T2V_IN_CHANNELS}-channel expert pair. An \
+             image-to-video ({WAN_I2V_IN_CHANNELS}-channel) pair would load into the wrong \
+             configuration.",
+            channels.map_or_else(|| "an unreadable number of".to_owned(), |c| c.to_string())
+        )));
+    }
+    Ok(Some(ComfyuiWanPaths {
+        low: plan
+            .required(sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE)
+            .loader_path()
+            .to_path_buf(),
+        te: plan
+            .optional("text_encoder")
+            .map(|pin| pin.loader_path().to_path_buf()),
+        vae: plan
+            .optional("vae")
+            .map(|pin| pin.loader_path().to_path_buf()),
+        high,
+        snapshot_dir,
+    }))
+}
+
+/// The first fully-present `SceneWorks/wan2.2-t2v-a14b-candle` tier, or `None`. One probe, both
+/// routes — the catalog scan answers `Ok(None)` ("not this lane's"), the plan route answers with a
+/// typed refusal, because a plan-backed checkpoint has already been claimed.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_comfyui_snapshot_dir(settings: &Settings) -> Option<PathBuf> {
+    let root = huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)?;
+    WAN_COMFYUI_SNAPSHOT_TIERS
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| {
+            dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+                && dir.join("tokenizer").join("tokenizer.json").is_file()
+        })
+}
+
 /// True when this is a candle-runnable in-place ComfyUI Wan2.2 T2V job: an `external_base_*` model whose
 /// forwarded row is a usable wan-video with both expert components + a resident snapshot. Mirrors the
 /// image comfyui availability predicates.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn wan_comfyui_available(request: &VideoRequest, settings: &Settings) -> bool {
-    request.model.starts_with("external_base_")
-        && matches!(resolve_wan_comfyui_paths(request, settings), Ok(Some(_)))
+/// Whether the ComfyUI Wan lane claims this request, PROPAGATING any refusal it raises.
+///
+/// The `?` is the whole point (sc-20644 review blocker 2). The terminal arm of the candle video
+/// ladder is `CandleVideoRoute::Stub`, which COMPLETES a job with procedural video — so a lane that
+/// answers a bare `bool` converts every refusal it had to give into "not mine", and a drifted plan,
+/// a missing snapshot tier, a missing or ambiguous expert role or an unconsumed layer all end as a
+/// SUCCESSFUL stub render. Each of those must reach the job as a typed error instead.
+///
+/// A PLAN-BACKED entry is claimable without an `external_base_` id: that prefix names a row the
+/// catalog assembled by scanning, and a linked checkpoint has no such row and never will. Gating
+/// the claim on it would have left every imported Wan checkpoint with no lane at all — which is the
+/// whole capability this row restores.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn wan_comfyui_claims(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<bool> {
+    let plan_backed =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+            .is_some();
+    if !plan_backed && !request.model.starts_with("external_base_") {
+        return Ok(false);
+    }
+    Ok(resolve_wan_comfyui_paths(request, settings)?.is_some())
 }
+
+/// The candle video verdict for a PLAN-BACKED entry (`importPlan.checkpointId`, epic 20398):
+/// `Ok(())` when this ComfyUI Wan T2V lane claims it, otherwise a typed refusal naming the
+/// checkpoint. Never "not mine" — a plan-backed entry that falls through the router lands on
+/// `CandleVideoRoute::Stub` and the job COMPLETES with procedural video (sc-20651).
+///
+/// `resolve_candle_video_route` consults this AHEAD of the backend gate and every mode arm, because
+/// each of those is wrong for a plan-backed entry in its own way:
+/// * all three `Stub` arms render procedural video — the video twin of the `generate_stub_stream`
+///   hole `CheckpointPlanSelection::into_unclaimed_refusal` closed on the image side, and the
+///   `!backend_candle_enabled` early-out reaches one before any plan check could run;
+/// * the `replace_person` / `extend_clip` / `video_bridge` arms are evaluated BEFORE
+///   [`wan_comfyui_claims`], so an imported checkpoint on those modes would be routed into a builtin
+///   Wan-VACE / SCAIL-2 lane that loads SceneWorks' own weights and never reads the plan's bytes.
+///
+/// The family/mode window mirrors `plan_backed_wan_video_candle_eligible` in core routing, which
+/// keeps the enqueue gate from admitting a shape this refuses. Both must move together.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn plan_backed_wan_video_route(
+    request: &VideoRequest,
+    settings: &Settings,
+    checkpoint_id: &str,
+) -> WorkerResult<()> {
+    let refuse = |reason: String| -> WorkerResult<()> {
+        Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:no-video-lane] checkpoint {checkpoint_id:?}: {reason}, and a \
+             plan-backed entry never renders procedural stub output"
+        )))
+    };
+    if !settings.backend_candle_enabled {
+        return refuse("the candle backend is disabled on this worker".to_owned());
+    }
+    let family = request
+        .model_manifest_entry
+        .get("family")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if family != "wan-video" {
+        return refuse(format!(
+            "no candle video lane loads a checkpoint plan for the {family:?} family"
+        ));
+    }
+    if request.mode != "text_to_video" {
+        return refuse(format!(
+            "the plan-backed Wan lane serves text_to_video only, not {:?}",
+            request.mode
+        ));
+    }
+    if !wan_comfyui_claims(request, settings)? {
+        return refuse(
+            "the plan-backed Wan lane could not resolve this checkpoint's expert layers".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+// There is deliberately NO boolean `wan_comfyui_available` probe any more. It existed only to be
+// called from the router, and answering `bool` is precisely how every refusal this lane raises
+// became a successful procedural-stub render (sc-20644 review blocker 2). Anything that needs the
+// claim asks [`wan_comfyui_claims`] and handles the refusal.
 
 /// Real candle in-place ComfyUI Wan2.2 T2V generation: resolve + confine the two expert paths and the
 /// snapshot tier, then drive the shared [`generate_video`] funnel with `input.comfyui` set (the bespoke
@@ -1591,61 +1875,226 @@ pub(super) async fn generate_candle_wan_comfyui(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_SCAIL2_ADAPTER: &str = "candle_scail2";
 
-/// Resolve candle SCAIL-2 weights from an explicit override, the exact Model Manager-installed
-/// `SceneWorks/scail2-mlx` bf16 tier, or the legacy app-managed candle component tree. Both native
-/// engines consume the same six bf16 files; q4/q8 stay MLX-only because their DiT tensors use MLX
-/// packing. Every candidate is classified by the pinned provider's own fail-closed layout predicate.
-/// When none is complete, a missing checkpoint surfaces a clear repair error
-/// instead of degrading to a stub (a character animation / replacement must never silently produce
-/// meaningless output). The provider's `load` then validates each subdir and reports the precise gap.
+/// Exact Candle SCAIL-2 package tiers. Q4/Q8 are packed inference payloads, not aliases for a
+/// load-time conversion. Keep this type next to the directory resolver so the cache key, `LoadSpec`,
+/// cold-load accounting, and asset telemetry all originate from one resolved decision.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_candle_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
-    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_SCAIL2_DIR") {
-        let path = PathBuf::from(dir.trim());
-        if !dir.trim().is_empty() {
-            runtime_cuda::providers::scail2::snapshot_layout(&path).map_err(|error| {
-                WorkerError::InvalidPayload(format!(
-                    "scail2 (candle): $SCENEWORKS_CANDLE_SCAIL2_DIR points to an incomplete snapshot at {}: {error}",
-                    path.display()
-                ))
-            })?;
-            return Ok(path);
-        }
-    }
-
-    resolve_managed_candle_scail2_model_dir(settings)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Scail2CandleTier {
+    Bf16,
+    Q4,
+    Q8,
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn resolve_managed_candle_scail2_model_dir(
+impl Scail2CandleTier {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Self::Bf16 => "bf16",
+            Self::Q4 => "q4",
+            Self::Q8 => "q8",
+        }
+    }
+
+    fn quant(self) -> Option<Quant> {
+        match self {
+            Self::Bf16 => None,
+            Self::Q4 => Some(Quant::Q4),
+            Self::Q8 => Some(Quant::Q8),
+        }
+    }
+}
+
+/// One source of truth for the selected complete payload. `tier` must survive through the cold-load
+/// admission and into `VideoGenInput.quant`; returning a bare path here was how an installed q8
+/// payload could previously be accounted as dense.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug)]
+pub(super) struct ResolvedCandleScail2Model {
+    pub(super) model_dir: PathBuf,
+    pub(super) tier: Scail2CandleTier,
+}
+
+/// Resolve the request's exact SCAIL-2 package tier. We deliberately do not mirror the historical
+/// MLX `<=4 => q4, >=8 => q8` convenience mapping: q6, an unparseable value, and a fractional value
+/// name no published Candle artifact and must fail before any directory search can substitute one.
+/// Omission retains the prior dense bf16 Candle baseline; q4/q8 require an explicit selection.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_scail2_tier(
+    request: &VideoRequest,
+    has_adapters: bool,
+) -> WorkerResult<Scail2CandleTier> {
+    let value = request.advanced.get("mlxQuantize");
+    let tier = match value {
+        // Keep the established dense Candle baseline when the payload names no tier. Q4/Q8 are
+        // explicit exact artifact selections, so a stale/default caller can never be promoted to
+        // packed weights merely because they happen to be installed.
+        None | Some(Value::Null) => Scail2CandleTier::Bf16,
+        Some(value) => {
+            let bits = value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
+                            .to_owned(),
+                    )
+                })?;
+            match bits {
+                ..=0 => Scail2CandleTier::Bf16,
+                4 => Scail2CandleTier::Q4,
+                8 => Scail2CandleTier::Q8,
+                _ => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "scail2 (candle): advanced.mlxQuantize={bits} has no exact hosted tier; choose q4 (4), q8 (8), or bf16 (<= 0)."
+                    )));
+                }
+            }
+        }
+    };
+    if has_adapters && tier != Scail2CandleTier::Bf16 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "scail2 (candle): packed {} cannot merge adapters; select the bf16 tier (advanced.mlxQuantize <= 0).",
+            tier.key()
+        )));
+    }
+    Ok(tier)
+}
+
+/// Require both the pinned provider's complete six-file predicate and the package's explicit
+/// quantization marker. The provider remains the authority for the safetensors shape/projection
+/// contract; the marker prevents a complete q4 directory from being passed off as q8 (or dense).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn validate_candle_scail2_tier_dir(
+    path: &Path,
+    tier: Scail2CandleTier,
+) -> WorkerResult<()> {
+    runtime_cuda::providers::scail2::snapshot_layout(path).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "scail2 (candle): {} is not a complete {} hosted package: {error}",
+            path.display(),
+            tier.key(),
+        ))
+    })?;
+    let config_path = path.join("config.json");
+    let config: Value = serde_json::from_slice(&std::fs::read(&config_path).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "scail2 (candle): cannot read {} package marker at {}: {error}",
+            tier.key(),
+            config_path.display(),
+        ))
+    })?)
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "scail2 (candle): {} package marker at {} is malformed: {error}",
+            tier.key(),
+            config_path.display(),
+        ))
+    })?;
+    let marker = config.get("quantization");
+    let marker_matches = match tier {
+        Scail2CandleTier::Bf16 => marker.is_none() || marker.is_some_and(Value::is_null),
+        Scail2CandleTier::Q4 | Scail2CandleTier::Q8 => marker
+            .and_then(Value::as_object)
+            .is_some_and(|quantization| {
+                quantization.get("bits").and_then(Value::as_i64)
+                    == Some(if tier == Scail2CandleTier::Q4 { 4 } else { 8 })
+                    && quantization.get("group_size").and_then(Value::as_i64) == Some(64)
+            }),
+    };
+    if marker_matches {
+        return Ok(());
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "scail2 (candle): {} does not carry the required {} package marker (q4/q8 require quantization.bits and group_size=64; bf16 must be dense).",
+        path.display(),
+        tier.key(),
+    )))
+}
+
+/// The pre-Model-Manager hand-built tree has no tier marker because it predates the hosted matrix.
+/// It remains a dense-only compatibility path; never use it to satisfy a q4/q8 request.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn validate_candle_scail2_legacy_bf16_dir(path: &Path) -> WorkerResult<()> {
+    runtime_cuda::providers::scail2::snapshot_layout(path)
+        .map(|_| ())
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "scail2 (candle): legacy bf16 snapshot at {} is incomplete: {error}",
+                path.display(),
+            ))
+        })
+}
+
+/// Resolve Candle SCAIL-2 weights from an explicit override, then the exact Model Manager tier, or
+/// (dense bf16 only) the old manually assembled component tree. There is intentionally no q8→q4,
+/// packed→dense, or legacy-packed fallback: a requested tier must be completely installed and carry
+/// its matching marker before the worker can use it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_scail2_model(
     settings: &Settings,
-) -> WorkerResult<PathBuf> {
+    request: &VideoRequest,
+    adapters: &[AdapterSpec],
+) -> WorkerResult<ResolvedCandleScail2Model> {
+    let tier = resolve_candle_scail2_tier(request, !adapters.is_empty())?;
+    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_SCAIL2_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if !dir.trim().is_empty() {
+            validate_candle_scail2_tier_dir(&path, tier).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "scail2 (candle): $SCENEWORKS_CANDLE_SCAIL2_DIR cannot satisfy the requested {} tier: {error}",
+                    tier.key(),
+                ))
+            })?;
+            return Ok(ResolvedCandleScail2Model {
+                model_dir: path,
+                tier,
+            });
+        }
+    }
+    resolve_managed_candle_scail2_model(settings, tier)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_managed_candle_scail2_model(
+    settings: &Settings,
+    tier: Scail2CandleTier,
+) -> WorkerResult<ResolvedCandleScail2Model> {
     if let Some(snapshot) = crate::model_jobs::huggingface_pinned_snapshot_dir(
         &settings.data_dir,
         SCAIL2_REPO,
         SCAIL2_REVISION,
     ) {
-        let bf16 = snapshot.join("bf16");
-        if runtime_cuda::providers::scail2::snapshot_layout(&bf16).is_ok() {
-            return Ok(bf16);
+        let selected = snapshot.join(tier.key());
+        if validate_candle_scail2_tier_dir(&selected, tier).is_ok() {
+            return Ok(ResolvedCandleScail2Model {
+                model_dir: selected,
+                tier,
+            });
         }
     }
 
-    // Retain the pre-Model-Manager manual component layout as a compatibility fallback.
-    let managed = settings
+    // Retain the pre-Model-Manager manual component layout only for dense adapter-compatible bf16.
+    let legacy = settings
         .data_dir
         .join("models")
         .join("candle")
         .join("scail2");
-    if runtime_cuda::providers::scail2::snapshot_layout(&managed).is_ok() {
-        return Ok(managed);
+    if tier == Scail2CandleTier::Bf16 && validate_candle_scail2_legacy_bf16_dir(&legacy).is_ok() {
+        return Ok(ResolvedCandleScail2Model {
+            model_dir: legacy,
+            tier,
+        });
     }
     Err(WorkerError::InvalidPayload(format!(
-        "scail2 (candle): the shared SCAIL-2 bf16 package is not installed or is incomplete. \
-         Install the bf16 tier from Model Manager ({SCAIL2_REPO} at {SCAIL2_REVISION}), repair that \
-         download, or set $SCENEWORKS_CANDLE_SCAIL2_DIR to a complete shared/legacy snapshot. \
-         Legacy fallback checked: {}.",
-        managed.display(),
+        "scail2 (candle): the requested {} package is not installed or is incomplete. Install the exact {} tier from Model Manager ({SCAIL2_REPO} at {SCAIL2_REVISION}) and repair that download before retrying.{}",
+        tier.key(),
+        tier.key(),
+        if tier == Scail2CandleTier::Bf16 {
+            format!(" Legacy bf16 fallback checked: {}.", legacy.display())
+        } else {
+            " No q4/q8 fallback to a different tier is permitted.".to_owned()
+        },
     )))
 }
 
@@ -1665,7 +2114,9 @@ fn candle_scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 /// sibling of the macOS `resolve_scail2_conditioning`. Loads the reference character image + the
 /// driving clip, segments both with the candle SAM3 PCS segmenter (every person → a palette color,
 /// left-to-right), paints the color-coded masks (animation: reference bg white, driving bg black), and
-/// assembles `Reference` + `Mask` + `ControlClip`. Segmentation + painting run on the blocking pool.
+/// assembles strict ordered `Reference`, `Mask` pairs before the `ControlClip`. Every
+/// `referenceAssetIds` entry is loaded + segmented separately in caller order; `sourceAssetId` is
+/// retained only as the legacy single-reference fallback. Segmentation + painting run on the blocking pool.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn resolve_candle_scail2_conditioning(
     api: &ApiClient,
@@ -1674,25 +2125,39 @@ async fn resolve_candle_scail2_conditioning(
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
-    // The character: a reference image (referenceAssetIds first, else the i2v sourceAssetId).
-    let ref_id = request
-        .reference_asset_ids
-        .first()
-        .map(String::as_str)
-        .or(request.source_asset_id.as_deref())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "scail2 animate_character requires a reference character image (referenceAssetIds \
-                 or sourceAssetId)."
-                    .into(),
+    let reference_ids: Vec<&str> = if request.reference_asset_ids.is_empty() {
+        request.source_asset_id.as_deref().into_iter().collect()
+    } else {
+        request
+            .reference_asset_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
+    };
+    if reference_ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "scail2 animate_character requires a reference character image (referenceAssetIds \
+             or sourceAssetId)."
+                .into(),
+        ));
+    }
+    if reference_ids.len() > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    let references = reference_ids
+        .into_iter()
+        .map(|reference_id| {
+            crate::image_jobs::load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                reference_id,
+                project_path,
             )
-        })?;
-    let reference = crate::image_jobs::load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        ref_id,
-        project_path,
-    )?;
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     // The driving video → frames at the output size (the engine re-resizes internally). Reuses the
     // candle Wan-VACE source-clip loader (`load_source_video_frames`, which reads `sourceClipAssetId`
@@ -1734,16 +2199,16 @@ async fn resolve_candle_scail2_conditioning(
         settings,
         &job.id,
         move |flag| {
-            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-                &rm,
-                &rt,
-                std::slice::from_ref(&reference),
-                Some(flag),
-                None,
-            )?;
-            let mask =
-                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)?;
-            Ok((reference, mask))
+            super::scail2::segment_scail2_references(references, &flag, |reference, flag| {
+                let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                    &rm,
+                    &rt,
+                    std::slice::from_ref(reference),
+                    Some(flag.clone()),
+                    None,
+                )?;
+                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+            })
         },
         move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
@@ -1779,9 +2244,13 @@ pub(super) async fn generate_candle_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
-    // Resolve and size adapters before constructing the cold-load gate. Dense SCAIL folds factors,
-    // but their source tensors coexist during the merge and were not part of the measured base peak.
+    // Resolve adapters before selecting the exact package: packed q4/q8 artifacts refuse adapter
+    // merging, so an adapter request resolves dense bf16 (or fails before any load) rather than
+    // silently reusing a packed directory.
     let adapters = resolve_scail2_adapters(settings, request)?;
+    let resolved = resolve_candle_scail2_model(settings, request, &adapters)?;
+    // Dense SCAIL folds factors, but their source tensors coexist during the merge and were not part
+    // of the measured base peak.
     let adapter_bytes =
         gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
             .ok_or_else(|| {
@@ -1791,10 +2260,11 @@ pub(super) async fn generate_candle_scail2(
             })?;
     let Scail2ColdLoadPlan {
         model_dir,
+        quant,
         admission,
     } = scail2_cold_load_plan(
         &request.model_manifest_entry,
-        resolve_candle_scail2_model_dir(settings)?,
+        resolved,
         adapter_bytes,
         &settings.gpu_id,
     );
@@ -1809,6 +2279,7 @@ pub(super) async fn generate_candle_scail2(
         scheduler: None,
         engine_id,
         model_dir,
+        quant,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),
@@ -1960,6 +2431,7 @@ pub(super) async fn generate_candle_scail2_replace(
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value, bool)> {
     let adapters = resolve_scail2_adapters(settings, request)?;
+    let resolved = resolve_candle_scail2_model(settings, request, &adapters)?;
     let adapter_bytes =
         gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
             .ok_or_else(|| {
@@ -1969,10 +2441,11 @@ pub(super) async fn generate_candle_scail2_replace(
             })?;
     let Scail2ColdLoadPlan {
         model_dir,
+        quant,
         admission,
     } = scail2_cold_load_plan(
         &request.model_manifest_entry,
-        resolve_candle_scail2_model_dir(settings)?,
+        resolved,
         adapter_bytes,
         &settings.gpu_id,
     );
@@ -1987,6 +2460,7 @@ pub(super) async fn generate_candle_scail2_replace(
         scheduler: None,
         engine_id,
         model_dir,
+        quant,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),
@@ -2283,6 +2757,353 @@ pub(super) async fn generate_candle_wan_vace_extend_bridge(
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, &request.advanced, input).await
+}
+
+/// sc-20644 review minor 10 — the behavioural test for `checkpoint_plan_bespoke_roles`, the
+/// roles-only plan source Wan is the only consumer of.
+///
+/// **First RUNS on the windows-candle CI lane.** The Wan comfyui lane and this helper are both
+/// `cfg(all(not(target_os = "macos"), feature = "backend-candle"))`, so `cargo test` on an Apple
+/// Silicon host only TYPECHECKS them; `check-candle-build.mjs` cross-compiles the test targets
+/// under `-D warnings` but does not execute them.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod plan_backed_wan_tests {
+    // Imports are named one by one rather than glob-imported from the parent:
+    // `video_jobs_remains_split_into_real_engine_modules` asserts each engine module reaches its
+    // parent through the explicit prelude, and that guard greps the whole file as source text —
+    // so even a comment quoting the glob form trips it.
+    use super::{resolve_plan_backed_wan_comfyui_paths, WAN_I2V_IN_CHANNELS, WAN_T2V_IN_CHANNELS};
+    use crate::settings::Settings;
+    use sceneworks_core::checkpoint_inspector::{TRANSFORMER_HIGH_ROLE, TRANSFORMER_LOW_ROLE};
+    use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+    use sceneworks_core::video_request::VideoRequest;
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+
+    /// A Wan expert's tensor surface, plus the `patch_embedding.weight` whose `shape[1]` is the
+    /// T2V/I2V discriminator the lane reads.
+    fn expert_entries(in_channels: u64) -> Vec<(String, String, Vec<u64>)> {
+        vec![
+            (
+                "blocks.0.self_attn.q.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4],
+            ),
+            (
+                "blocks.0.cross_attn.q.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4],
+            ),
+            (
+                "blocks.0.ffn.0.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4],
+            ),
+            ("blocks.0.modulation".to_owned(), "BF16".to_owned(), vec![4]),
+            (
+                "patch_embedding.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, in_channels],
+            ),
+        ]
+    }
+
+    /// A UMT5 text encoder's tensor surface — the T5 signature
+    /// `sceneworks_core::base_weights::has_text_encoder_signature` actually reads: the exact
+    /// `shared.weight` embedding key, an `encoder.block.` stack, and a `SelfAttention` projection.
+    ///
+    /// This exists because `write_expert` writes a TRANSFORMER surface whatever path it is given,
+    /// so a fixture that dropped an expert at `text_encoder/umt5.safetensors` produced a file whose
+    /// PATH says `text_encoder` and whose DESCRIPTOR says `transformer`. `reconcile_role` refuses
+    /// exactly that disagreement with `AmbiguousComponentRole`, so the tree never compiled and the
+    /// worker-level `[checkpoint-plan:unconsumed-layer]` refusal under test was never reached.
+    /// Production was right; the fixture was writing a contradiction.
+    ///
+    /// Deliberately carries NO transformer marker: none of `detect_transformer_family`'s families
+    /// match these keys (`encoder.block.0` contains `block.` but not `blocks.`, and `SelfAttention`
+    /// is not `.self_attn.`), so `detect_component_role` answers `TextEncoder` rather than the
+    /// `Checkpoint` it returns for a file carrying both.
+    fn text_encoder_entries() -> Vec<(String, String, Vec<u64>)> {
+        vec![
+            ("shared.weight".to_owned(), "BF16".to_owned(), vec![4, 4]),
+            (
+                "encoder.block.0.layer.0.SelfAttention.q.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, 4],
+            ),
+            (
+                "encoder.block.0.layer.1.DenseReluDense.wi.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, 4],
+            ),
+        ]
+    }
+
+    fn write_expert(path: &Path, in_channels: u64) {
+        write_safetensors(path, expert_entries(in_channels));
+    }
+
+    fn write_safetensors(path: &Path, entries: Vec<(String, String, Vec<u64>)>) {
+        let mut header = serde_json::Map::new();
+        let mut offset = 0_u64;
+        for (name, dtype, shape) in entries {
+            let elems: u64 = shape.iter().product();
+            let bytes = elems * 2;
+            header.insert(
+                name,
+                serde_json::json!({
+                    "dtype": dtype,
+                    "shape": shape,
+                    "data_offsets": [offset, offset + bytes],
+                }),
+            );
+            offset += bytes;
+        }
+        let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.resize(bytes.len() + offset as usize, 0x5a);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// Plant a resident `SceneWorks/wan2.2-t2v-a14b-candle` tier inside `data_dir`'s Hugging Face
+    /// cache, and PIN the cache-location env vars at it until the returned guard drops.
+    ///
+    /// Both halves are required, and the second is the one the fixture was missing.
+    /// `huggingface_hub_cache_dir` consults `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`
+    /// **before** it ever looks at `data_dir` (`test_env`'s own docs say so), and the self-hosted
+    /// Windows candle runner sets a machine-level `HF_HOME` — so on that lane the probe resolved
+    /// against the box's real cache, found no Wan tier, and `resolve_plan_backed_wan_comfyui_paths`
+    /// refused with `[checkpoint-plan:missing-component]` before it could reach the channel gate
+    /// the test asserts on. On macOS, where nothing sets those vars, the same fixture silently took
+    /// the `data_dir` fallback and the missing tier went unnoticed for the same reason.
+    ///
+    /// Goes through [`crate::test_env::EnvVars`] rather than a bare `set_var`: this crate's tests
+    /// are threads in one process, so the crate-wide lock is what keeps the pin from being
+    /// clobbered by — or clobbering — another module's cache-dir test.
+    #[must_use = "the env pin lives only as long as the guard; bind it for the whole test body"]
+    fn resident_wan_snapshot(data_dir: &Path) -> crate::test_env::EnvVars {
+        let hub = data_dir.join("cache").join("huggingface").join("hub");
+        let repo = hub.join("models--SceneWorks--wan2.2-t2v-a14b-candle");
+        // A deliberately NON-hex snapshot name: `discover_installed_snapshot_path` resolves a
+        // mutable name by a direct `is_dir()`, while a 40-hex one re-enters the lease-aware
+        // `discover_snapshot` — a dependency this fixture has no reason to take on.
+        let snapshot = repo.join("snapshots").join("resident");
+        // `q8` is the first entry `WAN_COMFYUI_SNAPSHOT_TIERS` probes.
+        let tier = snapshot.join("q8");
+        for component in ["text_encoder", "vae", "tokenizer"] {
+            std::fs::create_dir_all(tier.join(component)).expect("tier component dir creates");
+        }
+        std::fs::write(tier.join("tokenizer").join("tokenizer.json"), b"{}")
+            .expect("tokenizer.json writes");
+        std::fs::create_dir_all(repo.join("refs")).expect("refs dir creates");
+        std::fs::write(repo.join("refs").join("main"), b"resident").expect("refs/main writes");
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().expect("hub path is utf-8")),
+            // Emptied, not set: `EnvVars` REMOVES a var given an empty value, and these two are
+            // consulted ahead of / alongside `HF_HUB_CACHE`.
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    struct Fixture {
+        _data: tempfile::TempDir,
+        _library: tempfile::TempDir,
+        settings: Settings,
+        library: PathBuf,
+        store: CheckpointPlanStore,
+        root_id: String,
+    }
+
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            let data = tempfile::Builder::new()
+                .prefix(&format!("wan-roles-{label}-{}-", std::process::id()))
+                .tempdir()
+                .unwrap();
+            let library = tempfile::Builder::new()
+                .prefix(&format!("wan-roles-lib-{label}-{}-", std::process::id()))
+                .tempdir()
+                .unwrap();
+            let mut settings = Settings::from_env();
+            settings.data_dir = data.path().to_path_buf();
+            settings.external_model_roots = Vec::new();
+            let library_dir = std::fs::canonicalize(library.path()).unwrap();
+            let store = CheckpointPlanStore::open(&settings.data_dir);
+            let root_id = store.approve_root(&library_dir).unwrap().root_id;
+            Self {
+                _data: data,
+                _library: library,
+                settings,
+                library: library_dir,
+                store,
+                root_id,
+            }
+        }
+
+        /// Compile a two-expert tree, optionally with extra in-place artifacts.
+        fn compile(&self, extras: &[(&str, &str)], in_channels: u64) -> String {
+            write_expert(
+                &self
+                    .library
+                    .join("tree/unet/wan2.2_t2v_high_noise_14B.safetensors"),
+                in_channels,
+            );
+            write_expert(
+                &self
+                    .library
+                    .join("tree/unet/wan2.2_t2v_low_noise_14B.safetensors"),
+                in_channels,
+            );
+            // Each extra is written with the tensor surface its ROLE implies, not with an expert's.
+            // The inspector reconciles the path-implied role against the descriptor-implied one and
+            // refuses a disagreement, so an artifact whose bytes contradict its directory is a
+            // fixture that never reaches the behaviour under test.
+            for (relative, role) in extras {
+                let path = self.library.join("tree").join(relative);
+                match *role {
+                    "text_encoder" => write_safetensors(&path, text_encoder_entries()),
+                    "transformer" => write_expert(&path, in_channels),
+                    other => panic!("fixture has no tensor surface for the {other:?} role"),
+                }
+            }
+            self.store
+                .compile_linked(&self.root_id, "tree")
+                .expect("a two-expert Wan tree compiles")
+                .checkpoint_id
+        }
+
+        fn entry(&self, checkpoint_id: &str) -> serde_json::Map<String, Value> {
+            serde_json::json!({
+                "id": "linked_wan",
+                "catalogScope": "user",
+                "family": "wan-video",
+                "importPlan": { "checkpointId": checkpoint_id },
+            })
+            .as_object()
+            .cloned()
+            .unwrap()
+        }
+    }
+
+    /// Both experts resolve BY NAME to their own verified pins, and the optional in-place artifacts
+    /// fall back to the resident snapshot when the plan does not carry them.
+    ///
+    /// Failing mutations: swap the two role constants at the call site (each pin resolves to the
+    /// other's file); drop `optional_roles` (a tree carrying a VAE refuses instead of consuming it).
+    #[test]
+    fn the_roles_source_resolves_both_experts_by_name_and_falls_back_for_absent_optionals() {
+        let fx = Fixture::new("both");
+        let checkpoint_id = fx.compile(&[], WAN_T2V_IN_CHANNELS);
+        let entry = fx.entry(&checkpoint_id);
+
+        let plan = crate::image_jobs::checkpoint_plan_bespoke_roles(
+            &entry,
+            &fx.settings,
+            "wan-video",
+            &[TRANSFORMER_HIGH_ROLE, TRANSFORMER_LOW_ROLE],
+            &["text_encoder", "vae"],
+        )
+        .unwrap_or_else(|error| panic!("a two-expert plan must resolve: {error}"));
+        let plan = match plan {
+            Some(plan) => plan,
+            None => panic!("the helper must claim a plan-backed wan-video entry"),
+        };
+
+        assert!(
+            plan.required(TRANSFORMER_HIGH_ROLE)
+                .loader_path()
+                .to_string_lossy()
+                .contains("high_noise"),
+            "the high role must resolve to the HIGH file"
+        );
+        assert!(
+            plan.required(TRANSFORMER_LOW_ROLE)
+                .loader_path()
+                .to_string_lossy()
+                .contains("low_noise"),
+            "the low role must resolve to the LOW file"
+        );
+        assert!(
+            plan.optional("text_encoder").is_none() && plan.optional("vae").is_none(),
+            "an absent optional role is None, which is the family's signal to use its resident tier"
+        );
+    }
+
+    /// A layer the lane declared NEITHER required nor optional refuses, rather than going unloaded.
+    ///
+    /// Failing mutation: drop the `checkpoint_plan_unconsumed_layers` call from
+    /// `checkpoint_plan_bespoke_roles`.
+    #[test]
+    fn the_roles_source_refuses_a_layer_the_lane_never_declared() {
+        let fx = Fixture::new("extra");
+        // A third artifact under a role the Wan lane does not consume at all.
+        let checkpoint_id = fx.compile(
+            &[("text_encoder/umt5.safetensors", "text_encoder")],
+            WAN_T2V_IN_CHANNELS,
+        );
+        let entry = fx.entry(&checkpoint_id);
+
+        let error = crate::image_jobs::checkpoint_plan_bespoke_roles(
+            &entry,
+            &fx.settings,
+            "wan-video",
+            &[TRANSFORMER_HIGH_ROLE, TRANSFORMER_LOW_ROLE],
+            &[],
+        );
+        let error = match error {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a layer neither list names must refuse, not be left unloaded"),
+        };
+        assert!(
+            error.contains("[checkpoint-plan:unconsumed-layer]"),
+            "the refusal must name the unconsumed layer: {error}"
+        );
+    }
+
+    /// A plan-backed I2V expert pair REFUSES by name rather than declining into `Stub`
+    /// (review blocker 3).
+    ///
+    /// The resident snapshot tier is part of the SETUP, not part of what is asserted: the
+    /// snapshot probe sits ahead of the channel gate on purpose (a plan-integrity refusal precedes
+    /// operation admission), so without a resident tier this test only ever observed
+    /// `[checkpoint-plan:missing-component]` and never exercised the channel-count refusal at all.
+    #[test]
+    fn a_plan_backed_i2v_expert_pair_refuses_by_name() {
+        let fx = Fixture::new("i2v");
+        let _cache = resident_wan_snapshot(&fx.settings.data_dir);
+        let checkpoint_id = fx.compile(&[], WAN_I2V_IN_CHANNELS);
+        let payload = serde_json::json!({
+            "projectId": "p",
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": "linked_wan",
+            "modelManifestEntry": fx.entry(&checkpoint_id),
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let request = VideoRequest::from_payload(&payload);
+
+        let error = match resolve_plan_backed_wan_comfyui_paths(&request, &fx.settings) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("an I2V expert pair must REFUSE, not decline into the catalog gates"),
+        };
+        assert!(
+            error.contains("[checkpoint-plan:unsupported-operation]")
+                && error.contains(&WAN_I2V_IN_CHANNELS.to_string()),
+            "the refusal must name the channel count it found: {error}"
+        );
+
+        // And it reaches the ROUTER as an error rather than falling through to Stub.
+        let routed = crate::video_jobs::resolve_candle_video_route_for_test(&request, &fx.settings);
+        assert!(
+            routed.is_err(),
+            "a plan-backed I2V pair must never reach CandleVideoRoute::Stub"
+        );
+    }
 }
 
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]

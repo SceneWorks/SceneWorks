@@ -4,6 +4,7 @@ use crate::model_artifacts::{
     ArtifactIdentity, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
     ResolvedBundleClosure, ResolvedBundleMember, MODEL_ARTIFACT_CONTRACT_VERSION,
 };
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +67,37 @@ fn source_snapshot(candidate: &PromotionCandidate) -> &Path {
     }
 }
 
+/// Park a fixture entry in the non-live state `cleanup_stale_staging` requires before it will
+/// touch a staging directory at all.
+///
+/// This is a PRECONDITION for the two directory-swap tests below, never their subject.
+/// `ResolvedCacheReservation::drop` records the interruption on a best-effort basis: it *warns*
+/// and leaves the entry `Materializing`, still owned by this live session, whenever its metadata
+/// write cannot complete — a transient open/read/write failure under the descriptor and IO
+/// pressure of a loaded hosted runner is the documented case (see the note on
+/// `ResolvedCacheStore::read_eviction_marker`, which was made descriptor-cheap for exactly this
+/// reason). `cleanup_stale_staging` then correctly *skips* the entry fail-closed and returns
+/// `Ok(0)`, the swap hook never runs, and a test that only asserts "the sweep returned an error"
+/// reads that skip as "the symlink was followed". That is what reddened
+/// `stale_cleanup_directory_swap_never_follows_an_external_symlink` on the hosted macOS lane.
+///
+/// Forcing the transition here costs no coverage: the drop-marks-interrupted contract is owned by
+/// `materialization::tests::stale_staging_cleanup_requires_artifact_and_session_authority` and by
+/// `reservation_is_exclusive_unrelated_keys_progress_and_drop_interrupts`, which assert it
+/// directly instead of inheriting it as setup.
+fn force_interrupted_reservation(store: &ResolvedCacheStore, cache_key: &str) {
+    store
+        .update_metadata(cache_key, |metadata| {
+            metadata.state = ResolvedCacheEntryState::Interrupted;
+            metadata.reservation_id = None;
+            metadata.reservation_owner = None;
+            metadata.session_id = None;
+            metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+            Ok(())
+        })
+        .expect("the fixture entry must be parkable as an interrupted reservation");
+}
+
 #[cfg(unix)]
 #[test]
 fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
@@ -83,6 +115,7 @@ fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
     let staging = reservation.staging_path().to_owned();
     std::fs::write(staging.join("partial"), b"partial").unwrap();
     drop(reservation);
+    force_interrupted_reservation(&store, &candidate.cache_key);
 
     let external = scratch.path().join("external");
     std::fs::create_dir(&external).unwrap();
@@ -96,6 +129,18 @@ fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
     });
 
     assert!(store.cleanup_stale_staging().is_err());
+    // The swap has to be what the sweep refused. A sweep that never reached the removal at all
+    // (it skipped the entry, or failed earlier) also returns without deleting the sentinel, so
+    // without this the assertions below pass for the wrong reason: the hook only runs inside
+    // `remove_entry_at`, so a staging path that is now a symlink is the witness that the sweep
+    // stood on the swapped path and still refused to follow it.
+    assert!(
+        std::fs::symlink_metadata(&staging)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the removal must have reached the swapped staging path"
+    );
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
     assert!(external.is_dir());
     std::fs::remove_file(staging).unwrap();
@@ -186,6 +231,67 @@ fn the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refu
     assert_eq!(
         session_records, 0,
         "the lease boundary must refuse altered bytes before it writes a session record"
+    );
+}
+
+/// sc-21534 — one `acquire_complete` call re-reads each closure file exactly ONCE.
+///
+/// The load boundary is the single full-strength check that keeps every cheap paths-and-sizes
+/// read safe, but before this pin it hashed the closure FOUR times per load: twice inside
+/// `validate_complete_metadata` (the shape check duplicated the content check), once more in
+/// `acquire_runtime_lease`, and once more in the usage-stamp journal write — all under the same
+/// locks in the same call, so the extras closed no window. On a 33 GB bundle that multiple turned
+/// one ~70 s verify into the ~4.5-minute pass that outlasted the API's 90 s stale-worker sweep.
+/// Stated as an operation count, like
+/// `the_availability_decision_never_re_reads_the_artifact_it_admits`: a duration cannot see this
+/// on a small fixture.
+#[test]
+fn the_load_boundary_hashes_the_closure_exactly_once() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    let published = match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("fixture bundle was not published: {other:?}"),
+    };
+    let hashed_files = published
+        .artifact
+        .closure
+        .members
+        .iter()
+        .flat_map(|member| member.files.iter())
+        .filter(|file| file.sha256.is_some())
+        .count() as u64;
+    assert!(
+        hashed_files >= 1,
+        "the fixture must record content digests or the count below is vacuous"
+    );
+
+    let registry = ActiveArtifactLeaseRegistry::default();
+    let resolver = resolver(&source, registry.clone());
+    let (lease, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(
+        lease.unwrap().is_some(),
+        "the boundary must still issue the lease it is charging one hash pass for"
+    );
+    assert_eq!(
+        hashes, hashed_files,
+        "acquiring a complete entry must hash each closure file exactly once — the shape check, \
+         the runtime lease, and the usage stamp must all reuse the one full-strength verdict"
     );
 }
 
@@ -292,6 +398,7 @@ fn stale_cleanup_directory_swap_never_follows_an_external_junction() {
     let staging = reservation.staging_path().to_owned();
     std::fs::write(staging.join("partial"), b"partial").unwrap();
     drop(reservation);
+    force_interrupted_reservation(&store, &candidate.cache_key);
 
     let external = scratch.path().join("external");
     std::fs::create_dir(&external).unwrap();
@@ -306,6 +413,15 @@ fn stale_cleanup_directory_swap_never_follows_an_external_junction() {
     });
 
     assert!(store.cleanup_stale_staging().is_err());
+    // The swap has to be what the sweep refused. A sweep that never reached the removal at all
+    // (it skipped the entry, or failed earlier) also returns without deleting the sentinel, so
+    // without this the assertions below pass for the wrong reason: the hook only runs inside
+    // `windows_confined_directory`, so a staging path that is now a reparse point is the witness
+    // that the sweep stood on the swapped path and still refused to follow it.
+    assert!(
+        metadata_is_reparse_point(&std::fs::symlink_metadata(&staging).unwrap()),
+        "the removal must have reached the swapped staging path"
+    );
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
     assert!(external.is_dir());
     std::fs::remove_dir(staging).unwrap();
@@ -630,9 +746,10 @@ fn reservation_is_exclusive_unrelated_keys_progress_and_drop_interrupts() {
     assert_eq!(active.reservation_owner.as_deref(), Some("image:model-a"));
     let mut traversing = active.clone();
     traversing.session_id = Some("../../outside".to_owned());
-    assert!(validate_metadata_shape(
+    assert!(validate_metadata_shape_with(
         &traversing,
-        &cache_key_digest(&candidate_a.cache_key).unwrap()
+        &cache_key_digest(&candidate_a.cache_key).unwrap(),
+        ContentVerification::PathsAndSizesOnly
     )
     .is_err());
     assert!(matches!(
@@ -1016,6 +1133,87 @@ fn pin_owners_aggregate_exactly() {
     assert!(store
         .set_model_pin(&candidate.cache_key, "\n", true)
         .is_err());
+}
+
+/// sc-21534 — the older-slot recovery must not PIN a content-altered bundle.
+///
+/// The listings (including `recover()`'s opening `enumerate()`) validate on paths and sizes only,
+/// so this branch is the last reader before an entry recovered from its older journal slot gets
+/// re-pinned. A same-size alteration pinned here would be refused at every load yet never
+/// evicted — a permanent disk leak — so the branch must prove the bytes at full strength first
+/// and, on failure, leave the entry UNPINNED: still refused at the load boundary, but evictable,
+/// so retention can reclaim it and the next use re-materializes clean.
+#[test]
+fn older_slot_recovery_refuses_to_pin_altered_bytes() {
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    // Materialize through the real promotion path: it enriches the recorded closure with content
+    // digests post-copy, which is what lets the full-strength check see the alteration below (the
+    // `source_candidate` shortcut records no digests, so it cannot exercise this branch).
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(_) => {}
+        other => panic!("fixture bundle was not published: {other:?}"),
+    }
+    // Unpin twice so BOTH journal slots record `artifact_pinned: false` — otherwise the older
+    // slot the recovery falls back to still carries the materialization-era pin, and the assert
+    // below could not tell an inherited pin from the recovery-added one under test.
+    store.set_artifact_pin(&candidate.cache_key, false).unwrap();
+    store.set_artifact_pin(&candidate.cache_key, false).unwrap();
+    let entry = store.entry_path(&candidate.cache_key).unwrap();
+    let newest = [entry.join("metadata.0.json"), entry.join("metadata.1.json")]
+        .into_iter()
+        .max_by_key(|path| {
+            read_journal(path)
+                .map(|value| value.generation)
+                .unwrap_or(0)
+        })
+        .unwrap();
+    std::fs::write(newest, b"corrupt").unwrap();
+    // Same length, different bytes: paths-and-sizes reads cannot see it, only the full-strength
+    // check this branch must run before pinning can.
+    let bundle_file = store
+        .bundle_path(&candidate.cache_key)
+        .unwrap()
+        .join(&candidate.artifact.closure.members[0].destination)
+        .join("weights.bin");
+    assert_eq!(std::fs::read(&bundle_file).unwrap(), b"model-weights");
+    std::fs::write(&bundle_file, b"MODEL-WEIGHTS").unwrap();
+
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered.len(), 1);
+    let metadata = recovered[0].metadata.as_ref().unwrap();
+    assert!(
+        !metadata.effective_pin,
+        "an older-slot recovery of altered bytes must never pin the entry — pinned it would be \
+         refused at every load yet blocked from eviction forever"
+    );
+    assert_ne!(
+        metadata.recovery_status,
+        RecoveryStatus::RecoveredFromOlderSlot,
+        "the recovery must not claim it recovered content it could not verify"
+    );
+
+    // The unpinned entry is still refused where it matters: the load boundary.
+    let registry = ActiveArtifactLeaseRegistry::default();
+    let resolver = resolver(&source, registry.clone());
+    assert!(
+        store
+            .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+            .is_err(),
+        "altered bytes stay refused at the load boundary"
+    );
 }
 
 #[test]
@@ -1408,4 +1606,210 @@ fn cross_process_store_child() {
     while !release.exists() {
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// produced (derived) bundles — publication refusals (sc-20635)
+// ---------------------------------------------------------------------------------------------
+
+/// A derived reservation's staging directory is a WRITE surface with a declared shape, and
+/// publication proves that shape rather than trusting the producer.
+///
+/// `CheckpointDerivativeOutputs::create` refuses an undeclared name and confines every create to
+/// the staging root, so nothing reachable through the public derivative API can produce either of
+/// the trees below — which is exactly why they are exercised here, at the boundary that is the
+/// last line of defence if a producer ever writes to the staging path by some other means.
+fn derived_plan(outputs: &[&str]) -> DerivedArtifactPlan {
+    let identity = ArtifactIdentity::pinned(
+        "sceneworks-checkpoint-derivative/checkpoint",
+        REVISION_A,
+        "derived",
+    )
+    .unwrap();
+    let member = ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: Some("derived-index".to_owned()),
+        source: identity.clone(),
+        tier: None,
+        source_subpath: PathBuf::new(),
+        destination: PathBuf::new(),
+        files: outputs
+            .iter()
+            .map(|output| ArtifactFile::new(output).unwrap())
+            .collect(),
+    };
+    DerivedArtifactPlan::new(identity, vec![member]).unwrap()
+}
+
+fn derived_reservation(
+    store: &ResolvedCacheStore,
+    input: &Path,
+    plan: &DerivedArtifactPlan,
+) -> ResolvedCacheReservation {
+    let reservation = match store
+        .reserve_derived(
+            plan,
+            input,
+            "linked/root-fixture/dit.safetensors",
+            "fixture:model",
+        )
+        .unwrap()
+    {
+        ReservationOutcome::Acquired(reservation) => *reservation,
+        _ => panic!("fixture derived reservation must acquire"),
+    };
+    reservation.prepare_for_materialization().unwrap();
+    reservation
+}
+
+fn journal_slots(store: &ResolvedCacheStore, cache_key: &str) -> Vec<PathBuf> {
+    let digest = cache_key_digest(cache_key).unwrap();
+    let entry = store.root().join("entries").join(digest);
+    (0..=1)
+        .map(|slot| entry.join(format!("metadata.{slot}.json")))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// The two fields a derived entry added (`production`, `derivedFrom`) widen the journal document,
+/// and `ResolvedCacheMetadata` is `deny_unknown_fields`, so a binary that predates them cannot
+/// decode one. sc-20635 therefore writes a derived journal at
+/// [`RESOLVED_CACHE_DERIVED_STORE_VERSION`] and leaves a source copy at
+/// [`RESOLVED_CACHE_STORE_VERSION`] — the version is a property of the DOCUMENT, not of the store.
+///
+/// That split is what makes the bump safe to land on a warm cache: an existing v1 source copy is
+/// unchanged on disk and still readable. Bumping the store-wide constant instead would have
+/// invalidated every entry already there, and retention cannot reclaim an entry it cannot read, so
+/// the whole cache would have been stranded as unreclaimable recovery candidates.
+///
+/// Failing mutations: make `ResolvedCacheProduction::store_version` return
+/// `RESOLVED_CACHE_STORE_VERSION` for `Derived` (the derived assertion goes red) or
+/// `RESOLVED_CACHE_DERIVED_STORE_VERSION` for `SourceCopy` (the byte-shape assertion goes red).
+#[test]
+fn only_a_derived_journal_declares_the_widened_document_version() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+
+    let candidate = source_candidate(&source, REVISION_A);
+    let copy = match store.reserve(&candidate, &source, "fixture:model").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("fixture reservation must acquire"),
+    };
+    let copy_key = candidate.cache_key.clone();
+    drop(copy);
+    for path in journal_slots(&store, &copy_key) {
+        let body: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            body["schemaVersion"],
+            json!(RESOLVED_CACHE_STORE_VERSION),
+            "a source copy stays at the version every older build already reads: {path:?}"
+        );
+        // Byte-shape, not just version: both new keys are absent, so the document a pre-sc-20635
+        // build wrote and the one this build writes are the same document.
+        assert!(
+            body["metadata"].get("production").is_none()
+                && body["metadata"].get("derivedFrom").is_none(),
+            "a source copy must not widen the journal: {body}"
+        );
+    }
+
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let derived = derived_reservation(&store, &input, &plan);
+    let derived_key = plan.cache_key().unwrap();
+    drop(derived);
+    let derived_slots = journal_slots(&store, &derived_key);
+    assert!(!derived_slots.is_empty(), "the derived entry has a journal");
+    for path in &derived_slots {
+        let body: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            body["schemaVersion"],
+            json!(RESOLVED_CACHE_DERIVED_STORE_VERSION),
+            "a derived journal declares the version its extra fields need: {path:?}"
+        );
+        assert_eq!(body["metadata"]["production"], json!("derived"));
+    }
+
+    // And a journal from a NEWER writer is a version refusal, not "your cache is corrupt" — the
+    // classification that manual removal is allowed to clear.
+    for path in &derived_slots {
+        let mut body: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        body["schemaVersion"] = json!(RESOLVED_CACHE_DERIVED_STORE_VERSION + 1);
+        std::fs::write(path, serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+    let error = store.lookup_complete(&derived_key).unwrap_err();
+    assert!(
+        error.to_string().contains(UNSUPPORTED_JOURNAL_VERSION),
+        "{error}"
+    );
+    assert!(
+        !error.is_unrecoverable_metadata(),
+        "a forward-version journal is not proven-corrupt residue: {error}"
+    );
+}
+
+#[test]
+fn a_produced_bundle_holding_an_undeclared_file_is_never_published() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+
+    std::fs::write(staging.join("index.json"), b"{}").unwrap();
+    // Bytes the entry's own accounting would never count, so retention would under-measure the
+    // entry and over-reclaim against it.
+    std::fs::create_dir(staging.join("nested")).unwrap();
+    std::fs::write(staging.join("nested/stowaway.bin"), b"extra").unwrap();
+
+    let error = reservation.publish_produced(&plan).unwrap_err().to_string();
+    assert!(
+        error.contains("staged an undeclared file") && error.contains("stowaway.bin"),
+        "{error}"
+    );
+    assert_eq!(
+        store.lookup_complete(&plan.cache_key().unwrap()).unwrap(),
+        None,
+        "a refused publication leaves nothing complete behind"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_produced_bundle_whose_declared_output_is_a_symlink_is_never_published() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let outside = scratch.path().join("outside.bin");
+    std::fs::write(&outside, b"bytes that live somewhere else").unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+
+    // A declared output that is a LINK publishes an entry whose bytes are not IN the entry: the
+    // target can change or vanish under a lease, and removal would reclaim nothing.
+    symlink(&outside, staging.join("index.json")).unwrap();
+
+    let error = reservation.publish_produced(&plan).unwrap_err().to_string();
+    assert!(
+        error.contains("is linked, reparsed, or not a file") && error.contains("index.json"),
+        "{error}"
+    );
+    assert_eq!(
+        store.lookup_complete(&plan.cache_key().unwrap()).unwrap(),
+        None,
+        "a refused publication leaves nothing complete behind"
+    );
+    assert!(
+        outside.is_file(),
+        "the refusal never touches what the link pointed at"
+    );
 }

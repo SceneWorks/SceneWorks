@@ -160,6 +160,28 @@ pub(crate) fn flux2_edit_uses_provider_memory_safety(engine_id: &str) -> bool {
 
 const MAX_KLEIN_EDIT_REFERENCES: usize = 8;
 
+/// Refuse an `advanced.usePid` opt-in on a FLUX.2 **Dev** route (sc-20799).
+///
+/// The memory-route registry declares `pid: [false]` for all three Dev providers (`flux2_dev`,
+/// `flux2_dev_edit`, `flux2_dev_control`), and neither the Dev edit engine nor the
+/// Fun-Controlnet-Union engine wires a PiD decode path — so the request-scoped declaration, the fit
+/// plan, and the render would all be built for a decode the user did not get. Both lanes previously
+/// discarded the flag with no diagnostic: the job succeeded and quietly produced base-resolution
+/// output. `pid_backbone_for("flux2_dev")` DOES resolve (`"flux2"`), so this is reachable from the
+/// ordinary Studio flow simply by leaving the toggle on while switching model or mode.
+///
+/// Deliberately scoped to the Dev routes by the caller: the Klein edit variants declare and
+/// implement PiD, and must keep resolving it.
+fn refuse_pid_on_flux2_dev_route(route_label: &str, request: &ImageRequest) -> WorkerResult<()> {
+    if pid_requested(request) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{route_label} does not implement the PiD decoder. Clear advanced.usePid, or choose a \
+             model whose route implements it."
+        )));
+    }
+    Ok(())
+}
+
 fn flux2_edit_reference_ids(request: &ImageRequest, engine_id: &str) -> WorkerResult<Vec<String>> {
     if engine_id == "flux2_dev_edit" {
         return Ok(edit_reference_ids(request));
@@ -337,8 +359,13 @@ fn flux2_edit_resolved_quant(
 const FLUX2_DEV_EDIT_ACTIVATION_TRANSIENT_GB: f64 = 12.0;
 /// Build the calibrated request context consumed by the FLUX.2 provider's `safety_check`. The worker
 /// owns the live unified-memory reading and request facts; the provider owns the calibrated formula,
-/// numeric-tier enforcement, and final accept/reject decision. Single-reference requests and
-/// unavailable probes retain the prior fail-open behavior and therefore return no context.
+/// numeric-tier enforcement, and final accept/reject decision.
+///
+/// `None` here is NOT "run unadmitted" (sc-20799). The calibrated contract genuinely covers only the
+/// multi-reference route — its route gate refuses `reference_count < 2` outright — so a
+/// single-reference request is admitted by the request-scoped declared path instead
+/// (`Flux2EditMemoryAuthority::RequestScopedAdmissionOnly`). An unavailable live-memory probe still
+/// yields no context and therefore no provider decision.
 fn flux2_dev_edit_memory_context(
     contract: &gen_core::MemoryProviderContract,
     quant: Option<gen_core::Quant>,
@@ -407,6 +434,76 @@ fn flux2_dev_edit_memory_context(
     }))
 }
 
+/// Which memory-run context governs ONE FLUX.2 edit request (sc-20799).
+///
+/// The FLUX.2-dev edit provider owns a CALIBRATED contract
+/// (`sc-16593-flux2-dev-edit-evidence-v2`) whose route gate — `mlx_gen_flux2::memory_strategy::
+/// safety_check` at the pinned engine revision — accepts a context only when
+/// `mode == Edit && has_reference && geometry.reference_count >= 2`. So the two authorities are not
+/// interchangeable, and which one wins is a property of the request, not of call order:
+///
+/// * `>= 2` references: the calibrated provider contract is the authority. Handing it the declared
+///   request-scoped context instead would replace a measured multi-reference decision with the
+///   generic one.
+/// * `< 2` references on the dev edit provider: the provider's own gate would REFUSE any context at
+///   all, so the request-scoped evaluation admits the request (`mlx_fit_gate::evaluate_request`
+///   returns a typed `InvalidPayload` when nothing fits) and then hands the provider no context.
+///   Before sc-20799 this route had NO evaluation and NO context — it ran completely unadmitted.
+/// * Klein edit variants: no provider-owned branch at all; the declared path is the authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flux2EditMemoryAuthority {
+    /// The FLUX.2-dev edit provider's calibrated multi-reference contract decides.
+    ProviderCalibrated,
+    /// The declared request-scoped evaluation decides, and its context reaches the provider.
+    RequestScoped,
+    /// The declared request-scoped evaluation ADMITS the request, but its context is not offered to
+    /// the provider (whose calibrated gate covers only the multi-reference route).
+    RequestScopedAdmissionOnly,
+}
+
+/// Resolve [`Flux2EditMemoryAuthority`] for one concrete conditioning set. `reference_count` is the
+/// count the engine will actually receive (the pose tier's `[skeleton, reference]` pair included),
+/// not the number of user-selected references.
+fn flux2_edit_memory_authority(
+    use_provider_memory_safety: bool,
+    reference_count: usize,
+) -> Flux2EditMemoryAuthority {
+    if !use_provider_memory_safety {
+        return Flux2EditMemoryAuthority::RequestScoped;
+    }
+    if reference_count >= 2 {
+        Flux2EditMemoryAuthority::ProviderCalibrated
+    } else {
+        Flux2EditMemoryAuthority::RequestScopedAdmissionOnly
+    }
+}
+
+/// The `MemoryRunContext` that reaches `memory_strategy::generate_with_scope` — and therefore the
+/// provider's own `memory_strategy_safety_check` — for one FLUX.2 edit render.
+///
+/// This is deliberately a function of the resolved [`Flux2EditMemoryAuthority`] alone, not of which
+/// of the two candidate contexts happens to be populated. The previous
+/// `evaluation.or(provider_context)` expression silently depended on the dev edit lane producing no
+/// evaluation at all; now that it does produce one, that ordering would have handed the calibrated
+/// multi-reference route a generic context, and handed the single-reference route a context whose
+/// `reference_count = 1` the provider's route gate refuses outright.
+fn flux2_edit_memory_run_context<'a>(
+    authority: Flux2EditMemoryAuthority,
+    memory_evaluation: Option<&'a crate::mlx_fit_gate::MlxRequestEvaluation>,
+    provider_memory_context: Option<&'a gen_core::MemoryRunContext>,
+) -> Option<&'a gen_core::MemoryRunContext> {
+    match authority {
+        Flux2EditMemoryAuthority::ProviderCalibrated => provider_memory_context,
+        Flux2EditMemoryAuthority::RequestScoped => {
+            memory_evaluation.map(|evaluation| &evaluation.context)
+        }
+        // The request has ALREADY been admitted by `mlx_fit_gate::evaluate_request` — this is not
+        // the old fail-open. Offering the declared context here would refuse every
+        // single-reference FLUX.2-dev edit at the provider's calibrated route gate.
+        Flux2EditMemoryAuthority::RequestScopedAdmissionOnly => None,
+    }
+}
+
 /// Generate one FLUX.2 edit image conditioned on `conditioning` (the reference set).
 /// Distilled klein: guidance 1.0, no negative prompt.
 #[allow(clippy::too_many_arguments)]
@@ -439,6 +536,14 @@ fn flux2_edit_generate_one(
             _ => 0,
         })
         .sum();
+    let authority = flux2_edit_memory_authority(use_provider_memory_safety, reference_count);
+    // The selected rung's execution knobs are applied ONLY when that same selection also governs
+    // the provider request scope. On the dev edit lane the declared selection admits the request
+    // but never opens a provider scope, so engaging its rung here would run an optimized shape the
+    // provider was never told about.
+    let selected_memory = matches!(authority, Flux2EditMemoryAuthority::RequestScoped)
+        .then(|| memory_evaluation.map(|evaluation| evaluation.memory))
+        .flatten();
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
@@ -450,7 +555,7 @@ fn flux2_edit_generate_one(
         image_guidance,
         use_pid,
         conditioning,
-        memory: memory_evaluation.map(|evaluation| evaluation.memory),
+        memory: selected_memory,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
@@ -473,9 +578,11 @@ fn flux2_edit_generate_one(
     } else {
         None
     };
-    let memory_context = memory_evaluation
-        .map(|evaluation| &evaluation.context)
-        .or(provider_memory_context.as_ref());
+    let memory_context = flux2_edit_memory_run_context(
+        authority,
+        memory_evaluation,
+        provider_memory_context.as_ref(),
+    );
     let output = crate::memory_strategy::generate_with_scope(
         generator,
         &mut request,
@@ -559,6 +666,8 @@ async fn generate_flux2_edit_stream(
     let image_guidance = flux2_edit_image_guidance(engine_id, request);
     let adapters = resolve_adapters(request, settings)?;
     let pid_weights = if engine_id == "flux2_dev_edit" {
+        // sc-20799: refuse the opt-in instead of dropping it. Klein edit keeps its real PiD route.
+        refuse_pid_on_flux2_dev_route("FLUX.2-dev edit", request)?;
         None
     } else {
         resolve_pid_weights(request, &settings.data_dir, &request.model)?
@@ -688,46 +797,43 @@ async fn generate_flux2_edit_stream(
         use_pid,
         has_phases: false,
     };
-    if engine_id != "flux2_dev_edit" {
-        spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
-            engine_id,
-            resolved_tier,
-            Some(route_mode),
-            &request.model_manifest_entry,
-            spec,
-            declaration_context,
+    // sc-20799: `flux2_dev_edit` is a declared MLX route exactly like its Klein siblings — the
+    // registry carries its own rule (FLUX2_DEV_EDIT_MODES / PLAIN / bf16-q4-q8) and the manifest
+    // carries its request-context rows. Gating this whole block on the engine id meant the dev edit
+    // lane never reached request-scoped evaluation at all, so a single-reference dev edit — which
+    // the provider's calibrated ≥2-reference contract does not cover — ran with NO admission.
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        engine_id,
+        resolved_tier,
+        Some(route_mode),
+        &request.model_manifest_entry,
+        spec,
+        declaration_context,
+    );
+    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        engine_id,
+        resolved_tier,
+        Some(route_mode),
+        &request.model_manifest_entry,
+        spec,
+        declaration_context,
+    );
+    if let Some(warning) = crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec) {
+        tracing::warn!(
+            event = "mlx_load_shape_declaration_warning",
+            provider = engine_id,
+            ?warning,
+            "provider refused deferred materialization; retaining the safe eager FLUX.2 edit load path"
         );
-        spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
-            engine_id,
-            resolved_tier,
-            Some(route_mode),
-            &request.model_manifest_entry,
-            spec,
-            declaration_context,
-        );
-        if let Some(warning) =
-            crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
-        {
-            tracing::warn!(
-                event = "mlx_load_shape_declaration_warning",
-                provider = engine_id,
-                ?warning,
-                "provider refused deferred materialization; retaining the safe eager FLUX.2 edit load path"
-            );
-        }
     }
-    let memory_plan = (engine_id != "flux2_dev_edit")
-        .then(|| {
-            crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
-                engine_id,
-                &request.model,
-                &spec,
-                Some(&request.model_manifest_entry),
-                None,
-            )
-            .with_resolved_artifact_tier(resolved_tier)
-        })
-        .transpose()?;
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        engine_id,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    )
+    .with_resolved_artifact_tier(resolved_tier)?;
     let provider_overlay = crate::mlx_fit_gate::provider_overlay_for_load_spec(
         engine_id,
         &spec,
@@ -737,7 +843,17 @@ async fn generate_flux2_edit_stream(
         width,
         height,
         count: 1,
-        mode: request.mode.clone(),
+        // The dev edit provider's behavior identity is the EDIT route whatever public Studio mode
+        // selected it (`character_image`, `style_variations`, `image_to_image`, `edit_image`), and
+        // its calibration corpus is keyed under that identity. `mlx_fit_gate::provider_request_mode`
+        // has arms for the Klein edit variants but none for `flux2_dev_edit`, so the public mode
+        // would otherwise leak into the evidence key as `image_to_image`. Klein keeps the public
+        // coordinate it was calibrated under.
+        mode: if engine_id == "flux2_dev_edit" {
+            "edit_image".to_owned()
+        } else {
+            request.mode.clone()
+        },
         overlay: provider_overlay,
         adapter_count,
         has_reference: true,
@@ -769,9 +885,8 @@ async fn generate_flux2_edit_stream(
                 _ => None,
             };
             let mut request_cache_state = cache_state;
-            // sc-18317: one warm hit is one decision. This lane also has a no-memory-plan path, so the
-            // holder both rations the proposal across items AND guarantees the unevaluated path still
-            // settles it.
+            // sc-18317: one warm hit is one decision, but this lane evaluates the request once per
+            // item. Hand the real proposal to the first evaluation and an inert one to the rest.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             drive_gen_items_scored_reported(
                 tx,
@@ -808,36 +923,27 @@ async fn generate_flux2_edit_stream(
                         }
                         None => build_edit_conditioning(&references),
                     };
-                    // The `map` here used to swallow the proposal outright: with no memory plan the
-                    // closure never runs, and `#[must_use]` cannot see a closure-parameter binding.
-                    // Both arms now settle, so a warm decision is reported on every path.
-                    let memory_evaluation = match memory_plan.as_ref() {
-                        Some(memory_plan) => Some(crate::mlx_fit_gate::evaluate_request(
-                            generator,
-                            memory_plan,
-                            &memory_inputs,
-                            request_cache_state,
-                            loaded_policy.offload_policy,
-                            warm_policy.take(),
-                            external_committed_bytes,
-                        )?),
-                        None => {
-                            warm_policy.decline_if_unsettled(
-                                crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
-                            );
-                            None
-                        }
-                    };
+                    // sc-20799: every FLUX.2 edit engine — Klein AND dev — is evaluated here now, so
+                    // there is no "route has no request-scoped memory" arm left to settle: the real
+                    // proposal reaches the first item and an inert one every later item.
+                    let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                        generator,
+                        &memory_plan,
+                        &memory_inputs,
+                        request_cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy.take(),
+                        external_committed_bytes,
+                    )?;
                     request_cache_state = gen_core::MemoryCacheState::Warm;
                     let _request_memory_limit = memory_evaluation
-                        .as_ref()
-                        .and_then(|evaluation| evaluation.process_limit_bytes)
+                        .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let (out_w, out_h, pixels) = flux2_edit_generate_one(
                         generator,
                         use_provider_memory_safety,
                         use_pid,
-                        memory_evaluation.as_ref(),
+                        Some(&memory_evaluation),
                         total_unified_memory_gb,
                         quant,
                         &prompt,
@@ -1024,8 +1130,9 @@ fn flux2_control_scale(request: &ImageRequest) -> f32 {
 /// Fun-Controlnet-Union branch. dev is guidance-distilled (embedded scalar) — `guidance` rides the
 /// transformer's guidance embedder (no true-CFG).
 #[allow(clippy::too_many_arguments)]
-fn flux2_control_generate_one(
+fn flux2_control_generate_one_scoped(
     generator: &dyn Generator,
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     prompt: &str,
     width: u32,
     height: u32,
@@ -1037,7 +1144,7 @@ fn flux2_control_generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -1046,12 +1153,27 @@ fn flux2_control_generate_one(
         steps: Some(steps),
         guidance,
         conditioning,
+        memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
-        WorkerError::Engine(format!("FLUX.2-dev control generation failed: {error}"))
+    // sc-20799: this lane used to call `generator.generate` directly — no request scope, no
+    // provider safety decision, no admission of any kind. Route it through the shared scope like
+    // every other admitted MLX control lane so the uncalibrated dev-control contract gets its
+    // route/tier/budget decision before MLX's process-terminating allocation path is entered.
+    let memory_context = memory_evaluation.map(|evaluation| &evaluation.context);
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_context,
+        on_progress,
+    )
+    .map_err(|error| match error {
+        gen_core::Error::Unsupported(reason) if memory_context.is_some() => {
+            WorkerError::InvalidPayload(reason)
+        }
+        error => WorkerError::Engine(format!("FLUX.2-dev control generation failed: {error}")),
     })?;
     match output {
         GenerationOutput::Images(mut images) => {
@@ -1148,6 +1270,9 @@ async fn generate_flux2_dev_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    // sc-20799: this lane wires no PiD decode path at all, so `advanced.usePid` was discarded here
+    // with no diagnostic. Refuse it before any weights are fetched.
+    refuse_pid_on_flux2_dev_route("FLUX.2-dev strict-control", request)?;
     // Optional identity img2img-init (opt-in, off by default — `referenceStrength`-gated), shared
     // across the pose set. `None` → the pose-only tier (the validated sc-2292 default).
     let identity_init = resolve_identity_init(request, settings, project_path)?;
@@ -1217,19 +1342,93 @@ async fn generate_flux2_dev_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = attach_manifest_text_encoder(
+    let resolved_tier = resolved_mlx_artifact_tier_for_model("flux2_dev", &weights_dir, quant_bits);
+    let mut spec = attach_manifest_text_encoder(
         flux2_control_spec(weights_dir, control_weights, quant, adapters),
         FLUX2_DEV_CONTROL_ENGINE_ID,
         request,
         settings,
     )?;
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    // sc-20799 request-scoped admission, mirroring the FLUX.1-dev strict-control lane.
+    //
+    // The declared route coordinate is `TextToImage` with exactly ONE reference — NOT the public
+    // Studio mode this pose job arrived under. That is the registry's own declaration
+    // (`flux2_dev_control` carries `modes: TEXT_ONLY`, `load_profiles: SINGLE_CONTROL`, and
+    // `expected_provider_mode` maps it to `text_to_image` at `reference_count == 1`) and it matches
+    // the provider gate at the pinned engine revision: `dev_control_safety_check` requires
+    // `mode == TextToImage`, `has_reference`, `reference_count == 1`, `overlay == Some("control")`,
+    // no PiD, no phases, and the explicit EMPTY calibration handshake (the control route has no
+    // calibration evidence at all). The single "reference" is the control map itself.
+    const CONTROL_ROUTE_MODE: crate::memory_route_registry::MemoryRouteMode =
+        crate::memory_route_registry::MemoryRouteMode::TextToImage;
+    let route_context = crate::memory_route_registry::MemoryRouteRequestContext {
+        mode: CONTROL_ROUTE_MODE,
+        reference_count: 1,
+        use_pid: false,
+        has_phases: false,
+    };
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        FLUX2_DEV_CONTROL_ENGINE_ID,
+        resolved_tier,
+        Some(CONTROL_ROUTE_MODE),
+        &request.model_manifest_entry,
+        spec,
+        route_context,
+    );
+    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        FLUX2_DEV_CONTROL_ENGINE_ID,
+        resolved_tier,
+        Some(CONTROL_ROUTE_MODE),
+        &request.model_manifest_entry,
+        spec,
+        route_context,
+    );
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        FLUX2_DEV_CONTROL_ENGINE_ID,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    );
+    let memory_plan = match resolved_tier {
+        Some(tier) => memory_plan.with_resolved_artifact_tier(Some(tier))?,
+        None => memory_plan,
+    };
+    let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: 1,
+        // See CONTROL_ROUTE_MODE: `mlx_fit_gate::provider_request_mode` has no `flux2_dev_control`
+        // arm, so the public pose-job mode would otherwise reach the provider as `ImageToImage` or
+        // `CharacterImage` and the control route gate would refuse every render.
+        mode: "text_to_image".to_owned(),
+        // `provider_overlay_for_load_spec` passes the public overlay through for this provider (it
+        // rewrites only the Krea / FLUX.1 / FLUX.2-Klein families), so this is the exact
+        // `DEV_CONTROL_OVERLAY` identity the provider gate compares against.
+        overlay: crate::mlx_fit_gate::provider_overlay_for_load_spec(
+            FLUX2_DEV_CONTROL_ENGINE_ID,
+            &spec,
+            Some("control".to_owned()),
+        ),
+        adapter_count,
+        has_reference: true,
+        reference_count: 1,
+        use_pid: false,
+        has_phases: false,
+    };
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         FLUX2_DEV_CONTROL_ENGINE_ID,
         adapter_count,
         spec,
         "FLUX.2-dev control load failed".to_owned(),
-        move |generator, tx, cancel| {
+        move |generator,
+              initial_cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
             let identity_init = identity_init.as_ref();
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
@@ -1243,6 +1442,10 @@ async fn generate_flux2_dev_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            let mut cache_state = initial_cache_state;
+            // sc-18317: ONE warm hit is ONE decision, but this lane evaluates the request once per
+            // pose. The real proposal reaches the first evaluation, an inert one the rest.
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -1260,8 +1463,22 @@ async fn generate_flux2_dev_control_stream(
                     control_scale,
                     identity_init,
                 );
-                let (out_w, out_h, pixels) = flux2_control_generate_one(
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
                     generator,
+                    &memory_plan,
+                    &memory_inputs,
+                    cache_state,
+                    loaded_policy.offload_policy,
+                    warm_policy.take(),
+                    external_committed_bytes,
+                )?;
+                cache_state = gen_core::MemoryCacheState::Warm;
+                let _request_memory_limit = memory_evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                let (out_w, out_h, pixels) = flux2_control_generate_one_scoped(
+                    generator,
+                    Some(&memory_evaluation),
                     &prompt,
                     width,
                     height,
@@ -1309,6 +1526,307 @@ async fn generate_flux2_dev_control_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(all(target_os = "macos", test))]
+mod flux2_dev_admission_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn advanced_request(advanced: Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({ "model": "flux2_dev", "advanced": advanced })
+                .as_object()
+                .unwrap(),
+        )
+    }
+
+    /// The exact edit contract shape the pinned engine builds
+    /// (`mlx_gen_flux2::memory_strategy::build_contract_for_spec`): a calibrated identity bound to
+    /// the eager load. Only the calibration handshake matters to the helper under test.
+    fn dev_edit_contract() -> gen_core::MemoryProviderContract {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "flux2_dev_edit",
+            gen_core::MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: false,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.load_shape = gen_core::LoadShape::EagerMaterialization;
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "sc-16593-flux2-dev-edit-evidence-v2",
+            gen_core::LoadShape::EagerMaterialization,
+        ));
+        contract
+    }
+
+    /// The body of one `fn` in this file, by its declaration prefix. Used by the routing assertions
+    /// below: the edit/control streams are `async fn`s that load real MLX weights, so their WIRING
+    /// is what can be asserted without a GPU, not their behavior.
+    fn function_body(source: &'static str, declaration: &str) -> &'static str {
+        let start = source
+            .find(declaration)
+            .unwrap_or_else(|| panic!("flux2.rs no longer declares {declaration}"));
+        let body = &source[start..];
+        let open = body.find('{').expect("function has no body");
+        let mut depth = 0_usize;
+        for (offset, byte) in body.bytes().enumerate().skip(open) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &body[..=offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced body for {declaration}");
+    }
+
+    #[test]
+    fn the_calibrated_provider_owns_multi_reference_and_the_declared_path_owns_single_reference() {
+        // `flux2_dev_edit`, >= 2 references: the provider's calibrated contract decides. Its route
+        // gate at the pinned engine rev accepts only this range.
+        assert_eq!(
+            flux2_edit_memory_authority(true, 2),
+            Flux2EditMemoryAuthority::ProviderCalibrated
+        );
+        assert_eq!(
+            flux2_edit_memory_authority(true, MAX_KLEIN_EDIT_REFERENCES),
+            Flux2EditMemoryAuthority::ProviderCalibrated
+        );
+        // `flux2_dev_edit`, one reference: BELOW the calibrated floor. The declared request-scoped
+        // path admits it, and the provider is handed no context it would refuse. This is the arm
+        // that used to be "no evaluation and no context at all".
+        assert_eq!(
+            flux2_edit_memory_authority(true, 1),
+            Flux2EditMemoryAuthority::RequestScopedAdmissionOnly
+        );
+        assert_eq!(
+            flux2_edit_memory_authority(true, 0),
+            Flux2EditMemoryAuthority::RequestScopedAdmissionOnly
+        );
+        // Klein edit variants have no provider-owned branch; the declared context reaches them.
+        for references in 1..=MAX_KLEIN_EDIT_REFERENCES {
+            assert_eq!(
+                flux2_edit_memory_authority(false, references),
+                Flux2EditMemoryAuthority::RequestScoped,
+                "klein edit with {references} reference(s) must use the declared context"
+            );
+        }
+    }
+
+    #[test]
+    fn the_provider_calibrated_context_covers_only_the_multi_reference_edit_route() {
+        let contract = dev_edit_contract();
+        // One reference is outside the calibrated contract, so the helper declines — and because it
+        // declines, `flux2_edit_memory_authority` must NOT report `ProviderCalibrated` there (the
+        // assertion above), or the request would run with no admission at all.
+        assert!(flux2_dev_edit_memory_context(
+            &contract,
+            Some(gen_core::Quant::Q4),
+            1,
+            1024,
+            1024,
+            Some(128.0),
+        )
+        .unwrap()
+        .is_none());
+        let context = flux2_dev_edit_memory_context(
+            &contract,
+            Some(gen_core::Quant::Q4),
+            2,
+            1024,
+            1024,
+            Some(128.0),
+        )
+        .unwrap()
+        .expect("two references are inside the calibrated contract");
+        // The exact facts `mlx_gen_flux2::memory_strategy::safety_check` gates on.
+        assert_eq!(context.mode, gen_core::MemoryMode::Edit);
+        assert!(context.has_reference);
+        assert_eq!(context.geometry.reference_count, 2);
+        assert!(!context.use_pid);
+        assert_eq!(context.overlay, None);
+        assert_eq!(
+            context.calibration_fingerprint,
+            "sc-16593-flux2-dev-edit-evidence-v2"
+        );
+    }
+
+    /// A distinguishable declared-path evaluation. Only the fields the assertions read are
+    /// meaningful; `evidence_revision` is the marker that tells the two contexts apart.
+    fn declared_evaluation(
+        context: gen_core::MemoryRunContext,
+    ) -> crate::mlx_fit_gate::MlxRequestEvaluation {
+        crate::mlx_fit_gate::MlxRequestEvaluation {
+            memory: gen_core::GenerationMemory::default(),
+            context,
+            decode_quality_decisions: Vec::new(),
+            process_limit_bytes: None,
+        }
+    }
+
+    #[test]
+    fn the_context_handed_to_the_provider_follows_the_authority_not_the_call_order() {
+        let contract = dev_edit_contract();
+        let provider_context = flux2_dev_edit_memory_context(
+            &contract,
+            Some(gen_core::Quant::Q4),
+            2,
+            1024,
+            1024,
+            Some(128.0),
+        )
+        .unwrap()
+        .expect("calibrated context");
+        let mut declared_context = provider_context.clone();
+        declared_context.evidence_revision = "declared-request-scope".to_owned();
+        let evaluation = declared_evaluation(declared_context);
+
+        // Multi-reference: the calibrated provider context wins even though a declared evaluation
+        // now exists for this lane. The old `evaluation.or(provider)` ordering returned the wrong
+        // one here the moment the dev edit lane started producing evaluations.
+        assert_eq!(
+            flux2_edit_memory_run_context(
+                Flux2EditMemoryAuthority::ProviderCalibrated,
+                Some(&evaluation),
+                Some(&provider_context),
+            )
+            .map(|context| context.evidence_revision.as_str()),
+            Some("provider-owned-flux2-dev-edit-fit")
+        );
+        // Klein: the declared context is the only one there is, and it reaches the provider.
+        assert_eq!(
+            flux2_edit_memory_run_context(
+                Flux2EditMemoryAuthority::RequestScoped,
+                Some(&evaluation),
+                None,
+            )
+            .map(|context| context.evidence_revision.as_str()),
+            Some("declared-request-scope")
+        );
+        // Single-reference dev edit: admitted by `evaluate_request`, but NO context is offered —
+        // `mlx_gen_flux2::memory_strategy::safety_check` refuses `reference_count < 2` outright, so
+        // handing it the declared context would turn every single-reference dev edit into an error.
+        assert!(flux2_edit_memory_run_context(
+            Flux2EditMemoryAuthority::RequestScopedAdmissionOnly,
+            Some(&evaluation),
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_pid_opt_in_on_a_flux2_dev_route_is_refused_rather_than_dropped() {
+        for advanced in [json!({ "usePid": true }), json!({ "usePid": "true" })] {
+            let error = refuse_pid_on_flux2_dev_route("FLUX.2-dev edit", &advanced_request(advanced))
+                .expect_err("a PiD opt-in on a Dev route must not be silently ignored");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(_)),
+                "expected a typed InvalidPayload refusal, got {error:?}"
+            );
+        }
+        for advanced in [json!({}), json!({ "usePid": false })] {
+            assert!(
+                refuse_pid_on_flux2_dev_route("FLUX.2-dev edit", &advanced_request(advanced))
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn the_dev_edit_lane_is_not_gated_out_of_request_scoped_evaluation() {
+        let body = function_body(
+            include_str!("flux2.rs"),
+            "async fn generate_flux2_edit_stream(",
+        );
+        let declaration = body
+            .find("evaluate_declared_mlx_load_shape_for_request(")
+            .expect("the edit lane lost its declared load-shape evaluation");
+        let evaluation = body
+            .find("crate::mlx_fit_gate::evaluate_request(")
+            .expect("the edit lane lost its request-scoped evaluation");
+        assert!(declaration < evaluation);
+        // The whole defect was `engine_id != "flux2_dev_edit"` guards wrapped around the declared
+        // evaluation, the load-policy application, and the fit plan — three of them, which left the
+        // Dev edit lane with no request-scoped evaluation at all. Exactly ONE such guard may remain
+        // in this stream: the Klein-only route/PiD/component/decoder attachment on the LoadSpec.
+        assert_eq!(
+            body.matches("engine_id != \"flux2_dev_edit\"").count(),
+            1,
+            "the Dev edit engine is gated out of request-scoped admission again"
+        );
+        assert!(
+            body[declaration..evaluation].contains("MlxRequestPlan::for_spec_and_manifest("),
+            "the edit lane lost its unconditional MLX request plan"
+        );
+    }
+
+    #[test]
+    fn the_dev_control_lane_admits_its_request_before_generating() {
+        let body = function_body(
+            include_str!("flux2.rs"),
+            "async fn generate_flux2_dev_control_stream(",
+        );
+        for marker in [
+            "refuse_pid_on_flux2_dev_route(",
+            "evaluate_declared_mlx_load_shape_for_request(",
+            "apply_declared_mlx_load_policy_for_request(",
+            "MlxRequestPlan::for_spec_and_manifest(",
+            "start_cached_gen_stream_with_request_state(",
+            "crate::mlx_fit_gate::evaluate_request(",
+            "flux2_control_generate_one_scoped(",
+            "Some(&memory_evaluation),",
+        ] {
+            assert!(
+                body.contains(marker),
+                "the FLUX.2-dev control lane lost {marker}"
+            );
+        }
+        // The declared control coordinate the pinned `dev_control_safety_check` gates on: a
+        // text-to-image route carrying exactly one control image under the `control` overlay.
+        assert!(body.contains("mode: \"text_to_image\".to_owned(),"));
+        assert!(body.contains("has_reference: true,"));
+        assert!(body.contains("Some(\"control\".to_owned()),"));
+        // BOTH request identities — the registry declaration context and the fit-gate inputs — must
+        // name the single control map, and neither may be left behind when the other is edited.
+        assert_eq!(
+            body.matches("reference_count: 1,").count(),
+            2,
+            "the declared route context and the fit-gate inputs must both carry exactly one \
+             control image (the pinned dev_control_safety_check refuses any other cardinality)"
+        );
+        assert_eq!(
+            body.matches("reference_count:").count(),
+            2,
+            "an unexpected reference cardinality appeared on the control route"
+        );
+        assert!(
+            !body.contains("start_cached_gen_stream(\n"),
+            "the control lane must not fall back to the unadmitted stream starter"
+        );
+    }
+
+    #[test]
+    fn the_dev_control_render_goes_through_the_provider_request_scope() {
+        let body = function_body(
+            include_str!("flux2.rs"),
+            "fn flux2_control_generate_one_scoped(",
+        );
+        assert!(
+            body.contains("crate::memory_strategy::generate_with_scope("),
+            "the control render bypassed the provider memory-strategy scope again"
+        );
+        assert!(
+            !body.contains("generator.generate("),
+            "the control render still calls the generator directly, skipping its safety check"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

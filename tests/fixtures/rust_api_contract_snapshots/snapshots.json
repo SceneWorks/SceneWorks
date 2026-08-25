@@ -1657,6 +1657,235 @@
           "modelManifestEntries": [
             {
               "adapter": "sdxl_diffusers",
+              "candle": {
+                "measured": false,
+                "memoryStrategyCapabilities": {
+                  "bounded_attention": {
+                    "overlays": [
+                      "none",
+                      "lora",
+                      "control"
+                    ],
+                    "parameters": {
+                      "attentionChunkSize": 67108864
+                    }
+                  },
+                  "bounded_decode": {
+                    "overlays": [
+                      "none",
+                      "lora",
+                      "control"
+                    ],
+                    "parameters": {
+                      "decodeOverlap": 64,
+                      "decodeTileEdge": 512
+                    }
+                  }
+                },
+                "memoryStrategyContract": {
+                  "abi": 1,
+                  "implementations": [
+                    {
+                      "engagedRungs": [
+                        "resident"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "pid",
+                        "lora_pid",
+                        "single_control",
+                        "lora_single_control",
+                        "ip_adapter",
+                        "lora_ip_adapter",
+                        "ip_adapter_pid",
+                        "lora_ip_adapter_pid"
+                      ],
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_to_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control",
+                        "identity"
+                      ],
+                      "parameterRanges": {},
+                      "parameters": {},
+                      "rung": "resident",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "staged_residency"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "single_control",
+                        "lora_single_control"
+                      ],
+                      "modes": [
+                        "text_to_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control"
+                      ],
+                      "parameterRanges": {},
+                      "parameters": {},
+                      "rung": "staged_residency",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "bounded_decode"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "single_control",
+                        "lora_single_control",
+                        "ip_adapter",
+                        "lora_ip_adapter"
+                      ],
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_to_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control",
+                        "identity"
+                      ],
+                      "parameterRanges": {
+                        "decodeOverlaps": [
+                          64
+                        ],
+                        "decodeTileEdges": [
+                          512
+                        ]
+                      },
+                      "parameters": {
+                        "decodeOverlap": 64,
+                        "decodeTileEdge": 512
+                      },
+                      "rung": "bounded_decode",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "bounded_decode",
+                        "bounded_attention"
+                      ],
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "loadProfiles": [
+                        "plain",
+                        "lora",
+                        "single_control",
+                        "lora_single_control",
+                        "ip_adapter",
+                        "lora_ip_adapter"
+                      ],
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_to_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora",
+                        "control",
+                        "identity"
+                      ],
+                      "parameterRanges": {
+                        "attentionChunkSizes": [
+                          67108864
+                        ],
+                        "decodeOverlaps": [
+                          64
+                        ],
+                        "decodeTileEdges": [
+                          512
+                        ]
+                      },
+                      "parameters": {
+                        "attentionChunkSize": 67108864,
+                        "decodeOverlap": 64,
+                        "decodeTileEdge": 512
+                      },
+                      "rung": "bounded_attention",
+                      "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs",
+                      "sourceKinds": [
+                        "dir"
+                      ],
+                      "tiers": [
+                        "bf16",
+                        "q4",
+                        "q8"
+                      ]
+                    }
+                  ],
+                  "provider": "sdxl"
+                },
+                "minMemoryGb": 12,
+                "sequentialPeakGb": {
+                  "bf16": 16,
+                  "q4": 8,
+                  "q8": 11
+                },
+                "supportsSequentialOffload": true,
+                "vramGbByTier": {
+                  "bf16": 24,
+                  "q4": 12,
+                  "q8": 16
+                },
+                "vramMeasuredPixels": 1048576
+              },
               "capabilities": [
                 "text_to_image",
                 "edit_image",
@@ -1771,6 +2000,26 @@
                   "provider": "huggingface",
                   "repo": "madebyollin/sdxl-vae-fp16-fix",
                   "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd"
+                },
+                {
+                  "coRequisite": true,
+                  "componentId": "controlnet_openpose",
+                  "estimatedSizeBytes": 2500000000,
+                  "files": [
+                    "diffusion_pytorch_model.safetensors"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 2500000000
+                  },
+                  "platforms": [
+                    "macos",
+                    "windows",
+                    "linux"
+                  ],
+                  "provider": "huggingface",
+                  "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                  "required": "soft",
+                  "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7"
                 }
               ],
               "family": "sdxl",
@@ -2696,11 +2945,23 @@
               },
               "type": "image",
               "ui": {
+                "controlModes": [
+                  "pose"
+                ],
+                "controlScale": {
+                  "default": 1.0,
+                  "label": "Control strength",
+                  "max": 2.0,
+                  "min": 0.0,
+                  "step": 0.05
+                },
                 "description": "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL \u2014 the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable for general photoreal work. openrail++ (commercial use OK, ungated). Drop-in SDXL: same UNet, same dual-CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness \u2014 see InstantID).",
                 "label": "RealVisXL (photoreal SDXL)",
                 "pid": {
                   "checkpointId": "pid_sdxl"
                 },
+                "poseControlScale": true,
+                "poseLibrary": true,
                 "promptGuide": {
                   "path": "/prompt-guides/realvisxl.md",
                   "sources": [
@@ -3329,6 +3590,10 @@
       "adapter": "z_image_diffusers",
       "cacheEligibility": null,
       "cacheState": "missing",
+      "candleSupport": {
+        "features": {},
+        "supported": true
+      },
       "capabilities": [
         "text_to_image"
       ],
@@ -3424,6 +3689,10 @@
       "adapter": "z_image_diffusers",
       "cacheEligibility": null,
       "cacheState": "missing",
+      "candleSupport": {
+        "features": {},
+        "supported": true
+      },
       "capabilities": [
         "text_to_image",
         "edit_image",
@@ -3992,17 +4261,26 @@
       "bridgeRightClipAssetId": null,
       "characterId": "character_fixture",
       "characterLookId": null,
-      "duration": 6,
+      "duration": 5,
       "fitMode": "crop",
-      "fps": 25,
-      "height": 512,
+      "fps": 24,
+      "height": 480,
       "lastFrameAssetId": null,
       "loras": [],
       "mode": "replace_person",
-      "model": "ltx_2_3",
+      "model": "wan_2_2",
       "modelManifestEntry": {
-        "adapter": "ltx_video",
-        "autoDownload": false,
+        "adapter": "wan_video",
+        "candle": {
+          "measured": true,
+          "minMemoryGb": 14,
+          "vramGbByTier": {
+            "bf16": 14.5,
+            "q4": 12.1,
+            "q8": 12.1
+          },
+          "vramMeasuredPixels": 1048576
+        },
         "capabilities": [
           "image_to_video",
           "text_to_video",
@@ -4013,56 +4291,40 @@
         ],
         "catalogScope": "builtin",
         "defaults": {
-          "duration": 6,
-          "fps": 25,
+          "duration": 5,
+          "fps": 24,
           "quality": "balanced",
-          "resolution": "768x512",
-          "steps": 8
+          "resolution": "832x480",
+          "sampler": "default",
+          "scheduler": "default"
         },
         "downloads": [
           {
-            "coRequisite": true,
-            "estimatedSizeBytes": 26427894918,
-            "files": [
-              "gemma/*"
-            ],
-            "platforms": [
-              "macos",
-              "windows",
-              "linux"
-            ],
-            "provider": "huggingface",
-            "repo": "SceneWorks/ltx-2.3-mlx",
-            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb"
-          },
-          {
             "default": true,
-            "estimatedSizeBytes": 20467690460,
+            "estimatedSizeBytes": 17142889289,
             "files": [
               "q4/*"
             ],
             "footprint": {
-              "diskSizeBytes": 20467690460,
+              "diskSizeBytes": 17142889289,
               "peakMemoryBytes": null,
               "residentMemoryBytes": null
             },
             "platforms": [
-              "macos",
-              "windows",
-              "linux"
+              "macos"
             ],
             "provider": "huggingface",
-            "repo": "SceneWorks/ltx-2.3-mlx",
-            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+            "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+            "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
             "variant": "q4"
           },
           {
-            "estimatedSizeBytes": 29728720716,
+            "estimatedSizeBytes": 19596557565,
             "files": [
               "q8/*"
             ],
             "footprint": {
-              "diskSizeBytes": 29728720716,
+              "diskSizeBytes": 19596557565,
               "peakMemoryBytes": null,
               "residentMemoryBytes": null
             },
@@ -4070,17 +4332,17 @@
               "macos"
             ],
             "provider": "huggingface",
-            "repo": "SceneWorks/ltx-2.3-mlx",
-            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+            "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+            "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
             "variant": "q8"
           },
           {
-            "estimatedSizeBytes": 47092811992,
+            "estimatedSizeBytes": 24197122980,
             "files": [
               "bf16/*"
             ],
             "footprint": {
-              "diskSizeBytes": 47092811992,
+              "diskSizeBytes": 24197122980,
               "peakMemoryBytes": null,
               "residentMemoryBytes": null
             },
@@ -4088,52 +4350,99 @@
               "macos"
             ],
             "provider": "huggingface",
-            "repo": "SceneWorks/ltx-2.3-mlx",
-            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+            "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+            "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
+            "variant": "bf16"
+          },
+          {
+            "default": true,
+            "estimatedSizeBytes": 17338835457,
+            "files": [
+              "q4/*"
+            ],
+            "footprint": {
+              "diskSizeBytes": 17338835457,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "windows",
+              "linux"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+            "revision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+            "variant": "q4"
+          },
+          {
+            "estimatedSizeBytes": 19837231673,
+            "files": [
+              "q8/*"
+            ],
+            "footprint": {
+              "diskSizeBytes": 19837231673,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "windows",
+              "linux"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+            "revision": "9b173dc8660334a87a11e67de58939afe68f8cb2",
+            "variant": "q8"
+          },
+          {
+            "estimatedSizeBytes": 34203021834,
+            "files": [],
+            "platforms": [
+              "windows",
+              "linux"
+            ],
+            "provider": "huggingface",
+            "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
             "variant": "bf16"
           }
         ],
-        "family": "ltx-video",
-        "id": "ltx_2_3",
+        "family": "wan-video",
+        "id": "wan_2_2",
         "limits": {
           "durations": [
             4,
+            5,
             6,
-            8,
-            10,
-            12,
-            15
+            7,
+            8
           ],
           "fps": [
-            24,
-            25,
-            30
+            16,
+            24
           ],
-          "hardMaxDuration": 15,
-          "recommendedMaxDuration": 10,
-          "requiresDimensionsMultipleOf": 64,
+          "hardMaxDuration": 8,
+          "maxPixels": 901120,
+          "recommendedMaxDuration": 7,
           "resolutions": [
-            "768x512",
-            "512x768",
-            "640x640",
+            "832x480",
             "1280x704",
             "704x1280"
           ],
           "samplers": [
             "default",
+            "uni_pc",
             "euler",
             "euler_ancestral",
             "heun",
-            "dpmpp_2m",
             "dpmpp_sde",
-            "uni_pc",
-            "lcm",
             "ddim"
+          ],
+          "schedulers": [
+            "default"
           ]
         },
         "loraCompatibility": {
           "families": [
-            "ltx-video"
+            "wan-video"
           ],
           "types": [
             "style",
@@ -4143,68 +4452,70 @@
           ]
         },
         "mlx": {
-          "minMemoryGb": 31,
-          "repo": "SceneWorks/ltx-2.3-mlx"
+          "limits": {
+            "samplers": [
+              "default",
+              "uni_pc",
+              "euler",
+              "dpmpp_2m",
+              "euler_ancestral",
+              "heun",
+              "dpmpp_sde",
+              "ddim"
+            ],
+            "schedulers": [
+              "default"
+            ]
+          },
+          "minMemoryGb": 45,
+          "repo": "SceneWorks/wan2.2-ti2v-5b-mlx"
         },
-        "name": "LTX-2.3",
+        "name": "Wan2.2",
         "paths": {
-          "model": "${HF_CACHE}/SceneWorks/ltx-2.3-mlx"
+          "model": "${HF_CACHE}/SceneWorks/wan2.2-ti2v-5b-mlx"
         },
-        "recommended": true,
-        "resources": {
-          "checkpoint": {
-            "file": "ltx-2.3-22b-dev.safetensors",
-            "repo": "Lightricks/LTX-2.3"
-          },
-          "distilledCheckpoint": {
-            "file": "ltx-2.3-22b-distilled-1.1.safetensors",
-            "repo": "Lightricks/LTX-2.3",
-            "variants": {
-              "1.0": "ltx-2.3-22b-distilled.safetensors",
-              "1.1": "ltx-2.3-22b-distilled-1.1.safetensors"
+        "quantization": {
+          "variants": {
+            "gguf-q4_k_m": {
+              "format": "gguf",
+              "label": "GGUF Q4_K_M (smallest)",
+              "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+              "transformerFile": "Wan2.2-TI2V-5B-Q4_K_M.gguf"
+            },
+            "gguf-q8_0": {
+              "format": "gguf",
+              "label": "GGUF Q8_0 (near-lossless)",
+              "repo": "QuantStack/Wan2.2-TI2V-5B-GGUF",
+              "transformerFile": "Wan2.2-TI2V-5B-Q8_0.gguf"
             }
-          },
-          "distilledLora": {
-            "file": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
-            "repo": "Lightricks/LTX-2.3",
-            "variants": {
-              "1.0": "ltx-2.3-22b-distilled-lora-384.safetensors",
-              "1.1": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
-            }
-          },
-          "gemma": {
-            "repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"
-          },
-          "spatialUpscaler": {
-            "file": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-            "repo": "Lightricks/LTX-2.3"
           }
         },
         "type": "video",
         "ui": {
-          "description": "First-class short-shot video target for image-to-video and text-to-video.",
-          "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow.",
-          "label": "LTX-2.3",
+          "description": "Fallback video family kept behind the adapter contract for future runtime support.",
+          "durationHint": "Use shorter clips until local looping behavior is validated.",
+          "label": "Wan2.2",
           "promptGuide": {
-            "path": "/prompt-guides/ltx-2-3.md",
+            "path": "/prompt-guides/wan-2-2.md",
             "sources": [
               {
-                "label": "LTX official prompting guide",
-                "url": "https://docs.ltx.video/api-documentation/guides/prompting-guide"
+                "label": "Qwen Cloud video prompt guide",
+                "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/video-generation"
               },
               {
-                "label": "LTX-2.3 prompt guide blog",
-                "url": "https://ltx.io/model/model-blog/ltx-2-3-prompt-guide"
+                "label": "Wan2.2 GitHub repo",
+                "url": "https://github.com/Wan-Video/Wan2.2"
+              },
+              {
+                "label": "Wan2.2 TI2V model card",
+                "url": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers"
               }
             ],
-            "title": "LTX-2.3 Prompt Guide"
+            "title": "Wan2.2 Prompt Guide"
           },
           "recommendedFor": [
             "image_to_video",
-            "text_to_video",
-            "first_last_frame",
-            "extend_clip",
-            "video_bridge"
+            "text_to_video"
           ]
         }
       },
@@ -4215,13 +4526,14 @@
       "prompt": "hero walks through rain",
       "quality": "balanced",
       "referenceAssetIds": [],
+      "referenceAudioAssetIds": [],
       "referenceClipAssetId": null,
       "replacementMode": "face_only",
       "seed": null,
       "sourceAssetId": null,
       "sourceClipAssetId": "asset-video",
       "sourceClipAssetIds": [],
-      "width": 768
+      "width": 832
     },
     "progress": 0.0,
     "projectId": "project_fixture",

@@ -1,9 +1,9 @@
 use super::{
-    admit_candle_base, consume_gen_events, dense_tier_subdir, drive_gen_items, fit_engine_image,
-    load_reference_image, non_empty, pid_effective_dims, pid_output_tier, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    resolve_sdxl_components, resolve_seed, standard_tier_subdir, start_gen_stream,
-    uses_standard_tier_layout, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest,
+    admit_sdxl_bespoke_memory, consume_gen_events, dense_tier_subdir, drive_gen_items,
+    fit_engine_image, load_reference_image, non_empty, pid_effective_dims, pid_output_tier,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_pid_weights, resolve_sdxl_components, resolve_seed, standard_tier_subdir,
+    start_gen_stream, uses_standard_tier_layout, ApiClient, Image, ImagePlan, ImageRequest,
     JobSnapshot, JsonObject, Path, PathBuf, SdxlEdit, SdxlEditPaths, SdxlEditRequest, Settings,
     Value, WorkerError, WorkerResult,
 };
@@ -219,6 +219,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let adapters = resolve_adapters(request, settings)?;
     let sdxl_base = resolve_sdxl_edit_candle_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("SDXL edit base (SDXL/RealVisXL) not found".to_owned())
     })?;
@@ -227,27 +228,6 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             "SDXL edit requires edit_image mode + a source image".to_owned(),
         )
     })?;
-    let adapters = resolve_adapters(request, settings)?;
-    let adapter_bytes =
-        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "SDXL edit could not determine the resident size of the selected adapter stack"
-                        .to_owned(),
-                )
-            })?;
-    admit_candle_base(
-        request,
-        settings,
-        &sdxl_base,
-        "SDXL edit",
-        CandleBaseEvidence::Ungateable(
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-        ),
-        adapter_bytes,
-        false,
-    )
-    .await?;
     // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
     // source/mask fit so a 2K tier sizes the effective base and the edit source + mask are fit to THAT
     // base (source, mask, and latent stay aligned). `use_pid`/`with_pid` stay paired at the load below.
@@ -366,19 +346,60 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
     let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
         resolve_sdxl_components(&request.model_manifest_entry, settings)?;
 
+    let mut provider_spec =
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(sdxl_base.clone()))
+            .with_resolved_route(request.model.clone())
+            .with_component("tokenizer_clip_l", tokenizer_clip_l.clone())
+            .with_component("tokenizer_clip_bigg", tokenizer_clip_bigg.clone())
+            .with_component("vae_fp16_fix", vae_fp16_fix.clone())
+            .with_adapters(adapters.clone());
+    if let Some(pid) = &pid_weights {
+        provider_spec = provider_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
+    let memory_mode = if is_inpaint {
+        "image_inpaint"
+    } else {
+        "edit_image"
+    };
+    let (memory_evaluation, provider_spec) = admit_sdxl_bespoke_memory(
+        request,
+        settings,
+        provider_spec,
+        memory_mode,
+        width,
+        height,
+        1,
+        use_pid,
+        true,
+    )
+    .await?;
+    raw_settings.insert(
+        "memoryStrategy".to_owned(),
+        Value::String(format!(
+            "{:?}",
+            memory_evaluation.context.selection.strategy
+        )),
+    );
+    raw_settings.insert(
+        "memoryEvidenceRevision".to_owned(),
+        Value::String(memory_evaluation.context.evidence_revision.clone()),
+    );
+    let memory_context = memory_evaluation.context;
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "sdxl_edit",
         0,
         move || {
-            let model = SdxlEdit::load(&SdxlEditPaths {
+            let paths = SdxlEditPaths {
                 sdxl_base,
                 tokenizer_clip_l,
                 tokenizer_clip_bigg,
                 vae_fp16_fix,
                 adapters,
-            })
-            .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
+            };
+            let model = SdxlEdit::load_admitted(&paths, &provider_spec, memory_context)
+                .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
             // snapshots are cached, so a native-VAE edit is a no-op here.
             let model = match &pid_weights {

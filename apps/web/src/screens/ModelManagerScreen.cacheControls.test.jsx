@@ -222,6 +222,34 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     );
   const liveText = () => container.querySelector('[role="status"]')?.textContent ?? "";
 
+  it("hides every local-copy surface while the setting is disabled", async () => {
+    status = cacheStatus([cacheEntry()], {
+      policy: {
+        enabled: false,
+        maxBytes: 64 * GIB,
+        inactivitySeconds: 14 * 24 * 60 * 60,
+      },
+      error: "old cache entries could not be listed",
+    });
+    await render([
+      externalModel({
+        // Defend against a stale catalog snapshot as well as the normal external_ready state.
+        modelAvailability: "local_ready",
+        cacheEligibility: {
+          schemaVersion: 1,
+          coverage: "partial",
+          reason: "optional_components_excluded",
+          detail: "Optional components are not copied locally.",
+        },
+      }),
+    ]);
+
+    expect(cacheReads).toBe(1);
+    expect(section()).toBeNull();
+    expect(container.textContent).not.toMatch(/local cop|keep locally|automatic removal/i);
+    expect(badgeTexts()).not.toContain("partial local copy");
+  });
+
   // ---- typed availability badge -------------------------------------------------
 
   // Each typed state renders its own badge, driven entirely off the wire value. Enumerated so a
@@ -397,22 +425,15 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     expect(container.textContent).not.toContain("No local copy yet");
   });
 
-  // Hiding the controls silently would leave the user unable to tell "no local copies" from "no
-  // answer". The reason is stated ONCE for the whole screen, because one read failed for the whole
-  // screen — not once per model card.
-  it("explains once why the local-copy controls are hidden", async () => {
+  // A transport failure does not reveal the policy. Because local copies are opt-in, an unknown
+  // policy must not display their messaging as if the feature were enabled.
+  it("keeps local-copy messaging hidden when the setting cannot be read", async () => {
     status = new Error("cache listing failed");
     await render([
       externalModel(),
       externalModel({ id: "z", name: "Z-Image-Turbo", family: "z-image" }),
     ]);
-    const notices = [...container.querySelectorAll(".inline-warning")].filter((node) =>
-      node.textContent.includes("Local model copies can’t be shown"),
-    );
-    expect(notices).toHaveLength(1);
-    expect(notices[0].textContent).toContain("cache listing failed");
-    // It must not imply anything about what is cached — that is what could not be determined.
-    expect(notices[0].textContent).not.toMatch(/no local copies|none|0 copies/i);
+    expect(container.textContent).not.toMatch(/local model cop|no local cop/i);
   });
 
   // The subtler half of the same defect: the request SUCCEEDS but the store could not be listed,
@@ -431,7 +452,9 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
 
   // A read that recovers must clear the standing explanation rather than leave a stale alarm.
   it("clears the explanation once a later read succeeds", async () => {
-    status = new Error("cache listing failed");
+    // The successful response carries the enabled policy even though its store listing failed,
+    // so this is an enabled feature whose warning should remain visible until recovery.
+    status = cacheStatus([], { error: "cache listing failed" });
     await render([externalModel()]);
     expect(container.textContent).toContain("Local model copies can’t be shown");
     status = cacheStatus([cacheEntry()]);

@@ -44,14 +44,18 @@ pub(crate) use routing::mlx::*;
 // External re-export surface: `apps/rust-api/src/lib.rs` and the integration test
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
-    candle_routed_image_models, imported_control_intent_is_material,
+    candle_routed_image_models, checkpoint_plan_checkpoint_id, imported_control_intent_is_material,
+    imported_entry_installed_path, imported_entry_loadable_path,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
     imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
-    mac_capabilities, model_mac_support, ImportedProviderSurface, MacCapabilities,
-    MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
+    mac_capabilities, model_candle_support, model_mac_support, video_job_type_for_mode,
+    ImportedProviderSurface, MacCapabilities, ModelCandleSupport, MAC_NOT_AVAILABLE_LABEL,
+    MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
-    candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
+    candle_supported, convert_artifact_required_here, mac_rust_supported,
+    video_request_is_claimable_by_any_lane, video_request_is_claimable_on_platform,
+    UnsupportedReason, CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS,
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 pub use routing::{
@@ -2127,6 +2131,84 @@ impl JobsStore {
         Ok(failed)
     }
 
+    /// **The platform-reachability sweep (sc-19570).** Fails, terminal, every queued video job
+    /// whose (model, mode) pair no lane that can exist on `host_os` will ever claim.
+    ///
+    /// This is where the platform-conditional refusal lives, and the reason it lives HERE rather
+    /// than at `POST /api/v1/video/jobs`: an HTTP contract is not platform-dependent. The route
+    /// answers `201` for the same body on every host; what varies is the job's *execution outcome*,
+    /// which is inherently a property of the machine. sc-19570 shipped the refusal as a `400` first
+    /// and that was ruled out — the published surface must not differ by OS.
+    ///
+    /// It closes the real defect, which is not "the request was accepted" but "the job never
+    /// terminates": an MLX-only pair submitted off-Mac sat `queued` / "Waiting for an available
+    /// worker." with no error and no terminal state, forever. None of the four existing sweeps
+    /// rescues it. [`Self::fail_stranded_candle_jobs`] returns early the moment ANY live candle
+    /// worker exists — and one normally does; the job is unclaimable, not unserved. Its `mlx` twin
+    /// is `mlx_required`-gated and inert off-Mac. Both `fail_unsupported_*` sweeps default to
+    /// **warn**. So the job fell through all four.
+    ///
+    /// **No flag and no grace window,** unlike every sweep above it. Unreachability is structural
+    /// rather than transient: no worker capable of claiming the job can register on this OS at all,
+    /// so there is no window to wait out, and gating it behind a rollout switch would leave the
+    /// hang in place for every default deployment — which is exactly the state sc-19570 found. On
+    /// macOS it is inert by construction ([`video_request_is_claimable_on_platform`] returns `true`
+    /// there unconditionally), so no Mac-served pair is touched.
+    ///
+    /// Scoped to the four video job types via [`video_job_is_platform_unreachable`] — the same
+    /// range `create_video_job` enqueues — so it can never reach an image, training or upscale job.
+    /// Returns the jobs it failed so the caller can emit the structured event and publish updates.
+    pub fn fail_platform_unreachable_jobs(
+        &self,
+        host_os: &str,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        // Cheap exit on the platform where this can never fire, before taking the write lock.
+        if matches!(host_os, "macos" | "darwin") {
+            return Ok(Vec::new());
+        }
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = now_unix_seconds();
+
+        let mut statement = transaction.prepare(
+            "
+            select * from jobs
+             where status = 'queued'
+             order by created_at asc
+            ",
+        )?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        drop(statement);
+
+        let now_text = format_unix_seconds(now);
+        let mut failed_ids = Vec::new();
+        for job in candidates {
+            if !video_job_is_platform_unreachable(&job, host_os) {
+                continue;
+            }
+            let error = platform_unreachable_error(&job, host_os);
+            transaction.execute(
+                "
+                update jobs
+                   set status = 'failed',
+                       stage = 'failed',
+                       message = 'This mode has no backend on this platform.',
+                       error = ?2,
+                       completed_at = ?1,
+                       updated_at = ?1,
+                       worker_id = null
+                 where id = ?3 and status = 'queued'
+                ",
+                params![now_text, error, job.id],
+            )?;
+            failed_ids.push(job.id.clone());
+        }
+        let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
+        transaction.commit()?;
+        Ok(failed)
+    }
+
     /// Off-Mac "candle-unsupported" enforce sweep (sc-5502, epic 5483) — the Windows/Linux twin of
     /// [`Self::fail_unsupported_mlx_jobs`]. When `candle_required` AND `enforce`, fails every queued
     /// job the candle/CUDA flow can't run ([`candle_supported`] returns `Err`) terminal with a
@@ -3924,7 +4006,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     }
     // No-silent-T2I / no-fallback (sc-5968, epic 5483): any non-candle, non-mlx GPU descriptor must
     // DECLINE the unsupported-pose shapes the candle worker owns-to-reject (an `advanced.poses` job
-    // on a candle model with no pose lane, e.g. sdxl), so no generic claimant can silently render an
+    // on a candle model with no pose lane), so no generic claimant can silently render an
     // unconditioned T2I image and the candle worker reliably wins
     // them (then rejects with a typed error). Mac is unaffected: those shapes are MLX-served there
     // (model_mac_support pose), so the `mlx` worker still claims them and other descriptors decline.
@@ -3944,8 +4026,8 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     if worker_is_candle(worker) {
         // ImageGenerate + ImageEdit: claim the candle-served shapes (incl. the sc-5487
         // SdxlEdit/Flux2Edit/QwenEdit `image_edit` lanes) AND the unsupported-pose shapes the candle
-        // worker must OWN to reject (a `advanced.poses` job on a candle model with no pose lane, e.g.
-        // sdxl) — so those fail loudly on candle instead of silently rendering an unconditioned T2I
+        // worker must OWN to reject (an `advanced.poses` job on a candle model with no pose lane) — so
+        // those fail loudly on candle instead of silently rendering an unconditioned T2I
         // image (sc-5968, the no-fallback / no-silent-T2I directive). Every other unsupported shape is
         // declined and remains queued. `image_edit` is gated
         // here too (mirroring the mlx `JobType::ImageGenerate | JobType::ImageEdit` claim arm): without

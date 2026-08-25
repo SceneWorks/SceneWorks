@@ -5,8 +5,8 @@
   "invariant": "No component is resident above the user's selected quant tier unless a declared, measured exception says otherwise.",
   "normativeHome": "docs/memory-strategy-contract.md#tier-integrity",
   "totals": {
-    "exceptions": 111,
-    "measured": 111,
+    "exceptions": 117,
+    "measured": 117,
     "unmeasured": 0,
     "entriesWithoutHostedTierVariants": 6
   },
@@ -864,12 +864,12 @@
         "q8": 334615452
       },
       "vaeScope": "full-autoencoder",
-      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision c5a92a902dd4e6ee99c2a57981ecf66209905dd1; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+      "isolation": "Re-summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 778c3f02b7703b0c2755d0c0447592897193c6b5; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
-      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q8/vae/diffusion_pytorch_model.safetensors",
-      "note": null
+      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v1-mlx@778c3f02b7703b0c2755d0c0447592897193c6b5:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": "The metadata-only child keeps the q8 VAE LFS identity a91793eaf162d3531017f59decf47890e2abb6a376e709bb33542ebe8d4cfe0f unchanged. Its reviewed q4 config SHA-256 values are f87b89e4249e027632236caba75d1140e14fd4c2ce4b4e554f2912b234e72cf9 / 3b96bc14843360d24e864f7d1ac6d83e95cad8f68209e7e503cefa9a4f65b18b / aeb34c12f61f1edd9f7e17d8332f91197bacad70754bfaa450836137c40c8c4d; q8 values are c74289384c56ae6fdac29b39f01c081aa7dbd20161b371c5dc3b486fa94bf8fb / 2891a3c519b99c3b5983aeee973095974f2e08df5d88e7d59c88635638fa8d6a / 379fb37b8b7a893113925439117acebc03b205615b281bcc139b7c418b26ce7f."
     },
     {
       "model": "illustrious_xl_v2",
@@ -920,12 +920,12 @@
         "q8": 334615452
       },
       "vaeScope": "full-autoencoder",
-      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 7c5c8b2bb75a8f38a7365e70bdf84d38d6204473; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+      "isolation": "Re-summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 672e9851ede4dc856fa945649b6691975c9d74a3; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
-      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q8/vae/diffusion_pytorch_model.safetensors",
-      "note": null
+      "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v2-mlx@672e9851ede4dc856fa945649b6691975c9d74a3:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": "The metadata-only child keeps the q8 VAE LFS identity b0a960def5b0ff715be74a7a82202a80300f8b06a3bc08e364af3647b6d7a653 unchanged. Its reviewed q4 config SHA-256 values are f87b89e4249e027632236caba75d1140e14fd4c2ce4b4e554f2912b234e72cf9 / 3b96bc14843360d24e864f7d1ac6d83e95cad8f68209e7e503cefa9a4f65b18b / aeb34c12f61f1edd9f7e17d8332f91197bacad70754bfaa450836137c40c8c4d; q8 values are c74289384c56ae6fdac29b39f01c081aa7dbd20161b371c5dc3b486fa94bf8fb / 2891a3c519b99c3b5983aeee973095974f2e08df5d88e7d59c88635638fa8d6a / 379fb37b8b7a893113925439117acebc03b205615b281bcc139b7c418b26ce7f."
     },
     {
       "model": "instantid_realvisxl",
@@ -1649,6 +1649,182 @@
       "reviewedCause": "structural",
       "triageNote": "Measure, not eliminate: the provider loads these dense convolutional codec weights at BF16; packing the load-time-folded adaLN sources would change the decoded output rather than remove equivalent residency.",
       "source": "config/manifests/builtin.models.jsonc `mage_flow_turbo` per-tier VAE footprint; isolated artifact: SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": null
+    },
+    {
+      "model": "minimax_h3",
+      "component": "audioVae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8",
+        "bf16"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "cause": "backend-capability",
+      "reason": "The MLX audio VAE is loaded at a hard-coded `Dtype::Float32` — the width is not derived from the selected tier or from `Precision` at all, so it sits above EVERY tier including bf16.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 259757412,
+        "q8": 259757412,
+        "bf16": 259757412
+      },
+      "vaeScope": "decoder-only",
+      "isolation": "Summed the exact safetensors-header tensor shapes of the DECODE half of `audio_vae/` at immutable revision 939557dc319dd91227e30195a763f272ba7f8765 — decoder only; encoder tensors are excluded — 914 of 1087 tensors (`decoder.*` plus `dec_in_proj.*`), 64,939,353 elements at the hard-coded F32 load dtype. The split is exact rather than approximate: `MiniMaxH3AudioVae` has no encoder field at all and the encode half is a SEPARATE type (`MiniMaxH3AudioVaeEncoder`) that only the ref2va route constructs, and the two name sets are asserted in-crate to partition the checkpoint's 1087 tensors 173/914. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "backend-capability",
+      "triageNote": "Measure, not eliminate: the f32 width is a property of the port (the BigVGAN decoder's weight-norm reconstruction), not a packing choice, and 0.24 GB does not justify a numeric change to an audio path with no parity coverage below f32.",
+      "source": "mlx-gen-minimax-h3/src/model.rs — `decode_audio` constructs the audio VAE with `Dtype::Float32` literally, and `audio_vae.rs` forces weight-norm `weight_g`/`weight_v` to F32 regardless; config/manifests/builtin.models.jsonc `minimax_h3` audio_vae co-requisite — \"Also dense in every tier\"; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:audio_vae/",
+      "note": "This row is why `bf16` appears in appliesToTiers: an f32 component is above tier even on the dense bf16 tier. It is the only such row for this family — the video VAE follows the lane dtype and so is at tier on bf16."
+    },
+    {
+      "model": "minimax_h3",
+      "component": "transformerHead",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8",
+        "bf16"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "cause": "packing-exception",
+      "reason": "The converter's packing predicate excludes eight top-level DiT bases BY NAME (`proj_in`, `proj_out`, `audio_proj_in`, `audio_proj_out`, the two `time_embedder` linears, `context_embedder` and `norm_out.linear`), and the loader reads them with no dtype argument, so they stay at their published width — six of the eight at f32 — in every tier.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 181773824,
+        "q8": 181773824,
+        "bf16": 181773824
+      },
+      "vaeScope": null,
+      "isolation": "Summed the exact safetensors-header tensor shapes of the 16 tensors whose base matches `DENSE_BY_POLICY`, at immutable revision 939557dc319dd91227e30195a763f272ba7f8765; 56,442,624 `context_embedder` / `norm_out.linear` elements counted at BF16 and 17,222,144 `proj_in`/`proj_out`/`audio_proj_in`/`audio_proj_out`/`time_embedder` elements at F32, matching the published dtypes the MLX load sites preserve. This is isolated mixed-precision weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: these are the model's numerically sensitive I/O projections, the same class every sibling family leaves dense, and 0.17 GB does not justify a packing change with a quality question attached.",
+      "source": "mlx-gen-minimax-h3/src/convert.rs `DENSE_BY_POLICY` and `is_dit_linear_target` (a negative predicate: everything is a packing target except the declared dense sets and the AdaLN group); mlx-gen-minimax-h3/src/dit/heads.rs `LinearBias::from_weights` — \"Load `{prefix}.weight` / `{prefix}.bias` at their published dtype … the dtype is deliberately not a parameter\"; mlx-gen-minimax-h3/src/dit/model.rs — \"`dtype` is the block stack's precision. The 17 input/output tensors are loaded at their own published dtypes instead.\"; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:transformer/",
+      "note": "TIER-INVARIANT, which is why `bf16` is in appliesToTiers: the f32 half sits above even the dense bf16 tier, and `Precision::Fp32` does not widen these either — the model dtype reaches only the block stack and the refiner. The offline converter re-emits them verbatim, so a q4 shard carries these 16 tensors byte-identical to upstream. NOT the 26 GB `adaln_proj.linear` group: that IS packed, at its own per-tier width, and is evicted before step 0."
+    },
+    {
+      "model": "minimax_h3",
+      "component": "vae",
+      "residentTier": "bf16",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "cause": "packing-exception",
+      "reason": "Only the DiT and the text encoder are packed per tier; the video VAE is dense in every tier (the Wan precedent) and its loader casts every tensor to the lane's bf16 dtype rather than following the selected quant.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 5207737968,
+        "q8": 5207737968
+      },
+      "vaeScope": "full-autoencoder",
+      "isolation": "Summed the exact safetensors-header tensor shapes of every tensor in `vae/` at immutable revision 939557dc319dd91227e30195a763f272ba7f8765 — full autoencoder (encoder + decoder), 703 tensors, 2,603,868,984 elements, published F32 and counted at the MLX lane's BF16 runtime load dtype. Full rather than decoder-only because `MiniMaxH3VideoVae::load` REFUSES a snapshot whose encode half is missing (`if !vae.can_encode() { return Err(..) }`), so the encoder is constructed on every advertised mode including plain text-to-video, and fl2va genuinely runs it to encode keyframes. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: no packed VAE artifact exists for this family in any tier, and the decoder is a 36-layer transformer rather than a conv stack, so a lower-tier repack is engine work with a quality question attached rather than a rehost.",
+      "source": "config/manifests/builtin.models.jsonc `minimax_h3` video_vae co-requisite — \"Dense in EVERY tier (the Wan precedent) — no `variant`, because this is a floor no tier shrinks\"; the width is pinned by mlx-gen-minimax-h3/src/vae.rs, which loads every tensor through `as_dtype(dtype)` where `dtype` is the lane's `self.dtype`; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:vae/",
+      "note": null
+    },
+    {
+      "model": "minimax_h3_ref",
+      "component": "audioVae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8",
+        "bf16"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "cause": "backend-capability",
+      "reason": "Same hard-coded `Dtype::Float32` as `minimax_h3`, over a LARGER weight set: Ref2VA is the only route that conditions on reference audio, so it constructs the encoder as well as the decoder.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 605306340,
+        "q8": 605306340,
+        "bf16": 605306340
+      },
+      "vaeScope": "full-autoencoder",
+      "isolation": "Summed the exact safetensors-header tensor shapes of ALL of `audio_vae/` at immutable revision 939557dc319dd91227e30195a763f272ba7f8765 — full autoencoder (encoder + decoder), all 1087 tensors, 151,326,585 elements at the hard-coded F32 load dtype. The scope differs from `minimax_h3`'s row on purpose and that difference is the whole reason these are per-entry rows: the base partition's advertised modes (t2va, fl2va) never encode audio and take 914 tensors, while ref2va constructs the 173-tensor encoder too. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "backend-capability",
+      "triageNote": "Measure, not eliminate: same port-level f32 width as the base partition's row.",
+      "source": "mlx-gen-minimax-h3/src/model.rs — the ref2va branch calls `load_audio_encoder()` alongside `decode_audio`, and BOTH are constructed with `Dtype::Float32` literally; config/manifests/builtin.models.jsonc `minimax_h3_ref` audio_vae co-requisite; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:audio_vae/",
+      "note": null
+    },
+    {
+      "model": "minimax_h3_ref",
+      "component": "transformerHead",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8",
+        "bf16"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "cause": "packing-exception",
+      "reason": "Identical to `minimax_h3` — `transformer_ref` is the same 638-tensor architecture with the same published dtypes, converted by the same predicate, so the same eight bases stay dense at their published width in every tier.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 181773824,
+        "q8": 181773824,
+        "bf16": 181773824
+      },
+      "vaeScope": null,
+      "isolation": "Summed the exact safetensors-header tensor shapes of the 16 `DENSE_BY_POLICY` tensors in `transformer_ref/` at immutable revision 939557dc319dd91227e30195a763f272ba7f8765 — measured separately rather than inherited from the base partition, and they match to the byte: 56,442,624 elements at BF16 and 17,222,144 at F32. This is isolated mixed-precision weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: same component and same reasoning as the base partition — one packing change would resolve both rows.",
+      "source": "mlx-gen-minimax-h3/src/convert.rs `DENSE_BY_POLICY`; mlx-gen-minimax-h3/src/dit/heads.rs `LinearBias::from_weights` (no dtype parameter); docs/sc-17139-minimax-h3-hosting-layout.md §2 — `transformer` and `transformer_ref` \"resolve to the same `diffusion_pytorch_model.safetensors.index.json` blob … identical tensor names, identical shapes, identical 66,280,430,080-byte total\"; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:transformer_ref/",
+      "note": null
+    },
+    {
+      "model": "minimax_h3_ref",
+      "component": "vae",
+      "residentTier": "bf16",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "cause": "packing-exception",
+      "reason": "Identical to `minimax_h3` — the two partitions differ only in which DiT checkpoint denoises; the video VAE is the same byte-identical shared co-requisite, dense in every tier, cast to the lane's bf16 dtype.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 5207737968,
+        "q8": 5207737968
+      },
+      "vaeScope": "full-autoencoder",
+      "isolation": "Summed the exact safetensors-header tensor shapes of every tensor in `vae/` at immutable revision 939557dc319dd91227e30195a763f272ba7f8765 — full autoencoder (encoder + decoder), 703 tensors, 2,603,868,984 elements, published F32 and counted at the MLX lane's BF16 runtime load dtype. Ref2VA genuinely runs the encoder on its reference images, so full scope is the constructed set and not merely the loader's refusal to omit it. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: same component and same absent artifact as `minimax_h3` — one repack would resolve both rows.",
+      "source": "config/manifests/builtin.models.jsonc `minimax_h3_ref` video_vae co-requisite — byte-identical to `minimax_h3`'s row, same repo and same pinned revision; mlx-gen-minimax-h3/src/vae.rs loads every tensor through `as_dtype(dtype)`; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:vae/",
       "note": null
     },
     {

@@ -44,7 +44,14 @@ pub fn video_mode_conditioning_requirements(mode: &str) -> &'static [&'static [&
         "image_to_video" => &[&["reference"]],
         "first_last_frame" => &[&["keyframe"]],
         "video_to_video" | "multi_video_to_video" => &[&["videoClip"]],
-        "reference_to_video" => &[&["multiReference"]],
+        // Subject-reference conditioning is consumable through EITHER descriptor surface
+        // (sc-18650): the heterogeneous `multiReference` bundle (bernini, and the scail/edit
+        // convention), or the ordered singular `reference` kind — MiniMax-H3's omni-reference
+        // surface, where gen-core has no heterogeneous-reference variant and the engines instead
+        // declare the ordered vec `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]` (the
+        // request's own order carries the semantics). Same in-group alternatives idiom as
+        // `replace_person` below.
+        "reference_to_video" => &[&["multiReference", "reference"]],
         "reference_video_to_video" | "ads2v" => &[&["videoClip"], &["multiReference"]],
         "replace_person" | "animate_character" => {
             &[&["controlClip"], &["reference", "multiReference"]]
@@ -225,6 +232,18 @@ pub(super) fn has_nonempty_or_malformed_string(payload: &Map<String, Value>, key
         Some(Value::String(value)) => !value.trim().is_empty(),
         Some(_) => true,
     }
+}
+
+/// True when an optional string carrier is present in a shape that is neither a string nor `null`.
+/// Missing, `null`, and any string (blank included) are well-formed "not supplied or supplied"
+/// encodings; a number/bool/array/object is an authored value no route can consume and must fail
+/// closed. Use this where BOTH the populated and the absent carrier are eligible on the same gate,
+/// so [`has_nonempty_or_malformed_string`] cannot separate malformed from populated (sc-20525).
+pub(super) fn has_malformed_optional_string(payload: &Map<String, Value>, key: &str) -> bool {
+    !matches!(
+        payload.get(key),
+        None | Some(Value::Null) | Some(Value::String(_))
+    )
 }
 
 /// True when a payload key contains a non-empty JSON array.
