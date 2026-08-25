@@ -691,13 +691,38 @@ fn metadata_declares_nvfp4(entries: &serde_json::Map<String, Value>) -> bool {
     let Some(layers) = parsed.get("layers").and_then(Value::as_object) else {
         return false;
     };
-    !layers.is_empty()
-        && layers.values().all(|layer| {
-            layer
-                .get("format")
-                .and_then(Value::as_str)
-                .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
-        })
+    !layers.is_empty() && layers.values().all(nvfp4_layer_descriptor_is_decodable)
+}
+
+/// The block size `nvfp4-v1` decodes: 16 E2M1 values per FP8 block scale.
+///
+/// Not a tunable. It is baked into [`has_nvfp4_triplets`]'s shape arithmetic (`cols / 16` blocks
+/// per row, rounded to the 128×4 swizzle) and into the codec on the engine side.
+const NVFP4_GROUP_SIZE: u64 = 16;
+
+/// One `_quantization_metadata.layers` entry: `nvfp4` format, and a group size this build decodes.
+///
+/// The group size used to be READ by nobody. A converter emitting `group_size: 32` (the MXFP4 block
+/// size, and a plausible future NVFP4 variant) declared `format: "nvfp4"` and passed — and then the
+/// shape checks below, which assume 16, would either reject the file for the wrong reason or, where
+/// the arithmetic happened to line up, admit it and hand the codec blocks it decodes at the wrong
+/// stride. A declared size this build does not implement is refused explicitly (sc-11045 review).
+///
+/// An ABSENT `group_size` is accepted: the pinned Krea 2 artifact's descriptors carry one, but the
+/// field is optional in the converter's schema and its absence means "the codec default", which is
+/// 16. Only a size that is present and different is a refusal.
+fn nvfp4_layer_descriptor_is_decodable(layer: &Value) -> bool {
+    if !layer
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
+    {
+        return false;
+    }
+    match layer.get("group_size") {
+        None | Some(Value::Null) => true,
+        Some(value) => value.as_u64() == Some(NVFP4_GROUP_SIZE),
+    }
 }
 
 fn tensor_header<'a>(
@@ -776,8 +801,11 @@ fn has_nvfp4_triplets(entries: &serde_json::Map<String, Value>) -> bool {
         let block_values = block_shape
             .iter()
             .try_fold(1u64, |product, dim| product.checked_mul(*dim));
+        // `NVFP4_GROUP_SIZE` values per block scale — the same 16 the layer descriptor is validated
+        // against in `nvfp4_layer_descriptor_is_decodable`, so the two cannot drift apart.
         let expected_blocks = round_up_u64(*rows, 128).and_then(|scale_rows| {
-            round_up_u64(cols / 16, 4).and_then(|scale_cols| scale_rows.checked_mul(scale_cols))
+            round_up_u64(cols / NVFP4_GROUP_SIZE, 4)
+                .and_then(|scale_cols| scale_rows.checked_mul(scale_cols))
         });
         if !matches!((block_values, expected_blocks), (Some(actual), Some(expected)) if actual == expected)
             || !matches!(
@@ -1495,6 +1523,69 @@ mod tests {
         assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
         // And the import gate must not admit it under the krea_2 NVFP4 arm either.
         assert!(import_supported(&verdict).is_err());
+    }
+
+    /// The declared `group_size` is CHECKED against the 16 this build decodes (sc-11045 review).
+    ///
+    /// The descriptor carries it and nothing read it. `nvfp4-v1` is a 16-value block codec, and the
+    /// triplet proof below hard-codes that stride (`cols / 16` block scales per row, padded to the
+    /// 128x4 swizzle). A converter emitting `group_size: 32` — the MXFP4 block size, and the most
+    /// plausible shape a future NVFP4 variant takes — declared `format: "nvfp4"` and passed the
+    /// declaration check unread, leaving only the shape arithmetic between it and the codec.
+    ///
+    /// An ABSENT size still means "the codec default", so it is accepted; only a present-and-wrong
+    /// one is refused.
+    ///
+    /// Failing mutation (run): drop the `group_size` arm from
+    /// `nvfp4_layer_descriptor_is_decodable` (return `true` after the format check). Every
+    /// mis-sized row below then classifies as `Nvfp4`.
+    #[test]
+    fn a_declared_group_size_this_build_does_not_decode_is_not_nvfp4() {
+        // Re-declare the layer map with a chosen `group_size`, everything else identical to the
+        // fixture the two passing tests above use.
+        let with_group_size = |group_size: Option<Value>| {
+            let Value::Object(mut map) = quantization_metadata_nvfp4_header(
+                "model.diffusion_model.txtfusion.projector.weight",
+                6,
+                false,
+                &["nvfp4"],
+            ) else {
+                unreachable!("the fixture builds an object")
+            };
+            let mut declared = serde_json::Map::new();
+            for index in 0..6 {
+                let mut layer = serde_json::Map::new();
+                layer.insert("format".to_owned(), json!("nvfp4"));
+                if let Some(group_size) = group_size.clone() {
+                    layer.insert("group_size".to_owned(), group_size);
+                }
+                declared.insert(format!("blocks.{index}.attn.wq"), Value::Object(layer));
+            }
+            map.insert(
+                "__metadata__".to_owned(),
+                json!({
+                    "format": "pt",
+                    "_quantization_metadata":
+                        serde_json::to_string(&json!({"layers": declared})).unwrap(),
+                }),
+            );
+            recognized(classify_base_header(&Value::Object(map))).quant
+        };
+
+        // The size this build decodes, and its absence (the codec default), both classify NVFP4.
+        assert_eq!(with_group_size(Some(json!(16))), QuantFormat::Nvfp4);
+        assert_eq!(with_group_size(None), QuantFormat::Nvfp4);
+        assert_eq!(with_group_size(Some(Value::Null)), QuantFormat::Nvfp4);
+
+        // Anything else is refused, and the file drops back to what its tensor surface says it is
+        // rather than being handed to a codec that would decode it at the wrong stride.
+        for group_size in [json!(32), json!(8), json!(64), json!(0), json!("16")] {
+            assert_eq!(
+                with_group_size(Some(group_size.clone())),
+                QuantFormat::Fp8InlineScale,
+                "group_size {group_size} is not one this build decodes as nvfp4-v1"
+            );
+        }
     }
 
     /// A descriptor that annotates something with no proven triplet under it keeps the WHOLE file

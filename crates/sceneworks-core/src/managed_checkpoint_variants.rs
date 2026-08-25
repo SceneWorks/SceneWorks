@@ -7,6 +7,7 @@
 //! | verb | owner |
 //! | --- | --- |
 //! | install | [`ManagedIngest`] — staging, checksum, one atomic rename, `compile_managed` |
+//! | confirm | [`ManagedCheckpointVariantV1::confirm_installed`] — called post-commit by the worker's model-import job for an install id this registry knows |
 //! | remove | [`CheckpointPlanStore::remove_managed`] |
 //! | identity | [`ImportPlanV1::semantic_digest`](crate::checkpoint_import::ImportPlanV1::semantic_digest) |
 //! | format | the engine's registered `nvfp4-v1` codec, via the header classification in [`crate::base_weights`] |
@@ -386,6 +387,11 @@ impl ManagedCheckpointVariantV1 {
     /// as "how much will this download", and without a consumer it could drift arbitrarily far
     /// from the pinned artifact with nothing red. Checked here rather than at finalize because
     /// this is the one verb that compares a committed install against the registration as a whole.
+    ///
+    /// **Called in production**, post-commit, by the worker's model-import job (sc-11045): once
+    /// `ManagedIngest::finalize` has committed, an install id this registry knows is confirmed
+    /// against its registration and a mismatch fails the job. An import with no registration —
+    /// every ordinary user import — never reaches it.
     pub fn confirm_installed(&self, install: &ManagedInstallV1) -> Result<(), ManagedVariantError> {
         self.validate()?;
         if install.install_id != self.variant_id {
@@ -491,8 +497,57 @@ pub fn managed_nvfp4_variants() -> &'static [ManagedCheckpointVariantV1] {
 /// There is no sibling that maps a model, family, backend, or host capability onto a variant, and
 /// adding one would be the auto-selection this epic forbids (E2 / SC#5). A caller that wants NVFP4
 /// states which artifact it means.
+///
+/// **Exact, byte-for-byte.** A caller deciding what to do about a merely case-different id must go
+/// through [`match_managed_nvfp4_variant_id`], which reports the near miss instead of resolving it.
 pub fn managed_nvfp4_variant(variant_id: &str) -> Option<&'static ManagedCheckpointVariantV1> {
     managed_nvfp4_variants()
         .iter()
         .find(|variant| variant.variant_id == variant_id)
+}
+
+/// How a caller-supplied model id relates to the registry.
+///
+/// The third arm is the one that matters. A managed variant's id IS its install-directory name and
+/// its checkpoint identity, and the directory resolver preserves case while the two filesystems
+/// SceneWorks ships on (NTFS, APFS as configured) do not — so `"NVFP4-Krea-2-Turbo"` and
+/// `"nvfp4-krea-2-turbo"` are one directory and one identity there while an exact-match registry
+/// lookup sees only the second. That gap let a case-different id miss the pin enforcement entirely
+/// (no registered repo, revision, file or checksum), pass the distinct-id collision check, and then
+/// install arbitrary bytes into the curated variant's own directory under its own identity.
+///
+/// [`ManagedVariantIdMatch::NearMiss`] closes it, and the caller closes it by REFUSING rather than by
+/// normalizing. Silently rewriting the id to the canonical spelling would make a request install
+/// something other than what it asked for, which is exactly the "convenience is not a guarantee"
+/// rule this registry is built on; a near miss is a client bug or an attempt, and both deserve a
+/// diagnostic naming the canonical id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedVariantIdMatch {
+    /// The id is not a managed variant at all. An ordinary import.
+    Unregistered,
+    /// The id names a registered variant exactly.
+    Exact(&'static ManagedCheckpointVariantV1),
+    /// The id differs from a registered variant only by ASCII case — the same install directory and
+    /// the same checkpoint identity on a case-insensitive filesystem, under an id the registry
+    /// cannot key on.
+    NearMiss(&'static ManagedCheckpointVariantV1),
+}
+
+/// Classify a caller-supplied model id against the registry, case-insensitively.
+///
+/// Surrounding whitespace is trimmed first, as it always was — a padded id already resolved to the
+/// registration and was already pinned, so it is `Exact`. Only the CASE difference is the near miss.
+pub fn match_managed_nvfp4_variant_id(model_id: &str) -> ManagedVariantIdMatch {
+    let candidate = model_id.trim();
+    let Some(variant) = managed_nvfp4_variants()
+        .iter()
+        .find(|variant| variant.variant_id.eq_ignore_ascii_case(candidate))
+    else {
+        return ManagedVariantIdMatch::Unregistered;
+    };
+    if variant.variant_id == candidate {
+        ManagedVariantIdMatch::Exact(variant)
+    } else {
+        ManagedVariantIdMatch::NearMiss(variant)
+    }
 }

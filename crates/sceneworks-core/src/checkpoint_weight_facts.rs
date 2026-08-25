@@ -398,7 +398,8 @@ impl fmt::Display for MaterializationUnavailable {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum MaterializationFact {
-    /// Measured rows, sorted by `(codec_id, representation)`.
+    /// Measured rows, sorted by `(codec_id, representation)`. Never empty — see
+    /// [`CheckpointWeightFactsError::EmptyReportedMaterialization`].
     #[serde(rename = "reported")]
     Reported {
         rows: Vec<MaterializedCodecFact>,
@@ -436,6 +437,13 @@ pub enum CheckpointWeightFactsError {
         codec_id: String,
         tensor_count: usize,
     },
+    /// A `Reported` materialization carries no rows at all. "Measured, and it materialized nothing"
+    /// is not a thing a load can be; the honest statement for a load nobody measured is
+    /// [`MaterializationFact::Unavailable`], and an empty `Reported` was silently equivalent to a
+    /// measured DENSE run — [`CheckpointWeightFactsV1::executes_natively`] answered `Some(false)`
+    /// and the label rendered "dense fallback" — which is the fabricated-measurement mirror of the
+    /// lie this module exists to prevent (sc-11045 review).
+    EmptyReportedMaterialization,
     /// The payload declares a `schemaVersion` this build cannot read. A future version may add
     /// fields whose absence changes what the rest of the payload MEANS, so decoding it as v1 and
     /// dropping them would produce a confidently-wrong fact set — exactly the class this module
@@ -485,6 +493,11 @@ impl fmt::Display for CheckpointWeightFactsError {
                  labelled `{}`, but this host declares no native execution for that codec — a \
                  non-native host runs the declared dense fallback and its receipt must say so",
                 ExecutionRepresentation::NativePacked
+            ),
+            Self::EmptyReportedMaterialization => write!(
+                f,
+                "checkpoint weight facts: a `reported` materialization carries no rows; a load \
+                 nobody measured is `unavailable`, not a measurement of nothing"
             ),
             Self::UnsupportedSchemaVersion { version } => write!(
                 f,
@@ -602,6 +615,9 @@ impl CheckpointWeightFactsV1 {
             }
         }
         if let MaterializationFact::Reported { rows, .. } = &materialization {
+            if rows.is_empty() {
+                return Err(CheckpointWeightFactsError::EmptyReportedMaterialization);
+            }
             let mut seen: BTreeSet<(&str, ExecutionRepresentation)> = BTreeSet::new();
             for row in rows {
                 if !is_codec_id(&row.codec_id) {
@@ -734,14 +750,102 @@ impl CheckpointWeightFactsV1 {
         }
     }
 
+    /// **How much** of this codec ran packed and how much took the dense fallback, as a single
+    /// summary. `None` when nothing measured the load.
+    ///
+    /// This is the fact [`Self::executes_natively`] deliberately loses. That predicate is
+    /// `any`-shaped — the right shape for "may this run be called native at all" — but a receipt
+    /// that reports BOTH a non-empty `native-packed` row and a non-empty `dense-fallback` row
+    /// describes a genuinely mixed load, and collapsing it to `true` rendered as "native (packed)"
+    /// on a user-facing surface. That is untrue about the majority of the tensors whenever the
+    /// engine's shipping policy is mixed, and the pinned engine documents exactly such a policy for
+    /// this leg (a minority of projections executing the packed W4A4 operand, the remainder
+    /// decoded to dense W4A16).
+    ///
+    /// Zero-count rows assert nothing (the same boundary [`Self::try_new`] draws when it lets an
+    /// empty native row skip the capability check), so they never make a load "mixed".
+    pub fn execution_mix(&self, codec_id: &str) -> Option<ExecutionMix> {
+        let MaterializationFact::Reported { rows, .. } = &self.materialization else {
+            return None;
+        };
+        let tensors = |representation| {
+            rows.iter()
+                .filter(|row| row.codec_id == codec_id && row.representation == representation)
+                .map(|row| row.tensor_count)
+                .sum::<usize>()
+        };
+        let native_tensors = tensors(ExecutionRepresentation::NativePacked);
+        let dense_tensors = tensors(ExecutionRepresentation::DenseFallback);
+        Some(match (native_tensors, dense_tensors) {
+            (0, _) => ExecutionMix::DenseFallback,
+            (_, 0) => ExecutionMix::NativePacked,
+            (native_tensors, dense_tensors) => ExecutionMix::Mixed {
+                native_tensors,
+                dense_tensors,
+            },
+        })
+    }
+
     /// The single representation label to render for a codec, or `None` when unknown. Never
     /// synthesized from the capability — a host that *could* run packed may still have taken the
     /// dense path for a reason only the receipt knows.
-    pub fn representation_label(&self, codec_id: &str) -> Option<&'static str> {
-        match self.executes_natively(codec_id)? {
-            true => Some(ExecutionRepresentation::NativePacked.label()),
-            false => Some(ExecutionRepresentation::DenseFallback.label()),
+    ///
+    /// A mixed load renders as [`ExecutionMix::Mixed`]'s counted label rather than as either pure
+    /// arm; see [`Self::execution_mix`].
+    pub fn representation_label(&self, codec_id: &str) -> Option<String> {
+        Some(self.execution_mix(codec_id)?.label())
+    }
+}
+
+/// The `"mixed"` summary kind, and the separator its counted form uses.
+///
+/// **Not an [`ExecutionRepresentation`].** The two engine wire strings label individual measured
+/// ROWS and are shared verbatim across the repo boundary; this is a SceneWorks-side summary OVER
+/// those rows, and it is spelled differently on purpose so a reader (and
+/// [`ExecutionRepresentation::from_label`]) cannot mistake one vocabulary for the other.
+pub const MIXED_EXECUTION_LABEL: &str = "mixed";
+
+/// What a codec's measured rows add up to, across representations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionMix {
+    /// Every measured tensor of this codec executed in its stored packing.
+    NativePacked,
+    /// No measured tensor of this codec executed packed.
+    DenseFallback,
+    /// Both, with the tensor counts that make the split legible.
+    Mixed {
+        native_tensors: usize,
+        dense_tensors: usize,
+    },
+}
+
+impl ExecutionMix {
+    /// The value a telemetry column carries and a client renders.
+    ///
+    /// The two pure arms are the engine's own row labels, unchanged — every existing consumer and
+    /// every persisted row keeps reading exactly what it read before. The mixed arm is
+    /// `"mixed:<packed>/<dense>"`: a distinct value (so a query can separate mixed runs from either
+    /// pure one) that also carries the counts, so a surface can say *how* mixed without a second
+    /// column.
+    pub fn label(self) -> String {
+        match self {
+            Self::NativePacked => ExecutionRepresentation::NativePacked.label().to_owned(),
+            Self::DenseFallback => ExecutionRepresentation::DenseFallback.label().to_owned(),
+            Self::Mixed {
+                native_tensors,
+                dense_tensors,
+            } => format!("{MIXED_EXECUTION_LABEL}:{native_tensors}/{dense_tensors}"),
         }
+    }
+
+    /// Whether any measured tensor executed in its stored packing — the `any` question, asked
+    /// explicitly rather than by collapsing the mix.
+    pub fn has_native(self) -> bool {
+        matches!(self, Self::NativePacked | Self::Mixed { .. })
+    }
+
+    pub fn is_mixed(self) -> bool {
+        matches!(self, Self::Mixed { .. })
     }
 }
 
@@ -812,7 +916,7 @@ mod tests {
         assert!(facts.declares(NVFP4_CODEC_ID));
         assert_eq!(facts.executes_natively(NVFP4_CODEC_ID), Some(true));
         assert_eq!(
-            facts.representation_label(NVFP4_CODEC_ID),
+            facts.representation_label(NVFP4_CODEC_ID).as_deref(),
             Some("native-packed")
         );
         assert!(facts.capability().executes_natively(NVFP4_CODEC_ID));
@@ -836,7 +940,7 @@ mod tests {
         .expect("a capable host that ran dense reports dense");
         assert_eq!(facts.executes_natively(NVFP4_CODEC_ID), Some(false));
         assert_eq!(
-            facts.representation_label(NVFP4_CODEC_ID),
+            facts.representation_label(NVFP4_CODEC_ID).as_deref(),
             Some("dense-fallback")
         );
     }
@@ -1130,6 +1234,65 @@ mod tests {
         assert_eq!(error, CheckpointWeightFactsError::EmptySourceInventory);
     }
 
+    /// An empty `reported` receipt is refused — it is a FABRICATED measurement (sc-11045 review).
+    ///
+    /// It used to be accepted, and it was silently equivalent to a measured dense run:
+    /// `executes_natively` answered `Some(false)` and the label rendered "dense fallback" for a
+    /// load nobody measured. That is the same class of untruth as labelling a dense run native,
+    /// only pointing the other way — and it is exactly the reading the explicit `Unavailable` arm
+    /// exists to keep separate.
+    ///
+    /// Failing mutation (run): delete the `if rows.is_empty()` guard in `try_new`. The
+    /// construction succeeds and the two assertions after it read "measured dense".
+    #[test]
+    fn an_empty_reported_materialization_is_refused_on_both_paths() {
+        let error = CheckpointWeightFactsV1::try_new(
+            None,
+            sm_120(),
+            nvfp4_source(),
+            MaterializationFact::Reported {
+                rows: Vec::new(),
+                complete: true,
+            },
+        )
+        .expect_err("a measurement of nothing is not a measurement");
+        assert_eq!(
+            error,
+            CheckpointWeightFactsError::EmptyReportedMaterialization
+        );
+        assert!(error.to_string().contains("unavailable"));
+
+        // The deserializer runs the same validation, so a hand-edited sidecar cannot smuggle one
+        // back in either.
+        let valid = CheckpointWeightFactsV1::try_new(
+            None,
+            sm_120(),
+            nvfp4_source(),
+            reported(vec![row(ExecutionRepresentation::NativePacked, 588, 1)]),
+        )
+        .expect("valid");
+        let json = serde_json::to_string(&valid).expect("serializes");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        value["materialization"]["rows"] = serde_json::json!([]);
+        let error = serde_json::from_value::<CheckpointWeightFactsV1>(value)
+            .expect_err("an emptied receipt is refused on the way back in");
+        assert!(
+            error.to_string().contains("no rows"),
+            "unexpected error: {error}"
+        );
+
+        // The honest statement for the same situation still constructs.
+        CheckpointWeightFactsV1::try_new(
+            None,
+            sm_120(),
+            nvfp4_source(),
+            MaterializationFact::Unavailable {
+                reason: MaterializationUnavailable::NoRuntimeReceipt,
+            },
+        )
+        .expect("`unavailable` is how a load nobody measured is stated");
+    }
+
     #[test]
     fn duplicate_rows_are_refused_on_both_sides() {
         let duplicate_source = CheckpointWeightFactsV1::try_new(
@@ -1168,6 +1331,154 @@ mod tests {
                 representation: ExecutionRepresentation::DenseFallback,
             }
         );
+    }
+
+    /// A receipt reporting BOTH a non-empty packed row and a non-empty dense row describes a MIXED
+    /// load, and it must render as one (sc-11045, epic 11037, major 2-SW).
+    ///
+    /// `executes_natively` is `any`-shaped, so a mixed receipt collapsed to `Some(true)` and the
+    /// single label became `"native-packed"` → "native (packed)". The pinned engine documents a
+    /// mixed shipping policy for this leg (a minority of projections on the packed W4A4 operand,
+    /// the rest decoded to dense W4A16), so that reading was untrue about the MAJORITY of the
+    /// tensors on the very hosts the label is most likely to be read on.
+    ///
+    /// Failing mutation (run): restore the `any` collapse — make `representation_label` go back to
+    /// `match self.executes_natively(codec_id)? { true => native, false => dense }`. The counted
+    /// label below becomes `"native-packed"`.
+    #[test]
+    fn a_receipt_with_both_representations_reports_mixed_with_counts() {
+        // The engine README's shipping policy for this leg, as a receipt: 68 of 163 packed.
+        let facts = CheckpointWeightFactsV1::try_new(
+            None,
+            sm_120(),
+            nvfp4_source(),
+            reported(vec![
+                row(ExecutionRepresentation::NativePacked, 68, 2_400_000_000),
+                row(ExecutionRepresentation::DenseFallback, 95, 9_100_000_000),
+            ]),
+        )
+        .expect("a capable host may report a mixed load");
+
+        assert_eq!(
+            facts.execution_mix(NVFP4_CODEC_ID),
+            Some(ExecutionMix::Mixed {
+                native_tensors: 68,
+                dense_tensors: 95,
+            })
+        );
+        assert_eq!(
+            facts.representation_label(NVFP4_CODEC_ID).as_deref(),
+            Some("mixed:68/95"),
+            "a mixed load must not render as either pure representation"
+        );
+        assert!(facts
+            .execution_mix(NVFP4_CODEC_ID)
+            .expect("measured")
+            .is_mixed());
+        // The `any` predicate is untouched — it still answers the question it asks.
+        assert_eq!(facts.executes_natively(NVFP4_CODEC_ID), Some(true));
+        assert_eq!(facts.resident_bytes(), Some(11_500_000_000));
+    }
+
+    /// The pure arms keep the engine's own wire strings, byte for byte, and the tri-state
+    /// "not measured" arm is untouched.
+    #[test]
+    fn the_pure_and_unmeasured_arms_are_unchanged_by_the_mixed_state() {
+        let pure = |representation, tensor_count| {
+            CheckpointWeightFactsV1::try_new(
+                None,
+                sm_120(),
+                nvfp4_source(),
+                reported(vec![row(representation, tensor_count, 1)]),
+            )
+            .expect("valid")
+        };
+
+        let native = pure(ExecutionRepresentation::NativePacked, 588);
+        assert_eq!(
+            native.execution_mix(NVFP4_CODEC_ID),
+            Some(ExecutionMix::NativePacked)
+        );
+        assert_eq!(
+            native.representation_label(NVFP4_CODEC_ID).as_deref(),
+            Some("native-packed")
+        );
+
+        let dense = pure(ExecutionRepresentation::DenseFallback, 588);
+        assert_eq!(
+            dense.execution_mix(NVFP4_CODEC_ID),
+            Some(ExecutionMix::DenseFallback)
+        );
+        assert_eq!(
+            dense.representation_label(NVFP4_CODEC_ID).as_deref(),
+            Some("dense-fallback")
+        );
+
+        // A zero-count row asserts nothing, so it never makes a load "mixed".
+        let empty_native = CheckpointWeightFactsV1::try_new(
+            None,
+            NativeExecutionCapabilityFact::dense_only(),
+            nvfp4_source(),
+            reported(vec![
+                row(ExecutionRepresentation::NativePacked, 0, 0),
+                row(ExecutionRepresentation::DenseFallback, 588, 1),
+            ]),
+        )
+        .expect("an empty native row claims nothing");
+        assert_eq!(
+            empty_native.execution_mix(NVFP4_CODEC_ID),
+            Some(ExecutionMix::DenseFallback)
+        );
+        assert_eq!(
+            empty_native.representation_label(NVFP4_CODEC_ID).as_deref(),
+            Some("dense-fallback")
+        );
+
+        // Unmeasured stays tri-state `None` — never "mixed", never either pure arm.
+        let unmeasured = CheckpointWeightFactsV1::declared_source(
+            None,
+            sm_120(),
+            NVFP4_CODEC_ID,
+            MaterializationUnavailable::NoRuntimeReceipt,
+        )
+        .expect("valid");
+        assert_eq!(unmeasured.execution_mix(NVFP4_CODEC_ID), None);
+        assert_eq!(unmeasured.representation_label(NVFP4_CODEC_ID), None);
+
+        // And a codec the receipt reported nothing for is dense-by-measurement, as before: the
+        // rows exist, none of them are this codec's native rows.
+        assert_eq!(
+            native.execution_mix(DENSE_BF16_CODEC_ID),
+            Some(ExecutionMix::DenseFallback)
+        );
+    }
+
+    /// The mixed label is a SUMMARY, in a vocabulary the engine's row labels do not share.
+    #[test]
+    fn the_mixed_label_is_not_an_execution_representation() {
+        assert_eq!(MIXED_EXECUTION_LABEL, "mixed");
+        for label in ["mixed", "mixed:68/95"] {
+            assert_eq!(
+                ExecutionRepresentation::from_label(label),
+                None,
+                "{label} must not parse as a measured row's representation"
+            );
+        }
+        assert_eq!(
+            ExecutionMix::Mixed {
+                native_tensors: 1,
+                dense_tensors: 2,
+            }
+            .label(),
+            "mixed:1/2"
+        );
+        assert!(ExecutionMix::NativePacked.has_native());
+        assert!(ExecutionMix::Mixed {
+            native_tensors: 1,
+            dense_tensors: 2,
+        }
+        .has_native());
+        assert!(!ExecutionMix::DenseFallback.has_native());
     }
 
     #[test]

@@ -2969,13 +2969,34 @@ pub(crate) fn normalize_model_import_source(
 /// A managed variant is a pinned FETCH of specific upstream bytes, so the ownership modes that do
 /// not fetch — a linked library reference, a local copy, an upload, a bare URL — cannot claim one.
 fn resolve_managed_variant_pin(payload: &mut ModelImportRequest) -> Result<(), ApiError> {
-    let Some(variant) = payload
-        .model_id
-        .as_deref()
-        .map(str::trim)
-        .and_then(sceneworks_core::managed_checkpoint_variants::managed_nvfp4_variant)
-    else {
-        return Ok(());
+    use sceneworks_core::managed_checkpoint_variants::{
+        match_managed_nvfp4_variant_id, ManagedVariantIdMatch,
+    };
+    // Case-INSENSITIVELY, because a managed variant's id is its install-directory name and its
+    // checkpoint identity, and `safe_download_dir` preserves whatever case the request supplied
+    // while NTFS and a default APFS volume do not. An exact-match lookup therefore missed
+    // `"NVFP4-Krea-2-Turbo"` — no registered repo, revision, file or checksum was applied — while
+    // the distinct-id collision check saw a new id and the filesystem saw the curated variant's own
+    // directory. Arbitrary bytes then landed under the curated identity with nothing verified.
+    //
+    // A near miss is REFUSED, never normalized to the canonical id. Rewriting it would install
+    // something the request did not name, which is the same class of silent substitution this
+    // function exists to refuse everywhere else; the diagnostic names the canonical id so a client
+    // bug is one edit away from correct.
+    let variant = match match_managed_nvfp4_variant_id(payload.model_id.as_deref().unwrap_or("")) {
+        ManagedVariantIdMatch::Unregistered => return Ok(()),
+        ManagedVariantIdMatch::Exact(variant) => variant,
+        ManagedVariantIdMatch::NearMiss(variant) => {
+            return Err(ApiError::bad_request(format!(
+                "Model id '{}' differs only in case from the managed NVFP4 variant '{}', which \
+                 shares its install directory and checkpoint identity on this platform. Import it \
+                 under the exact id '{}', or choose a model id that is not a case variant of a \
+                 managed variant.",
+                payload.model_id.as_deref().unwrap_or("").trim(),
+                variant.variant_id,
+                variant.variant_id
+            )));
+        }
     };
     let claim = |detail: &str| {
         Err(ApiError::bad_request(format!(

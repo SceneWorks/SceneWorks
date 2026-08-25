@@ -181,7 +181,9 @@ pub(crate) fn insert_facts_into_raw_settings(
 ///
 /// Both halves are `None` without facts. The second is `None` whenever the load was not measured,
 /// and that stays `None`: an absent representation means "not measured", which the stats surface
-/// renders as unknown rather than as dense.
+/// renders as unknown rather than as dense. A load that ran PART of the codec packed and part dense
+/// carries the distinct `"mixed:<packed>/<dense>"` value rather than either pure label — see
+/// [`sceneworks_core::checkpoint_weight_facts::ExecutionMix`].
 /// Gated to the lanes that build image metrics at all: `image_jobs/base.rs` is included only where
 /// a media backend is linked, so on the "neither" build (no MLX, no candle) there is no metrics
 /// producer to call this and an ungated definition would be a dead-code error on that PR lane.
@@ -201,9 +203,7 @@ pub(crate) fn facts_metrics_pair(
     };
     (
         Some(entry.codec_id.clone()),
-        facts
-            .representation_label(&entry.codec_id)
-            .map(str::to_owned),
+        facts.representation_label(&entry.codec_id),
     )
 }
 

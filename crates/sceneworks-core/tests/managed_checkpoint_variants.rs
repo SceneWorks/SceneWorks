@@ -509,6 +509,53 @@ fn nothing_maps_a_model_onto_a_variant() {
     }
 }
 
+/// A case-different id is a NEAR MISS, reported as one, and never silently resolved.
+///
+/// It cannot be `Unregistered` — on NTFS and a default APFS volume it is the same install directory
+/// and the same checkpoint identity as the registration, so treating it as an ordinary import is
+/// precisely the pin bypass. It also must not be `Exact`: resolving it would install the pinned
+/// bytes under an id the request did not name.
+///
+/// Failing mutation: make the `find` in `match_managed_nvfp4_variant_id` compare with `==` instead
+/// of `eq_ignore_ascii_case` — every case row below becomes `Unregistered`.
+#[test]
+fn a_case_variant_id_is_reported_as_a_near_miss() {
+    use sceneworks_core::managed_checkpoint_variants::{
+        match_managed_nvfp4_variant_id, ManagedVariantIdMatch,
+    };
+
+    for exact in [KREA_VARIANT, KLEIN_VARIANT] {
+        assert_eq!(
+            match_managed_nvfp4_variant_id(exact),
+            ManagedVariantIdMatch::Exact(registered(exact)),
+            "the exact id still resolves"
+        );
+        // A padded id resolved (and was pinned) before this change and still does.
+        assert_eq!(
+            match_managed_nvfp4_variant_id(&format!("  {exact} ")),
+            ManagedVariantIdMatch::Exact(registered(exact))
+        );
+        assert_eq!(
+            match_managed_nvfp4_variant_id(&exact.to_ascii_uppercase()),
+            ManagedVariantIdMatch::NearMiss(registered(exact)),
+            "an upper-cased id is a near miss, not a stranger and not the registration"
+        );
+    }
+
+    assert_eq!(
+        match_managed_nvfp4_variant_id("NVFP4-Krea-2-Turbo"),
+        ManagedVariantIdMatch::NearMiss(registered(KREA_VARIANT))
+    );
+    // A genuinely different id is untouched — this is a near-miss guard, not a prefix ban.
+    for stranger in ["nvfp4-krea-2-turbo-mine", "krea_2_turbo", "nvfp4", ""] {
+        assert_eq!(
+            match_managed_nvfp4_variant_id(stranger),
+            ManagedVariantIdMatch::Unregistered,
+            "{stranger:?} is an ordinary import"
+        );
+    }
+}
+
 /// A generation request against an installed Krea variant is admitted ONLY when it names `nvfp4`.
 ///
 /// The legacy MLX bit count is refused rather than coerced, and so is any other named tier: an
@@ -712,9 +759,20 @@ fn changing_the_pinned_provenance_is_refused() {
     let error = resized
         .confirm_installed(&install)
         .expect_err("a variant that mis-states its download size must not confirm");
+    // The SIZE branch's OWN wording. `"not the pinned"` is emitted by the digest branch too, so an
+    // assertion on it did not distinguish which check refused — it matched a substring this case
+    // does not own. The two assertions below are specific to the size comparison.
     assert!(
-        error.reason().contains("not the pinned"),
+        error
+            .reason()
+            .contains("the registered size is what a client is told it will download"),
         "unexpected size-mismatch reason: {error}"
+    );
+    assert!(
+        error
+            .reason()
+            .contains(&format!("committed {} bytes", variant.size_bytes)),
+        "the size refusal must report the OBSERVED size: {error}"
     );
     // ...and the honest registration still confirms, so the check is a comparison and not a
     // blanket refusal.
