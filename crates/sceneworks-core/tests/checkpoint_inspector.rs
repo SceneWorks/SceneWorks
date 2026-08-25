@@ -1,5 +1,9 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// Only the Windows junction fixture holds an owned path; gated so the macOS/Linux build does not
+// warn on an unused import under `-D warnings`.
+#[cfg(windows)]
+use std::path::PathBuf;
 
 use sceneworks_core::checkpoint_import::{ManagedProvenanceV1, SourceLocatorV1};
 use sceneworks_core::checkpoint_inspector::{
@@ -613,7 +617,7 @@ fn path_confinement_errors_are_typed_and_do_not_read_outside_the_root() {
     let request = CheckpointInspectionRequestV1::linked(
         "escape",
         temp.path(),
-        PathBuf::from("../outside.safetensors"),
+        "../outside.safetensors",
         "comfy-primary",
     );
     assert!(request.is_err());

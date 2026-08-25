@@ -1648,12 +1648,12 @@ impl CheckpointPlanStore {
         relative_path: &str,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let root_path = self.resolve_root(root_id)?;
-        let relative = validate_portable_relative_path(relative_path)?;
+        validate_portable_relative_path(relative_path)?;
         let checkpoint_id = linked_checkpoint_id(root_id, relative_path);
         let request = CheckpointInspectionRequestV1::linked(
             checkpoint_id.clone(),
             root_path.clone(),
-            relative.clone(),
+            relative_path,
             root_id,
         )
         .map_err(|reason| CheckpointPlanError::InvalidRelativePath {
@@ -1684,12 +1684,12 @@ impl CheckpointPlanStore {
         provenance: ManagedProvenanceV1,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let install_path = self.resolve_install(install_id)?;
-        let relative = validate_portable_relative_path(relative_path)?;
+        validate_portable_relative_path(relative_path)?;
         let checkpoint_id = managed_checkpoint_id(install_id);
         let request = CheckpointInspectionRequestV1::managed(
             checkpoint_id.clone(),
             install_path.clone(),
-            relative.clone(),
+            relative_path,
             install_id,
             provenance,
         )

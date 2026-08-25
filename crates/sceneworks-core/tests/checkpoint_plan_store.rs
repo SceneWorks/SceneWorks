@@ -2062,9 +2062,9 @@ fn every_relative_path_call_site_refuses_what_the_contract_refuses() {
         );
     }
 
-    // An empty path COMPONENT is only reachable at the string-typed boundaries: the inspector takes
-    // a `Path`, and `a//b` is not a path a `PathBuf` can hold — it round-trips as `a/b` before the
-    // inspector ever sees it.
+    // An empty path COMPONENT is only reachable at the string-typed boundaries: `a//b` is not a
+    // path a `PathBuf` can hold — it round-trips as `a/b` — so once the inspector has built its
+    // native path from the validated parts there is nothing left to refuse.
     for candidate in ["a//b.safetensors", "trailing/"] {
         assert!(
             SourceLocatorV1::linked("root", candidate, DIGEST).is_err(),

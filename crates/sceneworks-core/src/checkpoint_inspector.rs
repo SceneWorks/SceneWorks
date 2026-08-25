@@ -163,13 +163,13 @@ impl CheckpointInspectionRequestV1 {
     pub fn linked(
         checkpoint_id: impl Into<String>,
         root_path: impl Into<PathBuf>,
-        relative_path: impl Into<PathBuf>,
+        relative_path: &str,
         root_id: impl Into<String>,
     ) -> Result<Self, String> {
         Self::new(
             checkpoint_id.into(),
             root_path.into(),
-            relative_path.into(),
+            relative_path,
             CheckpointOwnershipV1::Linked {
                 root_id: root_id.into(),
             },
@@ -179,14 +179,14 @@ impl CheckpointInspectionRequestV1 {
     pub fn managed(
         checkpoint_id: impl Into<String>,
         root_path: impl Into<PathBuf>,
-        relative_path: impl Into<PathBuf>,
+        relative_path: &str,
         install_id: impl Into<String>,
         provenance: ManagedProvenanceV1,
     ) -> Result<Self, String> {
         Self::new(
             checkpoint_id.into(),
             root_path.into(),
-            relative_path.into(),
+            relative_path,
             CheckpointOwnershipV1::Managed {
                 install_id: install_id.into(),
                 provenance,
@@ -194,18 +194,30 @@ impl CheckpointInspectionRequestV1 {
         )
     }
 
+    /// `relative_path` is the PORTABLE `/`-separated document spelling, not a native path.
+    ///
+    /// That distinction is the whole reason this takes `&str` (sc-20651). Taking `impl Into<PathBuf>`
+    /// and validating the resulting `Path` made the rule PLATFORM-DEPENDENT: on Windows
+    /// `PathBuf::from("dir\\model.safetensors")` splits into two `Normal` components and normalises
+    /// back to `dir/model.safetensors`, so the constructor accepted a spelling the contract
+    /// (`SourceLocatorV1`) refuses on every platform, while Unix refused it. The windows-candle lane
+    /// caught exactly that divergence.
+    ///
+    /// Deciding on the STRING, before any `std::path` semantics, is what makes the shared rule hold
+    /// identically on both platforms. The native `PathBuf` is then BUILT from the validated parts —
+    /// which is what the two production callers were doing themselves anyway.
     fn new(
         checkpoint_id: String,
         root_path: PathBuf,
-        relative_path: PathBuf,
+        relative_path: &str,
         ownership: CheckpointOwnershipV1,
     ) -> Result<Self, String> {
         if checkpoint_id.trim().is_empty() {
             return Err("checkpoint id must not be blank".to_owned());
         }
-        if !safe_relative_path(&relative_path) {
+        let Ok(relative_path) = portable_relative_path_parts(relative_path) else {
             return Err("checkpoint path must be a non-empty confined relative path".to_owned());
-        }
+        };
         match &ownership {
             CheckpointOwnershipV1::Linked { root_id } if root_id.trim().is_empty() => {
                 return Err("linked root id must not be blank".to_owned());
