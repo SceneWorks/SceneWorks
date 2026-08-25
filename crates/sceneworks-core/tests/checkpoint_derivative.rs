@@ -850,3 +850,92 @@ fn a_managed_install_produces_and_serves_derivatives() {
         .unwrap();
     assert_eq!(removed.len(), 1);
 }
+
+/// sc-20651 feature-end review: tearing down a MANAGED install goes through the derivative store,
+/// derivatives FIRST, so a derivative still in use holds the whole teardown rather than being
+/// orphaned by it.
+///
+/// The API's model-delete route used to call `CheckpointPlanStore::remove_managed` directly, which
+/// drops the plan documents and then `remove_dir_all`s the install tree with nothing asking about
+/// derivatives. A pinned or leased derivative survived that — but its plan and its source bytes did
+/// not, and its `derivedFrom` checkpoint id, the only handle any later invalidation has, no longer
+/// resolved to anything. `remove_managed_install` applies the ordering `invalidate_checkpoint`
+/// already had on the linked side.
+///
+/// Failing mutation: swap the two statements in `remove_managed_install` so `plans.remove_managed`
+/// runs first — the pinned refusal still comes back, but the plan and the install bytes are gone.
+#[test]
+fn a_pinned_derivative_holds_a_managed_teardown_instead_of_being_orphaned_by_it() {
+    use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
+    use sceneworks_core::checkpoint_ingest::ManagedIngest;
+
+    let data = fixture_dir("managed-teardown-data");
+    let source_dir = fixture_dir("managed-teardown-source");
+    let data_dir = fs::canonicalize(data.path()).unwrap();
+    let source = fs::canonicalize(source_dir.path())
+        .unwrap()
+        .join("dit.safetensors");
+    write_krea_native_file(&source, 13);
+
+    let plans = CheckpointPlanStore::open(&data_dir);
+    let ingest = ManagedIngest::begin(
+        &plans,
+        "krea-teardown",
+        ManagedProvenanceV1 {
+            source: "local_path".to_owned(),
+            ..ManagedProvenanceV1::default()
+        },
+    )
+    .unwrap();
+    ingest.stage_copy_file(&source, "dit.safetensors").unwrap();
+    let install = ingest.finalize("dit.safetensors", None).unwrap();
+    let install_dir = plans.install_dir("krea-teardown").unwrap();
+    assert!(
+        install_dir.join("dit.safetensors").is_file(),
+        "fixture check: the install tree holds the only copy of these bytes"
+    );
+
+    let store = CheckpointDerivativeStore::open(&data_dir).unwrap();
+    store
+        .ensure(&install.checkpoint_id, &request(), write_index)
+        .unwrap();
+    let resolved = plans.resolve(&install.checkpoint_id).unwrap();
+    let cache_key = store.cache_key(&resolved, &request()).unwrap();
+    store.cache().set_artifact_pin(&cache_key, true).unwrap();
+
+    // Pinned: the teardown REFUSES, and neither the plan nor the install bytes are touched.
+    let refusal = store
+        .remove_managed_install("krea-teardown")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("pinned"),
+        "a pinned derivative must hold the managed teardown, got: {refusal}"
+    );
+    assert!(
+        plans.resolve(&install.checkpoint_id).is_ok(),
+        "the plan must survive a refused teardown: the pinned derivative's only handle is its id"
+    );
+    assert!(
+        install_dir.join("dit.safetensors").is_file(),
+        "the install bytes must survive a refused teardown"
+    );
+    assert!(store.cache().lookup_complete(&cache_key).unwrap().is_some());
+
+    // Unpinned: derivative, plan and install tree all go, in that order.
+    store.cache().set_artifact_pin(&cache_key, false).unwrap();
+    let (removed, derivatives) = store.remove_managed_install("krea-teardown").unwrap();
+    assert!(removed, "the plan record was dropped");
+    assert_eq!(
+        derivatives
+            .iter()
+            .map(|outcome| outcome.cache_key.as_str())
+            .collect::<Vec<_>>(),
+        vec![cache_key.as_str()]
+    );
+    assert_eq!(store.cache().lookup_complete(&cache_key).unwrap(), None);
+    assert!(
+        !install_dir.exists(),
+        "a completed managed teardown removes the SceneWorks-owned install tree"
+    );
+}

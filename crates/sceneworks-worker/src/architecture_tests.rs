@@ -468,3 +468,711 @@ fn real_image_job_modules_import_the_json_macro_they_invoke() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// epic 20398 / sc-20651 — "no bespoke imported route or family allow-list outside adapters"
+// ---------------------------------------------------------------------------
+//
+// ## What the epic requires
+//
+// E2: adding a checkpoint family must need "one registered adapter and fixtures — no API,
+// scheduler, worker or catalog allow-list edits". The epic acceptance matrix turns that into an
+// AUDIT obligation: no bespoke imported route and no family allow-list may live outside the
+// adapters.
+//
+// ## Why an inventory rather than a flat prohibition
+//
+// The prohibition is not true today and writing it as one would produce either a red tree or a
+// vacuous scan. Nine family allow-lists exist at this commit, every one of them with a reason that
+// is a fact about a real deployment or a real crate graph rather than about laziness. So the guard
+// is shaped the way `crate::candle_preview_wiring_tests` is: an explicit inventory of what is
+// known and recorded, a directory-wide sweep for everything that is not, a non-vacuity floor so a
+// broken scanner cannot read as a clean tree, and an actionable message.
+//
+// Both directions are asserted, which is what makes the inventory shrink visibly:
+//
+// * an allow-list the sweep finds that is NOT recorded is an offender — a NEW family gate;
+// * a recorded entry the sweep does NOT find is also an offender — the lane went away and its
+//   exception must go with it.
+//
+// ## The limit of this audit, stated rather than hidden
+//
+// The sweep recognises a family allow-list by the family TOKENS it names, from an explicit
+// vocabulary (`CHECKPOINT_PLAN_FAMILY_TOKENS`, the `checkpoint_inspector::normalize_family`
+// outputs). A gate for a family that vocabulary does not yet contain is invisible to it. That hole
+// is closed as far as source text can close it by
+// `the_family_token_vocabulary_covers_every_family_the_live_tables_name`, which fails the moment a
+// new family reaches any of the three live tables without reaching the vocabulary.
+
+/// The plan-family vocabulary: every value `sceneworks_core::checkpoint_inspector::normalize_family`
+/// can return.
+///
+/// Spelled here rather than imported because `normalize_family` is private to the inspector and its
+/// outputs are a `match` arm's right-hand side, not a list. Kept honest by
+/// [`the_family_token_vocabulary_covers_every_family_the_live_tables_name`].
+const CHECKPOINT_PLAN_FAMILY_TOKENS: &[&str] = &[
+    "sdxl",
+    "qwen-image",
+    "flux2",
+    "flux",
+    "wan-video",
+    "z-image",
+    "mage-flow",
+    "krea_2",
+    "ltx-video",
+    "ideogram",
+    "anima",
+];
+
+/// Family tokens that are ALSO a builtin model id, and are therefore ambiguous on their own.
+///
+/// `sdxl` is the only one: the family the inspector detects and the builtin SDXL model id are the
+/// same string. Ten constants in the swept tree are pure builtin-model-id lists whose sole overlap
+/// with the vocabulary is that word — `SDXL_CONTROL_MODELS`, `CANDLE_POSE_MODELS`, `IMAGE_MODEL_CAPS`
+/// and friends. None of them is a family gate, and recording ten non-offenders as exceptions would
+/// bury the four that matter.
+///
+/// So a constant naming exactly ONE token, and that token an ambiguous one, is not judged a family
+/// allow-list. Naming two or more tokens, or naming a single unambiguous token (`mage-flow`,
+/// `krea_2`, `wan-video`, …), is.
+const FAMILY_TOKENS_THAT_ARE_ALSO_BUILTIN_MODEL_IDS: &[&str] = &["sdxl"];
+
+/// Directory roots swept for family allow-lists, relative to this crate's manifest directory.
+///
+/// The three surfaces E2 names, whole: the worker crate (its image and video lanes, its scheduler
+/// and dispatch, and the one-time catalog migration), the catalog/routing crate, and the API.
+///
+/// Read from disk, recursively, rather than enumerated with `include_str!` so a NEW file — or a new
+/// MODULE, which is how a family gate would most plausibly arrive — is swept the day it is added. A
+/// hardcoded file list is how an inventory-shaped guard goes stale.
+const FAMILY_ALLOW_LIST_SCAN_ROOTS: &[&str] =
+    &["src", "../sceneworks-core/src", "../../apps/rust-api/src"];
+
+/// The one swept file exempt from the sweep: this one.
+///
+/// [`CHECKPOINT_PLAN_FAMILY_TOKENS`] is the audit's own vocabulary — the instrument it judges by,
+/// not a gate any code consults — and [`RECORDED_FAMILY_ALLOW_LISTS`] is the inventory itself.
+/// Recording the audit as an exception to the audit would be a circular row that can never shrink.
+const FAMILY_ALLOW_LIST_SCAN_EXEMPT: &[&str] = &["src/architecture_tests.rs"];
+
+/// Every family allow-list that exists at this commit, with the recorded reason it is retained.
+///
+/// `(path relative to a scan root's spec, constant name, reason)`. sc-20651 established each reason
+/// by reading the code, not by asking the constant's own doc comment.
+///
+/// **`apps/rust-api/src` contributes ZERO rows, and that is the positive half of the audit.** The
+/// API declares no family allow-list at all, so E2's "no API allow-list edits" is not an aspiration
+/// here — it is the swept state, and one added row reds this test.
+const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
+    (
+        "src/image_jobs/checkpoint_plan.rs",
+        "CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES",
+        "MUST OUTLIVE the lanes. Its sole reader is `checkpoint_plan_shape_has_other_lane`; \
+         deleting it collapses `checkpoint_plan_unservable_shape` into `checkpoint_plan_unservable` \
+         and flips every LINKED checkpoint whose shape the plan route does not serve (LoRA, \
+         reference, Hires.fix) from DECLINE to hard refuse.",
+    ),
+    (
+        "src/image_jobs/checkpoint_plan.rs",
+        "CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS",
+        "Catalog data, not family truth: the adapter's `component_topology` says WHICH components \
+         are required; this says where THIS app installed them. Mage-Flow's fine-tunes live at \
+         `<data>/models/finetunes/<loraId>`, outside `CheckpointPlanStore::installs_root()`.",
+    ),
+    (
+        "src/image_jobs/checkpoint_plan.rs",
+        "CHECKPOINT_PLAN_RESIDENT_BASE_TIERS",
+        "Catalog data, not family truth: the adapter declares the `base-snapshot` dependency and \
+         which families satisfy it; this is only where the app installed that tier.",
+    ),
+    (
+        "src/mlx_fit_gate.rs",
+        "RESIDENT_ONLY_AUDIT_FAMILIES",
+        "Not an import gate and not production: a `#[cfg(test)]`, macOS-only SCOPE for the \
+         Resident-only estimate-band audit, over shipped MANIFEST `family` values — a different \
+         vocabulary that merely overlaps ours on `flux` and `ideogram`. It routes no checkpoint and \
+         admits no import; widening it changes which manifest entries a memory audit measures.",
+    ),
+    (
+        "../sceneworks-core/src/base_weights.rs",
+        "IMPORT_SUPPORTED_FAMILIES",
+        "NOT DERIVABLE at this commit. The adapter registry is \
+         `gen_core::ProviderRegistry::checkpoint_adapters`, and neither `sceneworks-core` nor \
+         `apps/rust-api` — the crate that owns this constant and the process that serves the import \
+         endpoint — depends on `sceneworks-gen-core`. The registry is also cfg-gated to \
+         macOS-or-candle: on the candle-off build `inference_runtime::media()` is EMPTY, so a \
+         derived list would refuse every import there. And the registry binds at least six families \
+         against this list's three, so deriving would silently WIDEN what import accepts.",
+    ),
+    (
+        "../sceneworks-core/src/checkpoint_inspector.rs",
+        "MULTI_EXPERT_FAMILIES",
+        "Checkpoint truth the adapter cannot carry: it is what makes `refine_multi_expert_role` \
+         provably ADDITIVE, so no other family's already-compiled plan can change. An adapter is \
+         resolved from the family this list helps determine, so deriving it from one is circular.",
+    ),
+    (
+        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
+        "MLX_ROUTED_FAMILIES",
+        "Catalog routing authority in a crate with no adapter-registry dependency (see \
+         IMPORT_SUPPORTED_FAMILIES). Pinned against the import gate by \
+         `mlx_routed_families_agree_with_import_supported_families`, so the two cannot drift.",
+    ),
+    (
+        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
+        "CANDLE_ROUTED_FAMILIES",
+        "The candle twin of MLX_ROUTED_FAMILIES, same reason, same parity assertion.",
+    ),
+    (
+        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
+        "EXPECTED_MLX_ROUTED_FAMILIES",
+        "A `#[cfg(test)]` fixture that pins MLX_ROUTED_FAMILIES by value. Not a production gate; it \
+         exists so a silent edit to the production list is red.",
+    ),
+    (
+        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
+        "EXPECTED_CANDLE_ROUTED_FAMILIES",
+        "The candle twin of EXPECTED_MLX_ROUTED_FAMILIES.",
+    ),
+];
+
+/// The live tables whose family membership [`CHECKPOINT_PLAN_FAMILY_TOKENS`] must cover.
+const LIVE_FAMILY_TABLES: &[(&str, &str)] = &[
+    (
+        "src/image_jobs/checkpoint_plan.rs",
+        "CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES",
+    ),
+    (
+        "../sceneworks-core/src/base_weights.rs",
+        "IMPORT_SUPPORTED_FAMILIES",
+    ),
+    (
+        "../sceneworks-core/src/checkpoint_inspector.rs",
+        "MULTI_EXPERT_FAMILIES",
+    ),
+];
+
+/// Every `const NAME: TYPE = &[ .. ];` (or `= [ .. ]`) in `code`, as
+/// `(constant name, the bracketed body, the body's byte range in `code`)`.
+///
+/// The `[` is looked for AFTER the `=`, never in the type: `const HEX: &[u8; 16] = b"0..";` would
+/// otherwise be read as a slice literal whose "body" is the type's length. Brackets inside string
+/// literals are skipped, so a constant carrying `"a[b"` does not truncate the scan.
+///
+/// Deliberately loose about what it accepts — an `impl` associated const and a `#[cfg(test)]` one
+/// both come back. Callers judge by the tokens the body NAMES, and a non-family constant names none.
+fn slice_const_bodies(code: &str) -> Vec<(String, String, std::ops::Range<usize>)> {
+    let bytes = code.as_bytes();
+    let mut found = Vec::new();
+    let mut index = 0usize;
+    while let Some(offset) = code[index..].find("const ") {
+        let at = index + offset;
+        index = at + "const ".len();
+        if !starts_a_token(bytes, at) {
+            continue;
+        }
+        let mut cursor = index;
+        while cursor < bytes.len() && (bytes[cursor] as char).is_whitespace() {
+            cursor += 1;
+        }
+        let name_start = cursor;
+        while cursor < bytes.len()
+            && (bytes[cursor] == b'_' || bytes[cursor].is_ascii_alphanumeric())
+        {
+            cursor += 1;
+        }
+        if cursor == name_start {
+            continue;
+        }
+        let name = code[name_start..cursor].to_owned();
+        // The `=` must precede the declaration's `;`, and the `[` must follow the `=` (modulo
+        // whitespace and one `&`) rather than living in the type.
+        let Some(equals) = code[cursor..].find('=').map(|offset| cursor + offset) else {
+            continue;
+        };
+        if code[cursor..equals].contains(';') {
+            continue;
+        }
+        let mut open = equals + 1;
+        while open < bytes.len() && ((bytes[open] as char).is_whitespace() || bytes[open] == b'&') {
+            open += 1;
+        }
+        if open >= bytes.len() || bytes[open] != b'[' {
+            index = equals + 1;
+            continue;
+        }
+        let Some(close) = matching_bracket(bytes, open) else {
+            continue;
+        };
+        found.push((name, code[open + 1..close].to_owned(), (open + 1)..close));
+        index = close + 1;
+    }
+    found
+}
+
+/// The index of the `]` closing the `[` at `open`, skipping brackets inside string, raw-string and
+/// char literals.
+///
+/// The char-literal and raw-string steps are the same quote-parity defence
+/// [`string_literals`] needs, for the same reason: a `'"'` anywhere between the brackets otherwise
+/// opens a phantom string, the closing `]` is never found, and the constant silently stops being
+/// inspected at all.
+fn matching_bracket(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut index = open;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if let Some(end) = char_literal_end(bytes, index) {
+                index = end.min(bytes.len()).max(index + 1);
+                continue;
+            }
+        }
+        if (bytes[index] == b'r' || bytes[index] == b'b') && starts_a_token(bytes, index) {
+            if let Some((_, end)) = raw_string_parts(bytes, index) {
+                index = end.min(bytes.len()).max(index + 1);
+                continue;
+            }
+        }
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Every plain double-quoted string literal in `code`, as
+/// `(contents, byte offset of the opening quote)`.
+///
+/// `code` must already have been through [`code_without_comments`], so a family name written in a
+/// doc comment cannot be mistaken for a gate.
+///
+/// Char literals and raw strings are STEPPED OVER rather than parsed, for the reason
+/// [`char_literal_end`] documents at length: a `'"'` char literal — seven swept files contain one —
+/// otherwise opens a phantom string that swallows the rest of the file, and a raw string's
+/// unescaped inner `"` closes early. Either one inverts quote parity, and the failure is silent
+/// blindness rather than a red test. Neither shape can hold a family gate, so skipping is enough.
+fn string_literals(code: &str) -> Vec<(String, usize)> {
+    let bytes = code.as_bytes();
+    let mut literals = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if let Some(end) = char_literal_end(bytes, index) {
+                index = end.min(bytes.len()).max(index + 1);
+                continue;
+            }
+        }
+        if (bytes[index] == b'r' || bytes[index] == b'b') && starts_a_token(bytes, index) {
+            if let Some((_, end)) = raw_string_parts(bytes, index) {
+                index = end.min(bytes.len()).max(index + 1);
+                continue;
+            }
+        }
+        if bytes[index] != b'"' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        let content_start = index;
+        while index < bytes.len() && bytes[index] != b'"' {
+            index += if bytes[index] == b'\\' { 2 } else { 1 };
+        }
+        let end = index.min(bytes.len());
+        if !code.is_char_boundary(content_start) || !code.is_char_boundary(end) {
+            break;
+        }
+        literals.push((code[content_start..end].to_owned(), start));
+        index = end + 1;
+    }
+    literals
+}
+
+/// The family tokens `body` names, as exact literal values.
+fn family_tokens_named(body: &str) -> BTreeSet<String> {
+    string_literals(body)
+        .into_iter()
+        .map(|(value, _)| value)
+        .filter(|value| CHECKPOINT_PLAN_FAMILY_TOKENS.contains(&value.as_str()))
+        .collect()
+}
+
+/// Whether a constant naming `tokens` is a family ALLOW-LIST rather than a model-id list that
+/// happens to share a word with the vocabulary. See
+/// [`FAMILY_TOKENS_THAT_ARE_ALSO_BUILTIN_MODEL_IDS`].
+fn is_family_allow_list(tokens: &BTreeSet<String>) -> bool {
+    match tokens.len() {
+        0 => false,
+        1 => !FAMILY_TOKENS_THAT_ARE_ALSO_BUILTIN_MODEL_IDS
+            .contains(&tokens.iter().next().expect("one token").as_str()),
+        _ => true,
+    }
+}
+
+/// Every `.rs` file under the scan roots, as `(display path, comment-stripped source)`.
+///
+/// The display path is the scan root's own spec plus the path below it, so it is identical on every
+/// machine — never an absolute path, which would make the inventory machine-dependent.
+fn family_allow_list_sources() -> Vec<(String, String)> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    let mut exempted: Vec<String> = Vec::new();
+    for spec in FAMILY_ALLOW_LIST_SCAN_ROOTS {
+        let root = manifest.join(spec);
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let below = path
+                    .strip_prefix(&root)
+                    .expect("scanned path is below its root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let display = format!("{spec}/{below}");
+                if FAMILY_ALLOW_LIST_SCAN_EXEMPT.contains(&display.as_str()) {
+                    exempted.push(display);
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                sources.push((display, code_without_comments(&source)));
+            }
+        }
+    }
+    sources.sort();
+    exempted.sort();
+    // Every exemption must have matched a real file. A misspelled exempt path skips nothing while
+    // reading as a deliberate skip, and — worse — a path that stops existing leaves an exemption
+    // standing that would silently absorb a future file of that name.
+    assert_eq!(
+        exempted,
+        FAMILY_ALLOW_LIST_SCAN_EXEMPT
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>(),
+        "every FAMILY_ALLOW_LIST_SCAN_EXEMPT path must name a file the sweep actually reached"
+    );
+    assert!(
+        sources.len() > 100,
+        "expected the worker lanes, the catalog crate and the API under \
+         {FAMILY_ALLOW_LIST_SCAN_ROOTS:?}, found {} files — the scan is broken, not the tree",
+        sources.len()
+    );
+    sources
+}
+
+/// The bracketed body of one named constant in one swept file.
+fn recorded_const_body(file: &str, name: &str) -> String {
+    let (_, code) = family_allow_list_sources()
+        .into_iter()
+        .find(|(path, _)| path == file)
+        .unwrap_or_else(|| panic!("{file} must be a swept file"));
+    slice_const_bodies(&code)
+        .into_iter()
+        .find(|(candidate, _, _)| candidate == name)
+        .unwrap_or_else(|| panic!("{file} must declare `const {name}`"))
+        .1
+}
+
+/// The headline audit: no family allow-list exists outside the recorded exception inventory, and no
+/// recorded exception outlives the lane it was recorded for.
+///
+/// Failing mutation: add `const FAKE_IMPORT_FAMILIES: &[&str] = &["krea_2", "flux2"];` to any file
+/// under a scan root. It is not in the inventory, so it is an offender and this test fails.
+#[test]
+fn no_family_allow_list_exists_outside_the_recorded_exception_inventory() {
+    let recorded: BTreeSet<(&str, &str)> = RECORDED_FAMILY_ALLOW_LISTS
+        .iter()
+        .map(|(file, name, _)| (*file, *name))
+        .collect();
+    assert_eq!(
+        recorded.len(),
+        RECORDED_FAMILY_ALLOW_LISTS.len(),
+        "the exception inventory names the same (file, constant) twice"
+    );
+
+    let mut found: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut unrecorded: Vec<String> = Vec::new();
+    let mut inspected = 0usize;
+    for (file, code) in family_allow_list_sources() {
+        for (name, body, _) in slice_const_bodies(&code) {
+            inspected += 1;
+            let tokens = family_tokens_named(&body);
+            if !is_family_allow_list(&tokens) {
+                continue;
+            }
+            found.insert((file.clone(), name.clone()));
+            if !recorded.contains(&(file.as_str(), name.as_str())) {
+                unrecorded.push(format!(
+                    "{file}: const {name} — names {:?}",
+                    tokens.into_iter().collect::<Vec<_>>()
+                ));
+            }
+        }
+    }
+
+    // A sweep that inspected nothing is indistinguishable from a clean sweep. Every recorded
+    // exception is itself a slice constant, so fewer than that many means the SCANNER broke rather
+    // than the tree becoming clean.
+    assert!(
+        inspected >= RECORDED_FAMILY_ALLOW_LISTS.len(),
+        "the family allow-list sweep inspected only {inspected} slice constants across \
+         {FAMILY_ALLOW_LIST_SCAN_ROOTS:?}, expected at least {} — the source scan is broken, not \
+         the tree",
+        RECORDED_FAMILY_ALLOW_LISTS.len()
+    );
+    assert!(
+        unrecorded.is_empty(),
+        "a family allow-list lives outside the checkpoint adapters and is not in the sc-20651 \
+         exception inventory (epic 20398 E2 — adding a family must need one registered adapter and \
+         fixtures, no API / scheduler / worker / catalog allow-list edits):\n  {}\nEither route the \
+         decision through `gen_core::CheckpointAdapterRegistration`, or add a row to \
+         `RECORDED_FAMILY_ALLOW_LISTS` stating why it cannot be.",
+        unrecorded.join("\n  ")
+    );
+
+    // The other direction, which is what makes the inventory SHRINK rather than accumulate: a
+    // recorded exception whose constant is gone must be removed from the inventory with it.
+    let stale: Vec<String> = RECORDED_FAMILY_ALLOW_LISTS
+        .iter()
+        .filter(|(file, name, _)| !found.contains(&((*file).to_owned(), (*name).to_owned())))
+        .map(|(file, name, _)| format!("{file}: const {name}"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the sc-20651 exception inventory records a family allow-list that no longer exists as \
+         one:\n  {}\nDelete the row — the inventory is meant to shrink as lanes go away.",
+        stale.join("\n  ")
+    );
+}
+
+/// The plan-driven route is adapter-mediated: `checkpoint_plan.rs` names a family only inside its
+/// three recorded catalog-data tables, never in a branch.
+///
+/// This is the "no bespoke imported route" half, and it is the half the allow-list sweep cannot see:
+/// `if family == "flux2" { .. }` declares no constant. The route resolves its adapter, its provider,
+/// its component topology and its capability policy from
+/// `gen_core::CheckpointAdapterRegistration`, so a family literal anywhere else in this file is by
+/// construction a bespoke route.
+///
+/// Failing mutation: add `if resolved.family() == "flux2" { .. }` anywhere in `checkpoint_plan.rs`
+/// outside the three tables.
+#[test]
+fn the_checkpoint_plan_route_names_a_family_only_inside_its_recorded_tables() {
+    let file = "src/image_jobs/checkpoint_plan.rs";
+    let (_, code) = family_allow_list_sources()
+        .into_iter()
+        .find(|(path, _)| path == file)
+        .expect("the plan route must be swept");
+
+    let tables: Vec<std::ops::Range<usize>> = slice_const_bodies(&code)
+        .into_iter()
+        .filter(|(name, _, _)| {
+            RECORDED_FAMILY_ALLOW_LISTS
+                .iter()
+                .any(|(recorded_file, recorded_name, _)| {
+                    *recorded_file == file && recorded_name == name
+                })
+        })
+        .map(|(_, _, range)| range)
+        .collect();
+    // Fixture check: all three of this file's recorded tables were located. Without it a scanner
+    // that found zero tables would leave every literal "outside a table", and one that swallowed
+    // the whole file would leave every literal inside one — opposite failures, both silent.
+    assert_eq!(
+        tables.len(),
+        3,
+        "expected the plan route's three recorded family tables, located {}",
+        tables.len()
+    );
+
+    let mut outside = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+    for (value, at) in string_literals(&code) {
+        if tables.iter().any(|table| table.contains(&at)) {
+            continue;
+        }
+        outside += 1;
+        if CHECKPOINT_PLAN_FAMILY_TOKENS.contains(&value.as_str()) {
+            offenders.push(format!("{value:?}"));
+        }
+    }
+    // Non-vacuity: the route is full of component ids, refusal codes and diagnostics, so a scanner
+    // that saw only a handful of literals outside the tables is broken.
+    assert!(
+        outside >= 20,
+        "the plan-route literal scan saw only {outside} literals outside the family tables — the \
+         scan is broken, not the route"
+    );
+    assert!(
+        offenders.is_empty(),
+        "the plan-driven checkpoint route names a family outside its recorded catalog-data tables: \
+         {}\nThe route is adapter-mediated (epic 20398 E2): resolve the behaviour from \
+         `gen_core::CheckpointAdapterRegistration` — its `eligible_backends`, `component_topology`, \
+         `base_compatibility` or per-operation capability policy — rather than branching on the \
+         family name.",
+        offenders.join(", ")
+    );
+}
+
+/// The vocabulary the sweep judges by must cover every family the live tables actually name.
+///
+/// Without this, adding a family with a token the vocabulary does not carry would make it invisible
+/// to [`no_family_allow_list_exists_outside_the_recorded_exception_inventory`] — the sweep would
+/// keep passing while the very thing it exists to catch walked past it.
+#[test]
+fn the_family_token_vocabulary_covers_every_family_the_live_tables_name() {
+    let vocabulary: BTreeSet<&str> = CHECKPOINT_PLAN_FAMILY_TOKENS.iter().copied().collect();
+    for (file, name) in LIVE_FAMILY_TABLES {
+        let body = recorded_const_body(file, name);
+        let named: Vec<String> = string_literals(&body)
+            .into_iter()
+            .map(|(value, _)| value)
+            .filter(|value| !value.is_empty())
+            .collect();
+        assert!(
+            !named.is_empty(),
+            "{file}: const {name} names no string at all — the table parse is broken"
+        );
+        for value in named {
+            assert!(
+                vocabulary.contains(value.as_str()),
+                "{file}: const {name} names the family {value:?}, which \
+                 CHECKPOINT_PLAN_FAMILY_TOKENS does not carry. Add it there, or the family \
+                 allow-list sweep is blind to every gate written for it."
+            );
+        }
+    }
+}
+
+/// Self-test the scanner rather than trusting it: a guard that silently matches nothing is worse
+/// than no guard. Covers the type-vs-value `[` ambiguity, brackets inside literals, the
+/// builtin-model-id collision, and the judgment that decides offender from non-offender.
+#[test]
+fn the_family_allow_list_scanner_recognises_the_shapes_it_must_judge() {
+    // The `[` in the TYPE must never be read as the value. Without the after-`=` rule this returns
+    // a "body" of `u8; 16` and the real value is never inspected.
+    let byte_const = "const HEX: &[u8; 16] = b\"0123456789abcdef\";";
+    assert!(
+        slice_const_bodies(byte_const).is_empty(),
+        "a byte-string constant declares no slice literal"
+    );
+
+    let families = "const F: &[&str] = &[\"krea_2\", \"mage-flow\"];";
+    let parsed = slice_const_bodies(families);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].0, "F");
+    assert_eq!(
+        family_tokens_named(&parsed[0].1),
+        ["krea_2".to_owned(), "mage-flow".to_owned()]
+            .into_iter()
+            .collect()
+    );
+    assert!(is_family_allow_list(&family_tokens_named(&parsed[0].1)));
+    // And the reported range really points at the body, so the plan-route test can mask it.
+    assert_eq!(&families[parsed[0].2.clone()], parsed[0].1);
+
+    // A bracket inside a literal must not close the body early.
+    let bracketed = "const B: &[&str] = &[\"a]b\", \"wan-video\"];";
+    let parsed = slice_const_bodies(bracketed);
+    assert_eq!(parsed.len(), 1);
+    assert!(is_family_allow_list(&family_tokens_named(&parsed[0].1)));
+
+    // The `sdxl` collision: a builtin-model-id list whose only overlap is that word is NOT a family
+    // allow-list, but the same list plus one real family token is.
+    let model_ids = "const M: &[&str] = &[\"sdxl\", \"realvisxl\", \"illustrious_xl_v1\"];";
+    let tokens = family_tokens_named(&slice_const_bodies(model_ids)[0].1);
+    assert_eq!(tokens, ["sdxl".to_owned()].into_iter().collect());
+    assert!(
+        !is_family_allow_list(&tokens),
+        "a builtin-model-id list must not be judged a family gate"
+    );
+    let widened = "const M: &[&str] = &[\"sdxl\", \"krea_2\"];";
+    assert!(is_family_allow_list(&family_tokens_named(
+        &slice_const_bodies(widened)[0].1
+    )));
+    // A single UNAMBIGUOUS token is a family gate on its own — `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`
+    // and `MULTI_EXPERT_FAMILIES` are each exactly that shape.
+    let single = "const S: &[(&str, fn())] = &[(\"mage-flow\", resolve)];";
+    assert!(is_family_allow_list(&family_tokens_named(
+        &slice_const_bodies(single)[0].1
+    )));
+
+    // A constant naming no family token is none of this audit's business.
+    let unrelated = "const T: &[&str] = &[\"bf16\", \"q8\", \"q4\"];";
+    assert!(!is_family_allow_list(&family_tokens_named(
+        &slice_const_bodies(unrelated)[0].1
+    )));
+
+    // A comment naming a family cannot create an offender, and cannot hide a deleted one: the sweep
+    // runs over `code_without_comments`.
+    let commented = "// const C: &[&str] = &[\"krea_2\", \"flux2\"];\nconst D: u8 = 1;";
+    assert!(slice_const_bodies(&code_without_comments(commented)).is_empty());
+
+    // Quote parity. A `'"'` char literal ahead of a family gate must not swallow it, and a raw
+    // string's unescaped inner quote must not invert everything after it. Both failures are SILENT
+    // — the scan simply stops seeing gates — which is why they are asserted rather than assumed.
+    let after_char_literal =
+        "fn q(c: char) -> bool { c == '\"' }\nconst G: &[&str] = &[\"krea_2\", \"flux2\"];";
+    let parsed = slice_const_bodies(after_char_literal);
+    assert_eq!(
+        parsed.len(),
+        1,
+        "a `'\"'` char literal must not hide the gate that follows it"
+    );
+    assert!(is_family_allow_list(&family_tokens_named(&parsed[0].1)));
+
+    let after_raw_string =
+        "const R: &str = r#\"a \"quoted\" fox\"#;\nconst H: &[&str] = &[\"mage-flow\"];";
+    let parsed = slice_const_bodies(after_raw_string);
+    let gate = parsed
+        .iter()
+        .find(|(name, _, _)| name == "H")
+        .expect("a raw string's inner quotes must not hide the gate that follows it");
+    assert!(is_family_allow_list(&family_tokens_named(&gate.1)));
+
+    // `string_literals` needs the same defence in its OWN right, and it needs it asserted directly:
+    // it is what `the_checkpoint_plan_route_names_a_family_only_inside_its_recorded_tables` runs
+    // over a whole production file. The two cases above go through `matching_bracket`, so they stay
+    // green even with this function's guard removed — a guard nothing can falsify is not a guard.
+    //
+    // Without the char-literal step, the `'"'` below opens a phantom literal that runs to the next
+    // quote, `"krea_2"` is consumed as ordinary text, and the family gate after it is invisible.
+    let literals = string_literals("fn q(c: char) -> bool { c == '\"' }\nlet f = \"krea_2\";");
+    assert!(
+        literals.iter().any(|(value, _)| value == "krea_2"),
+        "a `'\"'` char literal must not swallow the family literal that follows it; found \
+         {literals:?}"
+    );
+    // The raw-string half of the same claim.
+    let literals =
+        string_literals("const R: &str = r#\"a \"quoted\" fox\"#;\nlet f = \"mage-flow\";");
+    assert!(
+        literals.iter().any(|(value, _)| value == "mage-flow"),
+        "a raw string's inner quotes must not swallow the family literal that follows it; found \
+         {literals:?}"
+    );
+}

@@ -127,6 +127,21 @@ pub(crate) fn ensure_video_engine_weights(
     request: &VideoRequest,
     settings: &Settings,
 ) -> WorkerResult<()> {
+    // Plan-backed entries (epic 20398). Defense in depth for the MLX lane, mirroring the placement
+    // of `candle::plan_backed_wan_video_route` on the other side: there is NO macOS video lane that
+    // loads a checkpoint plan — every arm of `resolve_video_route` matches a builtin engine id, and
+    // a plan-backed entry carries none of them — so such a request reaches `VideoRoute::Stub` and,
+    // without this, COMPLETES with procedural video. The same silent-fake-clip hole sc-4176 opened
+    // this gate for, arriving through a new door. Same `[checkpoint-plan:no-video-lane]` tag the
+    // candle refusal uses, because it is the same verdict.
+    if let Some(checkpoint_id) =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:no-video-lane] checkpoint {checkpoint_id:?}: no macOS video engine \
+             loads a checkpoint plan, and a plan-backed entry never renders procedural stub output"
+        )));
+    }
     if let Some(engine_id) = wan_engine_id(&request.model) {
         resolve_wan_model_dir(settings, &request.model, engine_id)?;
     }

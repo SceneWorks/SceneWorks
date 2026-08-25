@@ -260,9 +260,13 @@ fn resolve_imported_krea_dit_pin(
 fn resolve_krea_imported_base_tier(settings: &Settings) -> WorkerResult<PathBuf> {
     let base_missing = || {
         WorkerError::InvalidPayload(
-            "Krea 2 base model is not installed — install the Krea 2 (Turbo) base model first. An \
-             imported Krea 2 checkpoint is the transformer only; it is paired with the base model's \
-             text encoder, VAE, and tokenizer to run."
+            // Tagged, not bare prose (sc-20651 feature-end review): this resolver is registered in
+            // the plan route's `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS` table, so a plan-backed Krea 2
+            // job surfaces this exact string as a checkpoint-plan refusal. The tag is what tests
+            // and callers key on; the prose is what the user reads, and it may be reworded freely.
+            "[checkpoint-plan:missing-component] Krea 2 base model is not installed — install the \
+             Krea 2 (Turbo) base model first. An imported Krea 2 checkpoint is the transformer \
+             only; it is paired with the base model's text encoder, VAE, and tokenizer to run."
                 .to_owned(),
         )
     };

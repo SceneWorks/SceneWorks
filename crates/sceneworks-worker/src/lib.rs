@@ -789,6 +789,7 @@ use pose_jobs::*;
 ))]
 use upscale_jobs::*;
 
+mod checkpoint_catalog_migration;
 mod credentials;
 pub use credentials::*;
 mod error;
@@ -1030,6 +1031,40 @@ pub async fn run() -> WorkerResult<()> {
     // Child restarts must never sweep while sibling utility workers may be converting.
     if !settings.is_child_worker {
         recover_stranded_model_conversions(&settings.data_dir).await?;
+        // sc-20651 (epic 20398): compile pre-epic imported catalog entries into the checkpoint
+        // plan store. Started here rather than in `run_worker_loop` for the same reason
+        // `recover_stranded_model_conversions` is: the loop runs in every child utility worker
+        // too, and four of them re-reading every legacy checkpoint at once would be four times
+        // the disk for one result. Started and NEVER awaited — an unmigrated entry still routes
+        // through the bespoke lane it always did, so nothing downstream waits on this.
+        {
+            let config_dir = settings.config_dir.clone();
+            let data_dir = settings.data_dir.clone();
+            tokio::spawn(async move {
+                match checkpoint_catalog_migration::migrate_legacy_checkpoint_catalog(
+                    &config_dir,
+                    &data_dir,
+                )
+                .await
+                {
+                    Ok(summary)
+                        if summary.attempted == 0 && summary.declined_containers.is_empty() => {}
+                    Ok(summary) => tracing::info!(
+                        event = "checkpoint_catalog_migrated",
+                        attempted = summary.attempted,
+                        migrated = summary.migrated,
+                        failed = summary.failed(),
+                        declined = summary.declined_containers.len(),
+                        skipped = summary.skipped,
+                        "migrated pre-epic imported models into the checkpoint plan store"
+                    ),
+                    Err(error) => tracing::warn!(
+                        error = %error,
+                        "pre-epic imported-model catalog migration failed"
+                    ),
+                }
+            });
+        }
         if settings.gpu_id == "auto" {
             return supervise_auto_workers(settings).await;
         }

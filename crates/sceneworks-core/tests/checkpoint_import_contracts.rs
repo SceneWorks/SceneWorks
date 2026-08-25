@@ -1,8 +1,8 @@
 use std::{fs, path::PathBuf};
 
 use sceneworks_core::checkpoint_import::{
-    CheckpointCatalogRecordV1, CheckpointInventoryV1, ImportLayerV1, ImportPlanReferenceV1,
-    ImportPlanSummaryV1, ImportPlanV1, ManagedProvenanceV1, SourceLocatorV1,
+    CheckpointCatalogRecordV1, CheckpointContainerV1, CheckpointInventoryV1, ImportLayerV1,
+    ImportPlanReferenceV1, ImportPlanSummaryV1, ImportPlanV1, ManagedProvenanceV1, SourceLocatorV1,
     CHECKPOINT_IMPORT_CONTRACT_VERSION,
 };
 use serde_json::{json, Value};
@@ -59,7 +59,7 @@ fn versioned_object(surface: VersionSurface, version: &str, reverse: bool) -> St
             r#""kind":"linked","rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}""#
         ),
         VersionSurface::Plan => format!(
-            r#""planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{}}}]"#,
+            r#""planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{}}}]"#,
             versioned_object(VersionSurface::Locator, "1", false)
         ),
         VersionSurface::Reference => format!(
@@ -109,7 +109,7 @@ fn versioned_fields(surface: VersionSurface, version: &str) -> Vec<String> {
             r#""planId":"plan""#.to_owned(),
             r#""family":"family""#.to_owned(),
             format!(
-                r#""layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{}}}]"#,
+                r#""layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{}}}]"#,
                 versioned_object(VersionSurface::Locator, "1", false)
             ),
         ],
@@ -251,7 +251,7 @@ fn raw_occurrences(surface: VersionSurface, envelope: &str) -> Vec<RawContractCa
         VersionSurface::Locator => cases.push(RawContractCase {
             label: "plan.layers[*].source",
             document: format!(
-                r#"{{"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{envelope}}}]}}"#
+                r#"{{"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{envelope}}}]}}"#
             ),
             parse: parse_plan,
         }),
@@ -337,6 +337,7 @@ fn plan(source: SourceLocatorV1) -> ImportPlanV1 {
             layer_id: "transformer".to_owned(),
             role: "transformer".to_owned(),
             target_path: "transformer/model.safetensors".to_owned(),
+            container: CheckpointContainerV1::Safetensors,
             source,
         }],
     )
@@ -398,11 +399,11 @@ fn linked_and_managed_copies_have_the_same_semantic_plan_but_different_bindings(
     );
     assert_eq!(
         linked_plan.source_binding_identity().unwrap(),
-        "sha256:402ad8fc8e320fc95e242e07ca1e86194489ef793bc147ea5d331a3c9cf3afd7"
+        "sha256:ec71914bc783474b31e33ea5899bec72ff0c6f0b978dbc7c0bce3d8ce28da10a"
     );
     assert_eq!(
         managed_plan.source_binding_identity().unwrap(),
-        "sha256:dcb8d85fd837eac9b4e776b4e6a992b6c8a60cb807d40f9bfb20caff58649122"
+        "sha256:c6ad10edaf11271804508eb8e68c2b49c81db9bf5c1bcf0d88fdd7f4bf2ca8fb"
     );
 }
 
@@ -416,12 +417,14 @@ fn canonical_serialization_and_domain_separated_hashes_are_deterministic() {
                 layer_id: "vae".to_owned(),
                 role: "vae".to_owned(),
                 target_path: "vae/model.safetensors".to_owned(),
+                container: CheckpointContainerV1::Safetensors,
                 source: linked("root", "vae/model.safetensors"),
             },
             ImportLayerV1 {
                 layer_id: "transformer".to_owned(),
                 role: "transformer".to_owned(),
                 target_path: "transformer/model.safetensors".to_owned(),
+                container: CheckpointContainerV1::Safetensors,
                 source: linked("root", "transformer/model.safetensors"),
             },
         ],
@@ -435,12 +438,14 @@ fn canonical_serialization_and_domain_separated_hashes_are_deterministic() {
                 layer_id: "transformer".to_owned(),
                 role: "transformer".to_owned(),
                 target_path: "transformer/model.safetensors".to_owned(),
+                container: CheckpointContainerV1::Safetensors,
                 source: linked("root", "transformer/model.safetensors"),
             },
             ImportLayerV1 {
                 layer_id: "vae".to_owned(),
                 role: "vae".to_owned(),
                 target_path: "vae/model.safetensors".to_owned(),
+                container: CheckpointContainerV1::Safetensors,
                 source: linked("root", "vae/model.safetensors"),
             },
         ],
@@ -578,7 +583,7 @@ fn future_version_envelopes_win_over_future_shape_errors() {
     let future_nested_locator = json!({
         "schemaVersion": 1, "planId": "plan", "family": "family",
         "layers": [{
-            "layerId": "layer", "role": "role", "targetPath": "model.safetensors",
+            "layerId": "layer", "role": "role", "targetPath": "model.safetensors","container": "safetensors",
             "source": {"kind": "future_locator", "schemaVersion": 2, "futureLocatorField": true}
         }]
     });
@@ -634,7 +639,7 @@ fn raw_json_rejects_duplicate_keys_for_every_versioned_contract() {
     assert_duplicate_schema_version!(
         ImportPlanV1,
         format!(
-            r#"{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
+            r#"{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
         ),
         "schemaVersion"
     );
@@ -688,7 +693,7 @@ fn raw_json_rejects_duplicate_keys_for_every_versioned_contract() {
     assert_duplicate_body_field!(
         ImportPlanV1,
         format!(
-            r#"{{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
+            r#"{{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
         )
     );
     assert_duplicate_body_field!(
@@ -753,7 +758,7 @@ fn future_versions_precede_duplicate_body_diagnostics() {
     // nested future version gets the same precedence over its duplicate body.
     assert_recompile_rescan_required!(
         ImportPlanV1,
-        r#"{"schemaVersion":1,"planId":"plan","family":"family","layers":[{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}}]}"#
+        r#"{"schemaVersion":1,"planId":"plan","family":"family","layers":[{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}}]}"#
     );
     assert_recompile_rescan_required!(
         CheckpointCatalogRecordV1,
@@ -781,7 +786,7 @@ fn recursive_preflight_is_order_independent_across_nested_surfaces() {
     }
 
     let plan_permutations = [
-        r#"{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{"kind":"future","schemaVersion":2}}]}"#.to_owned(),
+        r#"{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{"kind":"future","schemaVersion":2}}]}"#.to_owned(),
         r#"{"layers":[{"source":{"schemaVersion":2,"kind":"future"},"targetPath":"model.safetensors","role":"role","layerId":"layer"}],"family":"family","planId":"first","planId":"second","schemaVersion":1}"#.to_owned(),
     ];
     for document in plan_permutations {
@@ -789,9 +794,9 @@ fn recursive_preflight_is_order_independent_across_nested_surfaces() {
     }
 
     let duplicate_body_layer = format!(
-        r#"{{"layerId":"first","layerId":"second","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}"#
+        r#"{{"layerId":"first","layerId":"second","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}"#
     );
-    let future_locator_layer = r#"{"layerId":"future","role":"role","targetPath":"future.safetensors","source":{"kind":"future","schemaVersion":2}}"#;
+    let future_locator_layer = r#"{"layerId":"future","role":"role","targetPath":"future.safetensors","container":"safetensors","source":{"kind":"future","schemaVersion":2}}"#;
     for document in [
         format!(
             r#"{{"schemaVersion":1,"planId":"plan","family":"family","layers":[{duplicate_body_layer},{future_locator_layer}]}}"#
@@ -866,7 +871,7 @@ fn nested_duplicate_schema_versions_precede_earlier_body_duplicates() {
     assert_duplicate_version!(
         ImportPlanV1,
         format!(
-            r#"{{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":"invalid","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
+            r#"{{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{{"kind":"linked","schemaVersion":"invalid","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
         )
     );
     assert_duplicate_version!(
@@ -1082,8 +1087,8 @@ fn deserialization_rejects_noncanonical_plan_and_mismatched_catalog_digest() {
     let import_plan = plan(linked("root", "model.safetensors"));
     let mut plan_value = serde_json::to_value(&import_plan).unwrap();
     plan_value["layers"] = json!([
-        {"layerId":"z","role":"vae","targetPath":"vae/model.safetensors","source":serde_json::to_value(linked("root", "vae/model.safetensors")).unwrap()},
-        {"layerId":"a","role":"transformer","targetPath":"transformer/model.safetensors","source":serde_json::to_value(linked("root", "transformer/model.safetensors")).unwrap()}
+        {"layerId":"z","role":"vae","targetPath":"vae/model.safetensors","container":"safetensors","source":serde_json::to_value(linked("root", "vae/model.safetensors")).unwrap()},
+        {"layerId":"a","role":"transformer","targetPath":"transformer/model.safetensors","container":"safetensors","source":serde_json::to_value(linked("root", "transformer/model.safetensors")).unwrap()}
     ]);
     assert!(serde_json::from_value::<ImportPlanV1>(plan_value).is_err());
 
@@ -1710,13 +1715,13 @@ fn invalid_or_missing_current_envelopes_precede_nested_future_versions() {
     let documents = [
         (
             format!(
-                r#"{{"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{future_locator}}}]}}"#
+                r#"{{"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{future_locator}}}]}}"#
             ),
             parse_plan as RawParser,
         ),
         (
             format!(
-                r#"{{"schemaVersion":"bad","planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{future_locator}}}]}}"#
+                r#"{{"schemaVersion":"bad","planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{future_locator}}}]}}"#
             ),
             parse_plan,
         ),
@@ -1819,11 +1824,11 @@ fn escaped_keys_values_paths_and_unicode_are_decoded_before_contract_decisions()
     }
 
     let ordinary_document = format!(
-        r#"{{"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"models/file.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"models/file.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
+        r#"{{"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"models/file.safetensors","container":"safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"models/file.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
     );
     assert!(parse_plan(&ordinary_document).is_ok());
     let escaped_document = format!(
-        r#"{{"schemaVersion":1,"planId":"pl\u0061n","family":"f\u0061mily","layers":[{{"layerId":"l\u0061yer","role":"r\u006fle","targetPath":"models\/file.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"r\u006fot","relativePath":"models\/file.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
+        r#"{{"schemaVersion":1,"planId":"pl\u0061n","family":"f\u0061mily","layers":[{{"layerId":"l\u0061yer","role":"r\u006fle","targetPath":"models\/file.safetensors","container":"safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"r\u006fot","relativePath":"models\/file.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
     );
     let escaped: ImportPlanV1 = serde_json::from_str(&escaped_document).unwrap();
     let ordinary: ImportPlanV1 = serde_json::from_str(&ordinary_document).unwrap();
@@ -2060,7 +2065,7 @@ fn sibling_diagnostic_precedence_is_permutation_invariant() {
     assert!(!error.contains("recompile/rescan required"), "{error}");
 
     let duplicate_layer = format!(
-        r#"{{"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"a","layerId":"b","role":"role","targetPath":"model.safetensors","source":{}}}]}}"#,
+        r#"{{"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"a","layerId":"b","role":"role","targetPath":"model.safetensors","container":"safetensors","source":{}}}]}}"#,
         versioned_object(VersionSurface::Locator, "1", false)
     );
     let error = parse_plan(&duplicate_layer).unwrap_err().to_string();
@@ -2316,12 +2321,14 @@ fn schema_expressible_rules_are_bidirectionally_aligned_and_semantic_gaps_are_ex
                 layer_id: "a".to_owned(),
                 role: "a-role".to_owned(),
                 target_path: "a.safetensors".to_owned(),
+                container: CheckpointContainerV1::Safetensors,
                 source: linked("root", "a.safetensors"),
             },
             ImportLayerV1 {
                 layer_id: "b".to_owned(),
                 role: "b-role".to_owned(),
                 target_path: "b.safetensors".to_owned(),
+                container: CheckpointContainerV1::Safetensors,
                 source: linked("root", "b.safetensors"),
             },
         ],
@@ -2504,6 +2511,7 @@ fn constructors_and_every_publication_surface_reject_manual_invalid_state() {
         layer_id: " ".to_owned(),
         role: "role".to_owned(),
         target_path: "model.safetensors".to_owned(),
+        container: CheckpointContainerV1::Safetensors,
         source: linked("root", "model.safetensors"),
     };
     assert!(invalid_layer.validate().is_err());
@@ -2519,6 +2527,7 @@ fn deterministic_publication_round_trips_and_identity_domains_cover_manual_value
             layer_id: "layer".to_owned(),
             role: "role".to_owned(),
             target_path: "model.safetensors".to_owned(),
+            container: CheckpointContainerV1::Safetensors,
             source: linked("root-a", "model.safetensors"),
         }],
     )
@@ -2530,6 +2539,7 @@ fn deterministic_publication_round_trips_and_identity_domains_cover_manual_value
             layer_id: "layer".to_owned(),
             role: "role".to_owned(),
             target_path: "model.safetensors".to_owned(),
+            container: CheckpointContainerV1::Safetensors,
             source: linked("root-b", "model.safetensors"),
         }],
     )

@@ -1761,9 +1761,17 @@ pub(crate) async fn delete_model(
         Some((checkpoint_id, Some(install_id))) => {
             let data_dir = state.settings.data_dir.clone();
             let owned_install_id = install_id.to_owned();
+            // Through the DERIVATIVE store, not `CheckpointPlanStore::remove_managed` directly:
+            // the plan store's own removal drops the record and `remove_dir_all`s the install tree
+            // with nothing asking about derivatives first, so a leased or pinned derivative was
+            // orphaned — its source bytes and plan gone, and its `derivedFrom` checkpoint id (the
+            // only handle any later invalidation has) no longer resolving to anything. The
+            // derivative store removes derivatives FIRST and refuses the whole teardown if one is
+            // still in use, which is the same ordering the linked path above already had
+            // (sc-20651 feature-end review).
             let outcome = tokio::task::spawn_blocking(move || {
-                sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
-                    .remove_managed(&owned_install_id)
+                sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?
+                    .remove_managed_install(&owned_install_id)
             })
             .await;
             let failure = match outcome {
