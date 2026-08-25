@@ -22591,7 +22591,6 @@ fn checkpoint_plan_route_refuses_before_load_with_typed_diagnostics() {
     let compiled = fx.compile("kreamania.safetensors", &krea_native_entries());
     let edit = fx.plan_backed_request(
         &compiled,
-        None,
         json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
     );
     let declined = prepare_checkpoint_plan_sources(&edit, &fx.settings).unwrap();
