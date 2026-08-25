@@ -164,6 +164,67 @@ impl QuantFormat {
             Self::UnrecognizedScaling => "unrecognized_scaling",
         }
     }
+
+    /// Parse the [`Self::as_str`] spelling back.
+    ///
+    /// The inverse of `as_str`, needed because the classification is *persisted* — a manifest
+    /// entry's `importQuantFormat` is this string, written at import time by the header gate that
+    /// proved it, and read back on every later request. Matching is exact and case-sensitive:
+    /// these are values this code wrote, not user input, and a lenient parse would let a
+    /// near-miss (`"NVFP4"`, `"nvfp4-v1"`) resolve to a classification nothing verified.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "bf16" => Some(Self::Bf16),
+            "f16" => Some(Self::F16),
+            "f32" => Some(Self::F32),
+            "fp8_e4m3" => Some(Self::Fp8E4m3),
+            "scaled_fp8_companion" => Some(Self::ScaledFp8Companion),
+            "fp8_inline_scale" => Some(Self::Fp8InlineScale),
+            "comfy_quant_packed" => Some(Self::ComfyQuantPacked),
+            "int8_tensorwise_per_row" => Some(Self::Int8TensorwisePerRow),
+            "nvfp4" => Some(Self::Nvfp4),
+            "gguf" => Some(Self::Gguf),
+            "unrecognized_scaling" => Some(Self::UnrecognizedScaling),
+            _ => None,
+        }
+    }
+
+    /// The engine's stable **source-codec id** for this classification, when the two vocabularies
+    /// name the same thing (sc-21484, epic 11037).
+    ///
+    /// This is the one sanctioned bridge from SceneWorks' header classification to the cross-repo
+    /// codec vocabulary in [`crate::checkpoint_weight_facts`]. It is a *lookup on the verified
+    /// verdict*, never a derivation from a bit count: [`Self::Nvfp4`] is only ever reached through
+    /// `metadata_declares_nvfp4(..) && has_kitchen_nvfp4_triplets(..)`, both halves required, and
+    /// the codec id inherits exactly that proof. Nothing here reads `mlxQuantize`, a tier name, or
+    /// a dtype width.
+    ///
+    /// # Why several arms are `None`
+    ///
+    /// `None` means "this build cannot name the engine codec for that classification", not "the
+    /// file is dense". The fp8 family is the reason it exists: SceneWorks tells apart four fp8
+    /// conventions by *marker shape* ([`Self::Fp8E4m3`], [`Self::ScaledFp8Companion`],
+    /// [`Self::Fp8InlineScale`], [`Self::ComfyQuantPacked`]) while the engine's registered codecs
+    /// are keyed by *scale topology* (`fp8-e4m3-scalar-v1`, `mxfp8-v1`, …). The two partitions do
+    /// not line up one-to-one, and guessing a mapping would put a codec id that was never proved
+    /// into a persisted fact a user reads. A caller that gets `None` must omit the source-codec
+    /// fact, never substitute a request tier for it.
+    pub fn source_codec_id(self) -> Option<&'static str> {
+        use crate::checkpoint_weight_facts as facts;
+        match self {
+            Self::Bf16 => Some(facts::DENSE_BF16_CODEC_ID),
+            Self::F16 => Some(facts::DENSE_F16_CODEC_ID),
+            Self::F32 => Some(facts::DENSE_F32_CODEC_ID),
+            Self::Int8TensorwisePerRow => Some(facts::INT8_PER_ROW_CODEC_ID),
+            Self::Nvfp4 => Some(facts::NVFP4_CODEC_ID),
+            Self::Gguf => Some(facts::GGUF_CONTAINER_CODEC_ID),
+            Self::Fp8E4m3
+            | Self::ScaledFp8Companion
+            | Self::Fp8InlineScale
+            | Self::ComfyQuantPacked
+            | Self::UnrecognizedScaling => None,
+        }
+    }
 }
 
 impl std::fmt::Display for QuantFormat {
@@ -1046,6 +1107,88 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("krea_2"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Int8TensorwisePerRow);
+    }
+
+    /// The header classification → engine codec-id bridge (sc-21484). Pinned rather than left to
+    /// the match arms because the whole point of the bridge is that `Nvfp4` reaches the codec
+    /// vocabulary as `"nvfp4-v1"` and NEVER as the request tier `"nvfp4"` or as a `q4` alias.
+    #[test]
+    fn quant_format_maps_to_the_engine_source_codec_id() {
+        use crate::checkpoint_weight_facts::{is_codec_id, NVFP4_CODEC_ID};
+
+        assert_eq!(QuantFormat::Nvfp4.source_codec_id(), Some(NVFP4_CODEC_ID));
+        assert_eq!(QuantFormat::Nvfp4.source_codec_id(), Some("nvfp4-v1"));
+        assert_ne!(
+            QuantFormat::Nvfp4.source_codec_id(),
+            Some(QuantFormat::Nvfp4.as_str()),
+            "the codec id and the tier/verdict spelling must stay different strings"
+        );
+        assert_eq!(
+            QuantFormat::Int8TensorwisePerRow.source_codec_id(),
+            Some("int8-per-row-v1")
+        );
+        assert_eq!(QuantFormat::Bf16.source_codec_id(), Some("dense-bf16-v1"));
+        assert_eq!(
+            QuantFormat::Gguf.source_codec_id(),
+            Some("gguf-container-v1")
+        );
+
+        // The fp8 family has no proved one-to-one mapping, so it stays absent rather than guessing.
+        for unmapped in [
+            QuantFormat::Fp8E4m3,
+            QuantFormat::ScaledFp8Companion,
+            QuantFormat::Fp8InlineScale,
+            QuantFormat::ComfyQuantPacked,
+            QuantFormat::UnrecognizedScaling,
+        ] {
+            assert_eq!(
+                unmapped.source_codec_id(),
+                None,
+                "{unmapped} has no proved codec id and must not invent one"
+            );
+        }
+
+        // `as_str` round trips through `from_label` for every variant, so a persisted
+        // `importQuantFormat` resolves back to the classification that wrote it.
+        for quant in [
+            QuantFormat::Bf16,
+            QuantFormat::F16,
+            QuantFormat::F32,
+            QuantFormat::Fp8E4m3,
+            QuantFormat::ScaledFp8Companion,
+            QuantFormat::Fp8InlineScale,
+            QuantFormat::ComfyQuantPacked,
+            QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Nvfp4,
+            QuantFormat::Gguf,
+            QuantFormat::UnrecognizedScaling,
+        ] {
+            assert_eq!(QuantFormat::from_label(quant.as_str()), Some(quant));
+        }
+        // A near-miss never resolves — including the codec id, which is a different vocabulary.
+        for stranger in ["NVFP4", "nvfp4-v1", "q4", "", "int8-per-row-v1"] {
+            assert_eq!(
+                QuantFormat::from_label(stranger),
+                None,
+                "{stranger:?} must not parse as a verified classification"
+            );
+        }
+
+        // Whatever is produced is always a real codec id.
+        for quant in [
+            QuantFormat::Bf16,
+            QuantFormat::F16,
+            QuantFormat::F32,
+            QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Nvfp4,
+            QuantFormat::Gguf,
+        ] {
+            let codec_id = quant.source_codec_id().expect("mapped");
+            assert!(
+                is_codec_id(codec_id),
+                "{quant} produced a non-codec {codec_id:?}"
+            );
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::checkpoint_weight_facts::NVFP4_CODEC_ID;
 use crate::contracts::JobType;
 
 /// Video capabilities a shipped manifest entry advertises that NO lane can currently claim.
@@ -1449,6 +1450,33 @@ pub fn imported_entry_installed_path(entry: &Map<String, Value>) -> Option<&str>
     })
 }
 
+/// The **source codec** an imported manifest entry's weights are stored in — the engine's stable
+/// codec id (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"dense-bf16-v1"`, …), derived from the header
+/// classification the import gate persisted as `importQuantFormat` (sc-21484, epic 11037).
+///
+/// One place turns the persisted classification into the codec vocabulary, so admission and the
+/// worker's route cannot drift on what "this checkpoint is stored as NVFP4" means. `None` when the
+/// entry carries no classification, when the string is not one this build knows, or when the
+/// classification has no proved engine codec.
+///
+/// **This is the SOURCE fact only.** It says nothing about how a load would execute the weights: a
+/// checkpoint stored `nvfp4-v1` reports `nvfp4-v1` here on a Mac, on CPU, on datacenter `sm_100`
+/// and on a pre-Blackwell GPU, every one of which would run the dense BF16 fallback. What a run
+/// actually materialized is a separate fact carried on the asset receipt and the telemetry row (see
+/// [`crate::checkpoint_weight_facts`]), and it is never derived from this one.
+///
+/// The lowercase normalization preserves the case-insensitive compare this replaced; the persisted
+/// value is always written lowercase by the import job, so it only ever matters for an entry
+/// hand-edited into a manifest.
+pub fn imported_entry_source_codec(entry: &Map<String, Value>) -> Option<&'static str> {
+    let label = entry
+        .get("importQuantFormat")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_ascii_lowercase();
+    crate::base_weights::QuantFormat::from_label(&label)?.source_codec_id()
+}
+
 fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
     match entry.get("importSourceShape").and_then(Value::as_str) {
         Some(
@@ -1556,10 +1584,14 @@ pub fn imported_image_request_provider_eligible(
     let Some(source) = imported_source_shape(entry) else {
         return false;
     };
-    let native_nvfp4 = entry
-        .get("importQuantFormat")
-        .and_then(Value::as_str)
-        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"));
+    // Admission gates on what the checkpoint's weights are STORED in — the source codec — and on
+    // nothing else (sc-21484, epic 11037). It deliberately does not consult, and cannot consult,
+    // what a load would MATERIALIZE them as: that is a per-load receipt produced by the engine
+    // after admission, and a gate that guessed at it would be deciding routability from a
+    // prediction. `imported_entry_source_codec` is the one place the persisted classification is
+    // turned into the cross-repo codec vocabulary, so this gate and the worker's route agree on the
+    // question they are asking.
+    let native_nvfp4 = imported_entry_source_codec(entry) == Some(NVFP4_CODEC_ID);
     // Native Kitchen NVFP4 is a Candle/CUDA source encoding. MLX has no consumer for its packed
     // E2M1 weights and blocked scales, so it must never win the family route merely because dense
     // Krea imports are cross-platform.
@@ -2126,8 +2158,9 @@ mod tests {
 
     use super::{
         image_family_is_mlx_routed, image_model_mac_support, imported_control_intent_is_material,
-        imported_image_model_lora_advertisement, imported_image_request_family_eligible,
-        imported_image_request_provider_eligible, imported_provider_routes, is_builtin_image_model,
+        imported_entry_source_codec, imported_image_model_lora_advertisement,
+        imported_image_request_family_eligible, imported_image_request_provider_eligible,
+        imported_provider_routes, imported_requested_quant, is_builtin_image_model,
         video_job_type_for_mode, video_mode_probe_payload, video_model_candle_support,
         video_model_mac_support, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS,
         CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
@@ -2822,6 +2855,134 @@ mod tests {
                 &payload(unsupported),
                 "candle"
             ));
+        }
+    }
+
+    /// Admission reads the SOURCE codec, in the cross-repo codec vocabulary, and never a tier
+    /// (sc-21484, epic 11037).
+    #[test]
+    fn admission_reads_the_source_codec_not_the_requested_tier() {
+        use crate::checkpoint_weight_facts::NVFP4_CODEC_ID;
+        use serde_json::{json, Map};
+
+        let entry = |quant: Option<&str>| {
+            let mut entry = Map::new();
+            entry.insert("family".to_owned(), json!("krea_2"));
+            if let Some(quant) = quant {
+                entry.insert("importQuantFormat".to_owned(), json!(quant));
+            }
+            entry
+        };
+
+        assert_eq!(
+            imported_entry_source_codec(&entry(Some("nvfp4"))),
+            Some(NVFP4_CODEC_ID)
+        );
+        assert_eq!(
+            imported_entry_source_codec(&entry(Some("nvfp4"))),
+            Some("nvfp4-v1")
+        );
+        // Case tolerance is preserved from the compare this replaced.
+        assert_eq!(
+            imported_entry_source_codec(&entry(Some(" NVFP4 "))),
+            Some(NVFP4_CODEC_ID)
+        );
+        assert_eq!(
+            imported_entry_source_codec(&entry(Some("int8_tensorwise_per_row"))),
+            Some("int8-per-row-v1")
+        );
+        assert_eq!(
+            imported_entry_source_codec(&entry(Some("bf16"))),
+            Some("dense-bf16-v1")
+        );
+        // A REQUEST TIER is not a source codec, and neither is an absent or unknown stamp.
+        for not_a_codec in [None, Some("q4"), Some("q8"), Some("nvfp4-v1"), Some("")] {
+            assert_eq!(
+                imported_entry_source_codec(&entry(not_a_codec)),
+                None,
+                "{not_a_codec:?} must not resolve to a source codec"
+            );
+        }
+        // The gate's own question, spelled out: an NVFP4-stored entry is native-SOURCE, which is
+        // the only thing admission may decide from.
+        assert!(imported_entry_source_codec(&entry(Some("nvfp4"))) == Some(NVFP4_CODEC_ID));
+        assert!(imported_entry_source_codec(&entry(Some("bf16"))) != Some(NVFP4_CODEC_ID));
+    }
+
+    /// Saved-job round trip across the whole tier vocabulary (sc-21484, epic 11037).
+    ///
+    /// Surfacing the source codec and the execution representation as separate facts must not move
+    /// the REQUEST shapes: a job saved before this change — `advanced.quantTier` of `bf16`/`q8`/`q4`
+    /// (or `mlxQuantize` bits, or nothing at all) — has to admit exactly as it did, and the tier a
+    /// payload resolves to has to be the same string. The new facts describe a load; they are not
+    /// an input to one, and nothing in the routing gate reads them.
+    ///
+    /// The bit ladder is pinned here too, because `bits => tier` is the re-derivation that has
+    /// failed open five times in this epic: NVFP4 is reachable ONLY by name, never from a count.
+    #[test]
+    fn saved_job_tier_request_shapes_round_trip_unchanged() {
+        let dense_id = "user_kreamania_dense";
+        let payload = |advanced: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "model": dense_id,
+                "mode": "text_to_image",
+                "modelManifestEntry": {
+                    "id": dense_id,
+                    "family": "krea_2",
+                    "importSourceShape": "transformer_file",
+                    "paths": { "model": "/app/models/imports/kreamania_dense" }
+                }
+            });
+            if let Some(advanced) = advanced.as_object() {
+                value.as_object_mut().expect("payload is an object").insert(
+                    "advanced".to_owned(),
+                    serde_json::Value::Object(advanced.clone()),
+                );
+            }
+            value.as_object().expect("payload is an object").clone()
+        };
+
+        // Named tiers resolve to themselves; `bf16`/`dense` resolve to "no explicit tier".
+        for (advanced, expected) in [
+            (serde_json::json!({ "quantTier": "q4" }), Ok(Some("q4"))),
+            (serde_json::json!({ "quantTier": "q8" }), Ok(Some("q8"))),
+            (serde_json::json!({ "quantTier": "bf16" }), Ok(None)),
+            (serde_json::json!({ "quantTier": "dense" }), Ok(None)),
+            (
+                serde_json::json!({ "quantTier": "nvfp4" }),
+                Ok(Some("nvfp4")),
+            ),
+            (serde_json::json!({}), Ok(None)),
+            // The bit ladder, unchanged — and NVFP4 is not on it at any width.
+            (serde_json::json!({ "mlxQuantize": 4 }), Ok(Some("q4"))),
+            (serde_json::json!({ "mlxQuantize": 8 }), Ok(Some("q8"))),
+            (serde_json::json!({ "mlxQuantize": "4" }), Ok(Some("q4"))),
+            (serde_json::json!({ "mlxQuantize": 0 }), Ok(None)),
+            (serde_json::json!({ "quantTier": "nonsense" }), Err(())),
+        ] {
+            assert_eq!(
+                imported_requested_quant(&payload(advanced.clone()), false),
+                expected,
+                "saved payload {advanced} must resolve to {expected:?}"
+            );
+        }
+
+        // And the same payloads still admit through the provider gate for a dense import.
+        for advanced in [
+            serde_json::json!({ "quantTier": "q4" }),
+            serde_json::json!({ "quantTier": "q8" }),
+            serde_json::json!({ "quantTier": "bf16" }),
+            serde_json::json!({ "mlxQuantize": 8 }),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                imported_image_request_provider_eligible(
+                    dense_id,
+                    &payload(advanced.clone()),
+                    "candle"
+                ),
+                "a saved dense job with advanced {advanced} must still admit"
+            );
         }
     }
 
