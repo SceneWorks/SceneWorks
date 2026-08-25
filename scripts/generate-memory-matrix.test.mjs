@@ -3336,10 +3336,13 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // this pin rather than a thing still owed. sc-20651 — epic 20398's SINGLE terminal pin bump —
   // then advanced it off the feature head onto inference MAIN's merge of that head (6d8be650d,
   // inference #800), which is the adoption a sync deliberately deferred: 725c6bc59 is an ancestor
-  // of it, and the delta is the epic's own 13 review commits plus the merge. The literal is
+  // of it, and the delta is the epic's own 13 review commits plus the merge. The epic's campaign
+  // closure then advanced it once more, to 1caa68636 — inference MAIN's merge of #801, the int8
+  // precedence fix that unblocked the campaign's int8 parity leg (6d8be650d is its ancestor; the
+  // delta is that one fix plus the merge, and it declares no capability). The literal is
   // re-stamped rather than relaxed to a shape check: the assertion below only means something
   // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "6d8be650d34d53b7539cb55c8dee862bd0863960");
+  assert.equal(pin, "1caa6863673c0a6be33115506b059e25238d2011");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
