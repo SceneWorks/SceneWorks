@@ -47,18 +47,54 @@ pub(crate) async fn upsert_manifest_entry(
     let collection_key = collection_key.to_owned();
     // The critical section is blocking (fs2 advisory lock + sync read/write) so it
     // runs on a blocking thread rather than stalling the async runtime.
-    tokio::task::spawn_blocking(move || upsert_manifest_entry_locked(&path, &collection_key, entry))
-        .await
-        .map_err(|error| task_join_error("manifest upsert", error))?
+    tokio::task::spawn_blocking(move || {
+        merge_manifest_entry_locked(&path, &collection_key, entry, true).map(|_| ())
+    })
+    .await
+    .map_err(|error| task_join_error("manifest upsert", error))?
+}
+
+/// Merge `entry` into an entry that ALREADY EXISTS in `collection_key`, and write
+/// nothing at all when its id is absent. Returns whether the merge landed.
+///
+/// The update-only counterpart of [`upsert_manifest_entry`], for a writer that holds
+/// a value derived from an entry it read minutes ago: the checkpoint-catalog
+/// migration compiles for four full passes over a multi-gigabyte checkpoint before
+/// stamping, and an upsert would RESURRECT a model the user deleted in the meantime
+/// as a stub row carrying only `id` and `importPlan` — no name, no paths, no type
+/// (sc-20651). The absence check is made by the same read the merge writes from,
+/// INSIDE the same cross-process lock the write takes, so there is no window
+/// between deciding and writing.
+pub(crate) async fn update_manifest_entry_if_present(
+    path: &Path,
+    collection_key: &str,
+    entry: serde_json::Map<String, Value>,
+) -> WorkerResult<bool> {
+    if entry.get("id").and_then(Value::as_str).is_none() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{collection_key} manifest entry requires id"
+        )));
+    }
+    let path = path.to_path_buf();
+    let collection_key = collection_key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        merge_manifest_entry_locked(&path, &collection_key, entry, false)
+    })
+    .await
+    .map_err(|error| task_join_error("manifest update", error))?
 }
 
 /// Blocking read→merge→write of `path`, run under a cross-process exclusive lock on
 /// the `<manifest>.lock` sibling. Callers must invoke this off the async runtime.
-fn upsert_manifest_entry_locked(
+///
+/// `insert_missing` decides what an absent id means: appending a new member (upsert)
+/// or writing nothing and reporting `false` (update-only).
+fn merge_manifest_entry_locked(
     path: &Path,
     collection_key: &str,
     entry: serde_json::Map<String, Value>,
-) -> WorkerResult<()> {
+    insert_missing: bool,
+) -> WorkerResult<bool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -66,6 +102,11 @@ fn upsert_manifest_entry_locked(
 
     let mut manifest = match std::fs::read_to_string(path) {
         Ok(payload) => serde_json::from_str(&strip_jsonc_comments(&payload))?,
+        // No manifest at all: the id is absent, so an update-only write is a no-op
+        // rather than a fresh catalog holding one stub entry.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !insert_missing => {
+            return Ok(false);
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut object = serde_json::Map::new();
             object.insert("schemaVersion".to_owned(), json!(1));
@@ -108,9 +149,15 @@ fn upsert_manifest_entry_locked(
         }
     }
     if !found {
+        if !insert_missing {
+            // Nothing is written, so the file the caller read stays exactly as the
+            // deletion left it.
+            return Ok(false);
+        }
         collection.push(Value::Object(entry));
     }
-    write_json_value_blocking(path, &manifest)
+    write_json_value_blocking(path, &manifest)?;
+    Ok(true)
     // `_guard` (and the advisory lock) drops here, after the atomic rename lands.
 }
 

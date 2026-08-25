@@ -32,6 +32,13 @@ export function ProgramMonitor({
               asset={selectedAsset}
               className="ve-program-media"
               controls={false}
+              // Playback is driven from SCRIPT (EditorScreen's foregrounded-play effect calls
+              // `video.play()` with no user gesture on the element), and autoplay policy rejects an
+              // unmuted programmatic play() — the effect's `.catch` then flipped isPlaying off, so
+              // the transport silently stopped working when sc-17161 made `muted` an opt-in prop.
+              // Passing it explicitly is the contract assetMedia.jsx documents for script-driven
+              // surfaces, and restores the always-muted element this monitor rendered before.
+              muted
               onEnded={onEnded}
               onPause={onPause}
               onPlay={onPlay}

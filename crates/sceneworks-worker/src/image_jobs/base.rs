@@ -152,6 +152,15 @@ enum ImageRoute {
     /// keys on that descriptor id), unlike S3 which swaps to `krea_2_turbo`. Reference/edit/pose/PiD
     /// shapes are rejected loudly by the lane (multi-phase renders from pure noise).
     KreaMultiPhase,
+    /// A user model bound to a persisted checkpoint import plan (epic 20398, sc-20634): its manifest
+    /// entry carries `importPlan.checkpointId`, the plan store resolves and re-verifies the plan, and
+    /// the provider is selected by family + source shape + operation through the registry. Claimed
+    /// BEFORE every bespoke imported lane, but PER REQUEST, not per entry (sc-20636): this skeleton
+    /// serves plain text-to-image only, so a managed entry's family lane keeps the edit / pose /
+    /// reference / LoRA / Hires.fix shapes it had before the import. Exactly one lane owns each
+    /// REQUEST; the entry itself may be served by two. A request no lane claims at all is a typed
+    /// refusal, never the stub.
+    CheckpointPlan,
     /// An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
     /// `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
     /// assembly lane, which pairs the imported transformer with a resident `krea_2` base tier (shared
@@ -180,6 +189,8 @@ enum ImageRoute {
     /// conditioning and the fine-tuned entrypoint refuses adapters.
     MageFinetuned,
     InstantId,
+    /// Generic SDXL OpenPose ControlNet, shared by the five independently accepted model ids.
+    SdxlControl,
     PulidFlux,
     SdxlAdvanced,
     SensenovaEdit,
@@ -190,8 +201,7 @@ enum ImageRoute {
     /// falling through to `Mlx` (plain txt2img) and silently dropping the poses (sc-11796 generalized to
     /// every wired family, sc-11814) — the MLX twin of the candle `CandleImageRoute::PoseControlBaseMissing`.
     PoseControlBaseMissing,
-    /// A strict-pose job on an MLX model with NO pose-control lane (e.g. a plain `sdxl` pose job with no
-    /// reference — SDXL identity-pose ships via InstantID / IP-Adapter) that `mlx_available` would
+    /// A strict-pose job on an MLX model with NO pose-control lane that `mlx_available` would
     /// otherwise render as plain txt2img, dropping the poses. Reject loudly (sc-5968) — the MLX twin of
     /// the candle `CandleImageRoute::PoseReject`.
     PoseReject,
@@ -213,7 +223,7 @@ enum ImageRoute {
 ///   - `flux_dev`      → `flux1_dev_control_available` (Shakker Union-Pro-2.0)
 ///   - `flux2_dev`     → `flux2_dev_control_available` (Fun-Controlnet-Union)
 ///
-/// Distinct from a non-wired MLX pose family (e.g. `sdxl`), which reaches the sc-5968
+/// Distinct from a non-wired MLX pose family, which reaches the sc-5968
 /// [`ImageRoute::PoseReject`] instead. (sc-11814.)
 #[cfg(target_os = "macos")]
 const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
@@ -243,9 +253,11 @@ pub(crate) fn mlx_flux_strict_control_engine_id(model: &str) -> Option<&'static 
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn resolve_image_route_with_imported_availability(
     request: &ImageRequest,
     settings: &Settings,
+    checkpoint_plan_available: bool,
     imported_control_available: bool,
     imported_available: bool,
     sdxl_imported_available: bool,
@@ -306,6 +318,10 @@ fn resolve_image_route_with_imported_availability(
         // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
         // sibling of the `krea_edit_available` arm above.
         Some(ImageRoute::KreaTurboOnRaw)
+    } else if checkpoint_plan_available {
+        // A plan-backed user checkpoint (epic 20398, sc-20634): the persisted ImportPlanV1 is the
+        // route's sole source of truth. Claimed before every bespoke imported lane.
+        Some(ImageRoute::CheckpointPlan)
     } else if imported_control_available {
         // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch
         // rides the file-loaded imported DiT (the imported twin of the `KreaControl` arm above).
@@ -329,6 +345,11 @@ fn resolve_image_route_with_imported_availability(
         Some(ImageRoute::MageFinetuned)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
+    } else if sdxl_control_candidate(request) {
+        // Keep the generic SDXL ControlNet route after InstantID and before every SDXL edit,
+        // IP-Adapter, and generic route. The handler validates conflicts and malformed carriers,
+        // so a pose can never be silently discarded by a sibling conditioned path.
+        Some(ImageRoute::SdxlControl)
     } else if pulid_flux_available(request, settings) {
         Some(ImageRoute::PulidFlux)
     } else if sdxl_advanced_available(request, settings) {
@@ -356,8 +377,7 @@ fn resolve_image_route_with_imported_availability(
         //    `mlx_available` succeeds — for `krea_2_turbo` the control base (`resolve_krea_control_base`) diverges
         //    from the txt2img base (the reported sc-11796 silent-drop), and for `kolors` the lane additionally
         //    needs a `referenceAssetId`. Generalizes the sc-11796 krea-only reject to every wired family (sc-11814).
-        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img (e.g. a plain `sdxl`
-        //    pose job with no reference — SDXL identity-pose ships via InstantID / IP-Adapter, claimed above) →
+        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img →
         //    the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the generic `mlx_available` arm.
         if WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str()) {
@@ -372,6 +392,57 @@ fn resolve_image_route_with_imported_availability(
     }
 }
 
+/// Plan-route availability for the test-only route probes, with refusals made loud.
+///
+/// `prepare_checkpoint_plan_sources` has four outcomes: not plan-backed (an empty selection),
+/// servable (`is_available()`), a typed refusal (`Err`), and a DECLINE that retains the refusal for
+/// the router's zero-lane fall-through. Only the first is "this route is unavailable"; the other
+/// three mean the route OWNS the entry. Folding the refusal into `false` made every plan refusal
+/// indistinguishable from a missing route in the probes.
+///
+/// Gated per lane rather than a bare `#[cfg(test)]`: this helper only exists where a route probe
+/// does, and `tests/test_builtin_manifest_audit.py` treats the first line-initial `#[cfg(test)]`
+/// as the start of this file's test module — a bare one here would truncate the audited region to
+/// the first 400 lines and silently drop base.rs's `repo` / `modelPath` lanes from the inventory.
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+fn checkpoint_plan_available_or_panic(request: &ImageRequest, settings: &Settings) -> bool {
+    match prepare_checkpoint_plan_sources(request, settings) {
+        Ok(selection) => selection.is_available(),
+        Err(error) => panic!(
+            "the plan-driven route refused {:?} while probing which route claims it; probe with \
+             `prepare_checkpoint_plan_sources` directly to assert on a refusal: {error}",
+            request.model
+        ),
+    }
+}
+
+/// The companion directories a candle floor prices for an imported single-file load that pairs a
+/// user checkpoint with a resident family base snapshot.
+///
+/// The base snapshot is a COMPANION, never the weights: the imported file REPLACES the snapshot's
+/// `transformer/`, so pricing the snapshot directory recursively charges the DiT twice — the exact
+/// double-claim `base_admission::imported_file_floor_excludes_the_replaced_snapshot_transformer`
+/// exists to forbid. A selected encoder is already represented by the spec's prepared contract
+/// receipt, so the bundled `text_encoder/` is priced only when the spec has none of its own.
+///
+/// Shared rather than duplicated: the legacy Krea imported lane and the plan-driven checkpoint
+/// route must be admitted on an identical floor for the same file + base, and equality by
+/// construction is the only version of that which cannot drift.
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(super) fn imported_base_snapshot_companions(
+    base_dir: &Path,
+    spec_has_selected_text_encoder: bool,
+) -> Vec<PathBuf> {
+    let mut companions = vec![base_dir.join("vae")];
+    if !spec_has_selected_text_encoder {
+        companions.push(base_dir.join("text_encoder"));
+    }
+    companions
+}
+
 /// Test-facing pure route probe. Production uses [`prepare_image_route`] so payload-selected File
 /// sources stay pinned from selection through dispatch instead of being resolved a second time after
 /// the async preamble.
@@ -380,6 +451,11 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
     resolve_image_route_with_imported_availability(
         request,
         settings,
+        // Loud, not `matches!`: a plan-backed entry that REFUSES is a typed diagnostic, and
+        // collapsing it into "route unavailable" would make every refusal look like a missing
+        // route in the probes (sc-20634 review). Callers that want to observe a refusal call
+        // `prepare_checkpoint_plan_sources` directly.
+        checkpoint_plan_available_or_panic(request, settings),
         krea_imported_control_available(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
@@ -390,6 +466,7 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
 #[cfg(target_os = "macos")]
 enum PreparedImageRoute {
     Plain(ImageRoute),
+    CheckpointPlan(Box<PreparedCheckpointPlanSources>),
     KreaImported(Box<PreparedKreaImportedSources>),
     KreaImportedControl(Box<PreparedKreaImportedControlSources>),
     SdxlImported(Box<PreparedSdxlImportedSources>),
@@ -401,6 +478,7 @@ impl PreparedImageRoute {
     fn kind(&self) -> ImageRoute {
         match self {
             Self::Plain(route) => *route,
+            Self::CheckpointPlan(_) => ImageRoute::CheckpointPlan,
             Self::KreaImported(_) => ImageRoute::KreaImported,
             Self::KreaImportedControl(_) => ImageRoute::KreaImportedControl,
             Self::SdxlImported(_) => ImageRoute::SdxlImported,
@@ -417,6 +495,11 @@ fn prepare_image_route(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedImageRoute>> {
+    // The plan-driven route is offered the request first. It claims the shapes it serves; a shape
+    // it does not serve declines to the entry's own bespoke family lane when the entry has loadable
+    // bytes, and refuses outright when it does not. The decline RETAINS its refusal, re-raised
+    // below if no lane claims the request at all (sc-20636).
+    let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
     let imported_control = prepare_krea_imported_control_sources(request, settings)?;
     let imported = if imported_control.is_none() {
         prepare_krea_imported_sources(request, settings)?
@@ -428,14 +511,26 @@ fn prepare_image_route(
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         settings,
+        checkpoint_plan.is_available(),
         imported_control.is_some(),
         imported.is_some(),
         sdxl.is_some(),
         mage_finetuned.is_some(),
     ) else {
+        // Zero lanes claimed the request. For a plan-backed entry that is never "no route": the
+        // plan route declined only because the entry has SceneWorks-owned bytes some bespoke lane
+        // could load, and here that lane did not materialize. Falling out with `Ok(None)` lands the
+        // job in `generate_stub_stream`, which COMPLETES it with procedural stub output — so
+        // re-raise the retained typed refusal instead (sc-20636 review).
+        checkpoint_plan.into_unclaimed_refusal(request)?;
         return Ok(None);
     };
     Ok(Some(match kind {
+        ImageRoute::CheckpointPlan => PreparedImageRoute::CheckpointPlan(Box::new(
+            checkpoint_plan
+                .into_sources()
+                .expect("prepared checkpoint plan route lost its sources"),
+        )),
         ImageRoute::KreaImportedControl => PreparedImageRoute::KreaImportedControl(
             Box::new(imported_control.expect("prepared imported-control route lost its sources")),
         ),
@@ -460,6 +555,7 @@ impl ImageRoute {
             self,
             ImageRoute::ZImageControl
                 | ImageRoute::ZImageBaseControl
+                | ImageRoute::SdxlControl
                 | ImageRoute::QwenControl
                 | ImageRoute::KolorsControl
                 | ImageRoute::KreaControl
@@ -483,6 +579,7 @@ impl ImageRoute {
         match self {
             ImageRoute::ZImageControl
             | ImageRoute::ZImageBaseControl
+            | ImageRoute::SdxlControl
             | ImageRoute::QwenControl
             | ImageRoute::KolorsControl
             | ImageRoute::KreaControl
@@ -517,6 +614,8 @@ impl ImageRoute {
             // conditioning; strict-pose requests use the separate control route above.
             | ImageRoute::KreaImported
             | ImageRoute::SdxlImported
+            // Plan-driven checkpoints (sc-20634) are plain per-image txt2img: `count` renders.
+            | ImageRoute::CheckpointPlan
             // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
             // renders, each its own seed. No angle/pose grouping (the lane claims no conditioning).
             | ImageRoute::MageFinetuned
@@ -531,7 +630,9 @@ impl ImageRoute {
     /// descriptor label their stream resolves.
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
+            ImageRoute::SdxlControl => SDXL_CONTROL_ADAPTER_LABEL,
             ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
+            ImageRoute::CheckpointPlan => CHECKPOINT_PLAN_ENGINE,
             ImageRoute::KreaImported | ImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             ImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
@@ -557,6 +658,8 @@ enum CandleImageRoute {
     /// InstantID identity (sc-5491) — the off-Mac sibling of `ImageRoute::InstantId`. Checked first
     /// because `instantid_realvisxl` is not an `is_candle_engine` txt2img id.
     InstantId,
+    /// Generic SDXL OpenPose ControlNet, shared with the macOS route through registry id `sdxl`.
+    SdxlControl,
     /// SDXL img2img / inpaint / outpaint edit (sc-5487).
     SdxlEdit,
     /// FLUX.2-klein reference / img2img edit (sc-5487).
@@ -600,6 +703,9 @@ enum CandleImageRoute {
     KreaImported,
     /// Strict-pose control over an imported Krea DiT, one image per pose.
     KreaImportedControl,
+    /// Off-Mac twin of [`ImageRoute::CheckpointPlan`] (sc-20634): a plan-backed user checkpoint
+    /// resolved through the plan store and rendered by the registry-bound candle provider.
+    CheckpointPlan,
     /// A generated full-fine-tune Mage transformer paired with the installed Base TE/VAE.
     MageFinetuned,
     /// Off-Mac twin of [`ImageRoute::SdxlImported`], loaded by candle from the fused checkpoint plus
@@ -617,6 +723,10 @@ enum CandleImageRoute {
     QwenControl,
     /// Kolors strict-pose ControlNet (sc-5489).
     KolorsControl,
+    /// Kolors' bespoke IP and ControlNet providers have no shared composition.  This explicit
+    /// reject prevents routing precedence from silently dropping either identity reference, pose,
+    /// or an unsupported IP+PiD request.
+    KolorsCompositeReject,
     /// Kolors source-image img2img/edit through the registered generator.
     KolorsEdit,
     /// Z-Image strict-pose Fun-ControlNet (sc-5489).
@@ -844,6 +954,7 @@ impl CandleImageRoute {
     fn applies_request_loras(self, request: &ImageRequest) -> bool {
         match self {
             CandleImageRoute::InstantId
+            | CandleImageRoute::SdxlControl
             | CandleImageRoute::SdxlEdit
             | CandleImageRoute::SdxlIpAdapter
             | CandleImageRoute::KolorsIpAdapter
@@ -885,6 +996,7 @@ impl CandleImageRoute {
     fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
         match self {
             CandleImageRoute::QwenControl
+            | CandleImageRoute::SdxlControl
             | CandleImageRoute::KolorsControl
             | CandleImageRoute::ZimageControl
             | CandleImageRoute::Flux2Control
@@ -916,6 +1028,7 @@ impl CandleImageRoute {
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
             CandleImageRoute::InstantId => INSTANTID_ENGINE,
+            CandleImageRoute::SdxlControl => SDXL_CONTROL_ADAPTER_LABEL,
             CandleImageRoute::SdxlEdit => sdxl_edit_candle::SDXL_EDIT_CANDLE_ENGINE,
             CandleImageRoute::Flux2Edit => flux2_edit_candle::FLUX2_EDIT_CANDLE_ENGINE,
             CandleImageRoute::QwenEdit => qwen_edit_candle::QWEN_EDIT_CANDLE_ENGINE,
@@ -931,6 +1044,7 @@ impl CandleImageRoute {
             }
             CandleImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
             CandleImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
+            CandleImageRoute::CheckpointPlan => CHECKPOINT_PLAN_ENGINE,
             CandleImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             CandleImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             CandleImageRoute::SdxlIpAdapter => sdxl_ipadapter::SDXL_IPADAPTER_ENGINE,
@@ -947,7 +1061,9 @@ impl CandleImageRoute {
                 flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE
             }
             CandleImageRoute::KreaControl => krea_control_candle::KREA_CONTROL_ENGINE,
-            CandleImageRoute::PoseReject | CandleImageRoute::PoseControlBaseMissing => STUB_ADAPTER,
+            CandleImageRoute::PoseReject
+            | CandleImageRoute::PoseControlBaseMissing
+            | CandleImageRoute::KolorsCompositeReject => STUB_ADAPTER,
             CandleImageRoute::ZimageComfyui => {
                 zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE
             }
@@ -968,6 +1084,7 @@ impl CandleImageRoute {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 enum PreparedCandleImageRoute {
     Plain(CandleImageRoute),
+    CheckpointPlan(Box<PreparedCheckpointPlanSources>),
     KreaImported(Box<PreparedKreaImportedSources>),
     SdxlImported(Box<PreparedSdxlImportedSources>),
     ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
@@ -981,6 +1098,7 @@ impl PreparedCandleImageRoute {
     fn kind(&self) -> CandleImageRoute {
         match self {
             Self::Plain(route) => *route,
+            Self::CheckpointPlan(_) => CandleImageRoute::CheckpointPlan,
             Self::KreaImported(_) => CandleImageRoute::KreaImported,
             Self::SdxlImported(_) => CandleImageRoute::SdxlImported,
             Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
@@ -1003,6 +1121,7 @@ impl PreparedCandleImageRoute {
 fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
     settings: &Settings,
+    checkpoint_plan_available: bool,
     imported_available: bool,
     sdxl_imported_available: bool,
     zimage_comfyui_available: bool,
@@ -1018,6 +1137,10 @@ fn resolve_candle_image_route_with_prepared_availability(
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
     if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
+    } else if sdxl_control_candidate(request) {
+        // Same precedence as the core router: InstantID stays isolated, then generic SDXL control
+        // claims every material pose carrier before edit/IP/generic routes can discard it.
+        Some(CandleImageRoute::SdxlControl)
     } else if sdxl_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SdxlEdit)
     } else if matches!(
@@ -1053,6 +1176,15 @@ fn resolve_candle_image_route_with_prepared_availability(
             .is_some_and(|id| !id.trim().is_empty())
     {
         Some(CandleImageRoute::MageEdit)
+    } else if request.model == "kolors"
+        && ((non_empty(&request.reference_asset_id) && !pose_entries(request).is_empty())
+            || (non_empty(&request.reference_asset_id)
+                && advanced::flag(&request.advanced, "usePid")))
+    {
+        // Kolors IP-Adapter is its own provider (not a base overlay), and ControlNet owns a
+        // separate pose provider. Neither implementation composes IP+Control or IP+PiD, so this
+        // must fail before either precedence arm can discard an input.
+        Some(CandleImageRoute::KolorsCompositeReject)
     } else if zimage_identity_candle_available(request, settings) {
         // The registered Z-Image Turbo generator owns both Reference conditioning and adapters.
         Some(CandleImageRoute::CandleTxt2Img)
@@ -1109,6 +1241,10 @@ fn resolve_candle_image_route_with_prepared_availability(
         // for this t2i story (sc-13883). The candle twin of the MLX `resolve_image_route` `KreaTurboOnRaw`
         // arm; placed AFTER the edit lane, BEFORE the generic txt2img arm.
         Some(CandleImageRoute::KreaTurboOnRaw)
+    } else if checkpoint_plan_available {
+        // A plan-backed user checkpoint (epic 20398, sc-20634): claimed before every bespoke imported
+        // lane; the plan store is the route's sole source of truth.
+        Some(CandleImageRoute::CheckpointPlan)
     } else if krea_imported_control_available(request, settings) {
         // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch rides
         // the file-loaded imported DiT. Checked BEFORE the plain imported arm so a pose set renders one
@@ -1157,7 +1293,7 @@ fn resolve_candle_image_route_with_prepared_availability(
         //    snapshot is absent (the lane's local weight-gate failed) → `PoseControlBaseMissing`
         //    ("control base snapshot not installed"). Previously this family was excluded from the reject
         //    entirely and fell through to `CandleTxt2Img`, silently dropping the poses (sc-11171, F-008).
-        //  - No candle pose lane (e.g. sdxl) → the sc-5968 no-silent-T2I `PoseReject`.
+        //  - No candle pose lane → the sc-5968 no-silent-T2I `PoseReject`.
         // Checked BEFORE the txt2img arm below.
         if WIRED_CANDLE_POSE_FAMILIES.contains(&request.model.as_str()) {
             Some(CandleImageRoute::PoseControlBaseMissing)
@@ -1212,6 +1348,8 @@ fn resolve_candle_image_route(
     resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
+        // See the macOS twin: a typed refusal must surface, not read as "route unavailable".
+        checkpoint_plan_available_or_panic(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),
@@ -1229,8 +1367,26 @@ fn prepare_candle_image_route(
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedCandleImageRoute>> {
     if !settings.backend_candle_enabled {
+        // This early-out returns BEFORE `prepare_checkpoint_plan_sources` runs, so the
+        // `into_unclaimed_refusal` re-raise below never fires and a plan-backed entry falls all the
+        // way to `generate_stub_stream` — the job COMPLETES with procedural output under the user's
+        // imported checkpoint id (sc-20651). Refuse in the same typed shape instead. The macOS twin
+        // `prepare_image_route` has no such early-out, so it needs no counterpart.
+        if let Some(checkpoint_id) =
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: the candle \
+                 backend is disabled on this worker, and a plan-backed entry never renders \
+                 procedural stub output"
+            )));
+        }
         return Ok(None);
     }
+    // The plan-driven route is offered the request first (sc-20634). Per-request claim, exactly as
+    // in the macOS twin: it takes the shapes it serves, the family's bespoke lane keeps the rest,
+    // and the decline's retained refusal is re-raised below when no lane claims it (sc-20636).
+    let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
     // A pose-bearing imported checkpoint is claimed by the `KreaImportedControl` arm, which resolves
     // its own sources; skip pinning a second File token for the plain imported bundle in that case
     // (mirrors the macOS `prepare_image_route` guard).
@@ -1247,6 +1403,7 @@ fn prepare_candle_image_route(
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
+        checkpoint_plan.is_available(),
         imported.is_some(),
         sdxl.is_some(),
         zimage.is_some(),
@@ -1254,9 +1411,18 @@ fn prepare_candle_image_route(
         flux2.is_some(),
         mage_finetuned.is_some(),
     ) else {
+        // See the macOS twin: zero lanes claimed a plan-backed entry means the bespoke lane the
+        // plan route deferred to does not exist for this shape. Raise the retained typed refusal
+        // rather than dropping through to `generate_stub_stream`'s procedural output (sc-20636).
+        checkpoint_plan.into_unclaimed_refusal(request)?;
         return Ok(None);
     };
     Ok(Some(match kind {
+        CandleImageRoute::CheckpointPlan => PreparedCandleImageRoute::CheckpointPlan(Box::new(
+            checkpoint_plan
+                .into_sources()
+                .expect("prepared checkpoint plan route lost its sources"),
+        )),
         CandleImageRoute::KreaImported => PreparedCandleImageRoute::KreaImported(
             Box::new(imported.expect("prepared imported route lost its sources")),
         ),
@@ -1277,6 +1443,74 @@ fn prepare_candle_image_route(
         )),
         route => PreparedCandleImageRoute::Plain(route),
     }))
+}
+
+/// The `!backend_candle_enabled` early-out of [`prepare_candle_image_route`] returns before
+/// `prepare_checkpoint_plan_sources` runs, so `into_unclaimed_refusal` never fires and a plan-backed
+/// entry falls through to `generate_stub_stream` — the job COMPLETES with procedural output under
+/// the user's imported checkpoint id (sc-20651). The refusal is asserted at that seam, and the
+/// control proves it is keyed on the PLAN and not on the disabled backend.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_disabled_plan_backed_refusal_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(entry: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({
+                "projectId": "project-1",
+                "model": "imported_krea_abc123",
+                "mode": "text_to_image",
+                "prompt": "a fox",
+                "modelManifestEntry": entry
+            })
+            .as_object()
+            .expect("payload object"),
+        )
+    }
+
+    fn candle_disabled_settings() -> Settings {
+        Settings {
+            backend_candle_enabled: false,
+            ..crate::test_env::offline_settings()
+        }
+    }
+
+    #[test]
+    fn a_plan_backed_image_request_refuses_instead_of_stubbing_when_candle_is_disabled() {
+        let settings = candle_disabled_settings();
+        let routed = prepare_candle_image_route(
+            &request(json!({
+                "id": "imported_krea_abc123",
+                "family": "krea_2",
+                "importPlan": { "checkpointId": "ckpt_krea_abc123" }
+            })),
+            &settings,
+        );
+        // `PreparedCandleImageRoute` is not `Debug`, so match rather than `expect_err`.
+        let error = match routed {
+            Err(error) => error,
+            Ok(_) => panic!("a plan-backed entry must never fall through to the stub generator"),
+        };
+        match error {
+            WorkerError::InvalidPayload(message) => assert!(
+                message.contains("[checkpoint-plan:no-adapter-binding]")
+                    && message.contains("\"ckpt_krea_abc123\""),
+                "the refusal must name the checkpoint: {message}"
+            ),
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        }
+
+        // Control: the identical entry WITHOUT a plan still takes the early-out unchanged.
+        let control = prepare_candle_image_route(
+            &request(json!({ "id": "krea_2", "family": "krea_2" })),
+            &settings,
+        );
+        assert!(
+            matches!(control, Ok(None)),
+            "the refusal must be keyed on the plan, not on the disabled backend"
+        );
+    }
 }
 
 /// Couples a route-owned File source bundle to the immutable generation plan without widening the
@@ -1549,6 +1783,8 @@ fn pinned_turnkey_snapshot_for_request(
 /// manifest's windows/linux whole-repo download entry.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_CANDLE_DIFFUSERS_REVISION: &str = "ac0da2ff55fbe434795be0dce883042e4d49e2fc";
 
 /// The whole-repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF snapshot the candle
 /// SANA-Sprint lane loads (sc-11781, epic 8485). The `candle-gen-sana` Sprint pipeline reads the same
@@ -1560,6 +1796,9 @@ const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024p
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SANA_SPRINT_CANDLE_DIFFUSERS_REPO: &str =
     "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_SPRINT_CANDLE_DIFFUSERS_REVISION: &str =
+    "19683c58b7ea290e55cedd8950ae1d86ada7ef96";
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 // Keep the explicit optional branch: the manifest audit recognizes this shape and proves every
@@ -1577,6 +1816,130 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
         return None;
     };
     Some(raw_path.to_owned())
+}
+
+/// Typed, actionable preflight for a **convert-at-install** model whose conversion has not produced
+/// a local artifact yet (sc-20529).
+///
+/// Such a model is declared with `mlx.requiresConversion` + `mlx.converter`, and the API injects the
+/// converted dir as `modelPath` (`inject_converted_model_path`) once, and only once, the conversion
+/// has actually run. So a request with NO `modelPath` means there is no converted artifact — and the
+/// source repo it would otherwise fall back to is a bare single-file transformer
+/// with no `text_encoder/` / `vae/` / `tokenizer/`. Loading it produced a raw engine-level
+/// `"<label>: snapshot missing the text_encoder/ component directory (at …)"` from candle-gen's
+/// shared `loader.rs`, which names an internal path and tells the user nothing about what to do.
+///
+/// This turns that class into one typed [`WorkerError::InvalidPayload`] naming BOTH remedies: run
+/// the conversion, and install the base model whose text encoder / VAE / tokenizer the conversion
+/// borrows (`mlx.convertBaseRepo` + `mlx.convertBaseSubdir` — for `flux2_klein_9b_true_v2`,
+/// `SceneWorks/flux2-klein-9b-mlx` `bf16`). Keyed on the MANIFEST CONTRACT, never on a model id, so
+/// every present and future convert-at-install model inherits it.
+///
+/// **Platform-scoped on purpose.** The gate is [`convert_artifact_required_here`], not a bare
+/// `requiresConversion` read: Anima (`anima_base` / `anima_aesthetic` / `anima_turbo`) declares
+/// `requiresConversion` and ships windows/linux downloads, but its `anima_quant` converter is
+/// macOS-only — off-Mac those models legitimately resolve the raw `circlestone-labs/Anima`
+/// `split_files/` tree below with no `modelPath` at all. Refusing them here would break three
+/// models that render fine today.
+///
+/// **Self-contained on purpose.** The `modelPath` test lives INSIDE this function rather than in the
+/// caller, so the same verdict can be reached from two seams that see the request at different
+/// points: [`resolve_weights_dir`] (which reaches the loader) and [`candle_weights_gap`] (the
+/// stub fall-through, which never resolves weights at all — see its docs for why that second seam
+/// is required).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
+    // An injected `modelPath` IS the converted artifact — nothing outstanding.
+    if model_path_override(request).is_some() {
+        return Ok(());
+    }
+    let Some(mlx) = request.model_manifest_entry.get("mlx") else {
+        return Ok(());
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let converter = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !sceneworks_core::jobs_store::convert_artifact_required_here(converter) {
+        return Ok(());
+    }
+    let name = request
+        .model_manifest_entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(request.model.as_str());
+    // The base whose text encoder / VAE / tokenizer the conversion borrows. Named explicitly when
+    // the manifest declares it so the user knows the exact second install to make; the sentence is
+    // dropped rather than faked when it does not (a dir-sourced converter borrows nothing).
+    let base = mlx
+        .get("convertBaseRepo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|repo| {
+            let tier = mlx
+                .get("convertBaseSubdir")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match tier {
+                Some(tier) => format!(
+                    " It also requires the base model {repo} ({tier}) to be installed — the \
+                     conversion borrows that base's text encoder, VAE, and tokenizer, which the \
+                     single-file checkpoint does not contain."
+                ),
+                None => format!(
+                    " It also requires the base model {repo} to be installed — the conversion \
+                     borrows that base's text encoder, VAE, and tokenizer, which the single-file \
+                     checkpoint does not contain."
+                ),
+            }
+        })
+        .unwrap_or_default();
+    Err(WorkerError::InvalidPayload(format!(
+        "{name} has not been converted yet — convert it from the Model Manager before \
+         generating. It downloads as a transformer-only checkpoint, so there is nothing to load \
+         until the conversion assembles a complete local model.{base}"
+    )))
+}
+
+/// Fail-loud gate for the CANDLE stub fallback (sc-20529) — the off-Mac twin of [`mlx_weights_gap`],
+/// consulted by `run_image_generate_job` immediately before it would call `generate_stub_stream`.
+///
+/// [`unconverted_model_preflight`] fires from [`resolve_weights_dir`], which only runs once a route
+/// has CLAIMED the job. That is enough for `text_to_image` / `image_to_image` / `character_image` on
+/// an unconverted convert-at-install model: those modes reach the ladder's terminal
+/// `is_candle_engine(&request.model) && request.mode != "edit_image"` arm → `CandleTxt2Img` →
+/// `generate_candle_stream`, which resolves weights and propagates the typed error.
+///
+/// `edit_image` does NOT. `flux2_edit_candle_available` (and every sibling `…_available` weight
+/// gate) collapses a resolver `Err` to `false`, and every terminal arm of the ladder excludes
+/// `mode == "edit_image"` — so an unconverted `edit_image` job is claimed by NO route,
+/// `prepare_candle_image_route` returns `None`, and the job fell through to `generate_stub_stream`
+/// and COMPLETED with a procedural gradient. A silent stub in place of a typed refusal is exactly
+/// the no-silent-fallback posture sc-5099 forbids, and it is worse than the raw loader error it
+/// replaced: the user gets a plausible-looking asset instead of an error.
+///
+/// Returning the preflight's own message keeps ONE wording for the class — the dispatch seam and
+/// the loader seam cannot drift into two different explanations of the same missing conversion.
+/// `None` for every other job, so a model that legitimately stubs (test ids, unported families)
+/// stubs exactly as before.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn candle_weights_gap(request: &ImageRequest) -> Option<String> {
+    match unconverted_model_preflight(request) {
+        Ok(()) => None,
+        Err(WorkerError::InvalidPayload(message)) => Some(message),
+        // The preflight raises exactly one class; anything else would be a new variant whose
+        // wording has not been reviewed for this seam, so fall through to the existing behaviour
+        // rather than surfacing it as a stub-gap message.
+        Err(_) => None,
+    }
 }
 
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
@@ -1600,6 +1963,11 @@ pub(crate) fn resolve_weights_dir(
         }
         return Ok(Some(dir));
     }
+    // No `modelPath` on a convert-at-install model means the conversion has not produced its local
+    // artifact. Refuse HERE with an actionable error rather than falling through to the raw
+    // single-file source snapshot, which loads no further than candle-gen's "snapshot missing the
+    // text_encoder/ component directory" (sc-20529).
+    unconverted_model_preflight(request)?;
     let Some(model) = mlx_model(&request.model) else {
         return Ok(None);
     };
@@ -1732,9 +2100,10 @@ pub(crate) fn resolve_weights_dir(
     // error above. macOS never compiles this branch (it keeps the MLX turnkey path).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if request.model == "sana_1600m" {
-        return Ok(huggingface_snapshot_dir(
+        return Ok(huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             SANA_CANDLE_DIFFUSERS_REPO,
+            SANA_CANDLE_DIFFUSERS_REVISION,
         ));
     }
     // SANA-Sprint 1.6B off-Mac (candle, sc-11781, epic 8485): identical treatment to base SANA above —
@@ -1746,9 +2115,10 @@ pub(crate) fn resolve_weights_dir(
     // nonexistent `q4/`). macOS never compiles this branch (it keeps the MLX turnkey path).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if request.model == "sana_sprint_1600m" {
-        return Ok(huggingface_snapshot_dir(
+        return Ok(huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             SANA_SPRINT_CANDLE_DIFFUSERS_REPO,
+            SANA_SPRINT_CANDLE_DIFFUSERS_REVISION,
         ));
     }
     // SenseNova-U1 needs NO bespoke branch (sc-14249). It had one from sc-13817 to sc-14249:
@@ -1769,6 +2139,108 @@ pub(crate) fn resolve_weights_dir(
         return Ok(snapshot.map(|root| standard_tier_subdir(&root, request)));
     }
     Ok(snapshot)
+}
+
+/// FLUX.1's generic Candle route reads only the hosted packed q4/q8 turnkeys. The shared resolver
+/// deliberately has a best-available fallback chain for ordinary matrix models; using it unchecked
+/// here could turn an explicit FLUX q4/q8 selection into a different tier (or a dense root). Probe the
+/// shared resolver with the exact requested tier, then accept its answer only when the resolved
+/// directory names that same tier.
+///
+/// This is intentionally limited to generic Candle text-to-image. The existing FLUX IP-Adapter and
+/// strict-control providers retain their own established weight-resolution and load contracts.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_flux1_packed_requested_tier(request: &ImageRequest) -> WorkerResult<&'static str> {
+    match request.advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => Ok("q4"),
+        Some(value) => match value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+        {
+            Some(4) => Ok("q4"),
+            Some(8) => Ok("q8"),
+            _ => Err(WorkerError::InvalidPayload(format!(
+                "{} on Candle supports only its hosted packed q4 or q8 tiers",
+                request.model
+            ))),
+        },
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_flux1_packed_resolution_is_exact(requested_tier: &str, resolved: &Path) -> bool {
+    resolved.file_name().and_then(|name| name.to_str()) == Some(requested_tier)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_flux1_packed_weights_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    let requested_tier = candle_flux1_packed_requested_tier(request)?;
+    let mut probe = request.clone();
+    probe.advanced.insert(
+        "mlxQuantize".to_owned(),
+        Value::from(if requested_tier == "q4" { 4 } else { 8 }),
+    );
+    let resolved = resolve_weights_dir(&probe, settings)?;
+    match resolved {
+        Some(dir) if candle_flux1_packed_resolution_is_exact(requested_tier, &dir) => Ok(Some(dir)),
+        Some(_) | None => Err(WorkerError::InvalidPayload(format!(
+            "{} requested Candle packed {requested_tier}, but that exact artifact is not installed; \
+             refusing to fall back to a different tier",
+            request.model
+        ))),
+    }
+}
+
+/// Whether completed-image telemetry must replay the Candle-only FLUX.1 exact-tier resolver.
+///
+/// The metrics consumer is shared by MLX and Candle builds, but the direct packed FLUX.1 route is
+/// not: macOS must keep using its ordinary MLX resolver and default-tier semantics. Keeping that
+/// distinction in a pure cfg-sensitive predicate makes the build boundary testable without making
+/// [`resolve_candle_flux1_packed_weights_dir`] (or any Candle production route) available on macOS.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn completed_image_metrics_use_candle_flux1_exact_resolution(model: &str) -> bool {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let exact = matches!(model, "flux_schnell" | "flux_dev");
+    #[cfg(target_os = "macos")]
+    let exact = {
+        let _ = model;
+        false
+    };
+    exact
+}
+
+/// Re-resolve the tier used by a completed image for telemetry only. The Candle-only FLUX.1 lane
+/// replays its exact q4/q8 resolver; macOS and all other families replay the ordinary resolver that
+/// selected their production weights. The cfg around the Candle call is intentional: a shared
+/// metrics helper must never make the off-Mac Candle route part of a macOS build.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_completed_image_metrics_tier_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<PathBuf> {
+    let _use_candle_exact =
+        completed_image_metrics_use_candle_flux1_exact_resolution(&request.model);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if _use_candle_exact {
+        return resolve_candle_flux1_packed_weights_dir(request, settings)
+            .ok()
+            .flatten();
+    }
+    #[cfg(target_os = "macos")]
+    debug_assert!(
+        !_use_candle_exact,
+        "macOS metrics must not select the Candle-only FLUX.1 resolver"
+    );
+    resolve_weights_dir(request, settings).ok().flatten()
 }
 
 #[cfg(target_os = "macos")]
@@ -2160,8 +2632,10 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "qwen_image_edit_2511_lightning",
     // FLUX.1 (sc-8669, Group-B): schnell + dev ship the standard q4/q8/bf16 turnkey. FLUX quantizes
     // all four components (DiT transformer + CLIP + T5 + VAE attention), so the TE is packed too —
-    // hence no `mlx.denseTextEncoderTier` (the q4/q8 load-quant is a harmless no-op on already-packed
-    // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
+    // hence no `mlx.denseTextEncoderTier`. The pinned Candle descriptor advertises no load-time
+    // quants and rejects a nonempty `LoadSpec.quantize`; its loader packed-detects q4/q8 directly
+    // from the selected directory while the worker records that resolved tier separately. Replaces
+    // the gated BFL download + install-time quantize.
     "flux_schnell",
     "flux_dev",
     // PuLID-FLUX (sc-9947, epic 8506): the MLX lane's FLUX.1-dev backbone now loads from the SAME
@@ -2186,8 +2660,8 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // SANA + SANA-Sprint (sc-8489/sc-8513, epic 8506): the `SceneWorks/Sana_1600M_1024px_mlx` /
     // `Sana_Sprint_1.6B_1024px_mlx` turnkeys ship standard q4/q8/bf16 tiers. mlx-gen #653 packs the
     // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
-    // dense in every tier. Like flux1/qwen (and UNLIKE the dense-TE klein class) the q4/q8 load-quant
-    // is a harmless no-op on the already-packed weights and bf16 resolves to Quant::None — so these do
+    // dense in every tier. Unlike the dense-TE klein class, the q4/q8 load-quant is an accepted no-op
+    // on the already-packed weights and bf16 resolves to Quant::None — so these do
     // NOT need a `mlx.denseTextEncoderTier` declaration (only `flux2_klein_9b` / `_kv` carry that flag;
     // the "NOT" was dropped by a rename, which left this block contradicting its own UNLIKE clause two
     // lines above). The SANA descriptor now advertises supported_quants
@@ -2197,9 +2671,9 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "sana_sprint_1600m",
     // Kolors (sc-9946, epic 8506): the `SceneWorks/kolors-mlx` turnkey ships standard q4/q8/bf16
     // tiers. mlx-gen #659 packs the SDXL-style UNet + the ChatGLM3-6B `ChatGlmLinear` projections
-    // and packed-detects on load; the SDXL VAE stays dense in every tier. Like flux1/sana (and
-    // UNLIKE the dense-TE klein class) the ChatGLM3 TE is packed, so the q4/q8 load-quant is a
-    // harmless no-op on the already-packed weights and bf16 resolves to Quant::None — no
+    // and packed-detects on load; the SDXL VAE stays dense in every tier. Unlike the dense-TE klein
+    // class, the ChatGLM3 TE is packed, so the q4/q8 load-quant is an accepted no-op on the
+    // already-packed weights and bf16 resolves to Quant::None — no
     // `mlx.denseTextEncoderTier` declaration. The kolors descriptor already advertises supported_quants Q4/Q8,
     // so it flows through the same resolve_quant + reconcile path as every other matrix model.
     "kolors",
@@ -3106,13 +3580,13 @@ pub(super) fn candle_certified_load_spec(
     let WeightsSource::Dir(weights_dir) = &spec.weights else {
         return false;
     };
-    if !is_mage_engine(engine_id)
-        && !crate::memory_route_registry::candle_declaration_owns_load_shape(engine_id)
-        && !crate::memory_route_registry::candle_manifest_declares_request_strategy_provider(
-            manifest_entry,
-            engine_id,
-        )
-    {
+    let declaration_owned =
+        crate::memory_route_registry::candle_declaration_owns_load_shape(engine_id)
+            || crate::memory_route_registry::candle_manifest_declares_request_strategy_provider(
+                manifest_entry,
+                engine_id,
+            );
+    if !is_mage_engine(engine_id) && !declaration_owned {
         return candle_certified_artifact_path(engine_id, settings, weights_dir, tier);
     }
     let Some(downloads) = manifest_entry.get("downloads").and_then(Value::as_array) else {
@@ -3121,7 +3595,8 @@ pub(super) fn candle_certified_load_spec(
     let certify = |component_id: Option<&str>, actual: &Path| {
         let mut matches = downloads.iter().filter(|download| {
             download.get("provider").and_then(Value::as_str) == Some("huggingface")
-                && download.get("variant").and_then(Value::as_str) == Some(tier)
+                && (download.get("variant").and_then(Value::as_str) == Some(tier)
+                    || (component_id.is_some() && download.get("variant").is_none()))
                 && download.get("componentId").and_then(Value::as_str) == component_id
                 && download.get("coRequisite").and_then(Value::as_bool).unwrap_or(false)
                     == component_id.is_some()
@@ -3141,6 +3616,15 @@ pub(super) fn candle_certified_load_spec(
         let relative = download
             .get("subdir")
             .and_then(Value::as_str)
+            .or_else(|| {
+                component_id
+                    .and_then(|_| download.get("files"))
+                    .and_then(Value::as_array)
+                    .and_then(|files| match files.as_slice() {
+                        [Value::String(file)] if !file.contains('*') => Some(file.as_str()),
+                        _ => None,
+                    })
+            })
             .unwrap_or(tier);
         candle_certified_hf_artifact_path(
             settings,
@@ -3151,26 +3635,330 @@ pub(super) fn candle_certified_load_spec(
         )
     };
 
-    if !is_mage_engine(engine_id) {
+    // Component certification is descriptor-driven, and `media_descriptor` only ever resolves a
+    // registered GENERATOR. Several declaration-owned runtime providers are registered as encoder
+    // contract ROUTES over a sibling generator instead — `z_image_control`,
+    // `z_image_turbo_control`, `qwen_image_edit`, `qwen_image_control` — so no descriptor carries
+    // their id and no component contract exists to certify against. Those routes bind their
+    // co-requisites outside `spec.components`; the exact certification for them is the one this
+    // function has always applied: the primary matches its pinned download AND nothing else is
+    // bound. Reading a missing descriptor as `false` (as this did between the SDXL-derivative
+    // change and sc-20799) reports every such route uncertified, which silently strips its
+    // receipt-priced admission down to resident-only.
+    let descriptor = crate::inference_runtime::media_descriptor(engine_id);
+    if !is_mage_engine(engine_id) && descriptor.is_none() {
         return spec.components.is_empty()
             && (spec.text_encoder.is_none() || spec.validate_prepared_file_pins().is_ok())
             && certify(None, weights_dir);
     }
-    let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
+    let Some(descriptor) = descriptor else {
         return false;
     };
-    if spec.components.len() != descriptor.required_components.len() {
+    let expected_component_count = descriptor.required_components.len()
+        + usize::from(
+            engine_id == "sdxl"
+                && spec.ip_adapter.is_some()
+                && spec.components.contains_key("sdxl_ip_image_encoder"),
+        );
+    if spec.components.len() != expected_component_count {
         return false;
     }
 
     certify(None, weights_dir)
         && descriptor.required_components.iter().all(|component_id| {
-            matches!(
-                spec.components.get(*component_id),
-                Some(WeightsSource::Dir(path))
-                    if certify(Some(component_id), path)
-            )
+            spec.components.get(*component_id).is_some_and(|source| {
+                certify(
+                    Some(component_id),
+                    crate::conditioning_fit::weights_source_path(source),
+                )
+            })
         })
+}
+
+/// Seal every file recursively-inventoried receipt provider can read before selector evaluation.
+/// The same finalized `LoadSpec` reaches the generator cache, so cold/warm execution cannot
+/// silently re-resolve a pathname after admission.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn seal_recursive_receipt_load_spec(
+    engine_id: &str,
+    artifact_is_certified: bool,
+    spec: &mut LoadSpec,
+) -> WorkerResult<()> {
+    if !matches!(
+        engine_id,
+        "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+    )
+        || !artifact_is_certified
+    {
+        return Ok(());
+    }
+
+    fn visit(root: &Path, files: &mut Vec<PathBuf>) -> WorkerResult<()> {
+        for entry in std::fs::read_dir(root).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Receipt artifact inventory cannot read {}: {error}",
+                root.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| WorkerError::InvalidPayload(format!("Receipt artifact inventory failed: {error}")))?
+                .path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "Receipt artifact member cannot be inspected: {error}"
+                ))
+            })?;
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::metadata(&path).map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Receipt artifact symlink target cannot be inspected: {error}"
+                    ))
+                })?;
+                if target.is_file() {
+                    files.push(std::path::absolute(&path).map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "Receipt artifact member cannot be absolutized: {error}"
+                        ))
+                    })?);
+                    continue;
+                }
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Receipt artifact symlink must resolve directly to a file: {}",
+                    path.display()
+                )));
+            }
+            if metadata.is_dir() {
+                visit(&path, files)?;
+            } else if metadata.is_file() {
+                files.push(std::path::absolute(&path).map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Receipt artifact member cannot be absolutized: {error}"
+                    ))
+                })?);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = spec
+        .file_source_paths()
+        .into_iter()
+        .map(std::path::absolute)
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| WorkerError::InvalidPayload(format!(
+            "Receipt file source cannot be absolutized: {error}"
+        )))?;
+    for root in spec.directory_source_paths() {
+        visit(root, &mut files)?;
+    }
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Receipt artifact inventory is empty".to_owned(),
+        ));
+    }
+    let pins = files
+        .iter()
+        .map(|path| {
+            gen_core::PinnedWeightsFile::pin(path)
+                .map_err(|error| crate::classify_engine_error("Receipt load pin", error))
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "Receipt load preparation")?;
+    spec.validate_prepared_file_pins()
+        .map_err(|error| crate::classify_engine_error("Receipt load preparation", error))
+}
+
+/// Seal exactly the files the Ideogram Candle loader reads. Direct component safetensors,
+/// transformer configs, the tokenizer, TurboTime residual, ordered user adapters, and PiD assets
+/// are load identity; nested files below a component are deliberately ignored because the provider
+/// does not enumerate them.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn seal_ideogram_load_spec(
+    engine_id: &str,
+    artifact_is_certified: bool,
+    spec: &mut LoadSpec,
+) -> WorkerResult<()> {
+    if !matches!(engine_id, "ideogram_4" | "ideogram_4_turbo") || !artifact_is_certified {
+        return Ok(());
+    }
+    let WeightsSource::Dir(root) = &spec.weights else {
+        return Err(WorkerError::InvalidPayload(
+            "Ideogram certified load must resolve to one tier directory".to_owned(),
+        ));
+    };
+    let root = root.clone();
+    let mut files = Vec::new();
+    for component in ["transformer", "unconditional_transformer", "text_encoder", "vae"] {
+        let dir = root.join(component);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Ideogram artifact inventory cannot read {}: {error}",
+                dir.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Ideogram artifact inventory failed: {error}"
+                    ))
+                })?
+                .path();
+            if path.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("safetensors")
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.push(root.join("transformer/config.json"));
+    if engine_id == "ideogram_4" {
+        files.push(root.join("unconditional_transformer/config.json"));
+    } else {
+        files.push(root.join("turbo_lora.safetensors"));
+    }
+    files.push(root.join("tokenizer/tokenizer.json"));
+    files.extend(spec.file_source_paths().into_iter().map(Path::to_path_buf));
+    if let Some(pid) = spec.pid.as_ref() {
+        let WeightsSource::Dir(gemma) = &pid.gemma else {
+            return Err(WorkerError::InvalidPayload(
+                "Ideogram PiD Gemma must resolve to one directory".to_owned(),
+            ));
+        };
+        let merged = gemma.join("gemma-2-2b-it.safetensors");
+        if merged.is_file() {
+            files.push(merged);
+        } else {
+            for entry in std::fs::read_dir(gemma).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "Ideogram PiD inventory cannot read {}: {error}",
+                    gemma.display()
+                ))
+            })? {
+                let path = entry
+                    .map_err(|error| {
+                        WorkerError::InvalidPayload(format!(
+                            "Ideogram PiD inventory failed: {error}"
+                        ))
+                    })?
+                    .path();
+                if path.is_file()
+                    && path.extension().and_then(|extension| extension.to_str())
+                        == Some("safetensors")
+                {
+                    files.push(path);
+                }
+            }
+        }
+        files.push(gemma.join("tokenizer.json"));
+    }
+    files = files
+        .into_iter()
+        .map(std::path::absolute)
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Ideogram load member cannot be absolutized: {error}"
+            ))
+        })?;
+    files.sort();
+    files.dedup();
+    if files.is_empty() || files.iter().any(|path| !path.is_file()) {
+        return Err(WorkerError::InvalidPayload(
+            "Ideogram loader-visible artifact inventory is incomplete".to_owned(),
+        ));
+    }
+    let pins = files
+        .iter()
+        .map(|path| {
+            gen_core::PinnedWeightsFile::pin(path)
+                .map_err(|error| crate::classify_engine_error("Ideogram load pin", error))
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "Ideogram load preparation")?;
+    spec.validate_prepared_file_pins()
+        .map_err(|error| crate::classify_engine_error("Ideogram load preparation", error))
+}
+
+#[cfg(test)]
+mod chroma_load_seal_tests {
+    use super::*;
+
+    #[test]
+    fn exact_inventory_is_carried_to_cache_load_and_mutation_fails_closed() {
+        for provider in ["chroma1_base", "sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            let temp = tempfile::tempdir().expect("temporary receipt artifact");
+            let root = temp.path().join("q4");
+            std::fs::create_dir_all(root.join("transformer")).expect("artifact directory");
+            let config = root.join("transformer/config.json");
+            std::fs::write(&config, b"{}").expect("artifact member");
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root)).with_resolved_route(provider);
+
+            seal_recursive_receipt_load_spec(provider, true, &mut spec)
+                .expect("seal recursive receipt load");
+            assert!(spec.prepared_file_pins().is_prepared());
+            assert_eq!(spec.prepared_file_pins().len(), 1);
+            spec.validate_prepared_file_pins().expect("stable prepared spec");
+
+            std::fs::write(config, b"{\"changed\":true}").expect("mutate artifact member");
+            assert!(spec.validate_prepared_file_pins().is_err(), "{provider}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod ideogram_load_seal_tests {
+    use super::*;
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn seals_only_loader_visible_inventory_and_detects_same_length_mutation() {
+        for (provider, turbo) in [("ideogram_4", false), ("ideogram_4_turbo", true)] {
+            let temp = tempfile::tempdir().expect("temporary Ideogram artifact");
+            let root = temp.path().join("q4");
+            for component in ["transformer", "text_encoder", "vae"] {
+                write(&root.join(component).join("model.safetensors"), b"tensor-a");
+            }
+            write(&root.join("transformer/config.json"), b"{}");
+            write(&root.join("tokenizer/tokenizer.json"), b"{}");
+            if turbo {
+                write(&root.join("turbo_lora.safetensors"), b"turbo---");
+            } else {
+                write(
+                    &root.join("unconditional_transformer/model.safetensors"),
+                    b"tensor-b",
+                );
+                write(&root.join("unconditional_transformer/config.json"), b"{}");
+            }
+            let nested = root.join("transformer/nested/ignored.safetensors");
+            write(&nested, b"ignored-a");
+            let direct = root.join("transformer/model.safetensors");
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root)).with_resolved_route(provider);
+
+            seal_ideogram_load_spec(provider, true, &mut spec).expect("seal Ideogram load");
+            assert!(spec.prepared_file_pins().is_prepared());
+            spec.validate_prepared_file_pins().expect("stable prepared spec");
+
+            write(&nested, b"ignored-b");
+            spec.validate_prepared_file_pins()
+                .expect("provider-ignored nested member stays outside the receipt");
+            write(&direct, b"tensor-z");
+            assert!(spec.validate_prepared_file_pins().is_err());
+        }
+    }
 }
 
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -3229,6 +4017,65 @@ mod mage_artifact_certification_tests {
             .join(revision);
         fs::create_dir_all(&root).expect("create fixture snapshot");
         root
+    }
+
+    #[test]
+    fn chroma_certification_binds_exact_route_revision_and_physical_tier() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
+        let data = tempfile::tempdir().expect("temp data dir");
+        let settings = settings(data.path());
+        for (model, repo, revision) in [
+            (
+                "chroma1_hd",
+                "SceneWorks/chroma1-hd-mlx",
+                "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
+            ),
+            (
+                "chroma1_base",
+                "SceneWorks/chroma1-base-mlx",
+                "e7330dda29d00ffdeeb719b28e92ee74cff0884c",
+            ),
+            (
+                "chroma1_flash",
+                "SceneWorks/chroma1-flash-mlx",
+                "6a9cb6178709559461506bf247f708d0d1008d00",
+            ),
+        ] {
+            let snapshot = cached_snapshot(data.path(), repo, revision);
+            let tier = snapshot.join("q4");
+            fs::create_dir_all(&tier).expect("tier dir");
+            let spec = LoadSpec::new(WeightsSource::Dir(tier.clone()))
+                .with_resolved_route(model);
+            let manifest = model_manifest(model);
+            assert!(candle_certified_load_spec(
+                model, &settings, &spec, &manifest, "q4"
+            ));
+
+            let wrong_tier = LoadSpec::new(WeightsSource::Dir(snapshot.join("q8")))
+                .with_resolved_route(model);
+            assert!(!candle_certified_load_spec(
+                model,
+                &settings,
+                &wrong_tier,
+                &manifest,
+                "q4"
+            ));
+            let wrong_revision = data.path().join("wrong-revision/q4");
+            fs::create_dir_all(&wrong_revision).expect("wrong revision dir");
+            let wrong_revision = LoadSpec::new(WeightsSource::Dir(wrong_revision))
+                .with_resolved_route(model);
+            assert!(!candle_certified_load_spec(
+                model,
+                &settings,
+                &wrong_revision,
+                &manifest,
+                "q4"
+            ));
+        }
     }
 
     #[test]
@@ -3427,9 +4274,21 @@ fn krea_evidence_revision() -> String {
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn optimized_shared_memory_context(
+    engine_id: &str,
     context: gen_core::MemoryRunContext,
 ) -> Option<gen_core::MemoryRunContext> {
-    context.selection.strategy.is_optimized().then_some(context)
+    (context.selection.strategy.is_optimized()
+        || matches!(
+            engine_id,
+            "ideogram_4"
+                | "ideogram_4_turbo"
+                | "sana_1600m"
+                | "sana_sprint_1600m"
+                | "sd3_5_large"
+                | "sd3_5_large_turbo"
+                | "sd3_5_medium"
+        ))
+    .then_some(context)
 }
 
 /// The registered FLUX.2-dev generator is a text-to-image provider even when the catalog surface
@@ -3442,6 +4301,17 @@ fn optimized_shared_memory_context(
 fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -> &'a str {
     if engine_id == "flux2_dev"
         || (engine_id == "flux2_klein_9b"
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+        || (matches!(
+            engine_id,
+            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium"
+        )
             && matches!(request_mode, "image_generation" | "text_to_image"))
     {
         "text_to_image"
@@ -4103,7 +4973,11 @@ pub(super) fn candle_adapter_resident_bytes(
     // forward-time residuals for dense bf16 as well as packed tiers, so both families must reserve
     // the exact adapter source bytes at every precision. Other generic Candle providers fold dense
     // factors and retain residuals only on packed tiers.
-    if engine_id.starts_with("krea_2_") || engine_id.starts_with("z_image") || tier != "bf16" {
+    if engine_id.starts_with("krea_2_")
+        || engine_id.starts_with("z_image")
+        || crate::candle_memory_strategy::is_sd35(engine_id)
+        || tier != "bf16"
+    {
         measured_source_bytes
     } else {
         0
@@ -4282,7 +5156,7 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
 /// function's test module is itself macOS-excluded, so admitting bare `test` would leave it unused
 /// in a macOS test build and dead-code-error again under `-D warnings`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn apply_declared_candle_image_load_shape(
+pub(super) fn apply_declared_candle_image_load_shape(
     engine_id: &str,
     resolved_tier: Option<&str>,
     request_mode: &str,
@@ -4355,11 +5229,18 @@ mod candle_image_load_shape_tests {
         apply_candle_image_load_shape(engine_id, spec)
     }
 
+    /// `qwen_image_edit` is deliberately absent from this list. SC-20790 moved its Candle rule off
+    /// `legacy_shaping` onto the declaration-owned shaper, and `apply_candle_image_load_shape`
+    /// consults ONLY legacy rules — so the legacy shaper returning the spec untouched is now the
+    /// correct answer for that route, not a regression. The route is not left uncovered: the arm
+    /// below pins the two facts that make the removal accountable, so a route cannot fall off this
+    /// list by accident. The declaration-owned shape itself is exercised at the qwen edit call
+    /// site, which is the only place that assembles the exact tier/mode/source coordinate the
+    /// declared shaper requires.
     #[test]
     fn adopting_native_image_routes_use_deferred_materialization() {
         for engine_id in [
             "qwen_image",
-            "qwen_image_edit",
             "flux1_schnell",
             "flux1_dev",
             "flux2_dev",
@@ -4376,6 +5257,22 @@ mod candle_image_load_shape_tests {
                 gen_core::LoadShape::DeferredMaterialization
             );
         }
+        // Qwen edit's own accounting. Note that being declaration-owned is NOT what excludes it —
+        // several routes above (the Mage six, `flux2_dev`) carry a declared rule alongside their
+        // legacy one and still shape here. What excludes qwen edit is that its legacy Candle rule
+        // was REPLACED rather than supplemented, so the legacy shaper finds nothing and correctly
+        // returns the spec untouched; its production call site reaches the declared shaper instead.
+        assert!(
+            crate::memory_route_registry::candle_declaration_owns_load_shape("qwen_image_edit"),
+            "if qwen edit ever returns to legacy shaping it belongs back in the list above"
+        );
+        assert_eq!(
+            legacy_shape("qwen_image_edit", fixture_spec()).load_shape,
+            fixture_spec().load_shape,
+            "no legacy Candle rule remains for qwen edit, so the legacy shaper is a no-op for it"
+        );
+        assert!(include_str!("qwen_edit_candle.rs")
+            .contains("apply_candle_qwen_load_shape(\n            QWEN_EDIT_PROVIDER_ID,"));
     }
 
     #[test]
@@ -4597,7 +5494,7 @@ mod candle_image_load_shape_tests {
             }),
             ..Default::default()
         };
-        let context = optimized_shared_memory_context(resident_context());
+        let context = optimized_shared_memory_context("legacy_provider", resident_context());
         assert!(context.is_none(), "Resident is a fallback sentinel, not an execution scope");
 
         crate::memory_strategy::generate_with_scope(
@@ -4610,6 +5507,23 @@ mod candle_image_load_shape_tests {
 
         assert_eq!(*observed.lock().unwrap(), Some(true));
         assert!(request.memory.unwrap().stage_residency);
+    }
+
+    #[test]
+    fn receipt_priced_resident_context_remains_request_scoped() {
+        let context = resident_context();
+        for provider in [
+            "ideogram_4",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+        ] {
+            assert_eq!(
+                optimized_shared_memory_context(provider, context.clone()),
+                Some(context.clone()),
+                "{provider}"
+            );
+        }
     }
 }
 
@@ -5556,6 +6470,25 @@ mod metrics_settings_tests {
         ImageRequest::from_payload(value.as_object().unwrap())
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn completed_metrics_replay_exact_flux1_tiers_only_on_the_candle_build() {
+        let candle_build = cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
+        for model in ["flux_schnell", "flux_dev"] {
+            assert_eq!(
+                completed_image_metrics_use_candle_flux1_exact_resolution(model),
+                candle_build,
+                "{model} must use Candle's q4-default exact resolver only on the Candle build"
+            );
+        }
+        assert!(!completed_image_metrics_use_candle_flux1_exact_resolution(
+            "qwen_image"
+        ));
+    }
+
     #[test]
     fn default_run_reports_effective_settings_not_blank() {
         let req = request(json!({
@@ -6151,6 +7084,12 @@ fn hires_first_pass_context(
     context.geometry.height = height;
     context.geometry.reference_count = reference_count;
     context.has_reference = reference_count > 0;
+    context.mode = if reference_count == 0 {
+        gen_core::MemoryMode::TextToImage
+    } else {
+        gen_core::MemoryMode::ImageToImage
+    };
+    context.has_phases = false;
     context
 }
 
@@ -6177,7 +7116,9 @@ fn generate_one_with_hires(
     use_pid: bool,
     text_style_gain: Option<f32>,
     memory: Option<gen_core::GenerationMemory>,
+    hires_first_pass_memory: Option<gen_core::GenerationMemory>,
     memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    hires_first_pass_memory_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
     hires_fix: Option<HiresFixPlan>,
     preview: gen_core::PreviewSink,
@@ -6215,13 +7156,19 @@ fn generate_one_with_hires(
         );
     };
 
-    let first_pass_context = memory_strategy_context.map(|context| {
-        hires_first_pass_context(
-            context,
-            width,
-            height,
-            lane_reference_count(reference.is_some(), multi_references.len(), edit_mask.is_some()),
-        )
+    let first_pass_context = hires_first_pass_memory_context.cloned().or_else(|| {
+        memory_strategy_context.map(|context| {
+            hires_first_pass_context(
+                context,
+                width,
+                height,
+                lane_reference_count(
+                    reference.is_some(),
+                    multi_references.len(),
+                    edit_mask.is_some(),
+                ),
+            )
+        })
     });
     let combined_steps = steps.saturating_add(hires.steps);
     let mut first_progress = |progress| match progress {
@@ -6254,7 +7201,7 @@ fn generate_one_with_hires(
         guidance_method,
         use_pid,
         text_style_gain,
-        memory,
+        hires_first_pass_memory.or(memory),
         first_pass_context.as_ref(),
         &PromptEnhance::default(),
         gen_core::PromptEnhancementSink::default(),
@@ -7951,7 +8898,9 @@ async fn generate_stream(
                         use_pid,
                         text_style_gain,
                         Some(memory_evaluation.memory),
+                        Some(memory_evaluation.memory),
                         Some(&memory_evaluation.context),
+                        None,
                         &enhance,
                         hires_fix,
                         preview.clone(),
@@ -8203,7 +9152,13 @@ fn rejects_unverified_shared_memory_fallback(
 ) -> bool {
     matches!(
         engine_id,
-        "z_image" | "z_image_turbo" | "flux2_dev" | "flux2_klein_9b"
+        "z_image"
+            | "z_image_turbo"
+            | "flux2_dev"
+            | "flux2_klein_9b"
+            | "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
     )
         && !optimized_strategy_selected
 }
@@ -8217,6 +9172,7 @@ fn verified_only_memory_family_label(engine_id: &str) -> Option<&'static str> {
         "z_image" | "z_image_turbo" => Some("Z-Image"),
         "flux2_dev" => Some("FLUX.2-dev"),
         "flux2_klein_9b" => Some("FLUX.2 Klein"),
+        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => Some("Chroma1"),
         _ => None,
     }
 }
@@ -8397,6 +9353,33 @@ mod candle_request_residency_tests {
             "flux2_klein_9b",
             false
         ));
+        for engine in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            assert!(rejects_unverified_shared_memory_fallback(engine, false));
+            assert!(!rejects_unverified_shared_memory_fallback(engine, true));
+            assert_eq!(verified_only_memory_family_label(engine), Some("Chroma1"));
+        }
+        for engine in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "image_generation"),
+                "text_to_image"
+            );
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "text_to_image"),
+                "text_to_image"
+            );
+            for refused in ["edit_image", "image_inpaint", "style_variations"] {
+                assert_eq!(candle_base_memory_request_mode(engine, refused), refused);
+            }
+        }
+        for engine in ["ideogram_4", "ideogram_4_turbo"] {
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "image_generation"),
+                "text_to_image"
+            );
+            for mode in ["text_to_image", "image_to_image", "edit_image", "image_inpaint"] {
+                assert_eq!(candle_base_memory_request_mode(engine, mode), mode);
+            }
+        }
         assert!(!rejects_unverified_shared_memory_fallback(
             "z_image", true
         ));
@@ -8446,6 +9429,21 @@ mod candle_request_residency_tests {
             assert_eq!(
                 candle_base_memory_request_mode(engine, "style_variations"),
                 "style_variations"
+            );
+        }
+        for engine in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "image_generation"),
+                "text_to_image"
+            );
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "text_to_image"),
+                "text_to_image"
+            );
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "style_variations"),
+                "style_variations",
+                "retired Chroma style alias must reach the exhaustive declaration and be refused"
             );
         }
     }
@@ -8809,6 +9807,9 @@ mod krea_turbo_memory_route_tests {
         );
         assert_eq!(candle_adapter_resident_bytes("sdxl", "bf16", 321), 0);
         assert_eq!(candle_adapter_resident_bytes("sdxl", "q4", 321), 321);
+        for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            assert_eq!(candle_adapter_resident_bytes(model, "bf16", 321), 321);
+        }
 
         let missing = vec![gen_core::AdapterSpec::new(
             root.join("missing.safetensors"),
@@ -9032,6 +10033,115 @@ pub(super) fn candle_resolved_tier_key(
     )
 }
 
+/// Run the shared selector for an uncached, bespoke SDXL provider after every physical component
+/// has been assembled. This is the only admission that can authorize the subsequent loader; the
+/// older scalar gate remains useful telemetry but cannot mint an optimized execution plan.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn admit_sdxl_bespoke_memory(
+    request: &ImageRequest,
+    settings: &Settings,
+    mut spec: LoadSpec,
+    request_mode: &str,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+    use_pid: bool,
+    additional_artifacts_certified: bool,
+) -> WorkerResult<(crate::candle_memory_strategy::CandleMemoryEvaluation, LoadSpec)> {
+    let WeightsSource::Dir(weights_dir) = &spec.weights else {
+        return Err(WorkerError::InvalidPayload(
+            "SDXL optimized admission requires a catalog snapshot directory".to_owned(),
+        ));
+    };
+    let tier = candle_resolved_tier_key(request, weights_dir, false);
+    spec = match tier {
+        "q4" => spec.with_quant(Quant::Q4),
+        "q8" => spec.with_quant(Quant::Q8),
+        "bf16" => spec,
+        other => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "SDXL Candle route resolved unsupported physical tier {other:?}"
+            )))
+        }
+    };
+    spec = apply_declared_candle_image_load_shape(
+        "sdxl",
+        Some(tier),
+        request_mode,
+        &request.model_manifest_entry,
+        spec,
+        false,
+    );
+    spec.prepare_file_sources().map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "SDXL could not retain exact component/adapter receipts: {error}"
+        ))
+    })?;
+    let contract = runtime_cuda::providers::sdxl::provider_contract_for_spec(&spec)
+        .map_err(|error| WorkerError::InvalidPayload(format!("SDXL receipt refused: {error}")))?;
+    let runtime_overlay_bytes = contract.asset_facts.overlay_bytes;
+    let artifact_is_certified = additional_artifacts_certified
+        && candle_certified_load_spec(
+            "sdxl",
+            settings,
+            &spec,
+            &request.model_manifest_entry,
+            tier,
+        );
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        runtime_overlay_bytes,
+    );
+    let overlay = if spec.ip_adapter.is_some() {
+        Some("identity")
+    } else if spec.control.is_some() {
+        Some("control")
+    } else if !spec.adapters.is_empty() {
+        Some("lora")
+    } else {
+        None
+    };
+    let evaluation = crate::candle_memory_strategy::evaluate_shared_bespoke_image(
+        "sdxl",
+        &request.model,
+        &spec,
+        artifact_is_certified,
+        &request.model_manifest_entry,
+        tier,
+        request_mode,
+        overlay,
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count,
+        },
+        reference_count > 0,
+        use_pid,
+        false,
+        budget,
+        predicted_peak,
+        runtime_overlay_bytes,
+        gen_core::MemoryCacheState::Cold,
+        contract,
+        crate::candle_memory_strategy::SDXL_REQUEST_EVIDENCE_REVISION,
+    )?
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "SDXL {} {} at {tier} has no exact shared memory strategy before load",
+            request.model, request_mode
+        ))
+    })?;
+    Ok((evaluation, spec))
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_quant_for_resolved_tier(
     request: &ImageRequest,
@@ -9040,6 +10150,9 @@ fn candle_quant_for_resolved_tier(
     supports_quant: bool,
     force_dense: bool,
 ) -> (Option<Quant>, Option<i64>) {
+    if matches!(request.model.as_str(), "sana_1600m" | "sana_sprint_1600m") {
+        return (None, None);
+    }
     let resolved_bits = match tier {
         "bf16" => None,
         "q4" => Some(4),
@@ -9050,6 +10163,28 @@ fn candle_quant_for_resolved_tier(
         _ => return (None, None),
     };
     if is_dense_te_tier(request) {
+        return (None, resolved_bits);
+    }
+    // Two families reach here with physically packed q4/q8 transformer tensors that the provider
+    // discovers from the selected directory rather than from `LoadSpec.quantize`:
+    //   * the Chroma/SD3.5 turnkeys, detected from their exact header/config receipt — setting
+    //     `quantize` would request a second on-the-fly quantization and the provider refuses it;
+    //   * the pinned candle-gen-flux descriptor, which advertises `supported_quants: []` and
+    //     rejects a nonempty `LoadSpec.quantize` outright.
+    // Keep the load instruction empty while retaining the resolved artifact bits for the recipe
+    // and later telemetry. This is deliberately narrower than `!supports_quant`: other descriptors
+    // with an empty list are dense-only and must not acquire a packed-tier receipt.
+    if matches!(
+        request.model.as_str(),
+        "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+            | "flux_schnell"
+            | "flux_dev"
+    ) {
         return (None, resolved_bits);
     }
     if force_dense || !supports_quant {
@@ -9100,6 +10235,35 @@ mod candle_resolved_tier_contract_tests {
             _ => "{}",
         };
         std::fs::write(transformer.join("config.json"), config).expect("tier config");
+    }
+
+    #[test]
+    fn packed_turnkeys_keep_load_quantization_none_for_every_public_route() {
+        for model in [
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+        ] {
+            for (tier, expected_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
+                let request = ImageRequest::from_payload(
+                    json!({
+                        "model": model,
+                        "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+                    })
+                    .as_object()
+                    .expect("request object"),
+                );
+                let weights = PathBuf::from(tier);
+                assert_eq!(
+                    candle_quant_for_resolved_tier(&request, tier, &weights, true, false),
+                    (None, expected_bits),
+                    "{model}:{tier}"
+                );
+            }
+        }
     }
 
     fn mage_spec(engine_id: &str, weights: &Path, quant: Option<Quant>) -> LoadSpec {
@@ -9256,6 +10420,83 @@ mod candle_resolved_tier_contract_tests {
             }
         }
     }
+
+    fn flux1_request(model: &str, quantize: Option<Value>) -> ImageRequest {
+        let mut payload = json!({
+            "model": model,
+            "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
+        });
+        if let Some(quantize) = quantize {
+            payload["advanced"] = json!({ "mlxQuantize": quantize });
+        }
+        ImageRequest::from_payload(payload.as_object().expect("request object"))
+    }
+
+    #[test]
+    fn flux1_candle_packed_tiers_are_exact_and_keep_the_load_receipt_truthful() {
+        for model_id in ["flux_dev", "flux_schnell"] {
+            let descriptor = mlx_model(model_id).expect("linked Candle FLUX.1 descriptor");
+            assert!(
+                !descriptor.supports_quant(),
+                "{model_id}'s pinned descriptor must keep supported_quants empty"
+            );
+
+            for (requested, expected) in
+                [(None, "q4"), (Some(json!(4)), "q4"), (Some(json!(8)), "q8")]
+            {
+                let request = flux1_request(model_id, requested);
+                assert_eq!(candle_flux1_packed_requested_tier(&request).unwrap(), expected);
+
+                let exact = Path::new("/models").join(model_id).join(expected);
+                let other = Path::new("/models").join(model_id).join(if expected == "q4" {
+                    "q8"
+                } else {
+                    "q4"
+                });
+                assert!(candle_flux1_packed_resolution_is_exact(expected, &exact));
+                assert!(
+                    !candle_flux1_packed_resolution_is_exact(expected, &other),
+                    "a requested {expected} must not fall back to {}",
+                    other.display()
+                );
+
+                let expected_bits = if expected == "q4" { Some(4) } else { Some(8) };
+                let (load_quant, receipt_bits) = candle_quant_for_resolved_tier(
+                    &request,
+                    expected,
+                    &exact,
+                    descriptor.supports_quant(),
+                    false,
+                );
+                assert_eq!((load_quant, receipt_bits), (None, expected_bits));
+                assert_eq!(
+                    load_spec(exact.clone(), load_quant, Vec::new(), None).quantize,
+                    None,
+                    "the prepacked FLUX.1 descriptor rejects a load-time quant instruction"
+                );
+                assert_eq!(
+                    mlx_raw_settings(&request, "SceneWorks/flux1-mlx", 28, receipt_bits, None)
+                        .get("mlxQuantize")
+                        .and_then(Value::as_i64),
+                    expected_bits,
+                    "the recipe must retain the exact packed artifact tier"
+                );
+                assert_eq!(
+                    effective_quant_label_gated(&request, false, Some(&exact)),
+                    (Some(expected.to_owned()), expected_bits),
+                    "asset telemetry must agree with the recipe's packed tier"
+                );
+            }
+        }
+
+        for unsupported in [json!(0), json!(6), json!(-1), json!(true), json!("4.0")] {
+            assert!(
+                candle_flux1_packed_requested_tier(&flux1_request("flux_dev", Some(unsupported)))
+                    .is_err(),
+                "bf16, q6, and malformed FLUX.1 selections must fail closed"
+            );
+        }
+    }
 }
 
 /// sc-13960 — the evict-then-reclaim gate driver the bespoke (non-cache-evicting) candle image lanes
@@ -9368,6 +10609,13 @@ async fn generate_candle_stream(
         model.backend()
     };
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
+    let is_sana = matches!(engine_id, "sana_1600m" | "sana_sprint_1600m");
+    let is_sd35 = crate::candle_memory_strategy::is_sd35(engine_id);
+    // Chroma, Ideogram and Kolors are priced from the same exact provider receipts SANA and SD3.5
+    // are, so their executed load policy is bound by the same authority (sc-20799). Before this
+    // they fell through to `resolve_offload(fit_decision(..))`, a manifest estimate, and an
+    // admitted STAGED peak could be executed as a RESIDENT load that the receipt never bounded.
+    let receipt_priced_route = crate::candle_memory_strategy::is_receipt_priced(engine_id);
     // Standard-tier weight resolution, SHARED with the MLX lane (sc-9092, epic 9083 gap #3). Every
     // candle image family — Ideogram / Boogu / Krea / Lens included — now packed-loads the SAME
     // SceneWorks MLX-packed per-tier turnkey the macOS path uses: as of the candle-gen rollout all 11
@@ -9401,6 +10649,13 @@ async fn generate_candle_stream(
     // live VRAM budget is re-pointed at the highest installed tier that does, before the spec is built.
     let mut weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
         base_dir.clone()
+    } else if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        resolve_candle_flux1_packed_weights_dir(request, settings)?.ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Candle packed FLUX.1 weights snapshot not found for {}",
+                request.model
+            ))
+        })?
     } else {
         resolve_weights_dir(request, settings)?.ok_or_else(|| {
             let repo = model_repo(request, &model);
@@ -9674,6 +10929,9 @@ async fn generate_candle_stream(
     // The comment above already knew "its footprint is neither the bf16 nor the q8 tier"; now the gate
     // acts on it. Extracted so that mapping has a unit test; this fn cannot be exercised from one.
     let mut tier = candle_resolved_tier_key(request, &weights_dir, convrot.is_some());
+    if matches!(engine_id, "sana_1600m" | "sana_sprint_1600m") {
+        tier = "bf16";
+    }
     validate_candle_tier_memory_evidence(&request.model, &request.model_manifest_entry, tier)?;
     let requested_tier = tier;
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
@@ -9724,11 +10982,13 @@ async fn generate_candle_stream(
     // `Keep`. Downtiering NVFP4 to q4/q8 would silently swap the numerics of an explicitly-picked tier —
     // exactly the creative-choice violation SC#5 forbids. Pinned by
     // `nvfp4_tier_is_never_downtiered_by_the_capability_clamp`.
-    let explicit_pick = request
-        .advanced
-        .get("mlxQuantizeExplicit")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let explicit_pick = (matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
+        && request.advanced.contains_key("mlxQuantize"))
+        || request
+            .advanced
+            .get("mlxQuantizeExplicit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if convrot.is_none() && !explicit_pick {
         let floor = capability_downtier_floor(
             krea_turbo_ladder,
@@ -9905,9 +11165,10 @@ async fn generate_candle_stream(
             }
         }
     }
-    // Reconcile only after the capability clamp has made its final directory/tier decision. The same
-    // resolved value now drives recipe bits, LoadSpec.quantize, MemoryNumericTier, active component
-    // floors, and the provider begin-request check.
+    // Reconcile only after the capability clamp has made its final directory/tier decision. The
+    // resolved artifact drives recipe bits, MemoryNumericTier, active component floors, and the
+    // provider begin-request check. `LoadSpec.quantize` remains descriptor-governed: in particular,
+    // FLUX.1 packed-detects q4/q8 and therefore receives `None` while its receipt keeps the tier bits.
     let (quant, quant_bits) = candle_quant_for_resolved_tier(
         request,
         tier,
@@ -9924,6 +11185,33 @@ async fn generate_candle_stream(
         tier,
         adapter_resident_bytes,
     );
+    // Chroma's selector prices the exact provider receipt after the load spec is sealed. Passing
+    // generic source-file adapter bytes here would double-charge adapters, omit PiD's materialized
+    // student/Gemma footprint, and let the public `lora` cell stand in for load identity. Other
+    // providers retain their established source-byte accounting.
+    let provider_receipt_priced = matches!(
+        engine_id,
+        "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "ideogram_4"
+            | "ideogram_4_turbo"
+            | "sana_1600m"
+            | "sana_sprint_1600m"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+    );
+    let shared_predicted_peak_gb = if provider_receipt_priced {
+        crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
+    } else {
+        needed
+    };
+    let shared_runtime_overlay_bytes = if provider_receipt_priced {
+        0
+    } else {
+        adapter_resident_bytes
+    };
     let krea_runtime_context = krea_turbo_ladder
         .then(|| krea_runtime_evidence_context(request, settings, tier, &weights_dir))
         .flatten();
@@ -9932,8 +11220,16 @@ async fn generate_candle_stream(
     // Reached only on the explicit-pick / ConvRot reject below (the downtier path already rejected above
     // when nothing smaller fits), where suggesting a smaller installed tier the user could pick is apt.
     let mut generation_memory: Option<gen_core::GenerationMemory> = None;
+    let mut hires_first_pass_generation_memory: Option<gen_core::GenerationMemory> = None;
     let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
     let mut selected_memory_strategy_context: Option<gen_core::MemoryRunContext> = None;
+    let mut hires_first_pass_memory_context: Option<gen_core::MemoryRunContext> = None;
+    let mut ideogram_warm_staged: Option<
+        crate::candle_memory_strategy::CandleWarmStagedEvaluation,
+    > = None;
+    let mut ideogram_hires_first_warm_staged: Option<
+        crate::candle_memory_strategy::CandleWarmStagedEvaluation,
+    > = None;
     let mut adapted_peak_gb: Option<f64> = None;
     // Every adopting provider uses the same worker-owned selector. Static
     // Implemented/unverified declarations do not authorize optimized execution: this bridge always
@@ -9966,34 +11262,66 @@ async fn generate_candle_stream(
     shared_contract_spec =
         attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    // A supported Hires refinement is a fresh one-reference image-to-image request even when the
+    // caller's first pass was Edit or Inpaint. Admit that final-pass identity independently; the
+    // original mode/reference/geometry is admitted below for the first pass.
+    let shared_admission_mode = if hires_fix.is_some()
+        && matches!(
+            engine_id,
+            "ideogram_4"
+                | "ideogram_4_turbo"
+                | "sana_1600m"
+                | "sana_sprint_1600m"
+                | "sdxl"
+        )
+    {
+        "image_to_image"
+    } else {
+        shared_request_mode
+    };
     shared_contract_spec = apply_declared_candle_image_load_shape(
         engine_id,
         Some(tier),
-        shared_request_mode,
+        shared_admission_mode,
         &request.model_manifest_entry,
         shared_contract_spec,
         false,
+    );
+    let first_pass_reference_count = lane_reference_count(
+        edit_reference.is_some() || img2img_reference.is_some(),
+        edit_refs.len(),
+        edit_mask.is_some(),
     );
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
         edit_reference.is_some() || img2img_reference.is_some(),
         edit_mask.is_some(),
         hires_fix.is_some(),
+    )
+    .saturating_add(
+        u32::try_from(
+            usize::from(shared_contract_spec.control.is_some())
+                + shared_contract_spec.extra_controls.len(),
+        )
+        .unwrap_or(u32::MAX),
     );
+    let artifact_is_certified = candle_certified_load_spec(
+        engine_id,
+        settings,
+        &shared_contract_spec,
+        &request.model_manifest_entry,
+        tier,
+    );
+    seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
+    seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
         &shared_contract_spec,
-        candle_certified_load_spec(
-            engine_id,
-            settings,
-            &shared_contract_spec,
-            &request.model_manifest_entry,
-            tier,
-        ),
+        artifact_is_certified,
         &request.model_manifest_entry,
         tier,
-        shared_request_mode,
+        shared_admission_mode,
         (adapter_count > 0).then_some("lora"),
         gen_core::MemoryGeometry {
             width: memory_width,
@@ -10003,26 +11331,93 @@ async fn generate_candle_stream(
             reference_count,
         },
         reference_count > 0,
-        use_pid,
+        use_pid && hires_fix.is_none(),
         hires_fix.is_some(),
-        false,
+        hires_fix.is_some(),
         budget,
-        needed,
-        adapter_resident_bytes,
+        shared_predicted_peak_gb,
+        shared_runtime_overlay_bytes,
         if reclaimable_gb > 0.0 {
             gen_core::MemoryCacheState::Warm
         } else {
             gen_core::MemoryCacheState::Cold
         },
     )?;
+    let first_pass_shared_memory = if hires_fix.is_some()
+        && matches!(
+            engine_id,
+            "ideogram_4"
+                | "ideogram_4_turbo"
+                | "sana_1600m"
+                | "sana_sprint_1600m"
+                | "sdxl"
+        )
+    {
+        crate::candle_memory_strategy::evaluate_shared_image(
+            engine_id,
+            &request.model,
+            &shared_contract_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            shared_request_mode,
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: first_pass_reference_count,
+            },
+            first_pass_reference_count > 0,
+            use_pid,
+            false,
+            false,
+            budget,
+            shared_predicted_peak_gb,
+            shared_runtime_overlay_bytes,
+            if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+        )?
+    } else {
+        None
+    };
+    // The receipt-priced selection, kept even when it is Resident. `optimized_shared_memory_context`
+    // below deliberately drops a Resident context for families outside its allowlist, so it cannot
+    // answer "did the receipt price this request?" — and that is exactly the question the executed
+    // load policy has to agree with.
+    let mut receipt_priced_selection: Option<gen_core::MemoryStrategy> = None;
     if let Some(evaluation) = shared_memory {
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
+        ideogram_warm_staged = evaluation.warm_staged;
+        if receipt_priced_route {
+            receipt_priced_selection = Some(evaluation.context.selection.strategy);
+        }
         // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
         // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
         // Resident scope would then overwrite that request memory back to resident in configure_request.
-        selected_memory_strategy_context = optimized_shared_memory_context(evaluation.context);
+        selected_memory_strategy_context =
+            optimized_shared_memory_context(engine_id, evaluation.context);
+    }
+    if let Some(evaluation) = first_pass_shared_memory {
+        hires_first_pass_generation_memory = evaluation.memory;
+        ideogram_hires_first_warm_staged = evaluation.warm_staged;
+        hires_first_pass_memory_context =
+            optimized_shared_memory_context(engine_id, evaluation.context);
+    }
+    if (is_sana || is_sd35)
+        && (selected_memory_strategy_context.is_none()
+            || (hires_fix.is_some() && hires_first_pass_memory_context.is_none()))
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} requires an exact receipt-priced pre-load memory selection for every render pass",
+            request.model
+        )));
     }
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
@@ -10068,8 +11463,14 @@ async fn generate_candle_stream(
             _ => {}
         }
     }
+    // Every receipt-priced family, not just SANA/SD3.5 (sc-20799). `receipt_priced_selection` is
+    // Some exactly when the receipt produced a graded selection for this request, including a
+    // Resident one — which is a real decision the load must honor, not an absence of one.
+    let receipt_selector_authoritative = receipt_priced_selection.is_some();
     let use_sequential =
-        if let Some(crate::vram_gate::KreaTurboFit::Resident {
+        if receipt_selector_authoritative {
+            generation_memory.is_some_and(|memory| memory.stage_residency)
+        } else if let Some(crate::vram_gate::KreaTurboFit::Resident {
             peak_gb,
             needed_gb,
             selection,
@@ -10387,7 +11788,7 @@ async fn generate_candle_stream(
     if let Some(peak_gb) = incurred_peak {
         crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
     }
-    let memory_strategy_context = selected_memory_strategy_context.or_else(|| memory_strategy_selection.and_then(|selection| {
+    let mut memory_strategy_context = selected_memory_strategy_context.or_else(|| memory_strategy_selection.and_then(|selection| {
         let budget = budget?;
         let predicted_peak_gb = adapted_peak_gb?;
         let turbo_fit = request.model_manifest_entry.get("candle")?.get("turboFit")?;
@@ -10450,14 +11851,16 @@ async fn generate_candle_stream(
             evidence_revision: krea_evidence_revision(),
         })
     }));
-    apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
+    if !receipt_selector_authoritative {
+        apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
+    }
     // Reuse the exact selector spec, including Mage's split text-encoder/VAE component paths. Only
     // the post-selection residency policy and optional ConvRot substitution may differ below.
     let mut spec = shared_contract_spec;
     spec = apply_declared_candle_image_load_shape(
         engine_id,
         Some(tier),
-        shared_request_mode,
+        shared_admission_mode,
         &request.model_manifest_entry,
         spec,
         use_sequential,
@@ -10518,13 +11921,227 @@ async fn generate_candle_stream(
     .await;
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("candle {engine_id} load failed"),
-        move |generator, tx, cancel| {
+        move |generator,
+              cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            if is_ideogram || is_sana || is_sd35 || receipt_selector_authoritative {
+                // Receipt-priced providers require the exact pre-load selector result to reach the
+                // cached generator. Ideogram may preserve a tighter pre-admitted staged sibling;
+                // SANA's cache key must exactly retain the selector's own resident/staged policy.
+                //
+                // Ideogram/SANA/SD3.5 additionally REQUIRE a pre-load context: for them an absent
+                // one is a bug, not a fallback. Chroma and Kolors reach here only when the receipt
+                // actually priced the request (`receipt_selector_authoritative`); an uncertified
+                // import legitimately produced no receipt and keeps the historical resident path
+                // through the `else` arm below.
+                if is_ideogram {
+                    let context = memory_strategy_context.as_mut().ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "{engine_id} cache access is missing its exact pre-load memory context"
+                        ))
+                    })?;
+                    crate::candle_memory_strategy::bind_ideogram_cache_execution(
+                        context,
+                        &mut generation_memory,
+                        &mut ideogram_warm_staged,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                    )?;
+                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                        crate::candle_memory_strategy::bind_ideogram_cache_execution(
+                            first_pass,
+                            &mut hires_first_pass_generation_memory,
+                            &mut ideogram_hires_first_warm_staged,
+                            cache_state,
+                            loaded_policy.offload_policy,
+                        )?;
+                    }
+                } else if is_sana || is_sd35 {
+                    let context = memory_strategy_context.as_mut().ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "{engine_id} cache access is missing its exact pre-load memory context"
+                        ))
+                    })?;
+                    context.cache_state = cache_state;
+                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                        first_pass.cache_state = cache_state;
+                    }
+                } else {
+                    // Chroma/Kolors: `optimized_shared_memory_context` drops a Resident context,
+                    // so `None` here means the receipt selected Resident, not that it was silent.
+                    if let Some(context) = memory_strategy_context.as_mut() {
+                        context.cache_state = cache_state;
+                    }
+                    if let Some(first_pass) = hires_first_pass_memory_context.as_mut() {
+                        first_pass.cache_state = cache_state;
+                    }
+                }
+                // sc-20799: the policy the receipt admitted must EQUAL the policy that loaded, for
+                // every receipt-priced family — not only SANA and SD3.5. An admitted staged peak
+                // does not bound a resident load, and a warm cache entry can present either shape.
+                // Evaluated AFTER the Ideogram warm-staged rebinding above, so the comparison is
+                // against the strategy this request will actually execute.
+                if let Some(selected_strategy) = receipt_priced_selection {
+                    let effective_strategy = memory_strategy_context
+                        .as_ref()
+                        .map(|context| context.selection.strategy)
+                        .unwrap_or(selected_strategy);
+                    let selected_staged = effective_strategy
+                        == gen_core::MemoryStrategy::StagedResidency
+                        || generator
+                            .memory_strategy_contract()
+                            .is_some_and(|contract| {
+                                contract.engages(
+                                    effective_strategy,
+                                    gen_core::MemoryStrategy::StagedResidency,
+                                )
+                            });
+                    let loaded_staged =
+                        loaded_policy.offload_policy == gen_core::OffloadPolicy::Sequential;
+                    if selected_staged != loaded_staged {
+                        return Err(WorkerError::InvalidPayload(format!(
+                            "{engine_id} warm cache policy crossed its exact pre-load selection"
+                        )));
+                    }
+                }
+                let stages = generation_memory.is_some_and(|memory| memory.stage_residency);
+                warm_policy.settle_with_selection(if stages {
+                    crate::execution_planner::GrantOutcome::AlreadyStaged
+                } else {
+                    crate::execution_planner::GrantOutcome::NoStagedCandidate
+                });
+                let cache_state_label = match cache_state {
+                    gen_core::MemoryCacheState::Cold => "cold",
+                    gen_core::MemoryCacheState::Warm => "warm",
+                };
+                let contract = generator.memory_strategy_contract().ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{engine_id} loaded provider omitted its sealed memory contract"
+                    ))
+                })?;
+                let facts = contract.asset_facts;
+                // Only these three families expose a singular canonical physical receipt to name in
+                // the disclosure. Chroma and Kolors seal their identity as an ordered overlay
+                // receipt instead, already bound into the selection above; they take the policy
+                // guard without minting a second, weaker receipt here.
+                if is_ideogram || is_sana || is_sd35 {
+                let physical_receipt = if is_sana {
+                    crate::candle_memory_strategy::sana_physical_receipt_identity(
+                        engine_id, contract,
+                    )?
+                } else if is_sd35 {
+                    crate::candle_memory_strategy::sd35_physical_receipt_identity(
+                        engine_id, contract,
+                    )?
+                } else {
+                    crate::candle_memory_strategy::ideogram_physical_receipt_identity(contract)?
+                };
+                let context = memory_strategy_context.as_ref().ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "{engine_id} cache access is missing its exact pre-load memory context"
+                    ))
+                })?;
+                let passes = match hires_first_pass_memory_context.as_ref() {
+                    Some(first) => vec![("hires_first", first), ("hires_final", context)],
+                    None => vec![("single", context)],
+                };
+                for (pass_identity, pass_context) in passes {
+                    let strategy_label = match pass_context.selection.strategy {
+                        gen_core::MemoryStrategy::Resident => "resident",
+                        gen_core::MemoryStrategy::StagedResidency => "staged_residency",
+                        gen_core::MemoryStrategy::BoundedDecode => "bounded_decode",
+                        gen_core::MemoryStrategy::BoundedAttention => "bounded_attention",
+                        gen_core::MemoryStrategy::BoundedTransformerResidency => {
+                            "bounded_transformer_residency"
+                        }
+                    };
+                    let authority_label = match pass_context.optimization_authority {
+                        gen_core::MemoryOptimizationAuthority::Resident => "resident",
+                        gen_core::MemoryOptimizationAuthority::Estimated => "estimated",
+                        gen_core::MemoryOptimizationAuthority::Calibrated => "calibrated",
+                    };
+                    let carrier = match (
+                        &pass_context.mode,
+                        pass_context.geometry.reference_count,
+                    ) {
+                        (_, 0) => "prompt_only",
+                        (gen_core::MemoryMode::Edit, 2) => "reference_mask",
+                        _ => "reference",
+                    };
+                    tracing::info!(
+                        event = "image_memory_strategy_selected",
+                        route = engine_id,
+                        actual_tier = tier,
+                        pass = pass_identity,
+                        mode = pass_context.mode.as_key(),
+                        carrier,
+                        reference_count = pass_context.geometry.reference_count,
+                        use_pid = pass_context.use_pid,
+                        overlay = pass_context.overlay.as_deref().unwrap_or("none"),
+                        physical_receipt = physical_receipt.as_str(),
+                        strategy = strategy_label,
+                        authority = authority_label,
+                        cache_state = cache_state_label,
+                        predicted_peak_bytes = pass_context.predicted_peak_bytes,
+                        base_bytes = facts.base_bytes,
+                        conditioning_bytes = facts.conditioning_bytes,
+                        transformer_bytes = facts.transformer_bytes,
+                        decoder_bytes = facts.decoder_bytes,
+                        overlay_bytes = facts.overlay_bytes,
+                        external_committed_bytes,
+                        evidence_revision = %pass_context.evidence_revision,
+                        "exact receipt-backed image memory strategy selected"
+                    );
+                    emit_event(
+                        "image_memory_strategy_selected",
+                        serde_json::json!({
+                        "backend": "candle",
+                        "route": engine_id,
+                        "actualTier": tier,
+                        "passIdentity": pass_identity,
+                        "mode": pass_context.mode.as_key(),
+                        "carrier": carrier,
+                        "referenceCount": pass_context.geometry.reference_count,
+                        "geometry": {
+                            "width": pass_context.geometry.width,
+                            "height": pass_context.geometry.height,
+                            "batch": pass_context.geometry.batch,
+                            "frames": pass_context.geometry.frames,
+                        },
+                        "usePid": pass_context.use_pid,
+                        "overlay": pass_context.overlay.clone(),
+                        "physicalReceipt": physical_receipt.clone(),
+                        "strategy": strategy_label,
+                        "authority": authority_label,
+                        "cacheState": cache_state_label,
+                        "predictedPeakBytes": pass_context.predicted_peak_bytes,
+                        "physicalFloor": {
+                            "baseBytes": facts.base_bytes,
+                            "conditioningBytes": facts.conditioning_bytes,
+                            "transformerBytes": facts.transformer_bytes,
+                            "decoderBytes": facts.decoder_bytes,
+                            "overlayBytes": facts.overlay_bytes,
+                        },
+                        "evidenceRevision": pass_context.evidence_revision.clone(),
+                    }),
+                    );
+                }
+                }
+            } else {
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+            }
             let scorer = match (&face_stack_dir, &likeness_source) {
                 (Some(dir), Some((source, _))) => {
                     crate::face_likeness::build_face_likeness_scorer(dir, source)
@@ -10571,7 +12188,9 @@ async fn generate_candle_stream(
                         use_pid,
                         text_style_gain,
                         generation_memory,
+                        hires_first_pass_generation_memory,
                         memory_strategy_context.as_ref(),
+                        hires_first_pass_memory_context.as_ref(),
                         &enhance,
                         hires_fix,
                         preview.clone(),
@@ -10765,6 +12384,20 @@ fn effective_quant_label_gated(
             Some(4) => (Some("q4".to_owned()), Some(4)),
             _ => (Some("bf16".to_owned()), None),
         };
+    }
+    // FLUX.1's generic Candle route accepts only an exact packed q4/q8 directory. Its omitted
+    // selection defaults to q4 (rather than the shared resolver's q8 default), so derive the
+    // LoadSpec/asset telemetry from that resolved directory instead of re-deriving a different
+    // request default here.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        if let Some(tier) = tier_dir.and_then(tier_key_from_resolved_dir) {
+            return match tier {
+                "q4" => (Some("q4".to_owned()), Some(4)),
+                "q8" => (Some("q8".to_owned()), Some(8)),
+                _ => unreachable!("FLUX.1 generic Candle route resolves only q4/q8"),
+            };
+        }
     }
     let (selected_quant, selected_bits) = resolve_quant_gated(request, nvfp4_host, tier_dir);
     let resolved = match (selected_quant, selected_bits) {
@@ -11302,7 +12935,7 @@ async fn consume_gen_events_with_disclosure(
     // `.ok().flatten()` because a metrics block must never fail a completed generation: an unresolvable
     // dir yields `None`, which conservatively reports the request-derived q4/q8/bf16 label exactly as
     // it did before this parameter existed.
-    let tier_dir = resolve_weights_dir(&plan.request, settings).ok().flatten();
+    let tier_dir = resolve_completed_image_metrics_tier_dir(&plan.request, settings);
     let mut metrics = build_image_metrics(
         &plan.request,
         effective_steps,
@@ -11672,6 +13305,40 @@ mod kolors_edit_worker_contract_tests {
             resolve_candle_kolors_edit_init(&missing_source, &settings, &project_path)
                 .expect("missing source is not an I/O error")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn kolors_ip_composites_refuse_before_provider_precedence() {
+        let data = tempfile::tempdir().expect("data dir");
+        let settings = settings(data.path());
+        let weights = data.path().join("models/kolors-test");
+        std::fs::create_dir_all(&weights).expect("model path");
+        let request = |advanced: Value| {
+            ImageRequest::from_payload(
+                json!({
+                    "projectId": "project",
+                    "model": "kolors",
+                    "mode": "character_image",
+                    "referenceAssetId": "identity-reference",
+                    "advanced": advanced,
+                })
+                .as_object()
+                .expect("request object"),
+            )
+        };
+        let ip_and_pid = request(json!({"modelPath": weights, "usePid": true}));
+        assert_eq!(
+            resolve_candle_image_route(&ip_and_pid, &settings),
+            Some(CandleImageRoute::KolorsCompositeReject)
+        );
+        let ip_and_pose = request(json!({
+            "modelPath": weights,
+            "poses": [{"keypoints": []}],
+        }));
+        assert_eq!(
+            resolve_candle_image_route(&ip_and_pose, &settings),
+            Some(CandleImageRoute::KolorsCompositeReject)
         );
     }
 }

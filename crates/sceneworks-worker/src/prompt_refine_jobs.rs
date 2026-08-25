@@ -284,6 +284,177 @@ fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> St
     }
 }
 
+// ----------------------------------------------------------------------------------------------
+// MiniMax-H3 tailored rewrite (epic 17137, sc-17162) — the local stand-in for the WITHHELD hosted
+// `H3-Context-IR` prompt-understanding component. Same shape as the Ideogram magic-prompt branch
+// below: an embedded, model-keyed system prompt driving the SAME `prompt_refine` TextLlm, selected
+// instead of the generic rewrite rules. It differs from magic-prompt in what selects it — Ideogram's
+// asset is chosen by the payload's `task` discriminator (a caption is a different JOB), while this
+// one is still the free-text Rewrite task and is chosen by the payload's `modelId` FAMILY, because
+// the product difference is which model consumes the result. Opt-in end to end: nothing rewrites a
+// prompt unless the user presses Refine and then Apply (`RefinePromptControl`).
+// ----------------------------------------------------------------------------------------------
+
+/// The tailored MiniMax-H3 rewrite system prompt (sc-17162), embedded verbatim and versioned like
+/// the Ideogram assets, and parsed for its `[SYSTEM]` block by the same [`magic_section_from`]. Its
+/// output shape is `H3-Context-IR`'s own published one — `integrated_multimodal_description:` /
+/// `overall_soundscape:` / `non_diegetic_music:` plus `[Shot N] At MM:SS.mmm` timed-shot labels —
+/// so the local refiner emits what the withheld hosted component would have. There is no `[USER]`
+/// block: like the generic rewrite, the user turn is the user's own prompt.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const MINIMAX_H3_REFINE_V1: &str = include_str!("minimax_h3_refine_v1.txt");
+
+/// The seven markers MiniMax declares in H3's `tokenizer_config.json` `additional_special_tokens`
+/// and NEVER TRAINED (sc-17143, story activity 18692): they appear in no vocabulary artifact, and
+/// the embedding rows `transformers` assigns them are statistically indistinguishable from the
+/// checkpoint's unused padding tail. The model card's examples use `<d>[English] …</d>` anyway, so a
+/// refiner that has just read the prompt guide can easily reproduce them. Emitting one feeds an
+/// untrained vector to the text encoder and spends prompt space for nothing, so the H3 rewrite is
+/// both INSTRUCTED not to write them (the embedded asset) and post-filtered so it cannot
+/// (`strip_untrained_markers`) — the instruction is advisory, the filter is the guarantee.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) const MINIMAX_H3_UNTRAINED_MARKERS: [&str; 7] = [
+    "<d>",
+    "</d>",
+    "<|cutoff|>",
+    "<|lyrics_start|>",
+    "<|lyrics_end|>",
+    "<|caption_start|>",
+    "<|caption_end|>",
+];
+
+/// Whether this refine job's TARGET model is a MiniMax-H3 partition, and so takes the tailored
+/// rewrite + the marker post-filter. Keyed through `sceneworks_core`'s own family predicate rather
+/// than a second copy of the id list, so `minimax_h3` and `minimax_h3_ref` — and any later partition
+/// on the same prefix — resolve identically here and in the video request path.
+///
+/// Deliberately keyed on the model ALONE, not on `(model, task)`: the ban is a property of what the
+/// text encoder can represent, so a task added later cannot route around it. Every other model is
+/// untouched.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn refines_for_minimax_h3(model_id: Option<&str>) -> bool {
+    model_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(sceneworks_core::video_request::is_minimax_h3_model)
+}
+
+/// Build the `system` message for a MiniMax-H3 rewrite: the embedded asset's `[SYSTEM]` block, plus
+/// the model's own prompt guide when the caller supplied one (the web fetches
+/// `/prompt-guides/minimax-h3.md` and forwards it, exactly as it does for the generic path). The
+/// guide is appended under the SAME `# Model prompt guide` heading [`build_refine_system_prompt`]
+/// uses, so the two paths present a guide identically.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn build_minimax_h3_refine_system_prompt(guide: Option<&str>) -> String {
+    let rules = magic_section_from(MINIMAX_H3_REFINE_V1, "SYSTEM");
+    let guide = guide.unwrap_or("").trim();
+    if guide.is_empty() {
+        rules
+    } else {
+        format!("{rules}\n\n# Model prompt guide\n\n{guide}")
+    }
+}
+
+/// Select the rewrite `system` message: the tailored MiniMax-H3 prompt for an H3 target model, the
+/// generic medium-keyed rewrite rules for everything else. The generic
+/// [`build_refine_system_prompt`] is untouched, so no other model's refinement changes.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn build_rewrite_system_prompt(
+    guide: Option<&str>,
+    workflow: Option<&str>,
+    model_id: Option<&str>,
+) -> String {
+    if refines_for_minimax_h3(model_id) {
+        build_minimax_h3_refine_system_prompt(guide)
+    } else {
+        build_refine_system_prompt(guide, workflow)
+    }
+}
+
+/// Remove every [`MINIMAX_H3_UNTRAINED_MARKERS`] occurrence from a refined prompt (case-insensitive
+/// — the markers are ASCII, matched without lowercasing the surrounding Unicode text). STRIP rather
+/// than reject, which is what this pipeline already does to invalid output: `clean_refine_output`
+/// removes reasoning blocks, code fences and stray quotes rather than failing the job over them. A
+/// reply that was ONLY markers cleans to empty and then hits the existing empty-output error, so the
+/// reject path is still reachable where it should be.
+///
+/// Each marker becomes a SPACE, not nothing, so `word<d>word` cannot be glued into one token; the
+/// runs of spaces that produces are collapsed per line. Text with no marker is returned byte for
+/// byte — the collapse never runs on an untouched reply.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn strip_untrained_markers(text: &str) -> String {
+    let mut stripped = text.to_owned();
+    let mut found = false;
+    for marker in MINIMAX_H3_UNTRAINED_MARKERS {
+        while let Some(at) = first_ci(&stripped, marker) {
+            stripped.replace_range(at..at + marker.len(), " ");
+            found = true;
+        }
+    }
+    if !found {
+        return stripped;
+    }
+    stripped
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+/// The whole reply-side cleanup, in one place so it is drivable without an API or real weights: the
+/// per-task clean (JSON isolation for a caption task, prose cleanup otherwise), then sc-17162's
+/// MiniMax-H3 marker ban when the TARGET model is an H3 partition.
+///
+/// The ban runs after BOTH clean paths and is keyed on the model alone, so no task can route around
+/// it, and it runs BEFORE the caller's empty-output check — a reply that was nothing but markers
+/// fails as empty (the pipeline's existing rejection) rather than shipping whitespace. Enforcing it
+/// here rather than only asking for it in the system prompt is the point: the refiner has just been
+/// handed a prompt guide that quotes `<d>[English] …</d>` verbatim, so an instruction is a request
+/// and this is the guarantee.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn finalize_refined_output(raw: &str, is_caption_task: bool, model_id: Option<&str>) -> String {
+    let cleaned = if is_caption_task {
+        clean_json_output(raw)
+    } else {
+        clean_refine_output(raw)
+    };
+    if refines_for_minimax_h3(model_id) {
+        strip_untrained_markers(&cleaned)
+    } else {
+        cleaned
+    }
+}
+
 /// Shared prelude for cleaning a model reply: strip `<think>…</think>` reasoning blocks, drop the
 /// text before an orphan closing tag, and unwrap a single wrapping ```…``` code fence. Both
 /// [`clean_refine_output`] (which then strips surrounding quotes) and [`clean_json_output`] (which
@@ -401,7 +572,7 @@ fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
 
 // ----------------------------------------------------------------------------------------------
 // Magic-prompt expansion (epic 4725, sc-5997) — plain idea → structured JSON caption. Drives the
-// SAME `prompt_refine` TextLlm (Llama-3.2-3B) with Ideogram's open-source magic-prompt system prompt
+// SAME `prompt_refine` TextLlm (Anubis-Mini-8B) with Ideogram's open-source magic-prompt system prompt
 // (`task: "magic_prompt"`) instead of the rewrite rules. The hosted Ideogram / OpenRouter Sonnet/Opus
 // configs in the reference are replaced by the local model (native-first, offline). The caller (web)
 // strips the non-schema `aspect_ratio` key + bboxes and validates the result against the sc-5993
@@ -873,6 +1044,13 @@ pub(crate) async fn run_prompt_refine_job(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_REFINE_MODEL)
         .to_owned();
+    // The TARGET model the refined prompt is destined for (the catalog id the studio has selected),
+    // as distinct from `model` above, which is the refiner CHECKPOINT that does the rewriting. The
+    // API forwards it as `modelId` for every refine request; sc-17162 is the first reader.
+    let target_model_id = payload
+        .get("modelId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let max_new_tokens = resolve_max_new_tokens(
         payload,
         task.is_caption(),
@@ -913,7 +1091,13 @@ pub(crate) async fn run_prompt_refine_job(
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             (
-                build_refine_system_prompt(guide.as_deref(), workflow.as_deref()),
+                // sc-17162: an H3 target model swaps in the tailored Context-IR-shaped system
+                // prompt; every other model keeps the generic medium-keyed rewrite rules.
+                build_rewrite_system_prompt(
+                    guide.as_deref(),
+                    workflow.as_deref(),
+                    target_model_id.as_deref(),
+                ),
                 original_prompt.clone(),
             )
         }
@@ -1197,11 +1381,7 @@ pub(crate) async fn run_prompt_refine_job(
     };
     // A caption task isolates the JSON object (the web parses + validates it; image_caption validates
     // here too); the free-text rewrite cleans to prose.
-    let refined = if is_caption_task {
-        clean_json_output(&raw)
-    } else {
-        clean_refine_output(&raw)
-    };
+    let refined = finalize_refined_output(&raw, is_caption_task, target_model_id.as_deref());
     if refined.is_empty() {
         return Err(WorkerError::Engine(
             "The prompt-refinement model returned an empty prompt.".to_owned(),
@@ -1520,6 +1700,226 @@ mod tests {
             !audio.contains("camera body"),
             "audio refinement must not inherit image-only camera guidance"
         );
+    }
+
+    /// sc-17162 — the H3 branch is SELECTED by the target model family, and what it selects is not
+    /// the generic rewrite.
+    ///
+    /// The control leg matters more than the positive one here. `guide` on the H3 path is the real
+    /// `minimax-h3.md`, and that guide already names `integrated_multimodal_description:`,
+    /// `overall_soundscape:` and `non_diegetic_music:` — so asserting on any of those would pass
+    /// even with the branch deleted, because the GENERIC path appends the very same guide. The
+    /// phrase asserted below appears ONLY in the embedded asset, and the non-H3 leg drives the same
+    /// guide through the generic path to prove that.
+    #[test]
+    fn minimax_h3_selects_a_tailored_system_prompt_per_family_partition() {
+        let guide = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/web/public/prompt-guides/minimax-h3.md"),
+        )
+        .expect("the shipped H3 prompt guide is readable");
+        // The distinguishing phrase must be the asset's alone. If a future guide edit introduced
+        // it, this test would stop discriminating and every assertion below would be vacuous.
+        assert!(
+            !guide.contains("H3 field block"),
+            "the discriminating phrase leaked into the guide — this test no longer proves the \
+             branch is selected"
+        );
+
+        // BOTH partitions take the tailored prompt: `minimax_h3` (t2va + fl2va) and
+        // `minimax_h3_ref` (Ref2VA) share one text encoder and one prompt format.
+        let asset = magic_section_from(MINIMAX_H3_REFINE_V1, "SYSTEM");
+        for model_id in ["minimax_h3", "minimax_h3_ref"] {
+            let system = build_rewrite_system_prompt(Some(&guide), Some("video"), Some(model_id));
+            assert!(
+                system.contains("H3 field block"),
+                "{model_id} must take the tailored H3 rewrite"
+            );
+            // The Context-IR field structure (story activity 18694) is what the asset instructs.
+            for field in [
+                "integrated_multimodal_description:",
+                "overall_soundscape:",
+                "non_diegetic_music:",
+            ] {
+                assert!(system.contains(field), "{model_id} instructs {field}");
+                // …and the ASSET is what instructs them. The guide names all three too, so a
+                // combined-prompt assertion alone would survive deleting them from the asset.
+                assert!(
+                    asset.contains(field),
+                    "the embedded asset itself must instruct {field}"
+                );
+            }
+            // Asserted on a phrase the ASSET owns, not on `[Shot 1] At 00:00.000` — the guide
+            // appended below contains that literal in its own worked example, so pinning it would
+            // have gone green with the asset's shot instruction deleted.
+            assert!(
+                system.contains("Continue this line with the framing, the angle"),
+                "{model_id} instructs the timed-shot labels, the one thing prose cannot express"
+            );
+            // The generic medium rules are REPLACED, not merged — the H3 asset owns the whole
+            // instruction, so a rule from the generic path cannot contradict it.
+            assert!(
+                !system.contains("You are a prompt rewriter for a generative video model."),
+                "{model_id} must not also carry the generic rewrite rules"
+            );
+            // The model's own guide is still attached, under the same heading the generic path uses.
+            assert!(system.contains("# Model prompt guide"));
+            assert!(system.contains("# MiniMax-H3 Prompt Guide"));
+        }
+
+        // Control: another video model, the SAME guide text, keeps the generic rules and never sees
+        // the tailored asset. An absent/blank id is the same generic path.
+        for other in [Some("ltx_2_3"), Some("bernini"), Some("  "), None] {
+            let system = build_rewrite_system_prompt(Some(&guide), Some("video"), other);
+            assert!(
+                !system.contains("H3 field block"),
+                "{other:?} must not take the H3 branch"
+            );
+            assert!(
+                system.contains("You are a prompt rewriter for a generative video model."),
+                "{other:?} keeps the generic rewrite rules"
+            );
+        }
+
+        // The family predicate itself, at the boundary the two partitions sit on.
+        assert!(refines_for_minimax_h3(Some("minimax_h3")));
+        assert!(refines_for_minimax_h3(Some(" minimax_h3_ref ")));
+        assert!(!refines_for_minimax_h3(Some("ltx_2_3")));
+        assert!(!refines_for_minimax_h3(Some("")));
+        assert!(!refines_for_minimax_h3(None));
+    }
+
+    /// sc-17162 review — the asset must carry no fill-in-the-blank SCAFFOLD.
+    ///
+    /// The post-filter strips the seven untrained markers and nothing else, so any other literal in
+    /// the asset that reads as a template is a string a small refiner checkpoint can echo straight
+    /// into the suggestion the user is offered. The first draft had exactly that: angle-bracketed
+    /// slots (`<framing, angle, …>`) and a timestamp with a letter standing in for a digit
+    /// (`00:0X.000`). Both would have shipped as literal placeholder text in a refined prompt.
+    ///
+    /// The rule this pins is "instructions, not blanks". Real OUTPUT tokens — the field names with
+    /// their colons, `[Shot 1] At 00:00.000` — are not scaffold: the model is supposed to write
+    /// those verbatim, and shot one always opens at zero.
+    #[test]
+    fn minimax_h3_asset_carries_no_fill_in_the_blank_scaffold() {
+        let asset = magic_section_from(MINIMAX_H3_REFINE_V1, "SYSTEM");
+        assert!(
+            !asset.is_empty(),
+            "the asset must parse to a non-empty SYSTEM block"
+        );
+
+        // No angle-bracketed slot. Scoped to `<` followed by a letter or space so the marker ban's
+        // own `<d>`/`<|…|>` citations in the rules below are not what this trips on — those are
+        // quoted BANS, and a test that could not tell them apart would forbid stating the ban.
+        for (index, byte) in asset.bytes().enumerate() {
+            if byte != b'<' {
+                continue;
+            }
+            let rest = &asset[index + 1..];
+            let cited_marker =
+                rest.starts_with('|') || rest.starts_with("d>") || rest.starts_with('/');
+            assert!(
+                cited_marker,
+                "angle-bracketed scaffold at byte {index}: {}",
+                &asset[index..asset.len().min(index + 60)]
+            );
+        }
+
+        // No timestamp with a non-digit standing in for a digit. Every `MM:SS.mmm`-shaped run in the
+        // asset must be all digits — `00:0X.000` is the exact form that was there.
+        for (index, _) in asset.match_indices(':') {
+            let after = &asset[index + 1..];
+            let digits_then_dot: String = after.chars().take(2).collect();
+            if !after.chars().nth(2).is_some_and(|c| c == '.') {
+                continue;
+            }
+            assert!(
+                digits_then_dot.chars().all(|c| c.is_ascii_digit()),
+                "timestamp with a placeholder digit near byte {index}: {}",
+                &asset[index.saturating_sub(12)..asset.len().min(index + 12)]
+            );
+        }
+
+        // And it says so, so a future edit is told the rule rather than only caught by it.
+        assert!(
+            asset.contains("never\nleave a blank, a placeholder or a bracketed stand-in"),
+            "the asset must forbid placeholders explicitly, not only avoid them"
+        );
+        assert!(
+            asset.contains("A timestamp is digits only"),
+            "the asset must forbid a stand-in digit explicitly"
+        );
+    }
+
+    /// sc-17162 (from sc-17143's finding) — a marker-baited reply survives NOTHING. The refiner is
+    /// handed a prompt guide that quotes `<d>[English] …</d>` verbatim, so it can plausibly echo the
+    /// syntax back; the system prompt asks it not to, and this is the enforcement that does not
+    /// depend on the model complying.
+    #[test]
+    fn minimax_h3_refinement_never_emits_the_untrained_markers() {
+        // Exactly the seven from the tokenizer config, and nothing invented here.
+        assert_eq!(MINIMAX_H3_UNTRAINED_MARKERS.len(), 7);
+
+        // A reply that abuses every marker, in a wrapping code fence with a reasoning block in
+        // front of it — i.e. it goes through the SAME cleanup a real reply does, then the ban.
+        let baited = "<think>The guide showed dialogue markers, I'll use them.</think>\n\
+             ```\n\
+             integrated_multimodal_description: A woman in a red coat turns to the camera.\n\
+             overall_soundscape: rain on tarmac; <d>[English] Not tonight.</d> spoken quietly.\n\
+             <|caption_start|>a closing caption<|caption_end|> <|cutoff|>\n\
+             non_diegetic_music: <|lyrics_start|>hummed melody<|lyrics_end|> low strings.\n\
+             ```";
+        // Driven through the SAME function the job body calls, with the same arguments — so this
+        // also pins that the ban is reached for an H3 target, not merely that the filter works.
+        let refined = finalize_refined_output(baited, false, Some("minimax_h3"));
+        for marker in MINIMAX_H3_UNTRAINED_MARKERS {
+            assert!(
+                first_ci(&refined, marker).is_none(),
+                "{marker} survived the H3 post-filter: {refined}"
+            );
+        }
+        assert_eq!(
+            finalize_refined_output(baited, false, Some("minimax_h3_ref")),
+            refined,
+            "both H3 partitions take the ban"
+        );
+        // Control leg: the ban is KEYED on the model, so the same reply for a non-H3 target is
+        // cleaned exactly as before this story — otherwise the test would pass with the key removed.
+        let untargeted = finalize_refined_output(baited, false, Some("ltx_2_3"));
+        assert_eq!(untargeted, clean_refine_output(baited));
+        assert!(
+            first_ci(&untargeted, "<d>").is_some(),
+            "the non-H3 path must be unchanged by this story"
+        );
+        // Case variants are matched too — the markers are ASCII and the model may shout them.
+        let shouted = strip_untrained_markers("a line <D>spoken</D> <|CUTOFF|> here");
+        for marker in MINIMAX_H3_UNTRAINED_MARKERS {
+            assert!(
+                first_ci(&shouted, marker).is_none(),
+                "{marker} survived in upper case: {shouted}"
+            );
+        }
+
+        // The words around the markers survive: this is a strip, not a truncation, and the user's
+        // dialogue text is the whole point of the field it sits in.
+        assert!(refined.contains("Not tonight."));
+        assert!(refined.contains("hummed melody"));
+        assert!(refined.contains("A woman in a red coat turns to the camera."));
+        // The removal cannot glue two words into one.
+        assert_eq!(strip_untrained_markers("word<d>word"), "word word");
+        // A reply that is ONLY markers cleans to empty, which is the pipeline's existing
+        // empty-output rejection rather than a new failure mode.
+        assert!(strip_untrained_markers(" <d> </d> <|cutoff|> ").is_empty());
+        // Text with no marker is returned byte for byte, indentation and blank lines intact.
+        let untouched = "  a prompt\n\n  with layout  ";
+        assert_eq!(strip_untrained_markers(untouched), untouched);
+
+        // And the ban is wired to the same family predicate as the system-prompt selection, so a
+        // model can never get the tailored instruction without the enforcement (or vice versa).
+        for model_id in ["minimax_h3", "minimax_h3_ref"] {
+            assert!(refines_for_minimax_h3(Some(model_id)));
+        }
+        assert!(!refines_for_minimax_h3(Some("ltx_2_3")));
     }
 
     #[test]

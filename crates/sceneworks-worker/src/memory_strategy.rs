@@ -874,11 +874,13 @@ mod tests {
     fn evidence(strategy: MemoryStrategy) -> MemoryEvidence {
         MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "test".into(),
                 resolved_route: "test".into(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: tier(),
                 load_shape: LoadShape::DeferredMaterialization,
                 mode: MemoryMode::TextToImage,
+                reference_shape: gen_core::MemoryReferenceShape::None,
                 overlay: None,
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -887,6 +889,7 @@ mod tests {
                     frames: 1,
                     reference_count: 0,
                 },
+                frames_per_second: None,
                 strategy,
                 engaged_composition: contract().engaged_composition(strategy),
                 parameters: params(strategy),

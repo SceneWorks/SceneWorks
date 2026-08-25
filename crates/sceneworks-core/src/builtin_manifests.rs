@@ -1132,6 +1132,526 @@ mod tests {
         assert_eq!(revision, "952f49d49653cb42e7d6cf7cbfad74738073ec7d");
     }
 
+    /// The four DIFFUSERS turbo files published by `lightx2v/Minimax-h3-Turbo`, paired with the
+    /// catalog id that must carry each. Transcribed from the real published headers at revision
+    /// `5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1` (sc-18724 verified all four).
+    const MINIMAX_H3_TURBO_FILES: [(&str, &str); 4] = [
+        (
+            "minimax_h3_turbo_4step_768p",
+            "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors",
+        ),
+        (
+            "minimax_h3_turbo_8step",
+            "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
+        ),
+        (
+            "minimax_h3_turbo_4step_v01",
+            "minimax_h3_fl2v_turbo_4step_v0.1.safetensors",
+        ),
+        (
+            "minimax_h3_ref2v_turbo_4step",
+            "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+        ),
+    ];
+
+    fn builtin_loras() -> Vec<serde_json::Value> {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.loras.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.loras.jsonc parses as JSON");
+        manifest["loras"]
+            .as_array()
+            .expect("builtin.loras.jsonc has a loras array")
+            .clone()
+    }
+
+    #[test]
+    fn minimax_h3_turbo_loras_are_registered_and_sha_pinned() {
+        // sc-18725 (epic 17137). All FOUR published diffusers checkpoints register as weight-load-only
+        // accelerators. Pin every non-default field so this discriminates a real registration from an
+        // empty or renamed one, and assert the COUNT so a fifth entry (or a dropped fourth — the
+        // story's own table listed only three until sc-18724 found the ref2v file) has to be
+        // deliberate.
+        let loras = builtin_loras();
+        let registered: Vec<&serde_json::Value> = loras
+            .iter()
+            .filter(|lora| lora["family"] == serde_json::json!("minimax-h3"))
+            .collect();
+        assert_eq!(
+            registered.len(),
+            MINIMAX_H3_TURBO_FILES.len(),
+            "expected exactly {} minimax-h3 catalog LoRAs; got {:?}",
+            MINIMAX_H3_TURBO_FILES.len(),
+            registered
+                .iter()
+                .map(|lora| lora["id"].clone())
+                .collect::<Vec<_>>()
+        );
+
+        for (id, file) in MINIMAX_H3_TURBO_FILES {
+            let lora = loras
+                .iter()
+                .find(|lora| lora["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is registered in builtin.loras.jsonc"));
+
+            assert_eq!(lora["family"], serde_json::json!("minimax-h3"), "{id}");
+            assert_eq!(lora["role"], serde_json::json!("accelerator"), "{id}");
+            assert_eq!(
+                lora["compatibility"]["families"],
+                serde_json::json!(["minimax-h3"]),
+                "{id}"
+            );
+            // The runtime `lora_scale` multiplier, NOT alpha. Anything but 1.0 would silently rescale
+            // the file's own alpha/rank fold (sc-18724).
+            assert_eq!(lora["defaultWeight"], serde_json::json!(1.0), "{id}");
+            assert_eq!(
+                lora["source"]["provider"],
+                serde_json::json!("huggingface"),
+                "{id}"
+            );
+            assert_eq!(
+                lora["source"]["repo"],
+                serde_json::json!("lightx2v/Minimax-h3-Turbo"),
+                "{id}"
+            );
+            assert_eq!(lora["source"]["file"], serde_json::json!(file), "{id}");
+            let revision = lora["source"]["revision"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id} pins a source.revision"));
+            assert!(
+                is_full_sha_revision(revision),
+                "{id} must pin a full 40-hex commit SHA (a floating `main` would drift the \
+                 accelerator weights under a pinned DiT); got {revision:?}"
+            );
+            assert_eq!(revision, "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1", "{id}");
+        }
+    }
+
+    #[test]
+    fn no_minimax_h3_lora_names_a_comfyui_export() {
+        // 🔴 sc-18724 / sc-18725. `lightx2v/Minimax-h3-Turbo` publishes seven files: four diffusers
+        // and three `_comfyui_` twins. The ComfyUI exports fuse q/k/v into `attn.qkv_proj` and swap
+        // the SwiGLU halves in `mlp.fc1`, so folding one is shape-valid and numerically WRONG — the
+        // sc-18740 class that shipped green at cosine 0.73-0.78. The engine refuses them by design,
+        // which makes a `_comfyui_` filename here a HARD ERROR at install rather than a degradation.
+        //
+        // Deliberately a SUBSTRING scan over every registered file rather than a re-assertion of the
+        // four expected names. The sibling test above pins those names AND the count, so it catches
+        // both a swap and a bare fifth entry — but it checks only the names listed in
+        // `MINIMAX_H3_TURBO_FILES`, so the moment that table is legitimately extended to cover a new
+        // file, it vouches for whatever name was written into it. This scan keeps failing on any
+        // `_comfyui_` file that ever appears under this family, which is the property that matters.
+        for lora in builtin_loras() {
+            if lora["family"] != serde_json::json!("minimax-h3") {
+                continue;
+            }
+            let id = lora["id"].as_str().unwrap_or("<no id>");
+            let file = lora["source"]["file"].as_str().unwrap_or_default();
+            assert!(
+                !file.contains("_comfyui_"),
+                "{id} names the ComfyUI export {file:?}; the engine REFUSES that key space \
+                 (fused qkv_proj + swapped SwiGLU halves). Use the diffusers twin."
+            );
+        }
+    }
+
+    /// sc-19563 — **every MiniMax-H3 turbo entry declares the ONE partition it is distilled for**,
+    /// and the ref2v one is the odd one out.
+    ///
+    /// This reads the embedded manifest, so it is the guard on the declaration itself; the gate that
+    /// reads it lives in `apps/rust-api/src/loras.rs::validate_lora_specs_for_model` and is proved
+    /// reachable from a real submission by
+    /// `jobs::cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job_route`.
+    ///
+    /// The `assert_ne!` at the end is the half that matters. Family membership cannot express this
+    /// pairing — both partitions are one architecture and both declare `family: minimax-h3` — so a
+    /// table that gave all four the same `modelIds` would be exactly as wrong as declaring none, and
+    /// would sail past a test that only checked the key was present.
+    #[test]
+    fn every_minimax_h3_turbo_lora_declares_its_partition() {
+        // The expected pairing, spelled out rather than derived from the filename, so a manifest
+        // edit that pointed the ref2v adapter at the fl2v partition reds here.
+        const EXPECTED: [(&str, &str); 4] = [
+            ("minimax_h3_turbo_4step_768p", "minimax_h3"),
+            ("minimax_h3_turbo_8step", "minimax_h3"),
+            ("minimax_h3_turbo_4step_v01", "minimax_h3"),
+            ("minimax_h3_ref2v_turbo_4step", "minimax_h3_ref"),
+        ];
+        let mut seen = 0;
+        for lora in builtin_loras() {
+            if lora["family"] != serde_json::json!("minimax-h3") {
+                continue;
+            }
+            let id = lora["id"].as_str().expect("a LoRA entry has an id");
+            let want = EXPECTED
+                .iter()
+                .find(|(known, _)| *known == id)
+                .unwrap_or_else(|| panic!("unlisted minimax-h3 LoRA {id}; add it to EXPECTED"))
+                .1;
+            let declared: Vec<&str> = lora["modelIds"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id} declares no `modelIds`. Both H3 partitions share \
+                         `family: minimax-h3`, so without this the adapter attaches to either and \
+                         folds CLEANLY at the wrong quality — a mismatch, not a failure (sc-19563)."
+                    )
+                })
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            assert_eq!(declared, vec![want], "{id} names the wrong partition");
+            seen += 1;
+        }
+        assert_eq!(seen, EXPECTED.len(), "every listed entry must be present");
+        // The two partitions really are addressed differently — a uniform table would be as wrong
+        // as no table at all, and would pass a mere presence check.
+        assert_ne!(
+            EXPECTED[0].1, EXPECTED[3].1,
+            "the fl2v and ref2v adapters must name DIFFERENT partitions"
+        );
+    }
+
+    #[test]
+    fn no_minimax_h3_lora_declares_an_alpha() {
+        // 🔴 sc-18724 / sc-18725. Alpha differs PER FILE inside this one repo — 128, 8, 8, and absent
+        // — so a family-wide (or even per-entry) manifest alpha would be wrong for three of the four.
+        // The engine resolves it from the file itself: rank from the factor shapes, alpha by
+        // precedence, never the rank. A manifest that pinned one would re-introduce exactly the 16x /
+        // 128x overshoot sc-18724 exists to close, and it would do so SILENTLY.
+        //
+        // The `lora-manifest.schema.json` item is `additionalProperties: false` and has no alpha key,
+        // so today this is unrepresentable — this test is the guard on that staying true, since
+        // relaxing the schema is a one-line edit and the failure it enables is invisible in output.
+        const ALPHA_SPELLINGS: [&str; 6] = [
+            "alpha",
+            "loraAlpha",
+            "lora_alpha",
+            "networkAlpha",
+            "network_alpha",
+            "scale",
+        ];
+        for lora in builtin_loras() {
+            if lora["family"] != serde_json::json!("minimax-h3") {
+                continue;
+            }
+            let id = lora["id"].as_str().unwrap_or("<no id>");
+            let object = lora.as_object().expect("a LoRA entry is an object");
+            for spelling in ALPHA_SPELLINGS {
+                assert!(
+                    !object.contains_key(spelling),
+                    "{id} declares `{spelling}`. Alpha is PER FILE (128 / 8 / 8 / absent) and is \
+                     resolved by the engine from the checkpoint; declaring one here is wrong for \
+                     three of the four files."
+                );
+                assert!(
+                    lora["source"].get(spelling).is_none(),
+                    "{id} declares `source.{spelling}`; see above."
+                );
+                assert!(
+                    lora["compatibility"].get(spelling).is_none(),
+                    "{id} declares `compatibility.{spelling}`; see above."
+                );
+            }
+        }
+    }
+
+    /// Every path a MiniMax-H3 load OPENS, expressed snapshot-relative, for `tier`.
+    ///
+    /// Read entirely from `mlx_tier_completeness` — the same constants
+    /// `minimax_h3_shared_is_complete` and `resolve_minimax_h3_load` gate on at job time. A second
+    /// hand-copied list here would drift from the runtime check exactly the way the catalog drifted
+    /// from it before sc-19573, which is the whole defect this guard exists to prevent.
+    ///
+    /// The shared half arrives as FILES since sc-19558, so the coverage test below is now asking the
+    /// stronger question: not "does some row fetch into `vae/`" but "does some row fetch
+    /// `vae/config.json`". [`minimax_h3_pattern_covers`] is what keeps a directory glob a legitimate
+    /// answer to a file-level question.
+    fn minimax_h3_probed_paths(tier: &str) -> Vec<String> {
+        use crate::mlx_tier_completeness as tc;
+        let mut paths = Vec::new();
+        // Both DiT partitions, under the TIER root. Not one of them — the engine opens
+        // `transformer/config.json` and `transformer_ref/config.json` on every load. These stay
+        // DIRECTORY-level: the shard set is index-driven and varies per tier, so the manifest
+        // question is "does a row fetch into this partition", which is what a `files` pattern says.
+        for (_, partition) in tc::MINIMAX_H3_PARTITIONS {
+            paths.push(format!("{tier}/{partition}"));
+        }
+        // The shared floor and the tier's text encoder, straight off the runtime enumerator. Both
+        // roots are EMPTY so the resolver yields the snapshot-relative remainder —
+        // `q4/text_encoder/config.json` for a packed tier, plain `text_encoder/config.json` for
+        // bf16 — which is the form a manifest `files` pattern is written in. Passing a real root
+        // would produce an absolute path no pattern can match, and passing the tier as the root
+        // would double it.
+        let empty = std::path::Path::new("");
+        for probe in tc::minimax_h3_shared_probe_paths(
+            empty,
+            &tc::minimax_h3_text_encoder_dir(empty, empty, tier),
+        ) {
+            // Manifest download patterns are URL/snapshot-relative and therefore always use
+            // forward slashes. `Path` renders with the host separator, so compare the same
+            // logical path on Windows instead of treating every shared component as unfetched.
+            paths.push(
+                probe
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
+        }
+        paths
+    }
+
+    /// Whether a manifest `files` pattern fetches `probed`.
+    ///
+    /// Three ways, and each is load-bearing:
+    /// * the pattern NAMES the path (`FL2VA/audio_vae/config.json`);
+    /// * the pattern fetches INTO it (`q4/transformer/*` covers the `q4/transformer` partition).
+    ///   Prefix-matched on a trailing `/` so `q4/transformer/*` cannot be read as covering
+    ///   `q4/transformer_ref` — the exact confusion `minimax_h3_ref` being a PREFIX EXTENSION of
+    ///   `minimax_h3` invites;
+    /// * the pattern is a directory GLOB the path falls under (`vae/*` covers `vae/config.json`).
+    ///   Required since sc-19558 made the shared probes files. The glob's own trailing `/` is
+    ///   retained for the same prefix reason — it is what stops `vae/*` claiming
+    ///   `audio_vae/config.json`.
+    fn minimax_h3_pattern_covers(pattern: &str, probed: &str) -> bool {
+        pattern == probed
+            || pattern.starts_with(&format!("{probed}/"))
+            || pattern
+                .strip_suffix('*')
+                .is_some_and(|prefix| prefix.ends_with('/') && probed.starts_with(prefix))
+    }
+
+    /// The snapshot-relative paths `entry`'s downloads FETCH for `tier` — every non-co-requisite row
+    /// whose `variant` matches, plus every co-requisite row that applies (tier-agnostic ones always
+    /// apply; `variant`-scoped ones only for their own tier), exactly as
+    /// `model_co_requisite_downloads_for_variant` selects them at install time.
+    fn minimax_h3_declared_files(entry: &serde_json::Value, tier: &str) -> Vec<String> {
+        entry["downloads"]
+            .as_array()
+            .expect("downloads array")
+            .iter()
+            .filter(|download| {
+                match download["variant"].as_str() {
+                    Some(variant) => variant.eq_ignore_ascii_case(tier),
+                    // A tier-agnostic row applies to every tier — but only co-requisites are ever
+                    // tier-agnostic here; a primary without a variant would be a different shape.
+                    None => download["coRequisite"].as_bool() == Some(true),
+                }
+            })
+            .flat_map(|download| {
+                download["files"]
+                    .as_array()
+                    .expect("files array")
+                    .iter()
+                    .map(|file| file.as_str().expect("file pattern is a string").to_owned())
+            })
+            .collect()
+    }
+
+    /// The probed paths `entry` does NOT fetch for `tier`. Empty ⇒ the install this entry produces
+    /// carries every path the loader opens.
+    fn minimax_h3_unfetched_paths(entry: &serde_json::Value, tier: &str) -> Vec<String> {
+        let declared = minimax_h3_declared_files(entry, tier);
+        minimax_h3_probed_paths(tier)
+            .into_iter()
+            .filter(|probed| {
+                !declared
+                    .iter()
+                    .any(|pattern| minimax_h3_pattern_covers(pattern, probed))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn minimax_h3_downloads_cover_every_path_the_loader_probes() {
+        // sc-19573. A `coRequisite` is a PRE-DOWNLOAD WEIGHTS FLOOR, so an entry that omits a path
+        // the loader opens is declaring an install that cannot load. Before this guard the catalog
+        // omitted four: the sibling DiT partition (at every tier — the engine opens both), the
+        // `tokenizer/` directory, and the three `FL2VA/audio_vae/` constructor documents.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"].as_array().expect("models array");
+        let entry = |id: &str| {
+            models
+                .iter()
+                .find(|model| model["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is present"))
+                .clone()
+        };
+
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let model = entry(id);
+            for tier in ["q4", "q8", "bf16"] {
+                assert!(
+                    minimax_h3_unfetched_paths(&model, tier).is_empty(),
+                    "{id} @ {tier}: installing this entry does not fetch {:?}, which \
+                     mlx-gen-minimax-h3::load opens — the install would fail at load",
+                    minimax_h3_unfetched_paths(&model, tier)
+                );
+            }
+        }
+
+        // MUTATION, one probed path at a time: removing the file PATTERNS that fetch a single path
+        // must make THAT path a reported gap, and must not move any probe those patterns did not
+        // fetch. Per pattern rather than per row, because the three `FL2VA/audio_vae/` documents
+        // share one row: deleting the row would move three paths at once and prove only that the
+        // guard notices a big hole. Deleting everything at once would prove even less.
+        //
+        // ⚠️ NOT `assert_eq!(gaps, vec![probed])` any more, and the change is forced by sc-19558
+        // rather than a loosening. The shared probes are FILES now, and one directory glob can be
+        // the only pattern fetching several of them — `q4/text_encoder/*` is the sole supplier of
+        // BOTH `q4/text_encoder/config.json` and `q4/text_encoder/model.safetensors.index.json`, so
+        // removing it legitimately opens two gaps. The confinement assertion below is what keeps
+        // that from becoming a licence for side effects: every reported gap must be a path a
+        // REMOVED pattern fetched.
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            for tier in ["q4", "q8", "bf16"] {
+                for probed in minimax_h3_probed_paths(tier) {
+                    let mut mutated = entry(id);
+                    let mut removed: Vec<String> = Vec::new();
+                    for download in mutated["downloads"]
+                        .as_array_mut()
+                        .expect("downloads array")
+                    {
+                        let files = download["files"].as_array_mut().expect("files array");
+                        files.retain(|file| {
+                            let file = file.as_str().expect("file pattern");
+                            if minimax_h3_pattern_covers(file, &probed) {
+                                removed.push(file.to_owned());
+                                return false;
+                            }
+                            true
+                        });
+                    }
+                    assert!(
+                        !removed.is_empty(),
+                        "{id} @ {tier}: nothing fetched {probed}, so the mutation is vacuous"
+                    );
+                    let gaps = minimax_h3_unfetched_paths(&mutated, tier);
+                    assert!(
+                        gaps.contains(&probed),
+                        "{id} @ {tier}: removing the patterns that fetch {probed} ({removed:?}) \
+                         must report it as unfetched, and reported {gaps:?}"
+                    );
+                    for gap in &gaps {
+                        assert!(
+                            removed
+                                .iter()
+                                .any(|pattern| minimax_h3_pattern_covers(pattern, gap)),
+                            "{id} @ {tier}: {gap} was reported unfetched but no removed pattern \
+                             ({removed:?}) fetched it — the mutation had a side effect"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn minimax_h3_sibling_partition_is_a_per_tier_co_requisite_of_both_entries() {
+        // The half of sc-19573 a path-coverage check alone cannot express: the sibling partition must
+        // arrive as a `coRequisite` (which `install_state_for` GATES on and the download job queues
+        // alongside the primary), not merely as some row that happens to match. A `variant` is
+        // required on each so a q4 user is not handed the 66 GB bf16 sibling, and so
+        // `install_state_for`'s tier-scoped aggregate can judge one tier's pair at a time.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"].as_array().expect("models array");
+        let partitions = crate::mlx_tier_completeness::MINIMAX_H3_PARTITIONS;
+
+        for (id, own) in partitions {
+            let sibling = partitions
+                .iter()
+                .find(|(other, _)| *other != id)
+                .map(|(_, partition)| *partition)
+                .expect("the pair has two members");
+            assert_ne!(
+                own, sibling,
+                "{id}: the sibling must be the OTHER partition"
+            );
+            let model = models
+                .iter()
+                .find(|model| model["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is present"));
+            let downloads = model["downloads"].as_array().expect("downloads array");
+
+            for tier in ["q4", "q8", "bf16"] {
+                let row = downloads
+                    .iter()
+                    .find(|download| {
+                        download["files"] == serde_json::json!([format!("{tier}/{sibling}/*")])
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{id} @ {tier}: no row fetches the sibling {sibling} partition")
+                    });
+                assert_eq!(
+                    row["coRequisite"].as_bool(),
+                    Some(true),
+                    "{id} @ {tier}: the sibling partition must be a coRequisite — a plain row is \
+                     neither queued alongside the primary nor gated on by install state"
+                );
+                assert!(
+                    row["variant"]
+                        .as_str()
+                        .is_some_and(|variant| variant.eq_ignore_ascii_case(tier)),
+                    "{id} @ {tier}: the sibling co-requisite must be variant-scoped to its tier"
+                );
+                assert!(
+                    row["required"].as_str() != Some("soft"),
+                    "{id} @ {tier}: the sibling partition is a HARD dependency — the engine opens \
+                     both partitions on every load, so there is no usable-without-it state for a \
+                     soft co-requisite to preserve"
+                );
+                // A co-requisite must NOT also be the entry's own primary — that would make the
+                // pair's install state depend on a row the download job never queues as a tier.
+                assert!(
+                    row["default"].as_bool() != Some(true),
+                    "{id} @ {tier}: the sibling co-requisite must never be the default tier"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_minimax_h3_partitions_advertise_the_minimax_h3_lora_family() {
+        // sc-18725. `loraCompatibility.families` is the LOAD gate the API
+        // (`validate_lora_specs_for_model`) and the web picker (`loraMatchesModel`) both read. Both
+        // partitions must declare it: the gate is per-model-id, and the ref2v adapter is distilled
+        // for `minimax_h3_ref` specifically, so omitting it there would leave that adapter
+        // unselectable on the only entry it belongs to.
+        //
+        // Also pins the ABSENCE of "acceleration" from `types`. That is the single token
+        // `modelSupportsMultiPhase` reads to open Image Studio's multi-phase editor, whose worker gate
+        // is `request.model == KREA_RAW_MODEL_ID` — advertising it from a video model would surface a
+        // lane no worker serves. Carrying `role: accelerator` LoRAs does NOT imply that compat type.
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let models = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array");
+
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("{id} is present"));
+            assert_eq!(
+                model["loraCompatibility"]["families"],
+                serde_json::json!(["minimax-h3"]),
+                "{id} must advertise the minimax-h3 LoRA family"
+            );
+            let types = model["loraCompatibility"]["types"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} declares loraCompatibility.types"));
+            assert!(
+                !types.contains(&serde_json::json!("acceleration")),
+                "{id} must NOT advertise the acceleration compat type: it opens the image \
+                 multi-phase editor, which only krea_2_raw has a worker lane for. Got {types:?}"
+            );
+        }
+    }
+
     #[test]
     fn krea_2_raw_advertises_the_acceleration_lora_compat_type() {
         // sc-13882: Raw must advertise "acceleration" as a compatible LoRA type so the turbo adapter

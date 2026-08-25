@@ -413,14 +413,18 @@ async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
 // neighbor's live probes can zero PEAK mid-measurement (via the draining reset) or
 // spuriously satisfy `peak > 1` — flakes that only surface on the slow hosted macos-26
 // runners (sc-17723). Same pattern as dataset_catalogs.rs's catalog_scan_hook_test_lock.
-fn catalog_probe_test_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+fn catalog_probe_test_lock() -> &'static TestSerializationLock {
+    static LOCK: std::sync::OnceLock<TestSerializationLock> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| TestSerializationLock::new("catalog_probe_test_lock"))
+}
+
+async fn lock_catalog_probes() -> TestSerializationGuard<'static> {
+    catalog_probe_test_lock().acquire().await
 }
 
 #[tokio::test]
 async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
-    let _probe_guard = catalog_probe_test_lock().lock().await;
+    let _probe_guard = lock_catalog_probes().await;
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -758,7 +762,7 @@ async fn concurrent_failed_estimate_is_shared_and_retries_after_negative_ttl_exp
 
 #[tokio::test]
 async fn models_catalog_starts_install_sweep_before_size_estimation_completes() {
-    let _probe_guard = catalog_probe_test_lock().lock().await;
+    let _probe_guard = lock_catalog_probes().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -820,7 +824,7 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
 
 #[tokio::test]
 async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
-    let _probe_guard = catalog_probe_test_lock().lock().await;
+    let _probe_guard = lock_catalog_probes().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -2258,6 +2262,183 @@ async fn model_import_route_is_enabled_and_detector_gated() {
     assert_eq!(url_job["type"], "model_import");
 }
 
+/// The manifest `source.provider` vocabulary is deliberately COARSER than `importProvenance.source`:
+/// the two non-remote shapes an epic-20398 import can have (`upload`, `local-copy`) both keep the
+/// historical `"local"` that every pre-existing model entry carries and every reader of that field
+/// was written against. A remote import DOES widen it, because `civitai` names a genuinely new
+/// provider rather than re-spelling an existing one. Pins all five mappings through the real route,
+/// so a change to either half of the pair is caught rather than shipped silently.
+#[tokio::test]
+async fn model_import_manifest_provider_stays_coarser_than_import_provenance() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    );
+    // A copy-from-disk source has to be real: the route inspects it before queueing.
+    let local_file = temp_dir.path().join("data/models/dropbox/krea.safetensors");
+    write_krea_checkpoint_file(&local_file);
+
+    let provider_of = |job: &Value| {
+        job["payload"]["manifestEntry"]["source"]["provider"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let provenance_of = |job: &Value| {
+        job["payload"]["importProvenance"]["source"]
+            .as_str()
+            .map(str::to_owned)
+    };
+
+    // upload -> provider "local"
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, job) = request_multipart_model_upload(
+        app,
+        &[
+            ("modelId", "prov_upload"),
+            ("name", "Upload"),
+            ("type", "image"),
+        ],
+        "krea.safetensors",
+        &test_safetensors_bytes_with_typed_keys(&[
+            ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
+            ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+            ("model.diffusion_model.first.weight", "BF16"),
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "upload queued as {job:?}");
+    assert_eq!(provenance_of(&job).as_deref(), Some("upload"));
+    assert_eq!(
+        provider_of(&job).as_deref(),
+        Some("local"),
+        "an upload keeps the historical manifest provider: {job:?}"
+    );
+
+    for (label, body, expected_provenance, expected_provider) in [
+        (
+            "local-copy",
+            json!({
+                "modelId": "prov_local",
+                "type": "image",
+                "sourcePath": local_file.display().to_string(),
+            }),
+            "local-copy",
+            "local",
+        ),
+        (
+            "huggingface",
+            json!({"modelId": "prov_hf", "type": "image", "repo": "org/model"}),
+            "huggingface",
+            "huggingface",
+        ),
+        (
+            "url",
+            json!({
+                "modelId": "prov_url",
+                "type": "image",
+                "sourceUrl": "https://host.example/models/custom.safetensors",
+            }),
+            "url",
+            "url",
+        ),
+        (
+            "civitai",
+            json!({
+                "modelId": "prov_civitai",
+                "type": "image",
+                "source": {
+                    "kind": "civitai",
+                    "url": "https://civitai.com/api/download/models/9931",
+                    "modelVersionId": "9931",
+                },
+            }),
+            "civitai",
+            "civitai",
+        ),
+    ] {
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, job) = request(app, "POST", "/api/v1/models/import", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{label} queued as {job:?}");
+        assert_eq!(
+            provenance_of(&job).as_deref(),
+            Some(expected_provenance),
+            "{label}: {job:?}"
+        );
+        assert_eq!(
+            provider_of(&job).as_deref(),
+            Some(expected_provider),
+            "{label}: {job:?}"
+        );
+    }
+}
+
+/// sc-20636: a caller-supplied `modelId` is sanitized into the directory name (`safe_download_dir`)
+/// that becomes the managed INSTALL ID, and nothing validated the result. An id that sanitizes to
+/// something `CheckpointPlanStore::install_dir` refuses was answered 201 and then died in the worker
+/// with an `InvalidInstallId` the caller never saw. The refusal has to name the constraint, and it
+/// has to be judged on the RESOLVED name because that is the string the worker addresses a path with.
+#[tokio::test]
+async fn an_explicit_model_id_that_resolves_to_an_invalid_install_id_is_refused_at_queue_time() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    );
+
+    for (model_id, expected_reason) in [
+        // A dot-leading id survives sanitization intact and would name a hidden directory.
+        (".hidden", "must not start with '.' or '-'"),
+        ("-leading", "must not start with '.' or '-'"),
+        // `a/../b` sanitizes to `a__..__b`: the separators are replaced, the traversal token is not.
+        ("a/../b", "must not contain '..'"),
+    ] {
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, error) = request(
+            app,
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "modelId": model_id,
+                "type": "image",
+                "sourceUrl": "https://host.example/models/custom.safetensors",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "modelId {model_id:?} must be refused at queue time, not in the worker: {error:?}"
+        );
+        let detail = error["detail"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            detail.contains(expected_reason),
+            "the refusal must name the install-id constraint for {model_id:?}: {detail}"
+        );
+        assert!(
+            detail.contains(model_id),
+            "the refusal must name the offending id {model_id:?}: {detail}"
+        );
+    }
+
+    // The control: an id that sanitizes to a usable install directory still queues.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": "my.model-v2",
+            "type": "image",
+            "sourceUrl": "https://host.example/models/custom.safetensors",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "queued as {job:?}");
+}
+
 #[tokio::test]
 async fn imported_model_catalog_uses_paths_model_install_marker() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -3076,6 +3257,633 @@ async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
     }
 }
 
+/// The two MiniMax-H3 catalog entries as the shipped manifest declares them: ONE repo, three tiers
+/// each, disjoint per-partition `files`, the per-tier text encoder (sc-19120), the tier-agnostic
+/// floor, and — since sc-19573 — the SIBLING DiT partition as a per-tier co-requisite of each entry,
+/// because the engine's `load` opens both partitions on every load. Written without `platforms` so
+/// the fixture is not stripped by `retain_downloads_for_os` on the candle CI lanes — the
+/// download/delete logic under test is OS-independent.
+#[cfg(test)]
+fn minimax_h3_manifest() -> String {
+    let tier_row = |partition: &str, tier: &str, co_requisite: bool| {
+        format!(
+            r#"{{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "{tier}"{}, "files": ["{tier}/{partition}/*"] }}"#,
+            if co_requisite {
+                ", \"coRequisite\": true"
+            } else if tier == "q4" {
+                ", \"default\": true"
+            } else {
+                ""
+            }
+        )
+    };
+    let tiers = |partition: &str| {
+        ["q4", "q8", "bf16"]
+            .iter()
+            .map(|tier| tier_row(partition, tier, false))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    };
+    // sc-19573: the other half of the pair. `minimax_h3` co-requires `transformer_ref` and vice
+    // versa, per tier.
+    let sibling = |partition: &str| {
+        ["q4", "q8", "bf16"]
+            .iter()
+            .map(|tier| tier_row(partition, tier, true))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    };
+    // sc-19120: the text encoder is TIER-SCOPED — packed beside the DiT tiers at q4/q8, dense
+    // upstream at bf16. sc-19573 adds `tokenizer/` and the `FL2VA/audio_vae/` constructor documents
+    // to the tier-agnostic floor.
+    let co_requisites = r#"
+        { "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "q4", "coRequisite": true, "componentId": "text_encoder", "subdir": "q4/text_encoder", "files": ["q4/text_encoder/*"] },
+        { "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "revision": "f22bc294f46894584645aec59a513ee411450c96", "variant": "q8", "coRequisite": true, "componentId": "text_encoder", "subdir": "q8/text_encoder", "files": ["q8/text_encoder/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "variant": "bf16", "coRequisite": true, "componentId": "text_encoder", "subdir": "text_encoder", "files": ["text_encoder/config.json", "text_encoder/model.safetensors.index.json"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "video_vae", "subdir": "vae", "files": ["vae/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "audio_vae", "subdir": "audio_vae", "files": ["audio_vae/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "componentId": "tokenizer", "subdir": "tokenizer", "files": ["tokenizer/*"] },
+        { "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "revision": "939557dc319dd91227e30195a763f272ba7f8765", "coRequisite": true, "files": ["FL2VA/audio_vae/config.json", "FL2VA/audio_vae/config.yaml", "FL2VA/audio_vae/metadata.json"] }"#;
+    format!(
+        r#"
+        {{
+          "schemaVersion": 1,
+          "models": [
+            {{
+              "id": "minimax_h3",
+              "name": "MiniMax-H3",
+              "type": "video",
+              "family": "minimax-h3",
+              "downloads": [
+{},
+{},
+{}
+              ]
+            }},
+            {{
+              "id": "minimax_h3_ref",
+              "name": "MiniMax-H3 References",
+              "type": "video",
+              "family": "minimax-h3",
+              "downloads": [
+{},
+{},
+{}
+              ]
+            }}
+          ]
+        }}
+        "#,
+        tiers("transformer"),
+        sibling("transformer_ref"),
+        co_requisites,
+        tiers("transformer_ref"),
+        sibling("transformer"),
+        co_requisites
+    )
+}
+
+/// Seed ONE MiniMax-H3 DiT partition into a repo snapshot: `config.json`, the shard index, and the
+/// shards in `present`. Files are real (not blob symlinks) so the fixture is portable; the blob-level
+/// semantics are covered by the unix-gated `variant_delete_tests`.
+#[cfg(test)]
+fn seed_minimax_partition(
+    snapshot: &std::path::Path,
+    tier: &str,
+    partition: &str,
+    present: &[&str],
+) {
+    let dir = snapshot.join(tier).join(partition);
+    std::fs::create_dir_all(&dir).expect("partition dir creates");
+    std::fs::write(dir.join("config.json"), "{}").expect("config writes");
+    std::fs::write(
+        dir.join("diffusion_pytorch_model.safetensors.index.json"),
+        json!({
+            "weight_map": {
+                "blocks.0.weight": "diffusion_pytorch_model-00001-of-00002.safetensors",
+                "blocks.1.weight": "diffusion_pytorch_model-00002-of-00002.safetensors",
+            }
+        })
+        .to_string(),
+    )
+    .expect("index writes");
+    for shard in present {
+        std::fs::write(dir.join(shard), b"weights").expect("shard writes");
+    }
+}
+
+#[cfg(test)]
+const MINIMAX_SHARDS: [&str; 2] = [
+    "diffusion_pytorch_model-00001-of-00002.safetensors",
+    "diffusion_pytorch_model-00002-of-00002.safetensors",
+];
+
+/// Seed the three shared co-requisite components from `MiniMaxAI/MiniMax-H3` (the tier-agnostic
+/// weights floor a render needs regardless of which DiT tier is installed).
+#[cfg(test)]
+fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
+    let snapshot =
+        data_dir.join("cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc");
+    for (dir, files) in [
+        (
+            "text_encoder",
+            vec!["config.json", "model.safetensors.index.json"],
+        ),
+        ("vae", vec!["config.json"]),
+        ("audio_vae", vec!["config.json"]),
+        // sc-19573 — the two paths the loader opens that the catalog used to omit.
+        ("tokenizer", vec!["tokenizer.json"]),
+        (
+            "FL2VA/audio_vae",
+            vec!["config.json", "config.yaml", "metadata.json"],
+        ),
+    ] {
+        let component = snapshot.join(dir);
+        std::fs::create_dir_all(&component).expect("component dir creates");
+        for file in files {
+            std::fs::write(component.join(file), "{}").expect("component file writes");
+        }
+    }
+}
+
+/// Seed the PACKED per-tier text encoder (sc-19120) into the rehost snapshot. Tier-scoped, so a q4
+/// install's co-requisite set is only satisfied by the q4 copy.
+#[cfg(test)]
+fn seed_minimax_packed_text_encoder(data_dir: &std::path::Path, tier: &str) {
+    let component = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294")
+        .join(tier)
+        .join("text_encoder");
+    std::fs::create_dir_all(&component).expect("packed text encoder dir creates");
+    std::fs::write(component.join("config.json"), "{}").expect("te config writes");
+}
+
+#[tokio::test]
+async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_floor() {
+    // sc-19078 — the on-demand tier fetch, per entry and per tier. `SceneWorks/minimax-h3-mlx` is
+    // 240.7 GB in total, so a tier install must pull exactly ONE TIER: q8 here is 70.6 GB of DiT
+    // against 240.7 GB for the repo. The co-requisites are the weights FLOOR and must be queued
+    // alongside it, at their own pinned revisions; without them the entry installs as a model that
+    // cannot render.
+    //
+    // ⚠️ AMENDED BY sc-19573. This test used to assert that a `minimax_h3` install must NOT pull
+    // `transformer_ref`. That was the bug: the engine's `load` opens BOTH partitions on every load,
+    // so the install it was protecting could not render anything. The sibling partition is now a
+    // per-tier co-requisite and IS pulled — what stays forbidden is pulling another TIER, which is
+    // the per-tier-fetch property sc-19078 actually established.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "variant": "q8" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // The primary job fetches THIS entry's partition of THAT tier — not the tier, not the repo.
+    assert_eq!(primary["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+    assert_eq!(primary["payload"]["variant"], "q8");
+    assert_eq!(primary["payload"]["files"], json!(["q8/transformer/*"]));
+    assert_eq!(
+        primary["payload"]["revision"], "f22bc294f46894584645aec59a513ee411450c96",
+        "the tier fetch is pinned, never main"
+    );
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .expect("jobs is an array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    // The primary, the q8 sibling partition, the q8 packed text encoder, and the four tier-agnostic
+    // floor rows (both VAEs, the tokenizer, the FL2VA constructor documents). The bf16 text encoder
+    // and the other tiers' rows are `variant`-scoped away.
+    let queued = download_jobs
+        .iter()
+        .map(|job| job["payload"]["files"].to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        download_jobs.len(),
+        7,
+        "primary + sibling partition + packed TE + four tier-agnostic floor rows: {queued:?}"
+    );
+    assert!(
+        queued
+            .iter()
+            .any(|files| files.contains("q8/transformer_ref")),
+        "sc-19573: the sibling DiT partition is part of the minimum loadable set and must be \
+         queued alongside the primary: {queued:?}"
+    );
+    assert!(
+        queued.iter().any(|files| files.contains("q8/text_encoder")),
+        "sc-19120: the packed text encoder for THIS tier: {queued:?}"
+    );
+    for probed in ["tokenizer/", "FL2VA/audio_vae/", "vae/", "audio_vae/"] {
+        assert!(
+            queued.iter().any(|files| files.contains(probed)),
+            "{probed} is opened by the loader and must be fetched: {queued:?}"
+        );
+    }
+    let floor = download_jobs
+        .iter()
+        .filter(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        floor.len(),
+        4,
+        "both VAEs, the tokenizer and the FL2VA constructor documents"
+    );
+    for component in floor {
+        // A DIFFERENT pin than the tier row's: the shared floor comes from MiniMax's own upstream
+        // snapshot, so asserting the tier's SHA here would have passed on a plain copy-through.
+        assert_eq!(
+            component["payload"]["revision"], "939557dc319dd91227e30195a763f272ba7f8765",
+            "a co-requisite carries its OWN pinned revision, not the tier row's"
+        );
+        assert!(
+            component["payload"]
+                .get("family")
+                .map_or(true, Value::is_null),
+            "a shared component is a different artifact than the DiT and must not carry its family"
+        );
+    }
+    // NOTHING pulls another TIER — the whole point of per-tier fetch, and the property the sibling
+    // co-requisite must not have quietly destroyed by being declared tier-agnostic.
+    for files in &queued {
+        assert!(
+            !files.contains("q4/") && !files.contains("bf16/"),
+            "a q8 install must not pull another tier: {files}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() {
+    // sc-19078: `SceneWorks/minimax-h3-mlx` ships no `model_index.json`, so the coarse
+    // `q4/transformer/*` glob is satisfied by a SINGLE landed file out of fourteen shards. Without the
+    // family predicate a torn tier read `installed` and then died at load — the "complete but
+    // unloadable" class. The two entries own disjoint partitions of one repo, so each must be judged
+    // on its OWN partition: here `minimax_h3`'s q4 is complete while `minimax_h3_ref`'s q4 is torn.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    // `minimax_h3` q4: complete. `minimax_h3_ref` q4: index + config landed, ONE of two shards missing.
+    seed_minimax_partition(&snapshot, "q4", "transformer", &MINIMAX_SHARDS);
+    seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS[..1]);
+    seed_minimax_shared_floor(&data_dir);
+    seed_minimax_packed_text_encoder(&data_dir, "q4");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entry = |id: &str| {
+        models
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap_or_else(|| panic!("{id} present"))
+            .clone()
+    };
+    let tier_state = |model: &Value, name: &str| {
+        model["variants"]
+            .as_array()
+            .expect("variants array")
+            .iter()
+            .find(|variant| variant["variant"] == name)
+            .unwrap_or_else(|| panic!("variant {name} present"))
+            .clone()
+    };
+
+    let base = entry("minimax_h3");
+    assert_eq!(base["hasVariantMatrix"], true);
+    assert_eq!(base["installState"], "installed");
+    assert_eq!(tier_state(&base, "q4")["installState"], "installed");
+    for absent in ["q8", "bf16"] {
+        assert_eq!(
+            tier_state(&base, absent)["installState"],
+            "missing",
+            "{absent} was never fetched"
+        );
+    }
+
+    // The torn sibling: NOT installed, and flagged as repairable so the card offers a re-fetch rather
+    // than a green badge over a tier that cannot load.
+    let reference = entry("minimax_h3_ref");
+    assert_eq!(reference["installState"], "missing");
+    assert_eq!(reference["repairAvailable"], true);
+    let torn = tier_state(&reference, "q4");
+    assert_eq!(torn["installState"], "missing");
+    assert_eq!(torn["cacheState"], "incomplete");
+    assert!(
+        torn["missingRequiredFiles"]
+            .as_array()
+            .expect("missing files array")
+            .iter()
+            .any(|file| file.as_str() == Some("q4/ (incomplete: missing model components)")),
+        "the torn tier must name itself: {torn:?}"
+    );
+}
+
+#[tokio::test]
+async fn minimax_h3_is_not_installed_without_its_shared_component_floor() {
+    // A co-requisite is a WEIGHTS FLOOR, not an optional extra: the Qwen3-VL-32B text encoder and both
+    // VAEs are dense in every tier and must be present before any render, whatever tier is installed.
+    // A tier fetch that landed the DiT alone would otherwise advertise a model that cannot run.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    seed_minimax_partition(&snapshot, "q4", "transformer", &MINIMAX_SHARDS);
+    // The floor is seeded, then the audio VAE is taken back out — one MISSING component of three.
+    seed_minimax_shared_floor(&data_dir);
+    std::fs::remove_dir_all(
+        data_dir.join(
+            "cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc/audio_vae",
+        ),
+    )
+    .expect("audio vae removes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let base = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "minimax_h3")
+        .expect("minimax_h3 present")
+        .clone();
+
+    // The q4 DiT tier itself is complete — this is specifically the co-requisite gate, not a torn tier.
+    let q4 = base["variants"]
+        .as_array()
+        .expect("variants array")
+        .iter()
+        .find(|variant| variant["variant"] == "q4")
+        .expect("q4 present")
+        .clone();
+    assert_eq!(
+        q4["installState"], "installed",
+        "the DiT tier itself landed"
+    );
+    // …yet the entry is not installed, and names the component repo it is still waiting on.
+    assert_eq!(base["installState"], "missing");
+    assert_eq!(base["repairAvailable"], true);
+    assert!(
+        base["missingRequiredFiles"]
+            .as_array()
+            .expect("missing files array")
+            .iter()
+            .any(|file| file
+                .as_str()
+                .is_some_and(|file| file.starts_with("MiniMaxAI/MiniMax-H3"))),
+        "the missing co-requisite must be named: {:?}",
+        base["missingRequiredFiles"]
+    );
+}
+
+#[tokio::test]
+async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
+    // sc-19078 — the shared-repo trap. Both entries live in ONE repo cache dir, and a whole-model
+    // delete resolves that dir, so the blanket `remove_dir_all` took `transformer_ref/` (a different
+    // checkpoint, up to 66.3 GB per tier) with it.
+    //
+    // sc-19573 gave this test a SECOND job. Once each entry co-requires the other's partition from
+    // the same repo, `model_repo_file_scopes` / `other_entries_repo_file_scopes` would — if they
+    // counted co-requisite rows — have each entry claiming and retaining the whole repo, so
+    // `selected && !retained` never held and the delete reclaimed NOTHING. This test is the guard on
+    // that filter: it fails with a 400 ("read-only unless local files are installed") the moment
+    // either helper stops excluding co-requisites.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    // Both entries installed: `minimax_h3` at q4 + bf16, `minimax_h3_ref` at q4.
+    for tier in ["q4", "bf16"] {
+        seed_minimax_partition(&snapshot, tier, "transformer", &MINIMAX_SHARDS);
+    }
+    seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS);
+    seed_minimax_shared_floor(&data_dir);
+    seed_minimax_packed_text_encoder(&data_dir, "q4");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // permanent=true keeps the assertions deterministic (the OS-trash path depends on the host).
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/minimax_h3?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete body: {deleted}");
+    assert_eq!(deleted["removedLocalArtifacts"], true);
+    // A built-in entry stays catalogued; only its files go.
+    assert_eq!(deleted["removedManifestEntry"], false);
+
+    // The deleted entry's partitions are gone from EVERY tier…
+    for tier in ["q4", "bf16"] {
+        assert!(
+            !snapshot.join(tier).join("transformer").exists(),
+            "{tier}/transformer removed"
+        );
+    }
+    // …the sibling's partition survives, file for file…
+    let sibling = snapshot.join("q4/transformer_ref");
+    assert!(sibling.join("config.json").is_file());
+    for shard in MINIMAX_SHARDS {
+        assert!(sibling.join(shard).is_file(), "{shard} retained");
+    }
+    // …and the shared component floor is untouched (it is a co-requisite of BOTH entries).
+    assert!(data_dir
+        .join("cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc/vae/config.json")
+        .is_file());
+
+    // The catalog agrees: the reference entry still reads installed at q4, the deleted one does not.
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let state_of = |id: &str| {
+        models
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap_or_else(|| panic!("{id} present"))["installState"]
+            .clone()
+    };
+    assert_eq!(state_of("minimax_h3"), "missing");
+    // ⚠️ AMENDED BY sc-19573. The sibling's own FILES survive — that is this test's subject and is
+    // asserted above, file for file. Its catalog verdict does NOT, and must not: the engine opens
+    // both partitions on every load, so deleting `minimax_h3` really does take `minimax_h3_ref` out
+    // of service, and the pair is now declared that way (`transformer/` is a per-tier co-requisite of
+    // the reference entry). Reporting it `installed` here would be the exact green-badge-over-an-
+    // unloadable-install shape sc-19573 was filed for. `repairAvailable` is what re-fetches the half
+    // that went with the delete.
+    assert_eq!(state_of("minimax_h3_ref"), "missing");
+    let reference = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "minimax_h3_ref")
+        .expect("minimax_h3_ref present")
+        .clone();
+    assert_eq!(
+        reference["repairAvailable"], true,
+        "the user must be offered the re-fetch rather than a dead entry: {reference}"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_model_keeps_a_sibling_that_names_the_identical_primary_files() {
+    // sc-19573 review — the flux_dev ↔ pulid_flux_dev shape, and the regression guard on the
+    // co-requisite subtraction added for MiniMax-H3.
+    //
+    // Six catalog groups pair TWO entries on ONE repo with the IDENTICAL primary `files`:
+    // flux_dev/pulid_flux_dev, z_image_turbo/z_image_edit, bernini/bernini_image,
+    // realvisxl/instantid_realvisxl, qwen_image_edit_2511/_lightning, ideogram_4/ideogram_4_turbo
+    // (plus the anima_* trio, which shares a text encoder and VAE the same way). Both entries in a
+    // pair are `coRequisite: false` PRIMARIES — they really do load the same checkpoint.
+    //
+    // Subtracting the deleted entry's own scopes from the UNION of the sibling's scopes empties the
+    // retained set for every one of them, and `remove_tier_artifacts`'s `selected && !retained` then
+    // unlinks the snapshot entries AND the blobs with `permanent=true`. That is the sc-19078 data
+    // loss, re-introduced: `DELETE /models/flux_dev` destroying an installed `pulid_flux_dev`.
+    //
+    // The subtraction must therefore apply to the sibling's CO-REQUISITE scopes only. This test
+    // fails — every `q4/*` assertion below goes red, the files having been unlinked — against a
+    // `sibling_files.retain(|file| !own_files.contains(file))` over the whole sibling set.
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // Verbatim from the shipped `builtin.models.jsonc`: identical `files` on both entries, no
+    // co-requisite rows anywhere. NOTHING here may be subtracted.
+    let tiers = r#"[
+        { "provider": "huggingface", "repo": "SceneWorks/flux1-dev-mlx", "variant": "q4", "default": true, "files": ["q4/*"] },
+        { "provider": "huggingface", "repo": "SceneWorks/flux1-dev-mlx", "variant": "q8", "files": ["q8/*"] },
+        { "provider": "huggingface", "repo": "SceneWorks/flux1-dev-mlx", "variant": "bf16", "files": ["bf16/*"] }
+    ]"#;
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{
+              "schemaVersion": 1,
+              "models": [
+                {{ "id": "flux_dev", "name": "FLUX.1 dev", "type": "image", "family": "flux", "downloads": {tiers} }},
+                {{ "id": "pulid_flux_dev", "name": "PuLID FLUX.1 dev", "type": "image", "family": "flux", "downloads": {tiers} }}
+              ]
+            }}"#
+        ),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let snapshot =
+        data_dir.join("cache/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/a1b2c3d4");
+    // One installed tier, shared by both entries — the single copy on disk that BOTH rows name.
+    let q4 = snapshot.join("q4");
+    std::fs::create_dir_all(&q4).expect("tier dir creates");
+    std::fs::write(q4.join("config.json"), "{}").expect("config writes");
+    std::fs::write(q4.join("flux1-dev.safetensors"), b"weights").expect("weights write");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/flux_dev?permanent=true",
+        Value::Null,
+    )
+    .await;
+
+    // 🔴 THE GUARD. `pulid_flux_dev` names `q4/*` as its OWN primary download. Those bytes ARE the
+    // sibling's install — one copy on disk, claimed by both rows — and a delete of the other entry
+    // must not touch them. Asserted before the status so a regression reports the data loss, not the
+    // status code.
+    assert!(
+        q4.join("flux1-dev.safetensors").is_file(),
+        "the sibling's weights must survive `DELETE /models/flux_dev`: {deleted}"
+    );
+    assert!(
+        q4.join("config.json").is_file(),
+        "the sibling's config must survive too: {deleted}"
+    );
+
+    // Nothing is exclusively `flux_dev`'s, so the delete honestly reclaims nothing and the existing
+    // built-in gate refuses rather than destroying a shared install. Asserted by MESSAGE, not a bare
+    // status: this is the only 400 the handler can return on this path.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "delete body: {deleted}");
+    assert_eq!(
+        deleted["detail"],
+        "Built-in model catalog entries are read-only unless local files are installed",
+        "delete body: {deleted}"
+    );
+
+    // …and the catalog still reports the sibling installed, because it genuinely is.
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let sibling = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "pulid_flux_dev")
+        .expect("pulid_flux_dev present")
+        .clone();
+    assert_eq!(
+        sibling["installState"], "installed",
+        "the sibling is untouched and must still read installed: {sibling}"
+    );
+}
+
 #[tokio::test]
 async fn quant_matrix_empty_cache_skeleton_reads_missing_not_incomplete() {
     // sc-9909: a tier that isn't published upstream resolves ZERO files, leaving an empty HF cache
@@ -3414,6 +4222,121 @@ async fn model_download_job_enqueues_co_requisite_dependencies() {
     assert!(
         co_requisite["payload"].get("family").map_or(true, Value::is_null),
         "a co-requisite job must not carry the model family (different artifact than the checkpoint)"
+    );
+}
+
+#[tokio::test]
+async fn sdxl_openpose_is_one_shared_soft_component_installed_with_each_backbone() {
+    const CONTROL_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
+    const CONTROL_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
+    const CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let data_dir = temp_dir.path().join("data");
+    let stage = |repo: &str, revision: &str, file: &str| {
+        let path = huggingface_repo_cache_path(&data_dir, repo)
+            .expect("HF cache path")
+            .join("snapshots")
+            .join(revision)
+            .join(file);
+        std::fs::create_dir_all(path.parent().expect("snapshot parent"))
+            .expect("snapshot dirs create");
+        std::fs::write(path, b"installed fixture").expect("snapshot file writes");
+    };
+    // One complete SDXL q4 base plus every hard Candle component. The optional OpenPose snapshot is
+    // deliberately absent: ordinary generation must remain installed while Model Manager offers it.
+    stage(
+        "SceneWorks/sdxl-base-mlx",
+        "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+        "q4/model.safetensors",
+    );
+    for (repo, revision, file) in [
+        (
+            "openai/clip-vit-large-patch14",
+            "32bd64288804d66eefd0ccbe215aa642df71cc41",
+            "tokenizer.json",
+        ),
+        (
+            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+            "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+            "tokenizer.json",
+        ),
+        (
+            "madebyollin/sdxl-vae-fp16-fix",
+            "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+            "diffusion_pytorch_model.safetensors",
+        ),
+    ] {
+        stage(repo, revision, file);
+    }
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        models
+            .as_array()
+            .expect("model array")
+            .iter()
+            .all(|model| model["id"] != "controlnet_openpose_sdxl"),
+        "the optional checkpoint must not appear as a fake runnable utility model"
+    );
+    let sdxl = models
+        .as_array()
+        .expect("model array")
+        .iter()
+        .find(|model| model["id"] == "sdxl")
+        .expect("SDXL catalog row");
+    assert_eq!(sdxl["installState"], "installed");
+    assert_eq!(sdxl["cacheState"], "complete");
+    assert_eq!(sdxl["repairAvailable"], false);
+    assert_eq!(
+        sdxl["updateAvailable"], true,
+        "a missing soft OpenPose component is an install/update affordance, not a base-model outage"
+    );
+
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/sdxl/download",
+        json!({ "requestedGpu": "auto", "variant": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(primary["payload"]["repo"], "SceneWorks/sdxl-base-mlx");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let control_jobs = jobs
+        .as_array()
+        .expect("jobs array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .filter(|job| job["payload"]["repo"] == CONTROL_REPO)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        control_jobs.len(),
+        1,
+        "one backbone install enqueues the shared OpenPose artifact exactly once"
+    );
+    let control = control_jobs[0];
+    assert_eq!(control["payload"]["revision"], CONTROL_REVISION);
+    assert_eq!(control["payload"]["files"], json!([CONTROL_FILE]));
+    assert!(
+        control["payload"]
+            .get("family")
+            .map_or(true, Value::is_null),
+        "a shared conditioning component is not reconciled as the SDXL base family"
     );
 }
 
@@ -4127,6 +5050,441 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     let (loras_status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
     assert_eq!(loras_status, StatusCode::OK);
     assert_eq!(loras.as_array().expect("loras array").len(), 0);
+}
+
+/// The baseline empty catalog manifests every checkpoint-teardown test starts from, plus whatever
+/// `user.models.jsonc` body the caller wants. Written as one helper so the fixtures below differ
+/// only in the model entry under test.
+fn write_catalog_manifests_with_models(config_dir: &std::path::Path, user_models: &str) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    for (name, body) in [
+        (
+            "builtin.models.jsonc",
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        ),
+        ("user.models.jsonc", user_models),
+        (
+            "builtin.loras.jsonc",
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        ),
+        ("user.loras.jsonc", r#"{ "schemaVersion": 1, "loras": [] }"#),
+        (
+            "builtin.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+        (
+            "user.recipe-presets.jsonc",
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        ),
+    ] {
+        std::fs::write(config_dir.join(name), body).expect("manifest writes");
+    }
+}
+
+/// A minimal single-file Krea 2 native DiT the checkpoint INSPECTOR accepts: the `txtfusion.` marker
+/// the family detector keys on, every tensor dense bf16, and — unlike
+/// `test_safetensors_bytes_with_typed_keys`, which pads every tensor to a fixed data end — tensor
+/// ranges that are actually contiguous, which the inspector requires.
+fn write_krea_checkpoint_file(path: &std::path::Path) {
+    let mut header = serde_json::Map::new();
+    let mut offset = 0_u64;
+    for name in [
+        "model.diffusion_model.txtfusion.projector.weight",
+        "model.diffusion_model.blocks.0.attn.wq.weight",
+        "model.diffusion_model.first.weight",
+    ] {
+        header.insert(
+            name.to_owned(),
+            json!({"dtype": "BF16", "shape": [1], "data_offsets": [offset, offset + 2]}),
+        );
+        offset += 2;
+    }
+    let encoded = serde_json::to_vec(&Value::Object(header)).expect("header serializes");
+    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(encoded);
+    bytes.resize(bytes.len() + offset as usize, 0x21);
+    std::fs::create_dir_all(path.parent().expect("file has a parent")).expect("dir creates");
+    std::fs::write(path, bytes).expect("checkpoint writes");
+}
+
+fn managed_upload_provenance() -> sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+    sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+        source: "upload".to_owned(),
+        reference: Some("krea.safetensors".to_owned()),
+        url: None,
+        version_id: None,
+        file_id: None,
+        credential_host: None,
+    }
+}
+
+/// sc-20636: `DELETE /api/v1/models/:id` removed the bytes and the manifest entry but left the
+/// managed checkpoint's catalog record, plan and bindings behind. That is not a leak of disk, it is
+/// a permanent poisoning of the id: the next import of the SAME id passes the route's `existing_ids`
+/// check (the manifest entry is gone) and then refuses FOREVER in the worker with `InstallIdTaken`,
+/// naming an install path that no longer exists.
+///
+/// A full import round-trip is not runnable here (the transfer is the worker's), so the delete path
+/// is driven directly against a real managed install published by `ManagedIngest`, and the
+/// re-importability claim is asserted the way the worker makes it: `ManagedIngest::begin` on the
+/// same id must succeed afterwards.
+#[tokio::test]
+async fn deleting_a_managed_model_removes_its_checkpoint_so_the_id_can_be_imported_again() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let source_file = temp_dir.path().join("library/krea.safetensors");
+    write_krea_checkpoint_file(&source_file);
+
+    // A real managed install: staged, committed by the atomic rename, plan + catalog record +
+    // bindings published. Exactly what a completed import leaves behind.
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let ingest = sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("ingest opens");
+    ingest
+        .stage_copy_file(&source_file, "krea.safetensors")
+        .expect("bytes stage");
+    let install = ingest
+        .finalize("krea.safetensors", None)
+        .expect("ingest finalizes");
+    assert_eq!(install.checkpoint_id, "managed/managed_model");
+    assert!(store.record("managed/managed_model").is_ok());
+
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "managed_model",
+                    "name": "Managed Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "managed/managed_model" }}
+                  }}]
+                }}"#,
+            install
+                .install_path
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // permanent=true keeps the assertions deterministic (the default move-to-OS-trash path depends
+    // on the host having a usable recycle bin/trash).
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/managed_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete answered {deleted:?}");
+    assert_eq!(deleted["removedManifestEntry"], true);
+    assert!(
+        !install.install_path.exists(),
+        "the managed install bytes must be gone: {}",
+        install.install_path.display()
+    );
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    assert!(
+        store.record("managed/managed_model").is_err(),
+        "the managed catalog record must not survive the delete: {:?}",
+        store.inventory().expect("inventory reads")
+    );
+    // The claim that actually matters, made the way the worker makes it.
+    sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("the install id must be free for a re-import after the delete");
+}
+
+/// sc-20651 feature-end review, MAJOR 2: the derivatives-first teardown REFUSES while a derivative
+/// is pinned, and that refusal must not be honoured HERE.
+///
+/// Everywhere else it is right — a pinned derivative's source bytes are still on disk, so holding
+/// the teardown keeps it usable. By this point in the delete route the bytes are ALREADY gone
+/// (`remove_whole_model_artifacts` ran) and so is the manifest entry, so honouring the refusal
+/// strands the plan record with nothing under it and `ManagedIngest::begin` then refuses the install
+/// id forever with `InstallIdTaken`, naming a path that no longer exists — the user can never
+/// re-import the model. Strictly worse than the orphaned derivative the ordering was fixing, which
+/// is orphaned either way once the bytes are gone.
+///
+/// So: the delete succeeds, the record is cleared regardless, and the warning NAMES both the
+/// checkpoint and the derivative cache entry left behind, because a named orphan is one the user can
+/// find and evict and a silent one is not.
+#[tokio::test]
+async fn a_pinned_derivative_does_not_strand_the_record_of_a_deleted_managed_model() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let source_file = temp_dir.path().join("library/krea.safetensors");
+    write_krea_checkpoint_file(&source_file);
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let ingest = sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("ingest opens");
+    ingest
+        .stage_copy_file(&source_file, "krea.safetensors")
+        .expect("bytes stage");
+    let install = ingest
+        .finalize("krea.safetensors", None)
+        .expect("ingest finalizes");
+
+    // A REAL published derivative of that install, then pinned — the same pin the cache's own
+    // removal refuses on, not a mocked failure.
+    let derivatives =
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)
+            .expect("derivative store opens");
+    let derivative_request =
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeRequestV1 {
+            kind: sceneworks_core::checkpoint_derivative::CheckpointDerivativeKindV1::DerivedIndex,
+            adapter_id: "krea_2".to_owned(),
+            adapter_version: "1".to_owned(),
+            codec_id: "dense-bf16".to_owned(),
+            codec_version: "1".to_owned(),
+            backend: "mlx".to_owned(),
+            outputs: vec!["index.json".to_owned()],
+        };
+    derivatives
+        .ensure(&install.checkpoint_id, &derivative_request, |outputs| {
+            use std::io::Write as _;
+            let mut file = outputs.create("index.json").map_err(|e| e.to_string())?;
+            file.write_all(b"{}").map_err(|error| error.to_string())
+        })
+        .expect("the derivative is produced and published");
+    let resolved = store
+        .resolve(&install.checkpoint_id)
+        .expect("the managed checkpoint resolves");
+    let cache_key = derivatives
+        .cache_key(&resolved, &derivative_request)
+        .expect("the derivative has a cache key");
+    derivatives
+        .cache()
+        .set_artifact_pin(&cache_key, true)
+        .expect("the derivative pins");
+    assert!(
+        derivatives.remove_managed_install("managed_model").is_err(),
+        "fixture check: a pinned derivative must make the derivatives-first teardown REFUSE, or \
+         this test proves nothing about the fallback"
+    );
+
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "managed_model",
+                    "name": "Managed Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "managed/managed_model" }}
+                  }}]
+                }}"#,
+            install
+                .install_path
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/managed_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a pinned derivative must not fail the delete: {deleted:?}"
+    );
+    assert_eq!(deleted["removedManifestEntry"], true);
+
+    let warnings = deleted["warnings"].to_string();
+    assert!(
+        warnings.contains("managed/managed_model") && warnings.contains(&cache_key),
+        "the warning must name the checkpoint AND the orphaned derivative: {warnings}"
+    );
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    assert!(
+        store.record("managed/managed_model").is_err(),
+        "the record must be cleared even though the derivative teardown refused: {:?}",
+        store.inventory().expect("inventory reads")
+    );
+    // The claim that actually matters, made the way the worker makes it.
+    sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &store,
+        "managed_model",
+        managed_upload_provenance(),
+    )
+    .expect("the install id must be free for a re-import after the delete");
+}
+
+/// The other half of the discrimination: a LINKED checkpoint's bytes are the user's own library
+/// copy, which this route never owned, so deleting the model must not reach `remove_managed` at all.
+///
+/// sc-20635's linked plan/derivative invalidation has now landed in the seam this was written to
+/// guard, so the record assertion below is the post-landing contract rather than the placeholder
+/// it started as: SceneWorks forgets its OWN documents (record, plan, bindings, derivatives),
+/// because leaving them behind stranded a plan nothing could reach or reclaim. The two guards this
+/// test actually exists for are unchanged and still asserted — managed teardown is never run for a
+/// linked entry, and the user's library file is never touched (E6).
+#[tokio::test]
+async fn deleting_a_linked_model_never_runs_managed_teardown_or_touches_the_library() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let library = temp_dir.path().join("library");
+    write_krea_checkpoint_file(&library.join("krea.safetensors"));
+    let library = std::fs::canonicalize(&library).expect("library canonicalizes");
+
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    let root = store.approve_root(&library).expect("root approves");
+    let compiled = store
+        .compile_linked(&root.root_id, "krea.safetensors")
+        .expect("linked checkpoint compiles");
+    let checkpoint_id = compiled.checkpoint_id.clone();
+
+    // The model's own SceneWorks-owned marker directory, so the delete has artifacts to remove and
+    // reaches the teardown block rather than short-circuiting on the read-only refusal.
+    let model_dir = data_dir.join("models/imports/linked_model");
+    std::fs::create_dir_all(&model_dir).expect("model dir creates");
+    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("marker writes");
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "linked_model",
+                    "name": "Linked Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "{checkpoint_id}" }}
+                  }}]
+                }}"#,
+            model_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/linked_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete answered {deleted:?}");
+    let warnings = deleted["warnings"].to_string();
+    assert!(
+        !warnings.contains(&checkpoint_id),
+        "a linked checkpoint must not be run through managed teardown: {warnings}"
+    );
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+    assert!(
+        matches!(
+            store.record(&checkpoint_id),
+            Err(
+                sceneworks_core::checkpoint_plan_store::CheckpointPlanError::UnknownCheckpoint { .. }
+            )
+        ),
+        "SceneWorks' own plan record is forgotten with the model (sc-20635): {:?}",
+        store.record(&checkpoint_id)
+    );
+    assert!(
+        store
+            .approved_roots()
+            .expect("approved roots load")
+            .get(&root.root_id)
+            .is_some(),
+        "forgetting one checkpoint must never un-approve its library root"
+    );
+    assert!(
+        library.join("krea.safetensors").is_file(),
+        "the user's own library copy must survive the model delete"
+    );
+}
+
+/// The files are gone before the checkpoint teardown runs, so a teardown failure cannot un-delete
+/// the model and must not fail the request. It is surfaced through the delete's own `warnings`, and
+/// the warning has to name the checkpoint — that id is the only handle anyone has on the record left
+/// behind. Driven by a corrupt `inventory.json`, which is what `remove_managed` reads first.
+#[tokio::test]
+async fn a_failed_managed_checkpoint_teardown_warns_instead_of_failing_the_delete() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let model_dir = data_dir.join("models/imports/managed_model");
+    std::fs::create_dir_all(&model_dir).expect("model dir creates");
+    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("marker writes");
+    let checkpoints_dir = data_dir.join("checkpoints");
+    std::fs::create_dir_all(&checkpoints_dir).expect("checkpoints dir creates");
+    std::fs::write(checkpoints_dir.join("inventory.json"), "{ not json")
+        .expect("corrupt inventory writes");
+
+    write_catalog_manifests_with_models(
+        &temp_dir.path().join("config/manifests"),
+        &format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "managed_model",
+                    "name": "Managed Model",
+                    "type": "image",
+                    "family": "krea_2",
+                    "paths": {{ "model": "{}" }},
+                    "importPlan": {{ "checkpointId": "managed/managed_model" }}
+                  }}]
+                }}"#,
+            model_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    );
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, deleted) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/managed_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a teardown failure must not fail the delete: {deleted:?}"
+    );
+    assert_eq!(deleted["removedManifestEntry"], true);
+    assert!(!model_dir.exists());
+    let warnings = deleted["warnings"].to_string();
+    assert!(
+        warnings.contains("managed/managed_model"),
+        "the warning must name the checkpoint left behind: {warnings}"
+    );
 }
 
 /// Deleting a global-scope trained LoRA must also sweep the preview-sample directory the training
@@ -5100,6 +6458,1098 @@ fn external_lora_without_a_detected_family_is_refused_at_job_create() {
     );
 }
 
+// --------------------------------------------------------------------------------------------
+// sc-17227 — the license-acknowledgment gate, enforced SERVER-SIDE.
+//
+// The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
+// only runs in the client. This endpoint is reachable from a browser on another machine (the
+// remote-access lane, epic 4484), from a workflow envelope's suggested action, and from curl —
+// none of which any client-side check binds.
+//
+// This is newly load-bearing because MiniMax-H3 is the first model whose acknowledgment is the
+// ONLY gate: every previously gated model also needed a Hugging Face credential, and HF answers
+// 401 without one, so unacknowledged weights never landed. `MiniMaxAI/MiniMax-H3` is a PUBLIC
+// repo. Refuse here or the weights arrive.
+// --------------------------------------------------------------------------------------------
+
+/// The OS this test process is NOT running on, so a download row tagged with it is guaranteed to
+/// be stripped by `retain_downloads_for_os` on whichever host runs the suite (sc-17227). Used to
+/// prove the licence-repo index reads the UNFILTERED manifest: every real MiniMax-H3 row is
+/// `platforms: ["macos"]`, so an index built from the OS-filtered catalog snapshot would be empty
+/// — and the gate absent — on Linux and Windows.
+const FOREIGN_DOWNLOAD_OS: &str = if cfg!(target_os = "macos") {
+    "linux"
+} else {
+    "macos"
+};
+
+/// Seed a catalog with one acknowledgment-gated entry and one ordinary one, so every assertion
+/// below can be made against the SAME app instance.
+///
+/// Shaped like the real `minimax_h3`: the tier artifact comes from the SceneWorks re-host, while
+/// the shared text-encoder/VAE floor is a CO-REQUISITE row pointing at MiniMax's own
+/// `MiniMaxAI/MiniMax-H3`. That co-requisite repo is the one the review's bypass named, and it is
+/// platform-tagged for the OS this process is not on — so a gate that only saw primary rows, or
+/// only saw this host's rows, fails the assertions below.
+///
+/// `shared_repo_model` is the case the SHIPPED catalog does not currently contain and the typed
+/// route's model-id gate could not see (sc-17227): an entry that does NOT declare
+/// `requiresLicenseAcknowledgment` but whose primary download names the restricted repo. That is
+/// the shared-co-requisite shape the manifest already uses for other families, so it is one
+/// authoring decision away rather than hypothetical. Its download rows carry NO `platforms`, so
+/// they survive `retain_downloads_for_os` on every host and the bypass is constructible wherever
+/// the suite runs. It also carries an UNRESTRICTED co-requisite, because the route queues every
+/// co-requisite job before the primary: a gate placed after that loop would refuse the primary
+/// while the co-requisite was already enqueued, and the "nothing was queued" assertion is what
+/// catches it.
+///
+/// The LoRA catalog is seeded for the same reason on the LoRA side: `restricted_lora` names the
+/// restricted repo in its `source.repo`, which `POST /api/v1/loras/:id/download` resolves and
+/// fetches.
+fn write_license_acknowledgment_catalog(config_dir: &std::path::Path) {
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"
+            {{
+              "schemaVersion": 1,
+              "models": [
+                {{
+                  "id": "minimax_h3",
+                  "name": "MiniMax-H3",
+                  "type": "video",
+                  "family": "minimax-h3",
+                  "requiresLicenseAcknowledgment": true,
+                  "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+                  "downloads": [
+                    {{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "files": ["q4/transformer/*"] }},
+                    {{ "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "coRequisite": true, "componentId": "text_encoder", "subdir": "text_encoder", "files": ["text_encoder/*"], "platforms": ["{FOREIGN_DOWNLOAD_OS}"] }}
+                  ]
+                }},
+                {{
+                  "id": "shared_repo_model",
+                  "name": "Shares the restricted repo",
+                  "type": "video",
+                  "family": "shared-repo",
+                  "downloads": [
+                    {{ "provider": "huggingface", "repo": "MiniMaxAI/MiniMax-H3", "files": ["*.safetensors"] }},
+                    {{ "provider": "huggingface", "repo": "owner/shared-repo-companion", "coRequisite": true, "componentId": "companion", "subdir": "companion", "files": ["companion/*"] }}
+                  ]
+                }},
+                {{
+                  "id": "plain_model",
+                  "name": "Plain",
+                  "type": "image",
+                  "family": "plain",
+                  "downloads": [
+                    {{ "provider": "huggingface", "repo": "owner/plain", "files": ["*.safetensors"] }}
+                  ]
+                }}
+              ]
+            }}
+            "#
+        ),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(config_dir);
+    // Overwrites the empty `builtin.loras.jsonc` the helper above wrote.
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "restricted_lora",
+              "name": "Restricted LoRA",
+              "family": "minimax-h3",
+              "source": {
+                "provider": "huggingface",
+                "repo": "MiniMaxAI/MiniMax-H3",
+                "file": "adapter_model.safetensors"
+              }
+            },
+            {
+              "id": "plain_lora",
+              "name": "Plain LoRA",
+              "family": "plain",
+              "source": {
+                "provider": "huggingface",
+                "repo": "owner/plain-lora",
+                "file": "adapter_model.safetensors"
+              }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin loras writes");
+}
+
+/// The raw-queue body the review used to walk past the typed route's 403. `requestedGpu` is a
+/// required field of `JobCreateRequest`, so it is present here but carries no meaning for a
+/// download.
+fn raw_model_download_job(repo: &str) -> Value {
+    json!({
+        "type": "model_download",
+        "requestedGpu": "auto",
+        "payload": { "repo": repo, "files": ["*.safetensors"] }
+    })
+}
+
+#[tokio::test]
+async fn license_acknowledgment_model_download_is_refused_without_the_acknowledgment() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // A body that predates the field — exactly what an older client, a workflow envelope's
+    // suggested action, or a bare curl sends.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    // Assert WHICH refusal, not merely that it errored: the machine-readable code is what a client
+    // keys off, and the status distinguishes "not allowed" from a 400 malformed body.
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("requires accepting its license")),
+        "the refusal must say what to do: {body:?}",
+    );
+
+    // An explicit `false` is refused the same way — the field is an assertion, and denying it is
+    // not a way in.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "license_acknowledgment_required");
+
+    // Nothing was queued: the refusal happens before any job is created, so a rejected request
+    // leaves no download the worker could pick up.
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused download must enqueue nothing: {jobs:?}",
+    );
+}
+
+#[tokio::test]
+async fn license_acknowledgment_model_download_proceeds_once_asserted() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+
+    // The gate is scoped to the entries that declare it. A model with no license requirement must
+    // still download from a body that says nothing about a license — otherwise this would be a
+    // blanket new requirement on every download in the product.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["repo"], "owner/plain");
+}
+
+/// What the `licenseAcknowledged` STAMP on a queued payload means (sc-17227 review MINOR 3).
+///
+/// The stamp is keyed on `model_requires_license_acknowledgment(model) || license_acknowledged` —
+/// the caller's own assertion is enough on its own, so it is written even when NO gate fired. That
+/// is deliberate and load-bearing: the repo gate catches an entry with no flag whose download names
+/// a repo a flagged entry declares, and a flag-keyed stamp would write nothing for exactly that
+/// shape, so the RETRY of an authorized download would then be refused by the repo gate reading its
+/// own stored `repo`.
+///
+/// The cost of that choice is that the stamp records "the caller asserted this", not "a gate fired
+/// and was satisfied". Pinned here on the case that isolates the difference — an entry the gate has
+/// no interest in at all, downloaded with the assertion volunteered — so the stamp's meaning cannot
+/// drift into being read as evidence of a gate.
+#[tokio::test]
+async fn license_acknowledgment_stamp_records_the_assertion_even_when_no_gate_fired() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Non-vacuity, derived from the gate's OWN input — the manifest the route reads — rather than
+    // asserted about the fixture: the entry under test must neither declare the flag (the id gate)
+    // nor name a repo any FLAGGED entry declares (the repo gate). If either became true the "no
+    // gate fired" premise would silently evaporate and the assertion below would prove nothing.
+    // Read from the manifest and not `GET /api/v1/models`, because the catalog DTO does not expose
+    // `downloads` at all and the repo gate is keyed on exactly those repos.
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(config_dir.join("builtin.models.jsonc")).expect("manifest reads"),
+    )
+    .expect("manifest parses");
+    let models = manifest["models"].as_array().expect("models is an array");
+    let repos = |entry: &Value| -> Vec<String> {
+        entry["downloads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|download| download["repo"].as_str())
+            .map(str::to_owned)
+            .collect()
+    };
+    let plain = models
+        .iter()
+        .find(|item| item["id"] == "plain_model")
+        .expect("the unrestricted fixture entry is in the manifest");
+    assert!(
+        plain.get("requiresLicenseAcknowledgment").is_none(),
+        "the unrestricted entry must NOT declare the flag, or the id gate fires and this test no \
+         longer isolates the assertion-only path: {plain:?}",
+    );
+    let plain_repos = repos(plain);
+    assert!(
+        !plain_repos.is_empty(),
+        "the fixture must actually fetch something: {plain:?}",
+    );
+    for other in models {
+        if other["id"] == plain["id"]
+            || other.get("requiresLicenseAcknowledgment") != Some(&Value::Bool(true))
+        {
+            continue;
+        }
+        for repo in repos(other) {
+            assert!(
+                !plain_repos.contains(&repo),
+                "the unrestricted entry must not share a repo with a flagged entry, or the REPO \
+                 gate fires and this is no longer the no-gate case: {repo}",
+            );
+        }
+    }
+
+    // Volunteered by the caller on a download nothing gates.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(
+        job["payload"][crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY],
+        Value::Bool(true),
+        "the stamp carries the caller's assertion verbatim, gate or no gate: {job:?}",
+    );
+
+    // And the control that makes the assertion above non-trivial: the SAME entry, the SAME route,
+    // without the assertion, must carry no stamp at all. A stamp that appeared unconditionally
+    // would satisfy the assertion above while meaning nothing.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert!(
+        job["payload"]
+            .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .is_none(),
+        "an unrestricted download with no assertion must not be stamped: {job:?}",
+    );
+}
+
+/// The typed route's gate was MODEL-ID-keyed while every other door is REPO-keyed (sc-17227), so
+/// the two doors disagreed about the same weights: `POST /api/v1/models/shared_repo_model/download`
+/// fetched `MiniMaxAI/MiniMax-H3` with no acknowledgment, while `POST /api/v1/jobs` naming that
+/// repo answered 403. Constructed here rather than argued: `shared_repo_model` carries no
+/// `requiresLicenseAcknowledgment`, so the id check cannot fire, and only the repo index refuses
+/// it.
+#[tokio::test]
+async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_declares() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // The entry itself declares nothing, so the model-id gate passes it through. Pinned, so this
+    // test cannot start passing because someone flagged the fixture entry instead of fixing the
+    // route — that would make the bypass unconstructible and the assertion below vacuous.
+    let (_, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    let entry = catalog
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|item| item["id"] == "shared_repo_model")
+        .expect("the bypass fixture entry is in the catalog");
+    assert!(
+        entry.get("requiresLicenseAcknowledgment").is_none(),
+        "the bypass entry must NOT declare the flag, or the id gate refuses it and the repo index \
+         is never exercised: {entry:?}",
+    );
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/shared_repo_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(
+        body["code"], "license_acknowledgment_required",
+        "and with the SAME machine-readable code the other doors use: {body:?}",
+    );
+    assert!(
+        body["detail"].as_str().is_some_and(
+            |detail| detail.contains("MiniMaxAI/MiniMax-H3") && detail.contains("minimax_h3")
+        ),
+        "the refusal must name the repo AND the entry that declares it: {body:?}",
+    );
+
+    // Nothing queued — not even `shared_repo_model`'s unrestricted co-requisite, which the route
+    // enqueues BEFORE the primary. A gate placed after that loop would 403 the primary and still
+    // have queued the companion fetch.
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused download must enqueue nothing, co-requisites included: {jobs:?}",
+    );
+
+    // Passing controls in the SAME test, so it cannot pass by being always-red: the assertion
+    // opens the restricted entry, and an unrelated entry is untouched.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/shared_repo_model/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    // The STAMP, for the shape this test exists to cover. `shared_repo_model` carries no
+    // `requiresLicenseAcknowledgment`, so a stamp keyed on the entry's flag writes nothing here —
+    // and the RETRY below then re-runs the repo-keyed gate over the stored `repo` and 403s a
+    // download this same server had just authorized. Asserting CREATED and `payload.repo` alone
+    // does not see that; the stamp and the retry leg are what do.
+    assert_eq!(
+        job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "an authorized no-flag gated download must record its acknowledgment: {job:?}",
+    );
+
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (retry_status, retry_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        retry_status,
+        StatusCode::CREATED,
+        "an authorized no-flag gated download must stay retryable: {retry_job:?}",
+    );
+    assert_eq!(retry_job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    assert_eq!(
+        retry_job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "and the retry must carry the stamp forward: {retry_job:?}",
+    );
+
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/plain_model/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["payload"]["repo"], "owner/plain");
+    // The stamp is not blanket: an unrestricted download whose caller asserted nothing carries no
+    // acknowledgment key, so a future gate cannot read one that was never made.
+    assert!(
+        job["payload"].get("licenseAcknowledged").is_none(),
+        "an unasserted, unrestricted download must not be stamped: {job:?}",
+    );
+}
+
+#[test]
+fn model_download_request_defaults_the_license_acknowledgment_to_false() {
+    // sc-17227: the field must default to NOT acknowledged. A `#[serde(default)]` on a `bool` is
+    // `false`, and this pins that direction — a default of `true` would let every client that has
+    // never heard of the field straight through the gate, which is the failure mode the gate
+    // exists to prevent.
+    let bare: crate::ModelDownloadRequest = serde_json::from_value(json!({})).expect("bare body");
+    assert!(!bare.license_acknowledged);
+
+    let asserted: crate::ModelDownloadRequest =
+        serde_json::from_value(json!({ "licenseAcknowledged": true })).expect("acknowledged body");
+    assert!(asserted.license_acknowledged);
+}
+
+// --------------------------------------------------------------------------------------------
+// sc-17227 review — the typed route's 403 was BYPASSABLE, proven live: against one `create_app`
+// instance, `POST /api/v1/models/minimax_h3/download` answered 403 while
+// `POST /api/v1/jobs {"type":"model_download","payload":{"repo":"MiniMaxAI/MiniMax-H3", …}}`
+// answered 201 and queued a job carrying that repo. `run_model_download_job` reads `repo`/`files`/
+// `revision` verbatim with no catalog lookup, so the weights would have landed.
+//
+// The fix enforces where the JOB is created, keyed on the payload's REPO rather than a model id,
+// which is the one mechanism that also closes `POST /api/v1/models/import`.
+// --------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn license_acknowledgment_generic_jobs_route_refuses_what_the_typed_route_refuses() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Request 1 — the typed route, as before.
+    let (typed_status, typed_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(typed_status, StatusCode::FORBIDDEN);
+    assert_eq!(typed_body["code"], "license_acknowledgment_required");
+
+    // Request 2 — the generic queue primitive, same app instance, naming MiniMax's own upstream
+    // repo. This is the request that returned 201.
+    let (raw_status, raw_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("MiniMaxAI/MiniMax-H3"),
+    )
+    .await;
+    assert_eq!(
+        raw_status,
+        StatusCode::FORBIDDEN,
+        "the generic jobs route must refuse the repo the typed route refuses: {raw_body:?}",
+    );
+    assert_eq!(
+        raw_body["code"], "license_acknowledgment_required",
+        "and refuse it with the SAME machine-readable code, not some incidental 4xx: {raw_body:?}",
+    );
+    assert!(
+        raw_body["detail"].as_str().is_some_and(
+            |detail| detail.contains("MiniMaxAI/MiniMax-H3") && detail.contains("minimax_h3")
+        ),
+        "the refusal must name the repo AND the catalog entry it supplies: {raw_body:?}",
+    );
+
+    // The re-hosted tier repo is the same weights under a different name, so it is refused too.
+    let (rehost_status, rehost_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("SceneWorks/minimax-h3-mlx"),
+    )
+    .await;
+    assert_eq!(rehost_status, StatusCode::FORBIDDEN, "{rehost_body:?}");
+    assert_eq!(rehost_body["code"], "license_acknowledgment_required");
+
+    // Case is not a way in: the hub resolves `owner/Name` and `owner/name` to one repository.
+    let (case_status, case_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("minimaxai/minimax-h3"),
+    )
+    .await;
+    assert_eq!(case_status, StatusCode::FORBIDDEN, "{case_body:?}");
+    assert_eq!(case_body["code"], "license_acknowledgment_required");
+
+    // Neither refusal queued anything — the whole point is that no worker picks the fetch up.
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused download must enqueue nothing: {jobs:?}",
+    );
+
+    // An UNRELATED repo through the same door is untouched — this is a licence gate, not a new
+    // blanket restriction on the raw queue.
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("owner/plain"),
+    )
+    .await;
+    assert_eq!(
+        plain_status,
+        StatusCode::CREATED,
+        "an unrestricted repo must still queue: {plain_job:?}",
+    );
+
+    // And the assertion is what opens it, exactly as on the typed route.
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_download",
+            "requestedGpu": "auto",
+            "payload": {
+                "repo": "MiniMaxAI/MiniMax-H3",
+                "files": ["*.safetensors"],
+                "licenseAcknowledged": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(asserted_job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+}
+
+#[tokio::test]
+async fn license_acknowledgment_model_import_is_refused_for_a_restricted_repo() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // `POST /api/v1/models/import` had NO licence logic at all — `model_import_enabled()` returns
+    // a hard `true` and nothing between the request and `run_model_import_job` reads the catalog.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({ "repo": "MiniMaxAI/MiniMax-H3", "type": "video" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+
+    // A `sourceUrl` addressing the same repo fetches the same bytes, so reading only `repo` would
+    // have left the equivalent request open.
+    let (url_status, url_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "sourceUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/vae/model.safetensors",
+            "type": "video"
+        }),
+    )
+    .await;
+    assert_eq!(url_status, StatusCode::FORBIDDEN, "{url_body:?}");
+    assert_eq!(url_body["code"], "license_acknowledgment_required");
+
+    // An unrestricted remote import is unaffected.
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({ "sourceUrl": "https://example.com/models/custom.safetensors", "type": "image" }),
+    )
+    .await;
+    assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
+
+    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so a
+    // retry re-validates against it rather than being refused for a field nothing wrote.
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "repo": "MiniMaxAI/MiniMax-H3",
+            "type": "video",
+            "licenseAcknowledged": true
+        }),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(
+        asserted_job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the queued import must carry the assertion: {asserted_job:?}",
+    );
+}
+
+/// `POST /api/v1/loras/import` fetches a caller-supplied repo and never consults the LoRA catalog
+/// for it — `run_lora_import_job` takes the payload's `repo` verbatim and, with an empty `files`,
+/// downloads the WHOLE repo. It was 201 for `MiniMaxAI/MiniMax-H3` while the identical `lora_import`
+/// job posted to `/api/v1/jobs` was 403. That the LoRA catalog declares no licence flag is beside
+/// the point: the catalog is not what this route reads.
+#[tokio::test]
+async fn license_acknowledgment_lora_import_is_refused_for_a_restricted_repo() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({ "repo": "MiniMaxAI/MiniMax-H3", "name": "x" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+
+    // The re-host row carries the same flag through the same index, so it is refused too.
+    let (rehost_status, rehost_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({ "repo": "SceneWorks/minimax-h3-mlx", "name": "x" }),
+    )
+    .await;
+    assert_eq!(rehost_status, StatusCode::FORBIDDEN, "{rehost_body:?}");
+    assert_eq!(rehost_body["code"], "license_acknowledgment_required");
+
+    // A huggingface.co `sourceUrl` addressing the same repo fetches the same bytes.
+    let (url_status, url_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({
+            "sourceUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/adapter.safetensors",
+            "name": "x"
+        }),
+    )
+    .await;
+    assert_eq!(url_status, StatusCode::FORBIDDEN, "{url_body:?}");
+    assert_eq!(url_body["code"], "license_acknowledgment_required");
+
+    // Control: an ordinary LoRA import is untouched by the gate.
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/import",
+        json!({ "repo": "owner/some-lora", "name": "ordinary" }),
+    )
+    .await;
+    assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
+
+    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so the
+    // raw-payload re-validation on retry sees it rather than refusing what was just authorized.
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/loras/import",
+        json!({
+            "repo": "MiniMaxAI/MiniMax-H3",
+            "name": "x",
+            "licenseAcknowledged": true
+        }),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(
+        asserted_job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the queued LoRA import must carry the assertion: {asserted_job:?}",
+    );
+}
+
+/// `POST /api/v1/loras/:id/download` had NO licence check at all (sc-17227), asymmetric with
+/// `create_model_download_job`, which gates on its catalog entry.
+///
+/// What stood here before asserted only that a caller cannot SUPPLY a repo — unknown ids 404, a
+/// body `repo` is inert — and read as coverage while the route was ungated. That is a claim about
+/// who CHOOSES the repo, not about whether the chosen repo is restricted: a catalog LoRA whose
+/// `source.repo` names a repo a `requiresLicenseAcknowledgment` model declares was fetched here
+/// with no acknowledgment. The weaker claim is kept, because it is true and worth pinning, but the
+/// STRONGER one is now asserted first: a catalog-named restricted repo is refused, with the same
+/// code every other door uses, queueing nothing.
+#[tokio::test]
+async fn license_acknowledgment_lora_download_refuses_a_catalog_named_restricted_repo() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // The fixture LoRA must actually resolve to the restricted repo, or the refusal below could be
+    // a 404 wearing a 403's clothes.
+    let (_, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+    let restricted = loras
+        .as_array()
+        .expect("loras is an array")
+        .iter()
+        .find(|item| item["id"] == "restricted_lora")
+        .expect("the restricted LoRA fixture is in the catalog");
+    assert_eq!(restricted["source"]["repo"], "MiniMaxAI/MiniMax-H3");
+    // The row must SAY it is gated, and name the model whose card takes the acknowledgment. This is
+    // the client's only route to the assertion the refusal below demands: a LoRA row renders no
+    // licence copy and no checkbox, so without this stamp the 403 is unclearable from every shipped
+    // surface and the gate is a dead end rather than a gate.
+    assert_eq!(
+        restricted["licenseAcknowledgmentModelId"], "minimax_h3",
+        "the gated LoRA row must name the model that gates it: {restricted:?}",
+    );
+    assert_eq!(
+        restricted["licenseAcknowledgmentModelName"], "MiniMax-H3",
+        "and the name the refusal copy points the user at: {restricted:?}",
+    );
+    // Not blanket: an unrestricted LoRA is untouched, so a client cannot read a requirement onto
+    // every row.
+    let plain = loras
+        .as_array()
+        .expect("loras is an array")
+        .iter()
+        .find(|item| item["id"] == "plain_lora")
+        .expect("the unrestricted LoRA fixture is in the catalog");
+    assert!(
+        plain.get("licenseAcknowledgmentModelId").is_none(),
+        "an unrestricted LoRA must carry no acknowledgment source: {plain:?}",
+    );
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/restricted_lora/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(
+        body["code"], "license_acknowledgment_required",
+        "and refuse it with the SAME machine-readable code, not some incidental 4xx: {body:?}",
+    );
+    assert!(
+        body["detail"].as_str().is_some_and(
+            |detail| detail.contains("MiniMaxAI/MiniMax-H3") && detail.contains("minimax_h3")
+        ),
+        "the refusal must name the repo AND the entry that declares it: {body:?}",
+    );
+
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs is an array").is_empty(),
+        "a refused LoRA download must enqueue nothing: {jobs:?}",
+    );
+
+    // Passing controls in the SAME test, so it cannot pass by being always-red.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/plain_lora/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an unrestricted catalog LoRA must still download: {job:?}",
+    );
+    assert_eq!(job["payload"]["repo"], "owner/plain-lora");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/restricted_lora/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
+    assert_eq!(
+        job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the queued LoRA download must carry the assertion so RETRY re-validates rather than \
+         refusing what was just authorized: {job:?}",
+    );
+
+    // The weaker claim, still true and still worth pinning: the repo comes from the catalog entry
+    // the path id names, so an unknown id is a 404 and a body-supplied repo is inert.
+    for id in ["MiniMaxAI%2FMiniMax-H3", "minimax_h3", "not_a_lora"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/loras/{id}/download"),
+            json!({ "requestedGpu": "auto" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a non-catalog LoRA id must 404 rather than fetch anything: {id} -> {body:?}"
+        );
+    }
+
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/loras/not_a_lora/download",
+        json!({ "requestedGpu": "auto", "repo": "MiniMaxAI/MiniMax-H3" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
+/// `model_convert` names no `repo`, which is why it was missed — but `resolve_convert_plan`'s LTX
+/// arm hands the payload's `baseRepo` to `ensure_ltx_upscaler_cached` → `ensure_hf_files_cached`,
+/// and `upscalerFile` is a GLOB, so `"**"` downloads the whole named repo. Adding the job type to
+/// the gate alone would have been INERT: the shared predicate read only `repo`/`sourceUrl`. This
+/// asserts the pair — the job type is gated AND `baseRepo` is one of the keys it reads.
+#[tokio::test]
+async fn license_acknowledgment_model_convert_is_refused_for_a_restricted_base_repo() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let settings = test_settings(&temp_dir);
+    let output_dir = settings.data_dir.join("models/mlx/converted-1");
+    let app = create_app(settings).expect("app creates");
+
+    let convert_payload = |base_repo: &str, acknowledged: bool| {
+        let mut payload = json!({
+            "modelId": "ltx_local",
+            "converter": "ltx_video",
+            "sourceRepo": "owner/plain",
+            "sourceFile": "ltx.safetensors",
+            "baseRepo": base_repo,
+            "upscalerFile": "**",
+            "outputDir": output_dir.display().to_string(),
+        });
+        if acknowledged {
+            payload["licenseAcknowledged"] = Value::Bool(true);
+        }
+        json!({ "type": "model_convert", "requestedGpu": "auto", "payload": payload })
+    };
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        convert_payload("MiniMaxAI/MiniMax-H3", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    assert!(
+        body["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("MiniMaxAI/MiniMax-H3"),
+        "the refusal names the repo the CONVERT would have fetched: {body:?}"
+    );
+
+    // `sourceRepo` is the other repo a convert payload names, and it is in the same key list.
+    // Refused for the same reason and with the same code — asserted so the key is covered rather
+    // than merely declared.
+    let (source_status, source_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_convert",
+            "requestedGpu": "auto",
+            "payload": {
+                "modelId": "ltx_local",
+                "converter": "ltx_video",
+                "sourceRepo": "MiniMaxAI/MiniMax-H3",
+                "sourceFile": "ltx.safetensors",
+                "baseRepo": "Lightricks/LTX-Video",
+                "upscalerFile": "**",
+                "outputDir": output_dir.display().to_string(),
+            },
+        }),
+    )
+    .await;
+    assert_eq!(source_status, StatusCode::FORBIDDEN, "{source_body:?}");
+    assert_eq!(source_body["code"], "license_acknowledgment_required");
+
+    // Control: an unrestricted `baseRepo` still enqueues, so the gate is keyed on the repo and not
+    // on the job type being refused wholesale (which would break every real conversion).
+    let (plain_status, plain_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        convert_payload("Lightricks/LTX-Video", false),
+    )
+    .await;
+    assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
+
+    let (asserted_status, asserted_job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        convert_payload("MiniMaxAI/MiniMax-H3", true),
+    )
+    .await;
+    assert_eq!(asserted_status, StatusCode::CREATED, "{asserted_job:?}");
+    assert_eq!(asserted_job["payload"]["baseRepo"], "MiniMaxAI/MiniMax-H3");
+}
+
+/// `MiniMaxAI/MiniMax-H3.git` is the git-remote spelling of the same repository. It passes the
+/// worker's `validate_hf_repo_id`, so before the `.git` strip it missed the index and was answered
+/// 201 — the one spelling nothing on our side refused, leaving Hugging Face's own 401 as the only
+/// backstop. Exercised through the ROUTES rather than the private key helper, so the strip is
+/// pinned where it matters.
+#[tokio::test]
+async fn license_acknowledgment_is_not_bypassed_by_a_git_suffix() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for repo in [
+        "MiniMaxAI/MiniMax-H3.git",
+        "MiniMaxAI/MiniMax-H3.git/",
+        "MiniMaxAI/MiniMax-H3.GIT",
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            raw_model_download_job(repo),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{repo} -> {body:?}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+    }
+
+    // `/models/import` runs `validate_huggingface_repo` first, which splits on `/` and demands
+    // exactly two parts — so the trailing-slash spelling is refused THERE, with a 400 and no
+    // licence code, before the gate is reached. Asserted as the 400 it actually is rather than
+    // folded into the 403s above: both are refusals, but they are different refusals.
+    for repo in ["MiniMaxAI/MiniMax-H3.git", "MiniMaxAI/MiniMax-H3.GIT"] {
+        let (import_status, import_body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({ "repo": repo, "type": "video" }),
+        )
+        .await;
+        assert_eq!(
+            import_status,
+            StatusCode::FORBIDDEN,
+            "{repo} -> {import_body:?}"
+        );
+        assert_eq!(import_body["code"], "license_acknowledgment_required");
+    }
+    let (slashed_status, slashed_body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({ "repo": "MiniMaxAI/MiniMax-H3.git/", "type": "video" }),
+    )
+    .await;
+    assert_eq!(slashed_status, StatusCode::BAD_REQUEST, "{slashed_body:?}");
+    assert!(
+        slashed_body["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("owner/name form"),
+        "the earlier refusal is the repo-form validator, not the licence gate: {slashed_body:?}"
+    );
+
+    // The strip must not swallow a DIFFERENT repo that merely ends in a dotted segment.
+    let (plain_status, plain_job) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        raw_model_download_job("owner/plain.git"),
+    )
+    .await;
+    assert_eq!(
+        plain_status,
+        StatusCode::CREATED,
+        "an unrestricted repo is unaffected by the suffix strip: {plain_job:?}"
+    );
+}
+
+#[tokio::test]
+async fn license_acknowledgment_survives_a_typed_download_retry() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    write_license_acknowledgment_catalog(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/minimax_h3/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // The typed route stamps the assertion onto the job. Without this the repo-keyed gate would
+    // refuse the RETRY of a download the same server had just authorized.
+    assert_eq!(
+        job["payload"]["licenseAcknowledged"],
+        Value::Bool(true),
+        "the authorized download must record its acknowledgment: {job:?}",
+    );
+
+    // Retry re-validates the stored payload through the same raw-payload validator.
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (retry_status, retry_job) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        retry_status,
+        StatusCode::CREATED,
+        "an authorized download must stay retryable: {retry_job:?}",
+    );
+    assert_eq!(retry_job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+}
+
 /// Deleting a model must reconcile the resolved-model hot cache (sc-19710). Without this the
 /// entry survives its own source: automatic retention refuses to evict anything it cannot
 /// re-verify as a second copy, so an orphaned entry would be held forever rather than reclaimed.
@@ -5370,4 +7820,166 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
         .lookup_complete(&keys[1])
         .expect("sibling lookup succeeds")
         .is_some());
+}
+
+/// `POST /api/v1/models/import` accepts linked (in-place) ownership: an approved library root id
+/// plus a confined relative path (sc-20635, AC1/AC2).
+///
+/// This is the API half of the reachability chain — without it, `approve_root`/`compile_linked`
+/// have no caller and a linked checkpoint can never become a manifest entry. What it pins: both
+/// halves are required, the pair excludes the fetch sources, an unapproved root and a traversal
+/// path are refused BEFORE a job is queued, and an accepted request carries no install directory.
+#[tokio::test]
+async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    for name in [
+        "builtin.models.jsonc",
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+    ] {
+        let field = if name.ends_with("models.jsonc") {
+            "models"
+        } else {
+            "loras"
+        };
+        std::fs::write(
+            config_dir.join(name),
+            format!("{{ \"schemaVersion\": 1, \"{field}\": [] }}"),
+        )
+        .expect("manifest writes");
+    }
+
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let library = temp_dir.path().join("comfy-library");
+    std::fs::create_dir_all(library.join("checkpoints")).expect("library creates");
+    std::fs::write(
+        library.join("checkpoints/dit.safetensors"),
+        b"not-inspected-here",
+    )
+    .expect("checkpoint writes");
+    let library = std::fs::canonicalize(&library).expect("library canonicalizes");
+    let root = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+        .approve_root(&library)
+        .expect("root approves");
+
+    let app = create_app(settings).expect("app creates");
+
+    // Half a pair names no checkpoint.
+    for half in [
+        json!({ "linkedRootId": root.root_id, "type": "image" }),
+        json!({ "linkedRelativePath": "checkpoints/dit.safetensors", "type": "image" }),
+    ] {
+        let (status, body) = request(app.clone(), "POST", "/api/v1/models/import", half).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    }
+
+    // Linked ownership excludes the fetch sources: one import, one ownership mode.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": root.root_id,
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "sourceUrl": "https://example.com/models/custom.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+
+    // An unapproved root is refused before anything is queued.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": "root-0000000000000000",
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[checkpoint-plan:unknown-root]"),
+        "the typed refusal reaches the caller: {body:?}"
+    );
+
+    // Traversal, absolute and non-portable paths are refused by the SAME validator `compile_linked`
+    // applies, so the API and the store cannot disagree about what is confined (AC2).
+    for bad in [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "checkpoints/../../escape.safetensors",
+        "checkpoints\\dit.safetensors",
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "linkedRootId": root.root_id,
+                "linkedRelativePath": bad,
+                "type": "image"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?} -> {body:?}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("[checkpoint-plan:invalid-relative-path]"),
+            "{bad:?} -> {body:?}"
+        );
+    }
+
+    // The accepted request queues an import that carries the durable identity and NO install
+    // directory: a linked checkpoint is referenced in place, never copied.
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "linkedRootId": root.root_id,
+            "linkedRelativePath": "checkpoints/dit.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(job["type"], "model_import");
+    assert_eq!(job["payload"]["linkedRootId"], json!(root.root_id));
+    assert_eq!(
+        job["payload"]["linkedRelativePath"],
+        json!("checkpoints/dit.safetensors")
+    );
+    assert_eq!(
+        job["payload"]["targetDir"],
+        Value::Null,
+        "a linked import installs nothing, so it gets no install directory: {job:?}"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["source"]["provider"], json!("linked-library"));
+    assert_eq!(entry["source"]["rootId"], json!(root.root_id));
+    assert_eq!(
+        entry["paths"],
+        Value::Null,
+        "no install path is written for a linked entry: {entry:?}"
+    );
+    let serialized = serde_json::to_string(entry).expect("entry serializes");
+    assert!(
+        !serialized.contains(library.to_str().expect("utf-8 library path")),
+        "the queued entry must carry rootId + relativePath, never an absolute path: {serialized}"
+    );
 }

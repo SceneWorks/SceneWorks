@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
@@ -33,10 +34,30 @@ import {
 import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useHostMemory } from "../hooks/useHostMemory.js";
+import {
+  readLicenseAck,
+  requiresLicenseAcknowledgment,
+  writeLicenseAck,
+} from "../licenseAcknowledgment.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
 import { blanketFloorGb, suggestTier, tierFits } from "../tierSuggestion.js";
-import { safeExternalUrl } from "../urls.js";
+import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
+import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
+import {
+  describeRefusal,
+  fetchLibraryRoots,
+  linkedCorrection,
+  linkedStatusIndex,
+  modelLinkedStatus,
+  modelOwnership,
+  modelProvenance,
+  removalCopy,
+  rescanLibraryCheckpoint,
+  scanLibraryRoot,
+  updateLibraryRoot,
+} from "../checkpointLibrary.js";
+import { isDesktop, tauriInvoke } from "../runtime.js";
 
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
@@ -98,32 +119,35 @@ function formatTierSize(bytes) {
   return `${mb.toFixed(0)} MB`;
 }
 
-// MLX status text, keyed off the macOS catalog's mlxConversionState. Turnkey
-// ("ready") models fetch their MLX weights automatically on first generation;
-// convert-required models need the native checkpoint downloaded, then converted.
+// Conversion status text, keyed off the catalog's `mlxConversionState`. Turnkey ("ready") models
+// fetch their weights automatically on first generation; convert-required models need the native
+// checkpoint downloaded, then converted.
+//
+// DEVICE-NEUTRAL wording (sc-20529). These fields used to be emitted only on macOS, so the copy
+// named MLX outright. `apply_mac_and_mlx_fields` now also emits them on Windows/Linux for a
+// convert-at-install model whose converter has a real candle twin (`CANDLE_NATIVE_CONVERTERS` —
+// `flux2_klein_9b_true_v2` today), where "convert it to MLX" / "MLX weights installed" is simply
+// wrong: the candle converter writes a diffusers dir for CUDA. The conversion is the same user
+// action on both platforms, so the copy names the action rather than the backend and needs no
+// platform prop threaded through. The backend still shows up where it is accurate — the per-tier
+// panel and the MLX memory floor stay behind `macGatingActive`.
 function mlxStatusText(model) {
   switch (model.mlxConversionState) {
     case "ready":
       return model.mlxInstallState === "installed"
-        ? "MLX weights installed."
-        : "MLX weights download automatically on first generation.";
+        ? "Model weights installed."
+        : "Model weights download automatically on first generation.";
     case "needs_source":
-      return "Download the model first, then convert it to MLX.";
+      return "Download the model first, then convert it for this device.";
     case "needs_conversion":
-      return "Native checkpoint downloaded — ready to convert to MLX.";
+      return "Native checkpoint downloaded — ready to convert.";
     case "converted":
-      return "Converted to MLX and ready.";
+      return "Converted and ready.";
     default:
       return "";
   }
 }
 
-const MODEL_TYPE_OPTIONS = [
-  { value: "image", label: "Image" },
-  { value: "video", label: "Video" },
-  { value: "audio", label: "Audio" },
-  { value: "utility", label: "Utility" },
-];
 const MODEL_TAB_TYPES = [
   ["image", "Image Models"],
   ["video", "Video Models"],
@@ -142,34 +166,6 @@ const MODEL_TAB_TYPES = [
 // an accepted one queues a `model_import` job whose completion refetches the catalog and
 // surfaces the new `catalogScope:"user"` model (a Krea 2 base checkpoint today).
 const MODEL_IMPORT_ENABLED = true;
-
-// Capability descriptors shown as chips on each model card. With models now grouped
-// by `type`, the chips are what tell the user what a card actually does (plain
-// text-to-image vs editing vs character reference, etc.). Unknown keys fall back to
-// a humanized form so a new capability still reads sensibly without a code change.
-const CAPABILITY_LABELS = {
-  text_to_image: "Text to Image",
-  image_to_image: "Image to Image",
-  edit_image: "Image Edit",
-  character_image: "Character",
-  vqa: "Visual Q&A",
-  interleave: "Interleaved",
-  image_to_video: "Image to Video",
-  text_to_video: "Text to Video",
-  // sc-8445: Krea Realtime advertises text/image/video-to-video, and without this row its third
-  // chip fell to the humanized fallback ("video to video") — visibly out of style beside the two
-  // title-cased siblings on the same card.
-  video_to_video: "Video to Video",
-  first_last_frame: "First / Last Frame",
-  extend_clip: "Extend Clip",
-  video_bridge: "Video Bridge",
-  replace_person: "Replace Person",
-};
-const RETIRED_MODEL_CAPABILITIES = new Set(["style_variations"]);
-
-function capabilityLabel(capability) {
-  return CAPABILITY_LABELS[capability] ?? String(capability).replaceAll("_", " ");
-}
 
 // Audio capability chips (epic 13400 / sc-13406): audio-type models describe what they
 // do through the manifest `audio` sub-block rather than the generic `capabilities[]`, so
@@ -223,18 +219,6 @@ function loraGroupKey(lora) {
   return lora.family ?? extractFamilies(lora)[0] ?? "";
 }
 
-// The Hugging Face page of a gated model's primary download repo — where the user
-// clicks "Agree and access" to be granted access with their token (sc-5999). Derived
-// from the first HF download repo (or the mlx repo), so it covers every gated model
-// without a per-model manifest field. Falls back to `licenseUrl` when no repo is known.
-function gatedRepoUrl(model) {
-  const host = model.credentialHost || "huggingface.co";
-  const repo =
-    (model.downloads ?? []).find((entry) => entry.provider === "huggingface" && entry.repo)?.repo ??
-    model.mlx?.repo;
-  return repo ? `https://${host}/${repo}` : null;
-}
-
 // Per-model license acknowledgment (sc-7872). Gated models (FLUX.2 [dev],
 // SD3.5 Large/Turbo/Medium, …) carry a non-commercial / community license the
 // user must accept on Hugging Face before access is granted; we also require an
@@ -244,95 +228,13 @@ function gatedRepoUrl(model) {
 // it's a UX gate only — the server-side download still needs the HF credential +
 // granted access. localStorage may be unavailable (private mode, quota), so the
 // getters/setters swallow failures and default to "not acknowledged".
-const LICENSE_ACK_KEY_PREFIX = "sceneworks-license-ack:";
-
-function readLicenseAck(modelId) {
-  if (!modelId) {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem(`${LICENSE_ACK_KEY_PREFIX}${modelId}`) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function writeLicenseAck(modelId, acknowledged) {
-  if (!modelId) {
-    return;
-  }
-  try {
-    const key = `${LICENSE_ACK_KEY_PREFIX}${modelId}`;
-    if (acknowledged) {
-      window.localStorage.setItem(key, "true");
-    } else {
-      window.localStorage.removeItem(key);
-    }
-  } catch {
-    // localStorage unavailable — the ack just won't persist this session. The
-    // in-memory state still gates the download for the current view.
-  }
-}
-
-// Gated models (e.g. FLUX.1 [dev]) need an accepted license + a saved credential
-// before a download can succeed. The catalog flags these with `gated`/
-// `credentialHost`/`licenseUrl` (sc-1898). When the matching credential is already
-// present we soften the notice to a ready state; otherwise we point the user at the
-// Settings credential screen. `present` is undefined while presence is still
-// unknown (e.g. the credential list hasn't loaded) — we still show the link then.
-// `repoUrl` links the gated repo so the user can request access (sc-5999); shown
-// alongside `licenseUrl` only when the license lives on a different page (e.g.
-// Ideogram 4, whose terms are on the source repo but access is on the SceneWorks repo).
-// `acknowledged`/`onAcknowledgeChange` drive the in-app license-acknowledgment gate
-// (sc-7872): the download button stays disabled until the user checks the box.
-function GatedModelNotice({
-  host,
-  repoUrl,
-  licenseUrl,
-  present,
-  acknowledged,
-  onAcknowledgeChange,
-  onOpenSettings,
-}) {
-  const hostLabel = host || "the required service";
-  const safeRepoUrl = safeExternalUrl(repoUrl);
-  const safeLicenseUrl = safeExternalUrl(licenseUrl);
-  const showSeparateLicense = safeLicenseUrl && safeLicenseUrl !== safeRepoUrl;
-  return (
-    <div className={present ? "model-gated-notice ready" : "model-gated-notice"}>
-      <p className={present ? "inline-success" : "inline-warning"}>
-        {present
-          ? `Credential for ${hostLabel} saved — request access on the model page, then download.`
-          : `Gated download. Add a ${hostLabel} token, then request access on the model page and accept the license before downloading.`}
-      </p>
-      <div className="model-gated-actions">
-        {present ? null : (
-          <button type="button" onClick={onOpenSettings}>
-            Add token in Settings
-          </button>
-        )}
-        {safeRepoUrl ? (
-          <a href={safeRepoUrl} target="_blank" rel="noreferrer noopener">
-            Request access on Hugging Face
-          </a>
-        ) : null}
-        {showSeparateLicense ? (
-          <a href={safeLicenseUrl} target="_blank" rel="noreferrer noopener">
-            Review license
-          </a>
-        ) : null}
-      </div>
-      <label className="model-license-ack">
-        <input
-          type="checkbox"
-          checked={acknowledged}
-          onChange={(event) => onAcknowledgeChange(event.target.checked)}
-        />
-        <span>I have read and accept this model&rsquo;s license.</span>
-      </label>
-    </div>
-  );
-}
+// The predicate and the localStorage accessors moved to `../licenseAcknowledgment.js` (sc-17227):
+// this screen is only ONE of the surfaces that can start a download, and the gate is now enforced
+// at the shared choke point (`createModelDownloadJob`) plus server-side, with the same predicate.
+// See that module for why the acknowledgment is independent of the Hugging Face credential.
+// The MARKUP — the notice, `gatedRepoUrl`, the links and the checkbox — moved to
+// `../components/LicenseGateNotice.jsx` (sc-17137 review) once the Setup Wizard grew a second
+// copy of it; this screen renders the `"card"` variant of that one component.
 
 function referencedPresetNames(recipePresets, kind, id) {
   return recipePresets
@@ -648,6 +550,7 @@ export function ModelManagerScreen() {
   const {
     activeProject,
     jobs,
+    token = "",
     loras,
     models,
     jobAction,
@@ -722,19 +625,6 @@ export function ModelManagerScreen() {
   const [loraEditSuggestions, setLoraEditSuggestions] = useState([]);
   const [savingLora, setSavingLora] = useState(false);
   const [loraEditError, setLoraEditError] = useState("");
-  const [importingModel, setImportingModel] = useState(false);
-  const [modelImportMessage, setModelImportMessage] = useState({ tone: "neutral", text: "" });
-  // Point-at-file import (sc-14020) leads with the file picker; URL stays available via the
-  // segmented toggle. `type` defaults to image — the only importable base checkpoint today.
-  const [modelImportForm, setModelImportForm] = useState({
-    mode: "file",
-    sourceUrl: "",
-    file: null,
-    name: "",
-    type: "image",
-    family: "",
-  });
-  const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
   // Resolved-model hot cache (epic 19703, sc-19711). ONE status read backs every card's local-copy
@@ -743,6 +633,11 @@ export function ModelManagerScreen() {
   // whatever state the screen happened to open on. A settled cache costs exactly the one mount
   // read it always did, which is what keeps the per-row cost sc-19708 removed from coming back.
   const [modelCache, setModelCache] = useState(null);
+  // Linked-library state for the catalog rows (epic 20398, sc-20650). ONE scan per approved root,
+  // read on mount, indexed by checkpoint id. A card whose linked checkpoint is Needs Relink /
+  // Needs Rescan must show the corrective ACTION — the state comes from this seam and is never
+  // re-derived from a path, and the card must never render such a model as missing.
+  const [linkedStatuses, setLinkedStatuses] = useState(() => new Map());
   // Cache key of the entry whose keep/remove request is in flight, so its buttons disable.
   const [cacheBusyKey, setCacheBusyKey] = useState("");
   // Why the local-copy controls are absent, when they are. Held apart from `deleteMessage` so an
@@ -778,13 +673,15 @@ export function ModelManagerScreen() {
   const [pendingUpdate, setPendingUpdate] = useState({});
   // Gated-model credential presence (sc-1898): only fetched when the catalog has a
   // gated model, so non-gated deployments make no extra credential request.
-  const [credentials, setCredentials] = useState([]);
+  // `null` until the keychain is actually read: the import panel distinguishes "no credential" from
+  // "never looked", and starting at `[]` would flash "no credential is stored" before the answer.
+  const [credentials, setCredentials] = useState(null);
   // Per-model license acknowledgments (sc-7872), seeded from localStorage so a
   // returning user keeps prior accepts. Keyed by model id; toggling the gated
   // notice checkbox both updates this map and persists to localStorage.
   const [licenseAcks, setLicenseAcks] = useState(() =>
     models.reduce((acc, model) => {
-      if (model.gated && readLicenseAck(model.id)) {
+      if (requiresLicenseAcknowledgment(model) && readLicenseAck(model.id)) {
         acc[model.id] = true;
       }
       return acc;
@@ -805,7 +702,11 @@ export function ModelManagerScreen() {
     setLicenseAcks((current) => {
       let next = current;
       for (const model of models) {
-        if (model.gated && current[model.id] === undefined && readLicenseAck(model.id)) {
+        if (
+          requiresLicenseAcknowledgment(model) &&
+          current[model.id] === undefined &&
+          readLicenseAck(model.id)
+        ) {
           if (next === current) {
             next = { ...current };
           }
@@ -815,6 +716,10 @@ export function ModelManagerScreen() {
       return next;
     });
   }, [models]);
+  // Keyed on `gated` ALONE, not on the acknowledgment flag (sc-17227): this is what decides
+  // whether to make the `list_credentials` keychain call at all. A licence-acknowledgment model
+  // on a public repo has no credential to look up, and asking would be a pointless keychain
+  // call on a deployment whose catalog has no gated model.
   const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = useMemo(
     () => loras.filter((lora) => matchesFamily(lora, familyFilter)),
@@ -849,8 +754,12 @@ export function ModelManagerScreen() {
     );
   }, [importForm.family]);
 
+  // The import panel's managed pane offers civitai.com and Hugging Face sources on EVERY catalog,
+  // gated or not, and it has to say whether a credential for the chosen host is stored. Keying this
+  // read on `hasGatedModel` alone made the panel report "no credential is stored" on an ordinary
+  // catalog even when one was — so the read also runs whenever the panel is mounted.
   useEffect(() => {
-    if (!hasGatedModel) {
+    if (!hasGatedModel && !MODEL_IMPORT_ENABLED) {
       return undefined;
     }
     let cancelled = false;
@@ -930,12 +839,21 @@ export function ModelManagerScreen() {
     refreshModelCache();
   }, [refreshModelCache]);
 
-  // Bounded convergence refresh. It runs ONLY while the snapshot actually holds an entry the store
-  // is still moving (queued, copying, being removed) and stops the moment every entry is terminal,
-  // so an all-settled cache is read exactly once. `stalled` is the honest end of the bound: still
-  // in flight, but nothing is re-reading any more, which the card has to say rather than leave a
-  // "checking…" line that has quietly stopped meaning anything.
-  const { stalled: cacheConvergenceStalled } = useCacheConvergence(modelCache, refreshModelCache);
+  // The cache endpoint is also the cross-platform source of truth for whether this feature is on.
+  // Keep every local-copy surface hidden until the policy is both known and explicitly enabled:
+  // the feature is off by default, and an unavailable status read must not make an opt-in feature
+  // appear enabled. A disabled cache can still contain entries left from an earlier session, but
+  // those should not advertise an opt-in feature across every model card.
+  const localCopiesEnabled = modelCache?.policy?.enabled === true;
+
+  // Bounded convergence refresh. It runs ONLY while the enabled cache snapshot actually holds an
+  // entry the store is still moving (queued, copying, being removed) and stops the moment every
+  // entry is terminal, so an all-settled cache is read exactly once. A disabled cache never arms a
+  // hidden polling loop for old entries that may remain on disk.
+  const { stalled: cacheConvergenceStalled } = useCacheConvergence(
+    localCopiesEnabled ? modelCache : null,
+    refreshModelCache,
+  );
 
   // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
   // status afterwards rather than optimistically flipping the row: the UI must not claim a state
@@ -1075,59 +993,32 @@ export function ModelManagerScreen() {
     }
   }
 
-  async function importModel(event) {
-    event.preventDefault();
-    const isFileImport = modelImportForm.mode === "file";
-    if ((!isFileImport && !modelImportForm.sourceUrl.trim()) || (isFileImport && !modelImportForm.file) || !onImportModel) {
-      return;
-    }
-    setImportingModel(true);
-    setModelImportMessage({
-      tone: "neutral",
-      text: isFileImport ? "Uploading model file before queueing import." : "",
-    });
-    try {
-      const familyOverride = modelImportForm.family ? { family: modelImportForm.family } : {};
-      const job = await onImportModel({
-        ...(isFileImport ? { file: modelImportForm.file } : { sourceUrl: modelImportForm.sourceUrl.trim() }),
-        name: modelImportForm.name.trim() || undefined,
-        // Send the model type under `type` — the literal field name the backend's multipart parser
-        // reads (models.rs `model_import_request_from_multipart`) and that JSON deserialization
-        // accepts via `#[serde(alias = "type")]` on `ModelImportRequest`. Keying this `modelType`
-        // was silently dropped on file uploads (multipart has no serde aliasing), defaulting every
-        // imported checkpoint to `image` regardless of selection (sc-14020).
-        type: modelImportForm.type,
-        ...familyOverride,
-      });
-      const modelId = job?.payload?.modelId;
-      const resolvedFamily = job?.payload?.manifestEntry?.family;
-      const detectionNote =
-        !modelImportForm.family && resolvedFamily
-          ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`
-          : "";
-      setModelImportForm((current) => ({ ...current, sourceUrl: "", file: null, name: "" }));
-      setModelFileInputKey((current) => current + 1);
-      setModelImportMessage({
-        tone: "success",
-        text: `${modelId ? `Model import queued for ${modelId}.` : "Model import queued."}${detectionNote}`,
-      });
-    } catch (err) {
-      setModelImportMessage({ tone: "error", text: err.message });
-    } finally {
-      setImportingModel(false);
-    }
-  }
-
   async function deleteModel(model) {
     if (!onDeleteModel || model.removable === false) {
       return;
     }
+    // Ownership-aware confirmation (epic 20398, sc-20650). A LINKED model's bytes are the user's
+    // own library copy, which this route never owned and never touches; a MANAGED model's bytes
+    // were copied into SceneWorks' storage and really do go away. Those are opposite promises, so
+    // they get opposite words — showing the managed warning over a linked entry would frighten a
+    // user out of a safe removal, and the reverse would lose them files.
+    //
+    // Only a PLAN-BACKED row has a known ownership. A built-in catalog entry, or any row imported
+    // before this epic, keeps the pre-epic sentence: it is the accurate one for a delete whose
+    // teardown is the built-in-identity-preserving sweep, and guessing "managed" over it would
+    // overstate what the delete does.
+    const ownership = modelOwnership(model);
+    const legacyMessage = deleteConfirmation("model", model, recipePresets);
+    const ownershipCopy = ownership ? removalCopy(model) : null;
+    const presetNote = legacyMessage
+      .split("\n\n")
+      .filter((line) => line.startsWith("Referenced by presets:") || line.startsWith("Those presets"));
     // Desktop-safe confirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
     if (
       !(await appConfirm({
-        title: "Delete model?",
-        message: deleteConfirmation("model", model, recipePresets),
-        confirmLabel: "Delete",
+        title: ownershipCopy?.title ?? "Delete model?",
+        message: ownershipCopy ? [ownershipCopy.message, ...presetNote].join("\n\n") : legacyMessage,
+        confirmLabel: ownershipCopy?.confirmLabel ?? "Delete",
         cancelLabel: "Cancel",
         tone: "danger",
       }))
@@ -1237,11 +1128,8 @@ export function ModelManagerScreen() {
   const pendingLoraImportJobs = jobs.filter((job) => job.type === "lora_import" && !isSupersededLoraImport(job, completedImportTimes));
   const localLoraImportJobs = pendingLoraImportJobs.filter((job) => job.status !== "completed" && matchesFamily(job, familyFilter));
   const pendingModelImportJobs = jobs.filter((job) => job.type === "model_import" && job.status !== "completed");
-  const isModelFileImport = modelImportForm.mode === "file";
-  const modelImportDisabled =
-    importingModel ||
-    !onImportModel ||
-    (isModelFileImport ? !modelImportForm.file : !modelImportForm.sourceUrl.trim());
+  // Completed imports, for the duplicate-checkpoint warning the job result carries (sc-20650).
+  const completedModelImportJobs = jobs.filter((job) => job.type === "model_import" && job.status === "completed");
   const hiddenImportCount =
     familyFilter === "all" ? 0 : pendingLoraImportJobs.filter((job) => job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
   const isFileImport = importForm.mode === "file";
@@ -1271,6 +1159,88 @@ export function ModelManagerScreen() {
   const loraGroups = [...loraGroupMap.entries()]
     .sort(([a], [b]) => (a === "compatible" ? 1 : b === "compatible" ? -1 : a.localeCompare(b)))
     .map(([family, items]) => ({ family, items }));
+
+  // Re-read every approved root's scan. Called after a relink or a rescan so the card's verdict is
+  // the seam's fresh answer rather than an optimistic local flip.
+  const refreshLinkedStatuses = useCallback(async () => {
+    try {
+      const response = await fetchLibraryRoots(token);
+      const roots = Array.isArray(response?.roots) ? response.roots : [];
+      if (roots.length === 0) {
+        setLinkedStatuses(new Map());
+        return;
+      }
+      const scans = await Promise.all(roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)));
+      setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
+    } catch {
+      // See the mount effect: an enrichment read, silent by design.
+    }
+  }, [token]);
+
+  // The two corrective actions a non-Ready linked card offers. Both surface the store's own typed
+  // refusal on failure — `describeRefusal` has no generic branch, so a rejection the user has to
+  // act on can never arrive as "something went wrong".
+  async function relinkLinkedModel(status) {
+    const picked = isDesktop ? await tauriInvoke("choose_folder").catch(() => null) : null;
+    if (!picked) {
+      setDeleteMessage({
+        tone: "error",
+        text: isDesktop
+          ? "Choose the folder this library lives in now."
+          : "Relinking a library names a folder on the host, so it has to be done from SceneWorks on that machine.",
+      });
+      return;
+    }
+    setDeletingItem(`relink:${status.checkpointId}`);
+    try {
+      await updateLibraryRoot(token, status.rootId, { path: String(picked) });
+      await refreshLinkedStatuses();
+      setDeleteMessage({ tone: "success", text: "Library relinked. Its models are selectable again." });
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
+  async function rescanLinkedModel(status) {
+    setDeletingItem(`rescan:${status.checkpointId}`);
+    try {
+      const next = await rescanLibraryCheckpoint(token, status.rootId, status.relativePath);
+      await refreshLinkedStatuses();
+      setDeleteMessage(
+        next?.state === "ready"
+          ? { tone: "success", text: `${status.relativePath} is usable again.` }
+          : { tone: "error", text: next?.detail || `${status.relativePath} still cannot be used.` },
+      );
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: describeRefusal(error).message });
+    } finally {
+      setDeletingItem("");
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetchLibraryRoots(token);
+        const roots = Array.isArray(response?.roots) ? response.roots : [];
+        if (roots.length === 0 || cancelled) return;
+        const scans = await Promise.all(
+          roots.map((root) => scanLibraryRoot(token, root.rootId).catch(() => null)),
+        );
+        if (!cancelled) setLinkedStatuses(linkedStatusIndex(scans.filter(Boolean)));
+      } catch {
+        // A deployment with no linked libraries answers here; the cards simply keep their ordinary
+        // install-state rendering. Deliberately silent: this is an enrichment read, and a banner
+        // for it would fire on every install that has never used a linked library.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   function renderModelCard(model) {
     const downloadJobs = downloadJobsFor(model);
@@ -1303,38 +1273,92 @@ export function ModelManagerScreen() {
     const showConvertButton = mlxState === "needs_conversion" || mlxState === "converted";
     const gated = Boolean(model.gated);
     const credentialPresent = gated && hasPresentCredential(credentials, model.credentialHost);
-    // License-acknowledgment gate (sc-7872): an uninstalled gated model can't be
-    // downloaded until the user accepts its license in-app. Already-installed
-    // gated models (no notice shown) are never blocked.
-    const licenseAcknowledged = licenseAcks[model.id] === true;
-    const licenseAckRequired = gated && !installed && !licenseAcknowledged;
     // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
     // + multi-select instead of the single Download button. Single-variant models are unchanged.
-    const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
+    const matrixVariants = orderedMatrixVariants(model);
+    const hasTierMatrix = model.hasVariantMatrix === true && matrixVariants.length > 0;
+    // License-acknowledgment gate (sc-7872, decoupled from the credential by sc-17227): a model
+    // whose licence must be acknowledged can't be downloaded until the user accepts it in-app.
+    // The requirement comes from `gated` OR the standalone `requiresLicenseAcknowledgment` — the
+    // latter covers a public repo whose licence still binds the user (MiniMax-H3).
+    //
+    // The predicate follows the DOWNLOAD CONTROLS, and is derived from the same conditions that
+    // decide whether any of them render — deliberately, because deriving it independently is how
+    // this went wrong: `!installed || updateAvailable` read "installed" as "nothing left to
+    // download", which is FALSE for a quant matrix. `install_state_for` (apps/rust-api/src/models.rs)
+    // marks a matrix model installed when ANY tier is present, so a MiniMax-H3 with q4 installed and
+    // q8/bf16 missing reported `installed: true`, `updateAvailable: false` — no notice, no
+    // checkbox — while the tier panel still offered bf16 and q8 and the choke point
+    // (`licenseAcknowledgmentBlocked`) still refused the click, telling the user to accept a licence
+    // on a card that rendered nothing to accept. Unrecoverable through the UI, and hit on every
+    // desktop relaunch, where localStorage does not survive.
+    //
+    // Each disjunct is a control that can start a download:
+    //   !installed           → the footer Download button
+    //   incomplete           → the footer Fix button (a torn cache re-fetches)
+    //   updateAvailable      → the Update button (MLX block and footer); also the `breaking_update`
+    //                          shape, which reports installed:false + updateAvailable:true
+    //   an uninstalled tier  → the tier panel's checkboxes + its Download button
+    // An installed model with none of those shows no notice: the acknowledgment is a pre-download
+    // step, and re-blocking a finished install would be noise.
+    const licenseGated = requiresLicenseAcknowledgment(model);
+    const downloadOnOffer =
+      !installed ||
+      incomplete ||
+      model.updateAvailable === true ||
+      (hasTierMatrix && matrixVariants.some((variant) => variant.installState !== "installed"));
+    const licenseGateApplies = licenseGated && downloadOnOffer;
+    const licenseAcknowledged = licenseAcks[model.id] === true;
+    const licenseAckRequired = licenseGateApplies && !licenseAcknowledged;
     const firstCapability = capabilities.length ? capabilityLabel(capabilities[0]) : null;
     const familyMeta = [model.family ?? "unassociated", firstCapability].filter(Boolean).join(" · ");
     const macBlock = macModelBlock(model, macCapabilities);
     // Header install-status badge: warn tones for an incomplete cache, accent for installed,
     // neutral for missing.
-    const statusClass = incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge";
-    const statusText = incomplete ? "incomplete" : installed ? "installed" : "missing";
+    // A linked checkpoint whose library is detached, or whose file drifted, is NOT missing: the
+    // plans are intact and there is exactly one button to press (AC2, epic 20398). Rendering it as
+    // "missing" invites the user to re-download bytes they already own.
+    const linkedStatus = modelLinkedStatus(model, linkedStatuses);
+    const linkedFix = linkedCorrection(linkedStatus);
+    const provenance = modelProvenance(model);
+    const statusClass = linkedFix
+      ? "status-badge warning"
+      : incomplete
+        ? "status-badge warning"
+        : installed
+          ? "status-badge installed"
+          : "status-badge";
+    const statusText = linkedFix
+      ? linkedFix.headline.toLowerCase()
+      : incomplete
+        ? "incomplete"
+        : installed
+          ? "installed"
+          : "missing";
     // Where this model's files actually resolve from, straight off the typed judgement the one
     // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
     // discipline is the whole reason a second, drifting availability opinion can't exist.
-    const availability = availabilityBadge(model);
+    // `local_ready` is itself local-copy messaging, so suppress even a stale catalog judgement
+    // until the current cache policy is known to be enabled. The other availability badges still
+    // matter with caching off (for example, that the external library is disconnected).
+    const availability =
+      model.modelAvailability === "local_ready" && !localCopiesEnabled
+        ? null
+        : availabilityBadge(model);
     // How much of this model a local copy could ever serve, straight off the backend's typed
     // `cacheEligibility` (sc-19712 F-5). Null for a fully cacheable model and for a row with no
     // external requirement closure; a badge whenever the local-copy affordance would over-promise.
-    const cacheCoverage = cacheEligibilityBadge(model);
+    const cacheCoverage = localCopiesEnabled ? cacheEligibilityBadge(model) : null;
     // Local copies of THIS model, joined by the backend.
-    const localCopies = entriesForModel(modelCache, model.id);
+    const localCopies = localCopiesEnabled ? entriesForModel(modelCache, model.id) : [];
     // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
     // status read failed outright, and a returned snapshot carries `error` when the store exists
     // but could not be listed — in both cases the entry list is empty for want of an answer, not
     // because there are no copies. Gating on `cacheKnown` is what stops "No local copy yet." from
     // being rendered as a confident claim over a read that never succeeded.
     const cacheKnown = Boolean(modelCache) && !modelCache.error;
-    const showLocalCopySection = cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
+    const showLocalCopySection =
+      localCopiesEnabled && cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
     return (
       <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
         <div className="model-card-head">
@@ -1374,7 +1398,38 @@ export function ModelManagerScreen() {
           </span>
         </div>
         {isRecommendedModel(model) ? <span className="model-card-rec-chip">★ Recommended</span> : null}
+        {/* Licence-required UI attribution (sc-17227). Some upstream licences oblige the product
+            to display a specific string prominently — MiniMax H3 Community License §IV.2 requires
+            "MiniMax H3" on the user interface. Its own line above the description, not folded into
+            prose, so it is legible as attribution rather than marketing copy. */}
+        {model.ui?.attribution ? (
+          <p className="model-card-attribution">{model.ui.attribution}</p>
+        ) : null}
         <p className="model-card-description">{model.ui?.description ?? model.family ?? model.id}</p>
+        {provenance ? (
+          <p className="model-card-provenance">
+            Source: {provenance.label}
+            {provenance.reference ? ` · ${provenance.reference}` : ""}
+          </p>
+        ) : null}
+        {linkedFix ? (
+          <div
+            aria-label={`${model.name ?? model.id} ${linkedFix.headline}`}
+            className="model-card-linked-fix"
+            role="group"
+          >
+            <p className="checkpoint-state-headline">{linkedFix.headline}</p>
+            <p>{linkedFix.summary}</p>
+            {linkedFix.detail ? <p className="checkpoint-import-detail">{linkedFix.detail}</p> : null}
+            <button
+              disabled={deletingItem === `relink:${linkedStatus.checkpointId}` || deletingItem === `rescan:${linkedStatus.checkpointId}`}
+              onClick={() => (linkedFix.action === "relink" ? relinkLinkedModel(linkedStatus) : rescanLinkedModel(linkedStatus))}
+              type="button"
+            >
+              {linkedFix.label}
+            </button>
+          </div>
+        ) : null}
         {capabilities.length ? (
           <ul className="model-capabilities">
             {capabilities.map((capability) => (
@@ -1393,11 +1448,13 @@ export function ModelManagerScreen() {
             ))}
           </ul>
         ) : null}
-        {!cleanupOnly && gated && !installed ? (
-          <GatedModelNotice
+        {!cleanupOnly && licenseGateApplies ? (
+          <LicenseGateNotice
+            credentialRequired={gated}
             host={model.credentialHost}
-            repoUrl={gatedRepoUrl(model) ?? model.licenseUrl ?? null}
+            repoUrl={gated ? (gatedRepoUrl(model) ?? model.licenseUrl ?? null) : null}
             licenseUrl={model.licenseUrl}
+            licenseNotice={model.licenseNotice}
             present={credentialPresent}
             acknowledged={licenseAcknowledged}
             onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
@@ -1427,7 +1484,9 @@ export function ModelManagerScreen() {
         {!cleanupOnly && mlxState ? (
           <div className="mlx-status">
             <div className="mlx-status-badges">
-              <span className="status-badge">MLX</span>
+              {/* sc-20529: device-neutral, like `mlxStatusText`. This block renders off-Mac too
+                  now (the candle convert lane), where an "MLX" chip mislabels a CUDA artifact. */}
+              <span className="status-badge">Conversion</span>
               {/* The model-level `mlx.minMemoryGb` is a single blanket floor = the HEAVIEST tier's
                   worst case (e.g. Wan A14B bf16, both MoE experts dense = 133 GB). Showing it
                   tier-agnostically over-warns quant-matrix models whose default/installed tier is q4
@@ -1449,16 +1508,18 @@ export function ModelManagerScreen() {
             {model.updateAvailable ? (
               <>
                 <p className="inline-warning">
-                  A newer checkpoint is available. Update re-downloads it and re-converts to MLX.
+                  A newer checkpoint is available. Update re-downloads it and re-converts it.
                 </p>
                 <button
                   disabled={
                     Boolean(downloadJob) ||
                     Boolean(convertJob) ||
                     Boolean(pendingUpdate[model.id]) ||
-                    !mlxEnoughMemory
+                    !mlxEnoughMemory ||
+                    licenseAckRequired
                   }
                   onClick={() => handleUpdateModel(model)}
+                  title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
                   type="button"
                 >
                   {convertJob
@@ -1477,10 +1538,10 @@ export function ModelManagerScreen() {
                 {convertJob
                   ? convertJob.status
                   : mlxState === "converted"
-                    ? "MLX ready"
+                    ? "Converted"
                     : failedConvert
-                      ? "Retry MLX Conversion"
-                      : "Convert to MLX"}
+                      ? "Retry Conversion"
+                      : "Convert"}
               </button>
             ) : null}
           </div>
@@ -1942,127 +2003,25 @@ export function ModelManagerScreen() {
       return null;
     }
     return (
-      <section className="model-import-panel-section">
-        {MODEL_IMPORT_ENABLED && (
-          <form className="models-accent-band models-import-panel" aria-label="Import model" onSubmit={importModel}>
-            <div className="models-accent-band-head">
-              <span className="models-accent-dot" aria-hidden="true" />
-              <p className="eyebrow">Import model</p>
-              <span className="models-accent-band-caption">
-                Point at a base checkpoint file — auto-detects family (Krea 2 today)
-              </span>
-            </div>
-            <div className="segmented-control compact-segment" aria-label="Model import source">
-              <button
-                className={modelImportForm.mode === "url" ? "active" : ""}
-                disabled={importingModel}
-                onClick={() => setModelImportForm((current) => ({ ...current, mode: "url" }))}
-                type="button"
-              >
-                URL
-              </button>
-              <button
-                className={modelImportForm.mode === "file" ? "active" : ""}
-                disabled={importingModel}
-                onClick={() => setModelImportForm((current) => ({ ...current, mode: "file" }))}
-                type="button"
-              >
-                Upload
-              </button>
-            </div>
-            <div className="models-import-grid">
-              <label>
-                Type
-                {/* Base-checkpoint import only produces image models today (a Krea 2 DiT).
-                    `queue_model_import_job` (models.rs) writes this type verbatim into the
-                    user manifest and never reconciles it against the detected family, so
-                    offering video/audio/utility here would let an image checkpoint be
-                    mis-typed. Constrain to Image (disabled) until more base-checkpoint types
-                    are importable, then drop the image-only filter to restore the full
-                    MODEL_TYPE_OPTIONS selector (sc-14020). */}
-                <select disabled value={modelImportForm.type} aria-readonly="true">
-                  {MODEL_TYPE_OPTIONS.filter((option) => option.value === "image").map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Family
-                <select
-                  disabled={importingModel || !families.length}
-                  onChange={(event) => setModelImportForm((current) => ({ ...current, family: event.target.value }))}
-                  value={modelImportForm.family}
-                >
-                  {families.length ? (
-                    <>
-                      <option value="">Auto-detect</option>
-                      {families.map((family) => (
-                        <option key={family} value={family}>
-                          {family}
-                        </option>
-                      ))}
-                    </>
-                  ) : (
-                    <option value="">No known families</option>
-                  )}
-                </select>
-              </label>
-              {isModelFileImport ? (
-                <label>
-                  Model File
-                  <span className="file-picker-row">
-                    <span className="file-upload-button">
-                      Choose
-                      <input
-                        accept=".safetensors,.ckpt,.pt,.bin"
-                        disabled={importingModel}
-                        key={modelFileInputKey}
-                        onChange={(event) => setModelImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                        type="file"
-                      />
-                    </span>
-                    <span className="selected-file-name">{modelImportForm.file?.name ?? "No file selected"}</span>
-                  </span>
-                </label>
-              ) : (
-                <label>
-                  Source URL
-                  <input
-                    disabled={importingModel}
-                    onChange={(event) => setModelImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                    placeholder="https://..."
-                    value={modelImportForm.sourceUrl}
-                  />
-                </label>
-              )}
-              <label>
-                Name
-                <input
-                  disabled={importingModel}
-                  onChange={(event) => setModelImportForm((current) => ({ ...current, name: event.target.value }))}
-                  placeholder="Optional"
-                  value={modelImportForm.name}
-                />
-              </label>
-              <button disabled={modelImportDisabled} type="submit">
-                {importingModel ? (isModelFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
-              </button>
-            </div>
-            {modelImportMessage.text ? <p className={modelImportMessage.tone === "success" ? "inline-success" : "inline-warning"}>{modelImportMessage.text}</p> : null}
-          </form>
-        )}
-        {pendingModelImportJobs.length ? (
-          <div className="lora-import-progress">
-            <strong>Model imports in progress</strong>
-            <div className="local-job-stack">
-              {pendingModelImportJobs.map((job) => (
-                <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-              ))}
-            </div>
-          </div>
-        ) : null}
+      <section className="model-import-panel-section models-accent-band">
+        <CheckpointImportPanel
+          completedJobs={completedModelImportJobs}
+          credentials={credentials}
+          families={families}
+          macCapabilities={macCapabilities}
+          models={models}
+          onCancelJob={onCancelJob}
+          onImportModel={onImportModel}
+          onOpenQueue={onOpenQueue}
+          // Relink / forget / rescan from inside the panel change the SAME linked statuses the
+          // catalog cards render; without this the cards keep saying "Needs relink" after the
+          // panel has already fixed it.
+          onOpenSettings={() => setActiveView("Settings")}
+          onRefreshCatalog={refreshLinkedStatuses}
+          onRetryJob={(job, payload) => onResumeDownloadJob(job, payload)}
+          pendingJobs={pendingModelImportJobs}
+          token={token}
+        />
       </section>
     );
   }
@@ -2190,7 +2149,7 @@ export function ModelManagerScreen() {
       {/* Stated once for the whole screen, because the read that failed was one read for the whole
           screen. Says what is unavailable and why, without implying anything about what is or is
           not cached — that is precisely what could not be determined. */}
-      {cacheError ? (
+      {localCopiesEnabled && cacheError ? (
         <p className="inline-warning">
           Local model copies can’t be shown right now, so their controls are hidden: {cacheError}
         </p>

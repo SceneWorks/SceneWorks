@@ -7,10 +7,11 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751"
+      "inferenceRevision": "6d8be650d34d53b7539cb55c8dee862bd0863960",
+      "audioInferenceRevision": "1caa6863673c0a6be33115506b059e25238d2011"
     },
     "mlx": {
-      "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751"
+      "inferenceRevision": "1caa6863673c0a6be33115506b059e25238d2011"
     }
   },
   "models": {
@@ -34,15 +35,15 @@
       "mlx": false
     },
     "boogu_image": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_edit": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_turbo": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "chatterbox_tts": {

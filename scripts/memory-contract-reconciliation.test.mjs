@@ -385,6 +385,9 @@ test("survey and engine scope mismatches carry exact coordinates in both directi
       overlay: "none",
       rung: "bounded_transformer_residency",
       selectorDigest: contractValue.selectorDigest,
+      // sc-21505: the survey names every axis here, so the over-claim is an assertion it made
+      // outright rather than a wildcard expansion. `memory-contract-triage.mjs` reads this.
+      cause: "survey_scope_overclaims",
     }],
   );
 
@@ -404,14 +407,21 @@ test("survey and engine scope mismatches carry exact coordinates in both directi
       overlay: "none",
       rung: "bounded_transformer_residency",
       selectorDigest: missingSurvey.engineFacts[1].memoryContracts[0].selectorDigest,
+      cause: "survey_scope_underclaims",
     }],
   );
 });
 
-test("pin and duplicate-provider failures are mutation-proven", () => {
+test("independent valid revision labels do not invalidate capability content", () => {
+  const input = fixture();
+  input.engineFacts[0].generatedFrom.inferenceRevision = "f".repeat(40);
+  assert.equal(reconcileMemoryContracts(input).mismatches, 0);
+});
+
+test("malformed revisions and duplicate-provider failures are mutation-proven", () => {
   rejectsStructurally(
-    (input) => input.engineFacts[0].generatedFrom.inferenceRevision = "f".repeat(40),
-    /Cargo pins/,
+    (input) => input.engineFacts[0].generatedFrom.inferenceRevision = "not-a-sha",
+    /no valid inference revision/,
   );
   rejectsStructurally(
     (input) => input.engineFacts[0].memoryContracts.push(structuredClone(input.engineFacts[0].memoryContracts[0])),

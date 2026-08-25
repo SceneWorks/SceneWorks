@@ -298,6 +298,28 @@ pub(super) fn bernini_engine_video_mode(mode: &str) -> &'static str {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn validate_r2v_reference_ids(request: &VideoRequest) -> WorkerResult<()> {
+    let count = request.reference_asset_ids.len();
+    if !(1..=8).contains(&count) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "bernini {} requires 1-8 reference images, got {count}",
+            request.mode.replace('_', " ")
+        )));
+    }
+    let unique: std::collections::BTreeSet<_> = request.reference_asset_ids.iter().collect();
+    if unique.len() != count {
+        return Err(WorkerError::InvalidPayload(
+            "bernini reference images must be distinct and preserve their submitted order"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve the source media for a Bernini editing/reference request into the planner conditioning:
 /// source clips → [`Conditioning::VideoClip`] (the edit structure, VAE/ViT-encoded by the engine)
 /// and subject reference images → [`Conditioning::MultiReference`]. `text_to_video` needs none.
@@ -379,12 +401,7 @@ pub(super) async fn resolve_bernini_conditioning(
         "reference_to_video" | "reference_video_to_video" | "ads2v"
     );
     if needs_refs {
-        if request.reference_asset_ids.is_empty() {
-            return Err(WorkerError::InvalidPayload(format!(
-                "bernini {} requires at least one reference image (referenceAssetIds).",
-                request.mode.replace('_', " ")
-            )));
-        }
+        validate_r2v_reference_ids(request)?;
         let mut images = Vec::with_capacity(request.reference_asset_ids.len());
         for asset_id in &request.reference_asset_ids {
             images.push(load_reference_image(
@@ -552,12 +569,7 @@ async fn resolve_candle_bernini_conditioning(
         "reference_to_video" | "reference_video_to_video" | "ads2v"
     );
     if needs_refs {
-        if request.reference_asset_ids.is_empty() {
-            return Err(WorkerError::InvalidPayload(format!(
-                "bernini {} requires at least one reference image (referenceAssetIds).",
-                request.mode.replace('_', " ")
-            )));
-        }
+        validate_r2v_reference_ids(request)?;
         let mut images = Vec::with_capacity(request.reference_asset_ids.len());
         for asset_id in &request.reference_asset_ids {
             images.push(crate::image_jobs::load_reference_image(

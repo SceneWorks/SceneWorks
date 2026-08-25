@@ -1,0 +1,477 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/epic-20738-terminal-receipt-v1.json",
+  "title": "Epic 20738 CUDA terminal evidence receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "profile", "cell", "status", "error", "repositories", "artifacts", "execution", "hardware", "cleanup", "authorityLifecycle", "inputs", "outputs", "logs", "startedAt", "completedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "profile": { "const": "epic-20738-candle-cuda-terminal-v1" },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ordinal", "modelId", "engineId", "kind", "requestedTier", "resolvedTier", "denseFallback", "loadSpecQuantBits"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "modelId": { "type": "string", "minLength": 1 },
+        "engineId": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["image", "scail2", "ltx", "sdxlOpenPose"] },
+        "requestedTier": { "enum": ["q4", "q8"] },
+        "resolvedTier": { "enum": ["q4", "q8"] },
+        "denseFallback": { "const": false },
+        "loadSpecQuantBits": { "enum": [null, 4, 8] },
+        "referenceCounterfactuals": { "$ref": "#/$defs/scail2ReferenceCounterfactuals" },
+        "controlCounterfactual": { "$ref": "#/$defs/openPoseControlCounterfactual" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "sdxlOpenPose" } }, "required": ["kind"] },
+          "then": {
+            "properties": { "loadSpecQuantBits": { "const": 4 } }
+          },
+          "else": {
+            "if": { "properties": { "kind": { "const": "scail2" } }, "required": ["kind"] },
+            "then": {
+              "if": { "properties": { "requestedTier": { "const": "q4" } }, "required": ["requestedTier"] },
+              "then": { "properties": { "loadSpecQuantBits": { "const": 4 } } },
+              "else": { "properties": { "loadSpecQuantBits": { "const": 8 } } }
+            },
+            "else": { "properties": { "loadSpecQuantBits": { "const": null } } }
+          }
+        }
+      ]
+    },
+    "status": { "enum": ["passed", "failed"] },
+    "error": { "type": ["string", "null"] },
+    "repositories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sceneworks", "inference"],
+      "properties": {
+        "sceneworks": { "$ref": "#/$defs/repository" },
+        "inference": { "$ref": "#/$defs/repository" }
+      }
+    },
+    "artifacts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/artifact" } },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "runAttempt", "headSha", "headRef", "workflow", "runnerName", "runnerOs", "runnerArch"],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1 },
+        "runAttempt": { "type": "string", "minLength": 1 },
+        "headSha": { "$ref": "#/$defs/sha40" },
+        "headRef": { "type": "string" },
+        "workflow": { "type": "string", "minLength": 1 },
+        "runnerName": { "type": "string", "minLength": 1 },
+        "runnerOs": { "type": "string", "minLength": 1 },
+        "runnerArch": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpuIdentity", "systemMemory", "cudaComputeCap", "cudaVisibleDevices", "rawVramSamples"],
+      "properties": {
+        "gpuIdentity": { "type": "array", "items": { "$ref": "#/$defs/gpuIdentity" } },
+        "systemMemory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["totalBytes", "availableBytesAtStart"],
+          "properties": {
+            "totalBytes": { "type": "integer", "minimum": 1 },
+            "availableBytesAtStart": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "cudaComputeCap": { "type": "string" },
+        "cudaVisibleDevices": { "type": "string" },
+        "rawVramSamples": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/gpuSample" } }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "completed", "error"],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "completed": { "type": "boolean" },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "authorityLifecycle": { "$ref": "#/$defs/authorityLifecycle" },
+    "inputs": { "type": "array", "items": { "$ref": "#/$defs/hashedFile" } },
+    "outputs": { "type": "array", "items": { "$ref": "#/$defs/hashedFile" } },
+    "logs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/hashedFile" } },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "status": { "const": "passed" } }, "required": ["status"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "error": { "const": null },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "selectedRoot": { "type": "string", "minLength": 1 },
+                "inventory": {
+                  "type": "object",
+                  "properties": {
+                    "complete": { "const": true },
+                    "sha256": { "$ref": "#/$defs/sha256" },
+                    "files": { "type": "integer", "minimum": 1 },
+                    "bytes": { "type": "integer", "minimum": 1 },
+                    "error": { "const": null }
+                  }
+                }
+              }
+            }
+          },
+          "hardware": {
+            "type": "object",
+            "properties": {
+              "gpuIdentity": { "type": "array", "minItems": 1 },
+              "rawVramSamples": { "type": "array", "minItems": 1 }
+            }
+          },
+          "cleanup": {
+            "type": "object",
+            "properties": {
+              "attempted": { "const": true },
+              "completed": { "const": true },
+              "error": { "const": null }
+            }
+          },
+          "inputs": { "type": "array", "minItems": 1 },
+          "outputs": { "type": "array", "minItems": 1 },
+          "logs": { "type": "array", "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": { "type": "object", "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+      "then": { "type": "object", "properties": { "error": { "type": "string", "minLength": 1 } } }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": ["status", "cell"],
+        "properties": {
+          "status": { "const": "passed" },
+          "cell": {
+            "type": "object",
+            "required": ["kind"],
+            "properties": { "kind": { "const": "sdxlOpenPose" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "cell": {
+            "type": "object",
+            "required": ["controlCounterfactual"],
+            "properties": { "controlCounterfactual": { "$ref": "#/$defs/openPoseControlCounterfactual" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "required": ["status", "cell"],
+        "properties": {
+          "status": { "const": "passed" },
+          "cell": {
+            "type": "object",
+            "required": ["id"],
+            "properties": { "id": { "const": "scail2-multi-reference-q4" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "cell": {
+            "type": "object",
+            "required": ["referenceCounterfactuals"],
+            "properties": {
+              "referenceCounterfactuals": { "$ref": "#/$defs/scail2ReferenceCounterfactuals" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "scail2ReferenceCounterfactual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "meanAbsDelta", "firstFrameMeanAbsDelta", "lastFrameMeanAbsDelta", "witnesses"],
+      "properties": {
+        "reference": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "meanAbsDelta": { "type": "number", "exclusiveMinimum": 0.000001 },
+        "firstFrameMeanAbsDelta": { "type": "number", "minimum": 0 },
+        "lastFrameMeanAbsDelta": { "type": "number", "minimum": 0 },
+        "witnesses": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["omittedReference", "firstFrame", "lastFrame"],
+          "properties": {
+            "omittedReference": { "type": "string", "minLength": 1 },
+            "firstFrame": { "type": "string", "minLength": 1 },
+            "lastFrame": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "scail2ReferenceCounterfactuals": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": false,
+      "prefixItems": [
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 1 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 2 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 3 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 4 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 5 } } }] },
+        { "allOf": [{ "$ref": "#/$defs/scail2ReferenceCounterfactual" }, { "type": "object", "properties": { "reference": { "const": 6 } } }] }
+      ]
+    },
+    "openPoseControlCounterfactual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sameSeed", "meanAbsDelta", "deltaFloor", "witnesses"],
+      "properties": {
+        "kind": { "const": "mirroredPose" },
+        "sameSeed": { "const": true },
+        "meanAbsDelta": { "type": "number", "exclusiveMinimum": 0.01 },
+        "deltaFloor": { "const": 0.01 },
+        "witnesses": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baselineControl", "counterfactualControl", "baselineOutput", "counterfactualOutput"],
+          "properties": {
+            "baselineControl": { "const": "input-openpose.png" },
+            "counterfactualControl": { "const": "input-openpose-counterfactual.png" },
+            "baselineOutput": { "const": "output.png" },
+            "counterfactualOutput": { "const": "counterfactual-output.png" }
+          }
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "clean"],
+      "properties": { "sha": { "$ref": "#/$defs/sha40" }, "clean": { "const": true } }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "complete", "sha256", "files", "bytes", "error"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "complete": { "type": "boolean" },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "repository", "revision", "subdirectory", "selectedRoot", "allowPatterns", "inventory"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "role": { "type": "string", "minLength": 1 },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "revision": { "$ref": "#/$defs/sha40" },
+        "subdirectory": { "type": "string", "minLength": 1 },
+        "selectedRoot": { "type": ["string", "null"] },
+        "allowPatterns": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "inventory": { "$ref": "#/$defs/inventory" }
+      }
+    },
+    "hashedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "gpuSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw"],
+      "properties": {
+        "timestamp": { "type": "string" },
+        "index": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "uuid": { "type": "string" },
+        "pciBusId": { "type": "string" },
+        "computeCapability": { "type": "string" },
+        "driverVersion": { "type": "string" },
+        "memoryTotalMiB": { "type": "number" },
+        "memoryUsedMiB": { "type": "number" },
+        "memoryFreeMiB": { "type": "number" },
+        "raw": { "type": "string", "minLength": 1 }
+      }
+    },
+    "gpuIdentity": {
+      "allOf": [
+        { "$ref": "#/$defs/gpuSample" },
+        { "type": "object", "required": ["index", "name", "uuid", "pciBusId", "computeCapability", "driverVersion", "memoryTotalMiB", "memoryUsedMiB", "memoryFreeMiB"] }
+      ]
+    },
+    "plainInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "files", "bytes", "sha256"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "diskProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "ordinal", "root", "freeBytes", "requiredFreeBytes"],
+      "properties": {
+        "phase": { "type": "string", "minLength": 1 },
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "root": { "type": "string", "minLength": 1 },
+        "freeBytes": { "type": "integer", "minimum": 0 },
+        "requiredFreeBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "requestMemoryStrategy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "requestMemoryPresent", "stageResidency", "streamTransformerBlocks"],
+          "properties": {
+            "strategy": {
+              "enum": [
+                "not-applicable",
+                "default-resident",
+                "explicit-resident",
+                "staged-resident",
+                "bounded-transformer"
+              ]
+            },
+            "requestMemoryPresent": { "type": "boolean" },
+            "stageResidency": { "type": "boolean" },
+            "streamTransformerBlocks": { "type": "boolean" }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "streamTransformerBlocks": { "const": true } },
+                "required": ["streamTransformerBlocks"]
+              },
+              "then": {
+                "properties": {
+                  "strategy": { "const": "bounded-transformer" },
+                  "requestMemoryPresent": { "const": true },
+                  "stageResidency": { "const": true }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "strategy": { "const": "bounded-transformer" } },
+                "required": ["strategy"]
+              },
+              "then": {
+                "properties": {
+                  "requestMemoryPresent": { "const": true },
+                  "stageResidency": { "const": true },
+                  "streamTransformerBlocks": { "const": true }
+                }
+              }
+            }
+          ]
+        },
+        { "type": "null" }
+      ]
+    },
+    "stagedAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "stageRoot", "inventory", "obstructionCount", "derivedNamespaces"],
+      "properties": {
+        "artifactId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "stageRoot": { "type": "string", "minLength": 1 },
+        "inventory": { "$ref": "#/$defs/plainInventory" },
+        "obstructionCount": { "type": "integer", "minimum": 1 },
+        "derivedNamespaces": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "derivedAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "derivedDisposition", "files", "bytes", "inventories"],
+      "properties": {
+        "artifactId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "derivedDisposition": {
+          "enum": [
+            "not-applicable",
+            "resident-empty",
+            "bounded-transformer-sidecars",
+            "provider-failed-empty"
+          ]
+        },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "inventories": { "type": "array", "items": { "$ref": "#/$defs/plainInventory" } }
+      }
+    },
+    "releasedAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "stageRoot", "stagedInventory", "derivedBeforeCleanup", "stageRemoved", "derivedRemoved"],
+      "properties": {
+        "artifactId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "stageRoot": { "type": "string", "minLength": 1 },
+        "stagedInventory": { "oneOf": [{ "$ref": "#/$defs/plainInventory" }, { "type": "null" }] },
+        "derivedBeforeCleanup": { "type": "array", "items": { "$ref": "#/$defs/plainInventory" } },
+        "stageRemoved": { "type": "boolean" },
+        "derivedRemoved": { "type": "boolean" },
+        "error": { "type": "string", "minLength": 1 }
+      }
+    },
+    "authorityLifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "cellId", "staged", "activeArtifactIds", "providerExecution", "requestMemoryStrategy", "verifiedBefore", "verifiedAfter", "derivedAfter", "released", "diskProbes"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "cellId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "staged": { "type": "array", "items": { "$ref": "#/$defs/stagedAuthority" } },
+        "activeArtifactIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" } },
+        "providerExecution": { "enum": ["not-attempted", "failed", "completed"] },
+        "requestMemoryStrategy": { "$ref": "#/$defs/requestMemoryStrategy" },
+        "verifiedBefore": { "type": "boolean" },
+        "verifiedAfter": { "type": "boolean" },
+        "derivedAfter": { "type": "array", "items": { "$ref": "#/$defs/derivedAuthority" } },
+        "released": { "type": "array", "items": { "$ref": "#/$defs/releasedAuthority" } },
+        "diskProbes": { "type": "array", "items": { "$ref": "#/$defs/diskProbe" } }
+      }
+    }
+  }
+}

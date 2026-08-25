@@ -346,10 +346,7 @@ fn resolve_reparse_chain(start: &Path) -> Option<PathBuf> {
 fn run_ffmpeg_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
     // Mirror the worker's ffmpeg resolution: the desktop app points SCENEWORKS_FFMPEG at its bundled
     // binary (it ships no system ffmpeg); the server stack leaves it unset and uses PATH.
-    let configured = std::env::var("SCENEWORKS_FFMPEG")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "ffmpeg".to_owned());
+    let configured = ffmpeg_program();
     let program = resolve_ffmpeg_program(&configured);
     let output = Command::new(program.as_ref())
         .arg("-y")
@@ -379,12 +376,82 @@ fn run_ffmpeg_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
     ensure_nonempty_output(dst)
 }
 
+/// Transcode any decoder-supported audio at `src` to a canonical **PCM signed-16 little-endian
+/// RIFF/WAVE** file at `dst`, preserving the source's sample rate and channel layout.
+///
+/// # Why the canonical form, and not "store what the user uploaded" (sc-18650)
+///
+/// PCM-16 RIFF/WAVE is not a preference, it is the ONLY audio SceneWorks can read back.
+/// `sceneworks_worker::audio_jobs::read_wav_pcm16` is the single decoder in the product — it serves
+/// the video reference-audio conditioning, the voice-clone tone-color reference, and the music
+/// extend/edit source clip — and it refuses anything that is not RIFF/WAVE (`is not a RIFF/WAVE
+/// file`) or not 16-bit PCM (`must be PCM 16-bit`). Storing an `.mp3` / `.flac` / `.m4a` verbatim
+/// would produce an asset that LOOKS usable everywhere (the picker's `assetCanRenderAsAudio` keys on
+/// `type == "audio"`, the browser plays it, the grid tiles it) and then fails at render time, deep
+/// inside a job the user already queued. Converting at the door makes an imported clip
+/// interchangeable with an Audio Studio render, which is the only other way an audio asset exists.
+///
+/// The rate and layout are deliberately NOT normalized: they are the caller's own signal, every
+/// consumer reads them off the file, and the one consumer with a fixed-rate contract (MiniMax-H3's
+/// 32 kHz audio VAE) resamples per request at conditioning time.
+///
+/// ffmpeg-only on every platform — `sips` is an image tool, so unlike [`transcode_to_png`] there is
+/// no always-present macOS fallback. A host with no reachable ffmpeg cannot import audio, and says
+/// so.
+pub fn transcode_to_wav_pcm16(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
+    let program = ffmpeg_program();
+    let output = Command::new(resolve_ffmpeg_program(&program).as_ref())
+        .arg("-y")
+        .arg("-nostdin")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(src)
+        // First audio stream only, and never a video stream: an upload that is really a movie
+        // container, or an mp3 carrying cover art, must not put a picture into the WAV.
+        .arg("-map")
+        .arg("0:a:0")
+        .arg("-vn")
+        .arg("-c:a")
+        .arg("pcm_s16le")
+        .arg(dst)
+        .output()
+        .map_err(|error| {
+            TranscodeError(format!(
+                "failed to run ffmpeg ({program}); ensure ffmpeg is installed: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TranscodeError(format!(
+            "ffmpeg failed to convert audio to PCM-16 WAV: {}",
+            stderr.trim()
+        )));
+    }
+    ensure_nonempty(dst, "WAV")
+}
+
+/// The ffmpeg the desktop bundle points at (`SCENEWORKS_FFMPEG`), else `ffmpeg` on PATH — the same
+/// resolution the worker's `media_jobs::run_ffmpeg` performs.
+fn ffmpeg_program() -> String {
+    std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "ffmpeg".to_owned())
+}
+
 fn ensure_nonempty_output(dst: &Path) -> Result<(), TranscodeError> {
+    ensure_nonempty(dst, "PNG")
+}
+
+fn ensure_nonempty(dst: &Path, label: &str) -> Result<(), TranscodeError> {
     match std::fs::metadata(dst) {
         Ok(meta) if meta.len() > 0 => Ok(()),
-        Ok(_) => Err(TranscodeError("transcode produced an empty PNG".to_owned())),
+        Ok(_) => Err(TranscodeError(format!(
+            "transcode produced an empty {label}"
+        ))),
         Err(error) => Err(TranscodeError(format!(
-            "transcode produced no PNG output: {error}"
+            "transcode produced no {label} output: {error}"
         ))),
     }
 }

@@ -7018,6 +7018,19 @@ details[open] > summary.lora-scope-group-heading::before,
   margin: 0;
 }
 
+/* The restrictions the acknowledgment is an acknowledgment OF (sc-17227): the manifest's
+   `licenseNotice`, rendered inside the gate box. It can run several sentences — MiniMax H3
+   Community License §V.2 requires notifying the user that the §V / Exhibit A restrictions
+   apply — so it scrolls inside the card rather than pushing the Download button out of reach. */
+.model-license-terms {
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
 .mlx-status {
   display: grid;
   gap: 8px;
@@ -7830,6 +7843,57 @@ details[open] > summary.lora-scope-group-heading::before,
 
 [data-theme="dark"] .model-card-rec-chip {
   color: var(--accent);
+}
+
+/* Prompt-guide tables (sc-17161). Scrolls inside its own box so a wide table never widens the
+   guide modal. */
+.markdown-table-wrap {
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.markdown-table-wrap table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.markdown-table-wrap th,
+.markdown-table-wrap td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-table-wrap th {
+  font-weight: 600;
+  background: var(--surface-2);
+}
+
+/* Licence-required UI attribution (sc-17227), e.g. MiniMax H3 Community License §IV.2. Sits
+   directly above the description and reads at full text weight/colour rather than the muted
+   description tone — "prominently display" is the obligation, so it must not look like a
+   footnote. */
+.model-card-attribution {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* The same obligation on the GENERATION surfaces (sc-17161): the studios' model field, the queue
+   card, and the asset detail. Same full weight/colour as the Models card — the obligation is to
+   display prominently, so this is deliberately not the muted metadata tone the rows around it
+   use. Slightly tighter than the card because it sits inside a settings field. */
+.model-attribution,
+.studio-model-attribution {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
 }
 
 .model-card-description {
@@ -12298,7 +12362,8 @@ details[open] > summary.lora-scope-group-heading::before,
   display: none;
 }
 
-.preview-modal.is-fullscreen .likeness-badge {
+.preview-modal.is-fullscreen .likeness-badge,
+.preview-modal.is-fullscreen .audio-track-badge {
   display: none;
 }
 
@@ -14309,6 +14374,32 @@ details[open] > summary.lora-scope-group-heading::before,
   margin-top: 4px;
 }
 
+/* The wizard's rendering of the Models screen's licence gate (sc-17227 / sc-17137 review):
+   reuses .model-gated-notice / .model-license-ack / .model-license-terms so the two surfaces
+   cannot drift apart visually, indented under its model row. */
+.setup-wizard-license {
+  margin: -2px 0 10px 28px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  text-align: left;
+}
+
+/* Per-click "these rows did NOT start" notice — the app error banner is hidden behind the
+   wizard overlay, so refusals must be named here. */
+.setup-wizard-refusals {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  text-align: left;
+}
+
+.setup-wizard-refusals p {
+  margin: 0;
+}
+
 .setup-wizard-actions {
   display: flex;
   gap: 10px;
@@ -15976,6 +16067,36 @@ details[open] > summary.lora-scope-group-heading::before,
   position: relative;
 }
 
+/* Soundtrack indicator (sc-19577). Sits opposite the likeness badge — top-LEFT — so the two never
+   overlap on an asset that carries both (a replace_person render of an LTX clip). Same pill
+   geometry and shadow so the card reads as one system. */
+.audio-track-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 12px);
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  box-shadow: var(--shadow-sm);
+  background: var(--accent-soft, color-mix(in oklch, var(--accent) 18%, var(--surface)));
+  color: color-mix(in oklch, var(--accent) 78%, var(--text));
+  pointer-events: auto;
+  cursor: help;
+}
+
+.audio-track-badge__glyph {
+  font-size: 12px;
+  line-height: 1;
+}
+
 .likeness-badge {
   position: absolute;
   top: 6px;
@@ -16036,6 +16157,13 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-modal-stage .likeness-badge {
   top: 12px;
   right: 12px;
+  font-size: 12px;
+  padding: 3px 9px;
+}
+
+.preview-modal-stage .audio-track-badge {
+  top: 12px;
+  left: 12px;
   font-size: 12px;
   padding: 3px 9px;
 }
@@ -17807,4 +17935,209 @@ button.audio-wave {
 }
 .workflow-fix-inputs > .workflow-fix-detail {
   margin: 0;
+}
+
+/* ---------- Unified checkpoint import (epic 20398, sc-20650) -----------------
+   One panel for both ownerships — "Use existing model library" (linked, the
+   files stay where they are) and "Add to SceneWorks" (managed, SceneWorks owns
+   the copy). It opens COLLAPSED on the Model Manager, which is a busy page, so
+   the catalog stays the screen's subject until the user asks to add something. */
+.checkpoint-import {
+  display: grid;
+  gap: 12px;
+}
+
+.checkpoint-import-heading {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.checkpoint-import-toggle {
+  justify-self: start;
+}
+
+.checkpoint-import-body {
+  display: grid;
+  gap: 14px;
+}
+
+/* The ownership choice is the panel's first decision, so it reads as two cards
+   rather than a segmented micro-control: each carries a sentence saying what
+   happens to the user's files, which is the whole basis for choosing. */
+.checkpoint-ownership {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.checkpoint-ownership-choice {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.checkpoint-ownership-choice.active {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
+  background: color-mix(in oklch, var(--accent) 8%, var(--surface));
+}
+
+.checkpoint-ownership-label {
+  font-weight: 600;
+}
+
+.checkpoint-ownership-summary,
+.checkpoint-source-hint {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.checkpoint-linked,
+.checkpoint-managed,
+.checkpoint-scan {
+  display: grid;
+  gap: 12px;
+}
+
+.checkpoint-linked-add {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) auto minmax(140px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.checkpoint-linked-add label {
+  display: grid;
+  gap: 7px;
+}
+
+.checkpoint-root-list,
+.checkpoint-candidate-list,
+.checkpoint-diagnostics {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.checkpoint-root,
+.checkpoint-candidate {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.checkpoint-root-head,
+.checkpoint-candidate-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.checkpoint-root-label,
+.checkpoint-candidate-path {
+  font-weight: 600;
+}
+
+.checkpoint-root-path,
+.checkpoint-candidate-meta,
+.checkpoint-candidate-unselectable {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.checkpoint-root-actions,
+.checkpoint-root-rename {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: end;
+}
+
+/* Needs Relink / Needs Rescan. Warning-toned, never danger-toned: nothing is
+   lost and nothing was uninstalled — there is one action to take. */
+.checkpoint-scan-unavailable,
+.checkpoint-unmatched,
+.checkpoint-candidate-correction,
+.model-card-linked-fix {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklch, var(--warning, #d08700) 35%, var(--border));
+  background: color-mix(in oklch, var(--warning, #d08700) 7%, var(--surface));
+}
+
+.checkpoint-scan-unavailable button,
+.checkpoint-unmatched button,
+.checkpoint-candidate-correction button,
+.model-card-linked-fix button {
+  justify-self: start;
+}
+
+.checkpoint-state-headline {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* The store's own `[checkpoint-plan:<code>] …` sentence. Monospaced because it
+   carries digests and paths the user may need to read exactly. */
+.checkpoint-import-detail {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.checkpoint-unmatched ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.checkpoint-unmatched li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.checkpoint-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.checkpoint-import-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.model-card-provenance {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* Simple shell: the same panel, tightened to the reduced shell's rhythm. */
+.checkpoint-import.compact {
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.checkpoint-import.compact .checkpoint-linked-add,
+.checkpoint-import.compact .models-import-grid {
+  grid-template-columns: 1fr;
 }

@@ -97,11 +97,20 @@ const FIDELITY = { f32: 4, bf16: 3, f16: 3, q8: 2, "int8-convrot": 2, q4: 1, nvf
 const COMPONENTS = new Set([
   "textEncoder",
   "vae",
+  // The AUDIO autoencoder of a joint audio+video family (sc-19506). Added rather than folded into
+  // `vae` because the uniqueness key is (model, component, LANE): MiniMax-H3 constructs BOTH
+  // autoencoders on every render and holds them at DIFFERENT widths — the video VAE at the lane's
+  // bf16 `self.dtype`, the audio VAE at a hard-coded f32 — so one summed `vae` row could only carry
+  // one `residentTier` and would have to over- or under-declare a half.
+  "audioVae",
   "visionTower",
   "controlBranch",
   "identityAdapters",
   "transformerHead",
 ]);
+
+/** Components whose rows carry a `vaeScope` and a structured residency receipt. */
+const SCOPED_AUTOENCODERS = new Set(["vae", "audioVae"]);
 
 const CAUSES = new Set(["packing-exception", "backend-capability", "structural"]);
 
@@ -491,7 +500,7 @@ export function validate({
     if (typeof evidence.source !== "string" || evidence.source.trim().length === 0) {
       errors.push(`${where}: evidence.source must cite where the fact is recorded in-tree.`);
     }
-    if (row.component === "vae") {
+    if (SCOPED_AUTOENCODERS.has(row.component)) {
       const receiptScope = VAE_RESIDENCY_SCOPES[receiptKey];
       if (!receiptScope) {
         errors.push(`${where}: VAE row has no structured residency-scope receipt for ${receiptKey}.`);

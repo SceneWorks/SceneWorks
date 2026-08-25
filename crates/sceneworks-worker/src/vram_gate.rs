@@ -566,6 +566,21 @@ impl KreaRuntimeEvidenceContext {
 /// the encoder and tokenizer contracts. An empty path therefore no longer represents a valid source.
 /// Keep the tests on the real lookup seam with a structurally truthful fixture; no model tensor is
 /// materialized and no memory evidence is measured or rewritten here.
+///
+/// ## Windows disk discipline (StorageFull incident, 2026-08-20)
+///
+/// "Sparse" above was only true on APFS/ext4. `gen_core_testkit::write_encoder_contract_fixture`
+/// ends with a multi-gigabyte `set_len` — the encoder's dense logical size, which must stay because
+/// the weight-bytes gates read it — and on NTFS that allocates in FULL. This fixture was measured
+/// costing 21.84 GB of `C:` per test process, and because it lives in a `static` (never dropped)
+/// every process left that behind permanently. Two mitigations, both load-bearing:
+///
+/// 1. Each tier's `.safetensors` tail is released right after the tier is written
+///    ([`crate::test_fixture_disk::sparsify_written_safetensors`]). Logical size and every written
+///    header byte are unchanged, so the gates read exactly the same numbers.
+/// 2. Initialization sweeps prior runs' leftovers, which a `static`'s guard can never do for
+///    itself. The directory name carries this process's PID so the sweep can tell its own from
+///    another concurrent run's.
 #[cfg(test)]
 fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
     struct Fixture {
@@ -573,9 +588,18 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
         root: std::path::PathBuf,
     }
 
+    /// Distinctive enough that the sweep can match nothing else under the shared temp root.
+    const FIXTURE_FAMILY: &str = "sceneworks-krea-memfix-";
+
     static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
-        let temp = tempfile::tempdir().expect("Krea memory-contract fixture root");
+        crate::test_fixture_disk::sweep_stale_fixtures(FIXTURE_FAMILY);
+        let temp = tempfile::Builder::new()
+            .prefix(&crate::test_fixture_disk::process_keyed_prefix(
+                FIXTURE_FAMILY,
+            ))
+            .tempdir()
+            .expect("Krea memory-contract fixture root");
         let root = temp.path().to_path_buf();
         let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
             .expect("Krea encoder contract");
@@ -586,6 +610,9 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
                 contract,
             )
             .expect("write sparse Krea encoder fixture");
+            // Per tier, not once at the end: the moment between the testkit's `set_len` and the
+            // release is the only fully-allocated one, and this bounds it to ONE tier's file.
+            crate::test_fixture_disk::sparsify_written_safetensors(&tier_root.join("text_encoder"));
             if let Some(bits) = bits {
                 let transformer = tier_root.join("transformer");
                 std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
@@ -1200,14 +1227,17 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         });
         MemoryEvidence {
             key: MemoryEvidenceKey {
+                model_family: "krea_2_turbo".to_owned(),
                 resolved_route: "krea_2_turbo".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
                 load_shape: provider_contract.load_shape,
                 mode: gen_core::MemoryMode::TextToImage,
+                reference_shape: gen_core::MemoryReferenceShape::None,
                 // The existing measurements cover ordinary T2I only.
                 overlay: None,
                 geometry: at_geometry,
+                frames_per_second: None,
                 strategy: selection.strategy,
                 engaged_composition,
                 parameters: selection.parameters,
@@ -1419,13 +1449,16 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             *selection,
             MemoryEvidence {
                 key: MemoryEvidenceKey {
+                    model_family: "krea_2_turbo".to_owned(),
                     resolved_route: "krea_2_turbo".to_owned(),
                     backend: gen_core::MemoryBackend::Candle,
                     tier: numeric_tier,
                     load_shape: provider_contract.load_shape,
                     mode: gen_core::MemoryMode::TextToImage,
+                    reference_shape: gen_core::MemoryReferenceShape::None,
                     overlay: None,
                     geometry,
+                    frames_per_second: None,
                     strategy: selection.strategy,
                     engaged_composition: provider_contract.engaged_composition(selection.strategy),
                     parameters: selection.parameters,
@@ -2110,22 +2143,23 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
 }
 
-/// Fail-closed admission for the shared SCAIL-2 Candle bf16 package. Unlike the generic Wan gate,
-/// SCAIL has no lower-memory Candle tier and no sequential/offload lifecycle, so falling back to
-/// on-disk bytes or admitting an absent row would turn an incomplete catalog into a real OOM. The
-/// exact production render owns `candle.vramGbByTier.bf16`; [`HEADROOM_GB`] remains the common CUDA
-/// reserve added by every measured-peak gate.
+/// Fail-closed admission for the exact SCAIL-2 Candle package tier. The resolver selects the hosted
+/// payload first and forwards its tier here; a source-ready q4/q8 directory is still unavailable for
+/// production until the catalog carries its measured row. Falling back to on-disk bytes, another
+/// precision, or an absent row would turn incomplete evidence into a real OOM. [`HEADROOM_GB`]
+/// remains the common CUDA reserve added by every measured-peak gate.
 #[cfg(test)]
 pub(crate) fn scail2_video_fit_error(
     manifest_entry: &JsonObject,
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
-    scail2_video_fit_error_with_adapter_bytes(manifest_entry, 0, gpu_id, budget)
+    scail2_video_fit_error_with_adapter_bytes(manifest_entry, "bf16", 0, gpu_id, budget)
 }
 
 pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
     manifest_entry: &JsonObject,
+    tier_key: &str,
     adapter_bytes: u64,
     gpu_id: &str,
     budget: Option<VramBudget>,
@@ -2137,7 +2171,7 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
         .and_then(Value::as_bool);
     let peak_gb = candle
         .and_then(|value| value.get("vramGbByTier"))
-        .and_then(|tiers| tiers.get("bf16"))
+        .and_then(|tiers| tiers.get(tier_key))
         .and_then(json_f64)
         .filter(|value| value.is_finite() && *value > 0.0);
     let min_memory_gb = candle
@@ -2153,36 +2187,37 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
         measured_pixels,
     ) else {
         return Some(WorkerError::InvalidPayload(
-            "SCAIL-2 Candle admission is unavailable because the installed catalog has no complete \
-             measured bf16 CUDA row (positive peak, 832x480 geometry, and minMemoryGb floor). \
-             Refusing to load the 47.2 GB shared package; update SceneWorks before retrying."
-                .to_owned(),
+            format!(
+                "SCAIL-2 Candle admission is unavailable because the installed catalog has no complete \
+                 measured {tier_key} CUDA row (positive peak, 832x480 geometry, and minMemoryGb floor). \
+                 Refusing to load the selected {tier_key} package; update SceneWorks before retrying."
+            ),
         ));
     };
     let base_needed_gb = peak_gb + HEADROOM_GB;
     if (min_memory_gb as f64) + f64::EPSILON < base_needed_gb.ceil() {
         return Some(WorkerError::InvalidPayload(format!(
             "SCAIL-2 Candle admission is unavailable because catalog minMemoryGb={min_memory_gb} \
-             is below the measured bf16 CUDA peak plus reserve (~{} GB). Refusing to load the \
-             47.2 GB shared package; update SceneWorks before retrying.",
+             is below the measured {tier_key} CUDA peak plus reserve (~{} GB). Refusing to load the \
+             selected {tier_key} package; update SceneWorks before retrying.",
             base_needed_gb.ceil() as u64,
         )));
     }
     let needed_gb = base_needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
     let Some(budget) = budget else {
         return Some(WorkerError::InvalidPayload(
-            "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
-             load the 47.2 GB shared package without proving that the measured bf16 render peak \
-             fits; verify the NVIDIA driver/runtime and retry."
-                .to_owned(),
+            format!(
+                "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
+                 load the selected {tier_key} package without proving that its measured render peak \
+                 fits; verify the NVIDIA driver/runtime and retry."
+            ),
         ));
     };
     (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
         WorkerError::InvalidPayload(format!(
-            "SCAIL-2 shared bf16 needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
+            "SCAIL-2 shared {tier_key} needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
              81-frame render peak plus CUDA reserve), but GPU {gpu_id} has ~{available} GB \
-             available. Its Candle provider has no lower-memory tier or sequential offload; use a \
-             GPU with more free VRAM, or use the MLX q4/q8 tiers on macOS.",
+             available. Select a measured SCAIL-2 tier that fits, or use a GPU with more free VRAM.",
             needed = needed_gb.ceil() as i64,
             available = budget.free_gb.round() as i64,
         ))
@@ -2762,15 +2797,55 @@ mod tests {
         .expect("the sc-18810 fit report parses")
     }
 
+    /// The q8 phase-fit block, resolved by SELECTION rather than by a fixed path.
+    ///
+    /// The report used to expose one tier-indexed slice per phase at `fits[phase].q8`. Since the
+    /// output-FPS axis entered the selector key, q8 maps to TWO complete selectors — fps30 with 11
+    /// records across six geometries, and fps24 with 2 records at a single geometry, which is under
+    /// `fit-ltx-temporal-form.mjs`'s three-geometry floor and therefore carries no fit at all. The
+    /// fitter refuses to pool records across selectors, so for an ambiguous tier it omits the
+    /// tier-indexed view (declaring the tier in `legacyFitsOmittedForTiers`) and carries the fit
+    /// inline on the selector entry instead. That drop is the truthful behaviour, not a regression:
+    /// there is no q8 slice that spans both selectors.
+    ///
+    /// This reader handles BOTH shapes and pins the invariant that makes either one unambiguous —
+    /// exactly one q8 selector may carry a fit, so the coefficients a runtime curve is promoted
+    /// from can never be silently swapped for another selector's.
+    fn ltx_q8_phase_fit<'a>(fit: &'a Value, phase: &str) -> &'a Value {
+        let omitted = fit["legacyFitsOmittedForTiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q8"));
+        if !omitted {
+            return &fit["fits"][phase]["q8"];
+        }
+        let fitted: Vec<&Value> = fit["selectorFits"]
+            .as_array()
+            .expect("selector fits")
+            .iter()
+            .filter(|entry| entry["selector"]["tier"] == "q8")
+            .filter(|entry| {
+                entry["fits"]
+                    .as_object()
+                    .is_some_and(|fits| !fits.is_empty())
+            })
+            .collect();
+        assert_eq!(
+            fitted.len(),
+            1,
+            "exactly one q8 selector may carry a fit, or `cross` has no single promotable source"
+        );
+        &fitted[0]["fits"][phase]
+    }
+
     /// The `cross` coefficients for one phase, in MANIFEST WIRE SHAPE — exactly the object a
     /// `phaseVramCurve` is, with no adaptation.
     ///
-    /// Note that `fits[phase].q8.chosen` is the per-series RMSE winner and is NOT uniformly
+    /// Note that the per-phase `chosen` is the per-series RMSE winner and is NOT uniformly
     /// `cross` (text ranks `area_only` first, denoise ranks `latent_tokens` first). The schema
     /// form adopted by this story is `cross` regardless, and
     /// [`the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve`] pins why.
     fn ltx_cross_curve(fit: &Value, phase: &str) -> JsonObject {
-        let coefficients = fit["fits"][phase]["q8"]["candidates"]["cross"]["coefficients"]
+        let coefficients = ltx_q8_phase_fit(fit, phase)["candidates"]["cross"]["coefficients"]
             .as_object()
             .expect("cross coefficients")
             .clone();
@@ -2801,7 +2876,7 @@ mod tests {
         let fit = ltx_temporal_fit();
         let shipped = ["fixedGb", "perMpxGb"];
         let mut extends = Vec::new();
-        let candidates = fit["fits"]["decode"]["q8"]["candidates"]
+        let candidates = ltx_q8_phase_fit(&fit, "decode")["candidates"]
             .as_object()
             .expect("candidate set");
         assert_eq!(candidates.len(), 5, "all five fitted forms must be graded");
@@ -2826,7 +2901,7 @@ mod tests {
             "only these forms can be an ADDITIVE schema change; the rest replace `perMpxGb`"
         );
         let held = |phase: &str, form: &str| {
-            fit["fits"][phase]["q8"]["candidates"][form]["heldOut"]["maxAbsGib"]
+            ltx_q8_phase_fit(&fit, phase)["candidates"][form]["heldOut"]["maxAbsGib"]
                 .as_f64()
                 .expect("held-out residual")
         };
@@ -2878,10 +2953,30 @@ mod tests {
             13,
             "the sweep's full record set must be graded, not a subset"
         );
+        // The fitted selector covers 11 of those 13. The other two are the fps24 pair, which sits
+        // at one geometry and so carries no fit of its own — they are graded here as OUT-OF-SAMPLE
+        // points, and the margin below is the fitted selector's own worst residual, never widened
+        // for them. Stated rather than hidden: a reader must be able to see that two of the graded
+        // records never entered the fit.
+        let fitted_records = fit["selectorFits"]
+            .as_array()
+            .expect("selector fits")
+            .iter()
+            .filter(|entry| {
+                entry["fits"]
+                    .as_object()
+                    .is_some_and(|fits| !fits.is_empty())
+            })
+            .flat_map(|entry| entry["recordIds"].as_array().expect("record ids"))
+            .count();
+        assert_eq!(
+            fitted_records, 11,
+            "the fitted q8 selector's own record count, with the remaining two graded out of sample"
+        );
         let mut graded = 0_usize;
         for phase in ["text", "denoise", "decode"] {
             let curve = ltx_cross_curve(&fit, phase);
-            let candidate = &fit["fits"][phase]["q8"]["candidates"]["cross"];
+            let candidate = &ltx_q8_phase_fit(&fit, phase)["candidates"]["cross"];
             let margin = candidate["fit"]["maxAbsGib"]
                 .as_f64()
                 .expect("fit residual")
@@ -5439,11 +5534,9 @@ mod tests {
         for tier in ["q4", "q8"] {
             for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
                 let path = root.join(tier).join(component).join("model.safetensors");
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::File::create(&path)
-                    .unwrap()
-                    .set_len(5_000_000_000)
-                    .unwrap();
+                // 8 x 5 GB. Sparse, or this one test allocates 40 GB of NTFS (see
+                // `crate::test_fixture_disk`); the gate reads the length, not the bytes.
+                crate::test_fixture_disk::create_sparse_weights(&path, 5_000_000_000);
             }
         }
 
@@ -5496,10 +5589,9 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("no lower-memory tier or sequential offload"),
+            message.contains("Select a measured SCAIL-2 tier"),
             "{message}"
         );
-        assert!(message.contains("MLX q4/q8"), "{message}");
 
         let high = apply_vram_cap(None, Some(105.0));
         assert!(
@@ -5508,6 +5600,7 @@ mod tests {
         );
         let adapter_message = scail2_video_fit_error_with_adapter_bytes(
             &entry,
+            "bf16",
             BYTES_PER_GIB as u64,
             "0",
             apply_vram_cap(None, Some(105.0)),
@@ -5594,6 +5687,37 @@ mod tests {
         assert!(message.contains("minMemoryGb=104"), "{message}");
         assert!(message.contains("~105 GB"), "{message}");
         assert!(message.contains("Refusing to load"), "{message}");
+    }
+
+    #[test]
+    fn scail2_source_ready_packed_tier_stays_closed_without_its_measured_fact_row() {
+        // Artifact availability is deliberately not enough to load q4/q8. This branch retains the
+        // current bf16-only catalog fact while the resolver and descriptor/pin promotion land in
+        // lockstep, so an off-Mac q4 directory can never be budgeted as dense or admitted by bytes.
+        let bf16_only = obj(json!({
+            "candle": {
+                "minMemoryGb": 105,
+                "measured": true,
+                "vramGbByTier": { "bf16": 102.115 },
+                "vramMeasuredPixels": 399360
+            }
+        }));
+        for tier in ["q4", "q8"] {
+            let message = scail2_video_fit_error_with_adapter_bytes(
+                &bf16_only,
+                tier,
+                0,
+                "0",
+                apply_vram_cap(None, Some(500.0)),
+            )
+            .expect("a source-ready packed tier needs its own measured catalog fact")
+            .to_string();
+            assert!(
+                message.contains(&format!("measured {tier} CUDA row")),
+                "{message}"
+            );
+            assert!(message.contains("Refusing to load"), "{message}");
+        }
     }
 
     /// The 5B's FORMER RESIDENT candle block (q4 46.1 / q8 48.7 / bf16 54.0), as sc-12402/sc-12631 shipped

@@ -443,6 +443,10 @@ const seededFallbackModels = [
     ui: {
       description: "Stability AI Stable Diffusion XL base 1.0 — open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP; ~6.9GB fp16, real CFG + negative prompt, ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
       promptGuide: { title: "Stable Diffusion XL Prompt Guide", path: "/prompt-guides/sdxl.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -453,6 +457,28 @@ const seededFallbackModels = [
     ui: {
       description: "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL — the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable. openrail++ (commercial use OK, ungated). Same SDXL UNet + dual CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance.",
       promptGuide: { title: "RealVisXL Prompt Guide", path: "/prompt-guides/realvisxl.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
+    },
+  },
+  {
+    // Distilled RealVisXL sibling: five-step Lightning sampling with CFG off at the default
+    // guidance 1.0. The native MLX and Candle lanes also accept the shared SDXL OpenPose control.
+    id: "realvisxl_lightning",
+    name: "RealVisXL Lightning (fast photoreal SDXL)",
+    family: "sdxl",
+    type: "image",
+    capabilities: ["text_to_image"],
+    defaults: { resolution: "1024x1024", steps: 5, guidanceScale: 1.0, count: 4 },
+    ui: {
+      description: "Few-step distilled RealVisXL — photoreal SDXL at ~5 steps, roughly 6x faster than the 30-step base. CFG-free by default at guidance 1.0; the negative prompt becomes active only if guidance is raised toward 2.0. Text-to-image and OpenPose control only; use standard RealVisXL for edits, reference identity, inpaint, or detail-refine.",
+      promptGuide: { title: "RealVisXL Lightning Prompt Guide", path: "/prompt-guides/realvisxl-lightning.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -470,6 +496,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -486,6 +516,10 @@ const seededFallbackModels = [
       promptHint:
         "Danbooru-tag model: lead with the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, silver hair, ornate dress, dynamic pose). Plain sentences underperform tags.",
       promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+      poseLibrary: true,
+      poseControlScale: true,
+      controlModes: ["pose"],
+      controlScale: { label: "Control strength", default: 1.0, min: 0.0, max: 2.0, step: 0.05 },
     },
   },
   {
@@ -687,11 +721,14 @@ const seededFallbackModels = [
     name: "LTX-2.3",
     type: "video",
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced", steps: 8 },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
+      // Distilled: 8 baked sigma waypoints is the ONLY renderable count on either backend, so the
+      // Steps control pins rather than accepting a value the enqueue gate would refuse (sc-19502).
+      steps: [8],
       resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {
@@ -706,11 +743,13 @@ const seededFallbackModels = [
     type: "video",
     macOnly: true,
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced" },
+    defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced", steps: 8 },
     limits: {
       durations: [4, 6, 8, 10, 12, 15],
       recommendedMaxDuration: 10,
       fps: [24, 25, 30],
+      // Same distilled schedule as base LTX-2.3 (sc-19502).
+      steps: [8],
       resolutions: ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
     },
     ui: {
@@ -791,6 +830,9 @@ const seededFallbackModels = [
     id: "wan_2_2_i2v_14b",
     name: "Wan2.2 14B (I2V)",
     type: "video",
+    // No `first_last_frame` (sc-19504): neither engine has a keyframe path on the A14B. This mirror
+    // is what the picker reads BEFORE the catalog loads, so a stale capability here re-offers the
+    // dead tab for that whole window — `declared video capabilities are all offerable` pins it.
     capabilities: ["image_to_video", "extend_clip", "video_bridge"],
     defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
     limits: {
@@ -838,6 +880,85 @@ const seededFallbackModels = [
       description: "Wan2.2 A14B VACE control model (high/low-noise mixture-of-experts) for person replacement and controllable video.",
       durationHint: "Heavy dual-expert control model — keep clips at 5s or less. Generates at 16fps.",
       promptGuide: { title: "Wan2.2 VACE-Fun Prompt Guide", path: "/prompt-guides/wan-2-2-t2v-14b.md" },
+    },
+  },
+  // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-17158). ⚠️ A MIRROR of
+  // config/manifests/builtin.models.jsonc, not a source of truth — the catalog is, and editing only
+  // this file ships nothing (sc-4997's fast path changed only the mirror and never took effect).
+  // videoGeometryParity.test.js pins the resolutions + default against the manifest in both
+  // directions.
+  //
+  // The duration menu is the FOURTEEN `17n + 5` lattice rungs, NOT a range and NOT the `4k + 1` the
+  // epic's R7 claims — see MINIMAX_H3_LEGAL_FRAME_COUNTS in
+  // crates/sceneworks-core/src/video_request.rs. Every bucket is on the default ÷32 stride, so no
+  // `requiresDimensionsMultipleOf` travels with them.
+  {
+    id: "minimax_h3",
+    name: "MiniMax-H3",
+    type: "video",
+    capabilities: ["text_to_video", "image_to_video", "first_last_frame"],
+    defaults: { duration: 5.1667, fps: 24, resolution: "1344x768", steps: 50 },
+    limits: {
+      durations: [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+      hardMinDuration: 5.1667,
+      hardMaxDuration: 14.375,
+      recommendedMaxDuration: 14.375,
+      // MODEL EVALUATIONS (NFE), not sigma grid points — the engine appends the terminal 0 itself,
+      // so 1 evaluation is a legal 2-point grid that renders, as a single Euler jump from pure
+      // noise. 2 is the smallest schedule with an intermediate sigma, so the floor is a product
+      // judgement, and it is refused rather than raised (sc-19426, corrected sc-18726). See the
+      // manifest's `hardMinSteps` comment for the full account.
+      hardMinSteps: 2,
+      fps: [24],
+      maxPixels: 1032192,
+      resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+    },
+    ui: {
+      // Licence-required attribution (MiniMax H3 Community License §IV.2, sc-17227). It must be in
+      // the MIRROR too: the generation surfaces render whichever catalog is in hand, and the
+      // fallback one is what they get before /api/v1/models lands — a licence obligation that is
+      // discharged only once the network answers is not discharged (sc-17161).
+      attribution: "Powered by MiniMax H3",
+      // sc-17162 — the withheld-component disclosure has to survive into the MIRROR for the same
+      // reason the attribution does. `ModelManagerScreen` renders `ui.description` from whichever
+      // catalog is in hand, so a description that only warns about H3-Context-IR / H3-Regenerate-2K
+      // / dense attention once /api/v1/models answers leaves the pre-network card advertising a
+      // model that does more than these weights do. Condensed against the manifest's prose, but it
+      // carries the same four load-bearing claims, and
+      // `minimaxH3CatalogCopy.test.js` pins the mirror to the manifest claim-by-claim.
+      description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps, and 15s is refused rather than shortened to 14.38s. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
+      promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
+    },
+  },
+  {
+    id: "minimax_h3_ref",
+    name: "MiniMax-H3 References",
+    type: "video",
+    capabilities: ["reference_to_video"],
+    defaults: { duration: 5.1667, fps: 24, resolution: "1344x768", steps: 50 },
+    limits: {
+      durations: [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+      hardMinDuration: 5.1667,
+      hardMaxDuration: 14.375,
+      recommendedMaxDuration: 14.375,
+      hardMinSteps: 2,
+      fps: [24],
+      maxPixels: 1032192,
+      resolutions: ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+      maxReferenceAssets: 9,
+      maxSourceClipAssets: 3,
+      maxReferenceAudioAssets: 3,
+      maxCombinedReferenceAssets: 12,
+    },
+    ui: {
+      // §IV.2 attribution, same as `minimax_h3` — see that entry (sc-17227 / sc-17161).
+      attribution: "Powered by MiniMax H3",
+      // sc-17162 — carried in full rather than by reference, same as the manifest entry: this is a
+      // separate model card and a user can install it without ever opening the other one's.
+      description: "MiniMax-H3 reference-driven video: up to 9 images, 3 clips and 3 audio references (12 files total), with synchronized stereo audio. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. No guidance scale and no negative prompt. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, 15s is refused rather than shortened to 14.38s, and the same canvas-driven cost.",
+      promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },
   },
   // Audio models (epic 13400 A2/A3) — this mirrors the `type:"audio"` catalog entries so the

@@ -96,6 +96,16 @@ import sensenovaU1Apache20 from "../../../desktop/licenses/sensenova-u1/Apache-2
 import zImageApache20 from "../../../desktop/licenses/z-image/Apache-2.0.txt?raw";
 import ltx23ErosLTX2CommunityLicense from "../../../desktop/licenses/ltx-2.3-eros/LTX-2-Community-License.txt?raw";
 import kreaRealtimeApache20 from "../../../desktop/licenses/krea-realtime/Apache-2.0.txt?raw";
+// MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-17158). TWO notices, like the LTX-2.3 bundle: the DiT
+// weights are under MiniMax's own restricted community licence, while the text encoder is
+// byte-for-byte Qwen3-VL-32B-Instruct and stays Apache-2.0. Both entries — `minimax_h3` and
+// `minimax_h3_ref` — download the same components, so one component covers both.
+// The NOTICE is a THIRD document (sc-17227): §III.4 of the community licence requires
+// distributions to be accompanied by a "NOTICE" text file carrying a specific attribution
+// sentence, and About → Licenses is where SceneWorks serves it.
+import minimaxH3Notice from "../../../desktop/licenses/minimax-h3/NOTICE.txt?raw";
+import minimaxH3CommunityLicense from "../../../desktop/licenses/minimax-h3/MiniMax-H3-Community-License.txt?raw";
+import minimaxH3QwenApache20 from "../../../desktop/licenses/minimax-h3/Apache-2.0.txt?raw";
 import wan21VaeApache20 from "../../../desktop/licenses/wan2_1_t2v_14b_diffusers/Apache-2.0.txt?raw";
 import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?raw";
 import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?raw";
@@ -186,6 +196,9 @@ const DOCUMENT_TEXT = {
   "z-image-apache": zImageApache20,
   "ltx-2.3-eros-ltx-2-community-license": ltx23ErosLTX2CommunityLicense,
   "krea-realtime-apache": kreaRealtimeApache20,
+  "minimax-h3-notice": minimaxH3Notice,
+  "minimax-h3-community-license": minimaxH3CommunityLicense,
+  "minimax-h3-qwen-apache": minimaxH3QwenApache20,
   "wan2.1-vae-alternate-apache": wan21VaeApache20,
   "scail2-mit": scail2MIT,
   "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,

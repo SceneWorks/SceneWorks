@@ -527,7 +527,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
 /// `models` array. Shared by the manifest-gating catalog-eligibility tests so the ~15-line
 /// load→strip-comments→parse→get-array boilerplate lives in ONE place (sc-8926 dedupe of the
 /// near-verbatim copies that had drifted between the SD3.5 / SANA / SANA-Sprint gate tests).
-fn builtin_models_manifest() -> Vec<Value> {
+// `pub(crate)` so the `image_jobs::tests` module reads the SAME shipped bytes rather than growing a
+// second load→strip→parse copy (sc-20529: its klein guards must be driven off the real builtin
+// entries, not a synthetic stand-in that can pass vacuously).
+pub(crate) fn builtin_models_manifest() -> Vec<Value> {
     use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
     use sceneworks_core::jsonc::strip_jsonc_comments;
 
@@ -548,7 +551,7 @@ fn builtin_models_manifest() -> Vec<Value> {
 /// The builtin-manifest entry for `id`, panicking with a clear hint if the id is absent. Shared by
 /// the manifest-gating tests (sc-8926) so each gate test asserts on the entry directly instead of
 /// re-implementing the manifest lookup.
-fn builtin_model_entry(id: &str) -> Value {
+pub(crate) fn builtin_model_entry(id: &str) -> Value {
     builtin_models_manifest()
         .into_iter()
         .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
@@ -1761,34 +1764,23 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn bespoke_candle_base_evidence_is_live_or_explicitly_unmeasured() {
+    // SC-20793 gave the four SDXL-family Candle bases their own per-tier rows and moved
+    // `sdxl_edit_candle.rs` off `admit_candle_base(.., CandleBaseEvidence::Ungateable(..))` onto
+    // `admit_sdxl_bespoke_memory`, which prices those rows. Both halves of the old exception are
+    // therefore gone: the catalog rows exist, and the recorded reason no longer appears at any
+    // live call site. They belong in `EVIDENCED`, which is what keeps the rows load-bearing.
     const EVIDENCED: &[&str] = &[
         "flux2_klein_9b",
         "flux2_dev",
         "z_image_turbo",
         "krea_2_raw",
         "krea_2_turbo",
+        "sdxl",
+        "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
     ];
     const EXPLICITLY_UNMEASURED: &[(&str, &str, &str)] = &[
-        (
-            "sdxl",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "realvisxl",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "illustrious_xl_v1",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
-        (
-            "illustrious_xl_v2",
-            "SDXL-family Candle edit has not been CUDA-calibrated per tier",
-            include_str!("../image_jobs/sdxl_edit_candle.rs"),
-        ),
         (
             "flux2_klein_9b_true_v2",
             "the local True V2 converted fine-tune has no CUDA calibration row",
@@ -2006,19 +1998,39 @@ fn sana_manifest_entry_gates_correctly() {
         "sana defaults to the packed q4 tier"
     );
     // Per-tier variants present (q4 default + q8 + bf16), each its own installable artifact (sc-8508).
-    let variants: Vec<&str> = entry
+    let downloads = entry
         .get("downloads")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.get("variant").and_then(Value::as_str))
-                .collect()
+        .expect("sana downloads");
+    let variants: Vec<&str> = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"]
+                .as_array()
+                .is_some_and(|platforms| platforms.iter().any(|platform| platform == "macos"))
         })
-        .unwrap_or_default();
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect();
     assert_eq!(
         variants,
         vec!["q4", "q8", "bf16"],
         "sana ships the q4/q8/bf16 tier matrix"
+    );
+    let candle_variants = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"].as_array().is_some_and(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform == "windows" || platform == "linux")
+            })
+        })
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candle_variants,
+        vec!["bf16"],
+        "sana Candle ships only the immutable dense physical tier"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
@@ -2102,19 +2114,39 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some(4),
         "sana-sprint defaults to the packed q4 tier"
     );
-    let variants: Vec<&str> = entry
+    let downloads = entry
         .get("downloads")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| d.get("variant").and_then(Value::as_str))
-                .collect()
+        .expect("sana-sprint downloads");
+    let variants: Vec<&str> = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"]
+                .as_array()
+                .is_some_and(|platforms| platforms.iter().any(|platform| platform == "macos"))
         })
-        .unwrap_or_default();
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect();
     assert_eq!(
         variants,
         vec!["q4", "q8", "bf16"],
         "sana-sprint ships the q4/q8/bf16 tier matrix"
+    );
+    let candle_variants = downloads
+        .iter()
+        .filter(|download| {
+            download["platforms"].as_array().is_some_and(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform == "windows" || platform == "linux")
+            })
+        })
+        .filter_map(|download| download.get("variant").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candle_variants,
+        vec!["bf16"],
+        "sana-sprint Candle ships only the immutable dense physical tier"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
