@@ -4960,9 +4960,8 @@ mod tests {
         );
 
         // Keyed by record id, not by (authority, category): one epic can approve more than one
-        // record in the same category on different days. epic-17137 still does for the residual
-        // base/ref adapter records; under the old (authority, category) key those would collapse
-        // into one entry, silently losing a record from the comparison.
+        // record in the same category on different days. Under the old (authority, category) key
+        // those would collapse into one entry, silently losing a record from the comparison.
         let expected_records = BTreeMap::from([
             (
                 "epic-9083-precision-sequencing",
@@ -4987,14 +4986,6 @@ mod tests {
             (
                 "epic-7434-cfg-pp-guidance-sequencing",
                 ("epic-7434", "guidance", 4usize),
-            ),
-            (
-                "epic-17137-minimax-h3-adapter-sequencing",
-                ("epic-17137", "adapter", 1usize),
-            ),
-            (
-                "epic-17137-minimax-h3-ref-adapter-sequencing",
-                ("epic-17137", "adapter", 1usize),
             ),
             (
                 "epic-18803-eros-candle-operation-withdrawal",

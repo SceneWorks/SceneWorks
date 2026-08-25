@@ -147,34 +147,6 @@
       ]
     },
     {
-      "id": "epic-17137-minimax-h3-adapter-sequencing",
-      "category": "adapter",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved sequencing these MiniMax-H3 cells under epic-17137 on 2026-08-16. SC-20753 supplied the base Candle route, SC-20754 supplied measured tier ceilings, and SC-20755 enabled its operation, conditioning, precision and LoRA cells. The pinned Candle provider still advertises no LoKr support; SC-20757 owns that concrete capability rather than treating it as a permanent exception.",
-      "approver": "Michael Trefry",
-      "authority": "epic-17137",
-      "approvedDate": "2026-08-16",
-      "userFacingBehavior": "MiniMax-H3 LoRA is available on Candle. LoKr remains hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20757 implements Candle MiniMax-H3 LoKr and the generated matrix, routing tests and runtime evidence prove the cell.",
-      "cells": [
-        "models/minimax_h3/userAdapters/lokr"
-      ]
-    },
-    {
-      "id": "epic-17137-minimax-h3-ref-adapter-sequencing",
-      "category": "adapter",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying the MiniMax-H3 Ref2VA adapter cells under epic-17137 on 2026-08-20. SC-20756 made operation, conditioning, q4/q8/bf16 precision and LoRA available on Candle. The pinned Candle provider still advertises no LoKr support; SC-20757 owns that concrete capability rather than treating it as a permanent exception.",
-      "approver": "Michael Trefry",
-      "authority": "epic-17137",
-      "approvedDate": "2026-08-20",
-      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20757 implements Candle MiniMax-H3 LoKr and the generated matrix, routing tests and runtime evidence prove the cell.",
-      "cells": [
-        "models/minimax_h3_ref/userAdapters/lokr"
-      ]
-    },
-    {
       "id": "epic-18803-eros-candle-operation-withdrawal",
       "category": "operation",
       "decisionType": "product_decision",

@@ -5,9 +5,9 @@
     "modelCount": 94,
     "importedFamilyCount": 3,
     "cellCount": 918,
-    "mlxOnlyCellCount": 58,
+    "mlxOnlyCellCount": 56,
     "candleOnlyCellCount": 47,
-    "exceptionCount": 12
+    "exceptionCount": 10
   },
   "sources": {
     "apiContractEntry": "9475e0b8f63b96c7218a17549db8fce00144e693a47e3ae366526011439b209c",
@@ -17,12 +17,12 @@
     "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
     "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
     "descriptorCandleFacts": "e2b4448d0ee00cd84af113ee3367bc36b1d615f131779c0d53ce934bc47c7b90",
-    "descriptorCandleRuntime": "f83944b61b5fdf4960adad7003d931e65af773e7355b42632efce8427a380afb",
+    "descriptorCandleRuntime": "b01e0d82f5ea0c76f74e37625daac22937d395558ee9ff48ccf2a3f28c0c4581",
     "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
     "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
     "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
-    "exceptionRegister": "53d13d8ab0ba263f639f72ffc034d0361f1890c662605e00931afac48d1984f5",
-    "manifest": "33dd984fd9667b0bc293e2d6b285eb0832db6570d444a018c92580fe0bbaddc6",
+    "exceptionRegister": "f407a4dffe863fd53c40304988e72b4917e4b1cb851e2fa5312686695479d9b2",
+    "manifest": "a9faac6d56022e7f7c6094c8b41d35ab97af73189d871805cb61b3af8b293641",
     "modelImportDefaults": "15e0d63df3dab20249f68a2e1954f930a6791cb9e1742eca559361a4f3672268",
     "routerCandle": "846d7fdd0a1b080531b66f086561b9f1fba94484bbbd992141a4ccfa051bf765",
     "routerCatalog": "dda0a5908be503aeb8f09873bdd8c2b011a80a0c5dc812a31d4846fa541745c8",
@@ -3477,11 +3477,7 @@
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18481",
-            "url": "https://app.shortcut.com/trefry/story/18481"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -3622,11 +3618,7 @@
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18481",
-            "url": "https://app.shortcut.com/trefry/story/18481"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -7470,34 +7462,6 @@
         "models/illustrious_xl_v2/guidanceMethod/cfg_pp",
         "models/realvisxl/guidanceMethod/cfg_pp",
         "models/sdxl/guidanceMethod/cfg_pp"
-      ]
-    },
-    {
-      "id": "epic-17137-minimax-h3-adapter-sequencing",
-      "category": "adapter",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved sequencing these MiniMax-H3 cells under epic-17137 on 2026-08-16. SC-20753 supplied the base Candle route, SC-20754 supplied measured tier ceilings, and SC-20755 enabled its operation, conditioning, precision and LoRA cells. The pinned Candle provider still advertises no LoKr support; SC-20757 owns that concrete capability rather than treating it as a permanent exception.",
-      "approver": "Michael Trefry",
-      "authority": "epic-17137",
-      "approvedDate": "2026-08-16",
-      "userFacingBehavior": "MiniMax-H3 LoRA is available on Candle. LoKr remains hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20757 implements Candle MiniMax-H3 LoKr and the generated matrix, routing tests and runtime evidence prove the cell.",
-      "cells": [
-        "models/minimax_h3/userAdapters/lokr"
-      ]
-    },
-    {
-      "id": "epic-17137-minimax-h3-ref-adapter-sequencing",
-      "category": "adapter",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying the MiniMax-H3 Ref2VA adapter cells under epic-17137 on 2026-08-20. SC-20756 made operation, conditioning, q4/q8/bf16 precision and LoRA available on Candle. The pinned Candle provider still advertises no LoKr support; SC-20757 owns that concrete capability rather than treating it as a permanent exception.",
-      "approver": "Michael Trefry",
-      "authority": "epic-17137",
-      "approvedDate": "2026-08-20",
-      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
-      "revisitCondition": "Delete this sequencing record when SC-20757 implements Candle MiniMax-H3 LoKr and the generated matrix, routing tests and runtime evidence prove the cell.",
-      "cells": [
-        "models/minimax_h3_ref/userAdapters/lokr"
       ]
     },
     {
