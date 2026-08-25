@@ -16006,7 +16006,8 @@ fn candle_minimax_h3_resolves_the_real_route_not_stub() {
             "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums"
         }));
         assert_eq!(
-            resolve_candle_video_route(&req, &settings),
+            resolve_candle_video_route(&req, &settings)
+                .expect("MiniMax-H3 route resolution must succeed for this fixture"),
             CandleVideoRoute::MiniMaxH3("minimax_h3"),
             "{model}/{mode} must dispatch to the real Candle MiniMax-H3 route, never Stub"
         );
