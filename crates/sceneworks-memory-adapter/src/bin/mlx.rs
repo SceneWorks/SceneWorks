@@ -10032,16 +10032,12 @@ fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     ) {
         return Err("MiniMax-H3 admission rejected an exact-fit calibrated budget".to_owned());
     }
-    // THE EXACT-FIT ACCEPT ABOVE IS NOT SELF-VALIDATING, and on this provider that is not
-    // hypothetical. `Generator::memory_strategy_safety_check` has a TRAIT DEFAULT
-    // (`gen-core/src/generator.rs:58-72`) that, for a generator publishing no contract, accepts ANY
-    // resident selection unconditionally — budget ignored. At the pinned revision
-    // `mlx-gen-minimax-h3`'s generator overrides neither `memory_strategy_contract` nor
-    // `memory_strategy_safety_check`, so a resident capture reaching this line on the default would
-    // record an "exact fit accepted" that tested nothing at all. The contract identity check after
-    // load already fails closed on that path; this is the second, independent guard, and it is the
-    // one that stays meaningful if a future provider publishes a contract but regresses the check:
-    // the same loaded generator must REJECT a zero budget, or its accept is not evidence.
+    // THE EXACT-FIT ACCEPT ABOVE IS NOT SELF-VALIDATING. The permanent pin publishes the
+    // MiniMax-H3 `memory_strategy_contract` and overrides `memory_strategy_safety_check`, so this
+    // loaded generator's accept is checked against the provider contract rather than a trait
+    // default. The contract identity check after load is the first guard; this independent probe
+    // stays meaningful if a future provider publishes a contract but regresses the check: the same
+    // loaded generator must REJECT a zero budget, or its accept is not evidence.
     let mut unknown_budget = exact_fit.clone();
     unknown_budget.budget.total_bytes = 0;
     if !matches!(
@@ -14142,19 +14138,12 @@ mod minimax_tests {
         );
     }
 
-    /// **The campaign blocker, pinned in code.** At the current inference pin the MiniMax-H3 MLX
-    /// generator overrides neither `memory_strategy_contract` nor `memory_strategy_safety_check`,
-    /// so a LOADED generator publishes no contract and inherits a trait default that accepts ANY
-    /// resident selection with the budget ignored. `run_minimax_h3` therefore cannot emit a record
-    /// at this pin: it fails closed immediately after load.
-    ///
-    /// This test asserts the registry half — the contract registration exists and is real — while
-    /// the generator half is what the pending pin bump must fix. When the bump lands, the arm's
-    /// post-load contract comparison and its zero-budget re-probe start passing and NOTHING else in
-    /// this arm needs to change; if instead the bump publishes a contract while regressing the
-    /// check, the zero-budget re-probe is what still catches it.
+    /// **The provider contract, pinned in code.** At the permanent inference pin the MiniMax-H3
+    /// provider publishes `memory_strategy_contract` and its admission check is non-vacuous in both
+    /// directions. The registry contract and loaded-provider checks must continue to agree; a future
+    /// contract/check drift fails here rather than producing evidence.
     #[test]
-    fn the_registry_contract_exists_even_though_the_loaded_generator_half_is_pending_a_pin_bump() {
+    fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
         let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
         let contract = registry
             .memory_strategy_contract(
@@ -14168,8 +14157,8 @@ mod minimax_tests {
             contract.calibration.as_ref().unwrap().fingerprint,
             MINIMAX_CALIBRATION_FINGERPRINT
         );
-        // The registered admission check is non-vacuous in BOTH directions, weights-free — which is
-        // exactly the property the loaded generator does not yet inherit.
+        // The registered admission check is non-vacuous in BOTH directions, weights-free — the
+        // same property the loaded generator must enforce at the permanent pin.
         let spec = weights_free_spec(Some(Quant::Q4), LoadShape::EagerMaterialization);
         let selection = planned_selection(&minimal_request(MINIMAX_PROVIDER)).unwrap();
         let calibration = contract.calibration.as_ref().unwrap();
