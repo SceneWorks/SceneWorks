@@ -718,8 +718,8 @@ export function additionalPrerequisiteEdges(source, where) {
  * `null` when the extractor cannot read it unambiguously.
  *
  * gen-core's `validate_selection` has TWO accepting arms for a `Rung { .. EngagedInSameRequest }`
- * edge, not one — `crates/contracts/gen-core/src/memory_strategy.rs:1862-1873` at the pinned
- * `f17c82544`. The first is `engages`; the second is that the prerequisite rung is declared
+ * edge, not one — `crates/contracts/gen-core/src/memory_strategy.rs:2059-2070` at the pinned
+ * `28f0563baa03640ade1635356d2d54fe8a477f1a`. The first is `engages`; the second is that the prerequisite rung is declared
  * `StructurallyNotApplicable`, which satisfies the edge VACUOUSLY ("the architecture has no such
  * component to shed"). The gate needs this to implement the second arm.
  *
