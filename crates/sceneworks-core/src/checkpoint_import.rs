@@ -411,20 +411,18 @@ fn validate_nonempty(value: &str, label: &str) -> Result<(), CheckpointImportCon
     Ok(())
 }
 
+/// The document contract's relative-path rule. The RULES live in exactly one place —
+/// [`crate::checkpoint_plan_store::portable_relative_path_parts`] — and every checkpoint-seam
+/// validator delegates there, so none of them can drift looser than this contract and admit a path
+/// the others reject (feature-end round 1: this was the last of the five near-copies).
+///
+/// Only the refusal TYPE is local: the shared rule answers a `&'static str` reason so each caller
+/// wraps it in its own error. The message is unchanged so the contract's published refusal text
+/// stays byte-identical.
 fn validate_relative_path(value: &str, label: &str) -> Result<(), CheckpointImportContractError> {
     validate_nonempty(value, label)?;
-    if value.contains('\\')
-        || value.contains(':')
-        || value.starts_with('/')
-        || value.bytes().any(|byte| byte.is_ascii_control())
-        || value
-            .split('/')
-            .any(|component| matches!(component, "" | "." | ".."))
-    {
-        return Err(invalid(format!(
-            "{label} must be a portable confined relative path"
-        )));
-    }
+    crate::checkpoint_plan_store::portable_relative_path_parts(value)
+        .map_err(|_| invalid(format!("{label} must be a portable confined relative path")))?;
     Ok(())
 }
 

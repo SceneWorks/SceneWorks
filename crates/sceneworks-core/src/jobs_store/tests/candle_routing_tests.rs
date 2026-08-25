@@ -4951,3 +4951,177 @@ fn a_malformed_carrier_is_named_only_where_it_is_what_refused() {
         }))
     ));
 }
+
+// ---- Plan-backed imported Wan video (epic 20398, sc-20651) ----
+
+/// A `video_generate` payload for an IMPORTED Wan checkpoint: a model id in no static routed list,
+/// carrying a plan-backed `modelManifestEntry` (`family: "wan-video"` + `importPlan.checkpointId`)
+/// and NO installed component path. `entry_extra` is merged into the entry verbatim so a negative
+/// can drop the plan or blank its id.
+fn plan_backed_wan_video_payload(
+    model: &str,
+    mode: &str,
+    entry_extra: Value,
+) -> Map<String, Value> {
+    let mut entry = object(json!({ "id": model, "family": "wan-video" }));
+    for (key, value) in object(entry_extra) {
+        entry.insert(key, value);
+    }
+    object(json!({
+        "model": model,
+        "mode": mode,
+        "prompt": "a fox",
+        "modelManifestEntry": Value::Object(entry),
+    }))
+}
+
+/// **The unreachability this closes.** An imported plan-backed Wan checkpoint is served by the
+/// candle worker's ComfyUI Wan T2V arm (`wan_comfyui_claims` admits a plan-backed entry with no
+/// `external_base_` prefix), but its model id is in neither `CANDLE_VIDEO_ROUTED_MODELS` nor
+/// `VIDEO_MLX_ROUTED_MODELS` — so every claim predicate answered `false`, `create_video_job`
+/// returned `400`, and `worker_supports_job` refused the row.
+///
+/// Every assertion reads a production predicate's verdict on a payload whose model id those
+/// predicates cannot recognize, so nothing here can pass by restating the fixture.
+#[test]
+fn a_plan_backed_wan_video_request_is_claimable_by_the_candle_lane() {
+    let payload = plan_backed_wan_video_payload(
+        "imported_wan_2_2_abc123",
+        "text_to_video",
+        json!({ "importPlan": { "checkpointId": "ckpt_wan_abc123" } }),
+    );
+
+    assert!(
+        video_request_is_claimable_by_any_lane(&JobType::VideoGenerate, &payload),
+        "the enqueue gate must admit the shape the candle ComfyUI Wan lane serves"
+    );
+    assert!(video_request_is_candle_eligible(
+        &JobType::VideoGenerate,
+        &payload
+    ));
+    // The MLX half is a deliberate negative: SceneWorks ships no MLX video lane that reads a plan.
+    assert!(!video_request_is_mlx_eligible(
+        &JobType::VideoGenerate,
+        &payload
+    ));
+    // Off-Mac the platform sweep must not fail it either (macOS returns `true` unconditionally).
+    assert!(video_request_is_claimable_on_platform(
+        &JobType::VideoGenerate,
+        &payload,
+        "windows"
+    ));
+
+    // …and the worker-side union claims the resulting row, so the job does not strand.
+    let job = video_generate_job(Value::Object(payload));
+    assert!(
+        job_is_any_candle_eligible(&job),
+        "the candle grace sweep's union must own the enqueued row"
+    );
+    assert!(worker_supports_job(&gpu_worker(CANDLE_VIDEO_CAPS), &job));
+}
+
+/// The claim is keyed on the plan, the family, the mode and the conditioning shape — one axis at a
+/// time, each varied off the admitted fixture above so only that axis explains the flip.
+#[test]
+fn the_plan_backed_wan_video_claim_is_narrow_on_every_axis() {
+    // No `importPlan` at all: an imported id with no plan has no lane and must NOT be claimed.
+    assert!(!video_request_is_claimable_by_any_lane(
+        &JobType::VideoGenerate,
+        &plan_backed_wan_video_payload("imported_wan_2_2_abc123", "text_to_video", json!({}))
+    ));
+    // A whitespace-only checkpoint id is not an identity; `checkpoint_plan_checkpoint_id` trims.
+    assert!(!video_request_is_claimable_by_any_lane(
+        &JobType::VideoGenerate,
+        &plan_backed_wan_video_payload(
+            "imported_wan_2_2_abc123",
+            "text_to_video",
+            json!({ "importPlan": { "checkpointId": "   " } })
+        )
+    ));
+    // Another family: no candle video lane loads a plan for it, so claiming it would queue forever.
+    let mut foreign_family = plan_backed_wan_video_payload(
+        "imported_wan_2_2_abc123",
+        "text_to_video",
+        json!({ "importPlan": { "checkpointId": "ckpt_wan_abc123" } }),
+    );
+    foreign_family
+        .get_mut("modelManifestEntry")
+        .and_then(Value::as_object_mut)
+        .expect("entry")
+        .insert("family".to_owned(), json!("ltx-video"));
+    assert!(!video_request_is_claimable_by_any_lane(
+        &JobType::VideoGenerate,
+        &foreign_family
+    ));
+
+    // The advanced modes reach `WanVaceExtendBridge` / `ReplacePersonWanVace` BEFORE the ComfyUI
+    // Wan arm — builtin lanes that never read the plan's bytes — so they are refused at the claim
+    // (a 400), not admitted and refused later.
+    for (mode, job_type) in [
+        ("extend_clip", JobType::VideoExtend),
+        ("video_bridge", JobType::VideoBridge),
+        ("replace_person", JobType::PersonReplace),
+        ("image_to_video", JobType::VideoGenerate),
+        ("first_last_frame", JobType::VideoGenerate),
+    ] {
+        assert!(
+            !video_request_is_claimable_by_any_lane(
+                &job_type,
+                &plan_backed_wan_video_payload(
+                    "imported_wan_2_2_abc123",
+                    mode,
+                    json!({ "importPlan": { "checkpointId": "ckpt_wan_abc123" } })
+                )
+            ),
+            "{mode} has no plan-backed lane and must not be claimed"
+        );
+    }
+
+    // A T2V claim must not smuggle conditioning the ComfyUI Wan lane silently drops.
+    for carrier in [
+        "sourceAssetId",
+        "lastFrameAssetId",
+        "sourceClipAssetId",
+        "bridgeRightClipAssetId",
+    ] {
+        let mut payload = plan_backed_wan_video_payload(
+            "imported_wan_2_2_abc123",
+            "text_to_video",
+            json!({ "importPlan": { "checkpointId": "ckpt_wan_abc123" } }),
+        );
+        payload.insert(carrier.to_owned(), json!("asset_1"));
+        assert!(
+            !video_request_is_claimable_by_any_lane(&JobType::VideoGenerate, &payload),
+            "{carrier} conditioning is not served by the plan-backed T2V lane"
+        );
+    }
+}
+
+/// The MLX negative is DELIBERATE, not incidental. A plan-backed entry forwarded under a BUILTIN
+/// model id would otherwise clear `VIDEO_MLX_ROUTED_MODELS` and route to an MLX Wan engine that
+/// loads SceneWorks' own snapshot — rendering builtin weights under the user's imported checkpoint
+/// id. The control payload (same model, same mode, no `importPlan`) stays MLX-eligible, so the plan
+/// is provably what flipped the verdict.
+#[test]
+fn a_plan_backed_entry_under_a_builtin_model_id_is_refused_by_the_mlx_lane() {
+    let plan_backed = plan_backed_wan_video_payload(
+        "wan_2_2",
+        "text_to_video",
+        json!({ "importPlan": { "checkpointId": "ckpt_wan_abc123" } }),
+    );
+    let builtin = plan_backed_wan_video_payload("wan_2_2", "text_to_video", json!({}));
+
+    assert!(video_request_is_mlx_eligible(
+        &JobType::VideoGenerate,
+        &builtin
+    ));
+    assert!(!video_request_is_mlx_eligible(
+        &JobType::VideoGenerate,
+        &plan_backed
+    ));
+    // The candle lane still claims it — through the plan-backed Wan arm, which does load the plan.
+    assert!(video_request_is_candle_eligible(
+        &JobType::VideoGenerate,
+        &plan_backed
+    ));
+}

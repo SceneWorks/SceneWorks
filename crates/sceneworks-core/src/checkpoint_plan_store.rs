@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -477,6 +477,66 @@ impl CheckpointPlanError {
             Self::Io { .. } => "io",
         }
     }
+
+    /// The one-click lifecycle action that clears this refusal, or `None` when there is none.
+    ///
+    /// This is a CROSS-LANGUAGE contract: the web client keys the same decision off the same
+    /// `code()` strings (`apps/web/src/checkpointLibrary.js`, `REFUSAL_ACTION`), and a code that
+    /// one side treats as repairable while the other does not is a refusal the user is either
+    /// offered a button for that cannot help, or left with no way out of.
+    /// `packages/schemas/checkpoint-refusal-actions.json` is the single fixture both sides are
+    /// tested against.
+    ///
+    /// Deliberately exhaustive — no `_` arm — so a new variant cannot default into "no action".
+    pub fn lifecycle_action(&self) -> Option<CheckpointLifecycleActionV1> {
+        match self {
+            // The library itself is not where the binding says it is.
+            Self::UnknownRoot { .. } | Self::RootUnavailable { .. } => {
+                Some(CheckpointLifecycleActionV1::Relink)
+            }
+            // The root is reachable but this checkpoint's plan no longer describes its bytes.
+            Self::SourceMissing { .. }
+            | Self::SourceDrifted { .. }
+            | Self::PathEscapesRoot { .. }
+            | Self::PlanTampered { .. }
+            | Self::MissingPlan { .. }
+            | Self::InvalidRelativePath { .. }
+            | Self::UnsupportedLocator { .. } => Some(CheckpointLifecycleActionV1::Rescan),
+            // Everything else is the store's own problem, a caller error, or an ingest-time
+            // refusal: papering any of them over as "rescan" would hide it behind a button that
+            // cannot fix it.
+            Self::RootNotApprovable { .. }
+            | Self::InvalidRootLabel { .. }
+            | Self::RootAlreadyApproved { .. }
+            | Self::UnrunnableSource { .. }
+            | Self::UnknownCheckpoint { .. }
+            | Self::InvalidInstallId { .. }
+            | Self::InstallUnavailable { .. }
+            | Self::InstallIdTaken { .. }
+            | Self::LocatorOwnershipMismatch { .. }
+            | Self::InvalidPlanId { .. }
+            | Self::RootIdCollision { .. }
+            | Self::Contract(_)
+            | Self::Corrupt { .. }
+            | Self::Io { .. } => None,
+        }
+    }
+}
+
+/// The corrective actions a checkpoint-library refusal can carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CheckpointLifecycleActionV1 {
+    Relink,
+    Rescan,
+}
+
+impl CheckpointLifecycleActionV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Relink => "relink",
+            Self::Rescan => "rescan",
+        }
+    }
 }
 
 impl fmt::Display for CheckpointPlanError {
@@ -780,7 +840,42 @@ pub fn validate_install_id(install_id: &str) -> Result<(), CheckpointPlanError> 
     if install_id.contains("..") {
         return Err(invalid("must not contain '..'"));
     }
+    // A trailing '.' is silently STRIPPED by Windows when it opens the path, so `model.` and
+    // `model` name the same directory there while being two distinct install ids here — two
+    // installs that believe they own separate bytes and do not.
+    if install_id.ends_with('.') {
+        return Err(invalid("must not end with '.'"));
+    }
+    // Windows resolves a reserved DEVICE name anywhere a filename is accepted, extension and case
+    // ignored: `con.safetensors` opens the console, not a file. Creating the install directory then
+    // fails, or worse succeeds against a device. The id is refused on every platform so a library
+    // compiled on macOS is not one Windows cannot open.
+    let stem = install_id
+        .split_once('.')
+        .map_or(install_id, |(stem, _)| stem);
+    if is_windows_reserved_device_name(stem) {
+        return Err(invalid("must not be a Windows reserved device name"));
+    }
     Ok(())
+}
+
+/// The MS-DOS device names Windows still resolves ahead of any file of the same stem.
+fn is_windows_reserved_device_name(stem: &str) -> bool {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    if RESERVED
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return true;
+    }
+    // `install_id` is ASCII by the time this runs, so byte slicing is char-boundary safe.
+    let numbered = |prefix: &str| {
+        stem.len() == prefix.len() + 1
+            && stem[..prefix.len()].eq_ignore_ascii_case(prefix)
+            && stem.as_bytes()[prefix.len()].is_ascii_digit()
+            && stem.as_bytes()[prefix.len()] != b'0'
+    };
+    numbered("COM") || numbered("LPT")
 }
 
 /// Deterministic opaque id for an approved root. Derived from the canonical path's digest so
@@ -789,7 +884,11 @@ pub fn validate_install_id(install_id: &str) -> Result<(), CheckpointPlanError> 
 pub fn derive_root_id(canonical_path: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"sceneworks.checkpoint.approved-root.v1\0");
-    hasher.update(canonical_path.to_string_lossy().as_bytes());
+    // The path's OWN bytes, not a lossy string. `to_string_lossy` maps every invalid UTF-8 sequence
+    // to U+FFFD, so a library directory whose name is not valid UTF-8 hashed IDENTICALLY to a
+    // different directory literally named with the replacement character — two roots, one id, and
+    // whichever was approved second collided with the first.
+    hasher.update(canonical_path.as_os_str().as_encoded_bytes());
     let digest = hasher.finalize();
     format!("root-{:x}", digest)[..21].to_owned()
 }
@@ -804,31 +903,61 @@ pub fn validate_linked_relative_path(relative_path: &str) -> Result<(), Checkpoi
     validate_portable_relative_path(relative_path).map(|_| ())
 }
 
-fn validate_portable_relative_path(relative_path: &str) -> Result<PathBuf, CheckpointPlanError> {
-    let invalid = |reason: &str| CheckpointPlanError::InvalidRelativePath {
-        relative_path: relative_path.to_owned(),
-        reason: reason.to_owned(),
-    };
+/// THE lexical definition of a portable, confined relative path in the checkpoint seam.
+///
+/// There used to be five near-copies of these rules — this one, the ingest's staging validator, the
+/// derivative output validator, the inspector's `safe_relative_path`, and the contract validator in
+/// [`crate::checkpoint_import`] — which is four opportunities for one of them to drift looser than
+/// the document contract and admit a path the contract will later reject (or worse, admit one the
+/// contract never saw). Every one of those call sites now delegates here, and the rules below are
+/// exactly the contract validator's: no `\`, no `:`, no ASCII control byte, no empty/`.`/`..`
+/// component, nothing absolute.
+///
+/// The reason is a `&'static str` rather than a typed error so each caller can wrap it in its OWN
+/// refusal type without this function knowing about any of them.
+pub fn portable_relative_path_parts(relative_path: &str) -> Result<PathBuf, &'static str> {
     if relative_path.trim().is_empty() {
-        return Err(invalid("empty"));
+        return Err("empty");
     }
     if relative_path.contains('\\') {
-        return Err(invalid("must use '/' separators"));
+        return Err("must use '/' separators");
     }
-    let path = Path::new(relative_path);
+    if relative_path.contains(':') {
+        return Err("must not contain ':'");
+    }
+    if relative_path.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err("must not contain control characters");
+    }
+    // Named before the generic empty-component rule below so an absolute path is refused as what it
+    // is rather than as "a leading empty segment".
+    if relative_path.starts_with('/') {
+        return Err("must be relative");
+    }
+    // Split on '/' rather than walking `Path::components()`: components() silently NORMALISES
+    // `a//b` and a trailing `/.` away, so it would accept documents the contract validator (which
+    // splits) rejects. The looser reading is the one that has to go.
     let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => out.push(part),
-            Component::CurDir => return Err(invalid("contains '.'")),
-            Component::ParentDir => return Err(invalid("contains '..'")),
-            Component::RootDir | Component::Prefix(_) => return Err(invalid("must be relative")),
+    for part in relative_path.split('/') {
+        match part {
+            "" => return Err("empty path component"),
+            "." => return Err("contains '.'"),
+            ".." => return Err("contains '..'"),
+            part => out.push(part),
         }
     }
     if out.as_os_str().is_empty() {
-        return Err(invalid("empty"));
+        return Err("empty");
     }
     Ok(out)
+}
+
+fn validate_portable_relative_path(relative_path: &str) -> Result<PathBuf, CheckpointPlanError> {
+    portable_relative_path_parts(relative_path).map_err(|reason| {
+        CheckpointPlanError::InvalidRelativePath {
+            relative_path: relative_path.to_owned(),
+            reason: reason.to_owned(),
+        }
+    })
 }
 
 /// The `plan_id` shape the inspector emits (`checkpoint_inspector.rs`, `checkpoint-plan-{sha256:x}`).
@@ -1295,28 +1424,20 @@ impl CheckpointPlanStore {
             };
         match self.resolve(checkpoint_id) {
             Ok(_) => Ok(status(LinkedCheckpointStateV1::Ready, None)),
-            Err(
-                error @ (CheckpointPlanError::UnknownRoot { .. }
-                | CheckpointPlanError::RootUnavailable { .. }),
-            ) => Ok(status(
-                LinkedCheckpointStateV1::NeedsRelink,
-                Some(error.to_string()),
-            )),
-            Err(
-                error @ (CheckpointPlanError::SourceMissing { .. }
-                | CheckpointPlanError::SourceDrifted { .. }
-                | CheckpointPlanError::PathEscapesRoot { .. }
-                | CheckpointPlanError::PlanTampered { .. }
-                | CheckpointPlanError::MissingPlan { .. }
-                | CheckpointPlanError::InvalidRelativePath { .. }
-                | CheckpointPlanError::UnsupportedLocator { .. }),
-            ) => Ok(status(
-                LinkedCheckpointStateV1::NeedsRescan,
-                Some(error.to_string()),
-            )),
-            // Corruption, I/O and contract failures are the store's own problem, not a library
-            // lifecycle state; returning them keeps them from being papered over as "rescan".
-            Err(error) => Err(error),
+            // ONE classification, in `CheckpointPlanError::lifecycle_action`, shared with the code
+            // the client branches on. Corruption, I/O and contract failures carry no action and are
+            // returned as errors: that is what keeps them from being papered over as "rescan".
+            Err(error) => match error.lifecycle_action() {
+                Some(CheckpointLifecycleActionV1::Relink) => Ok(status(
+                    LinkedCheckpointStateV1::NeedsRelink,
+                    Some(error.to_string()),
+                )),
+                Some(CheckpointLifecycleActionV1::Rescan) => Ok(status(
+                    LinkedCheckpointStateV1::NeedsRescan,
+                    Some(error.to_string()),
+                )),
+                None => Err(error),
+            },
         }
     }
 
@@ -1527,12 +1648,12 @@ impl CheckpointPlanStore {
         relative_path: &str,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let root_path = self.resolve_root(root_id)?;
-        let relative = validate_portable_relative_path(relative_path)?;
+        validate_portable_relative_path(relative_path)?;
         let checkpoint_id = linked_checkpoint_id(root_id, relative_path);
         let request = CheckpointInspectionRequestV1::linked(
             checkpoint_id.clone(),
             root_path.clone(),
-            relative.clone(),
+            relative_path,
             root_id,
         )
         .map_err(|reason| CheckpointPlanError::InvalidRelativePath {
@@ -1563,12 +1684,12 @@ impl CheckpointPlanStore {
         provenance: ManagedProvenanceV1,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let install_path = self.resolve_install(install_id)?;
-        let relative = validate_portable_relative_path(relative_path)?;
+        validate_portable_relative_path(relative_path)?;
         let checkpoint_id = managed_checkpoint_id(install_id);
         let request = CheckpointInspectionRequestV1::managed(
             checkpoint_id.clone(),
             install_path.clone(),
-            relative.clone(),
+            relative_path,
             install_id,
             provenance,
         )

@@ -1745,6 +1745,61 @@ pub(super) fn wan_comfyui_claims(
     Ok(resolve_wan_comfyui_paths(request, settings)?.is_some())
 }
 
+/// The candle video verdict for a PLAN-BACKED entry (`importPlan.checkpointId`, epic 20398):
+/// `Ok(())` when this ComfyUI Wan T2V lane claims it, otherwise a typed refusal naming the
+/// checkpoint. Never "not mine" — a plan-backed entry that falls through the router lands on
+/// `CandleVideoRoute::Stub` and the job COMPLETES with procedural video (sc-20651).
+///
+/// `resolve_candle_video_route` consults this AHEAD of the backend gate and every mode arm, because
+/// each of those is wrong for a plan-backed entry in its own way:
+/// * all three `Stub` arms render procedural video — the video twin of the `generate_stub_stream`
+///   hole `CheckpointPlanSelection::into_unclaimed_refusal` closed on the image side, and the
+///   `!backend_candle_enabled` early-out reaches one before any plan check could run;
+/// * the `replace_person` / `extend_clip` / `video_bridge` arms are evaluated BEFORE
+///   [`wan_comfyui_claims`], so an imported checkpoint on those modes would be routed into a builtin
+///   Wan-VACE / SCAIL-2 lane that loads SceneWorks' own weights and never reads the plan's bytes.
+///
+/// The family/mode window mirrors `plan_backed_wan_video_candle_eligible` in core routing, which
+/// keeps the enqueue gate from admitting a shape this refuses. Both must move together.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn plan_backed_wan_video_route(
+    request: &VideoRequest,
+    settings: &Settings,
+    checkpoint_id: &str,
+) -> WorkerResult<()> {
+    let refuse = |reason: String| -> WorkerResult<()> {
+        Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:no-video-lane] checkpoint {checkpoint_id:?}: {reason}, and a \
+             plan-backed entry never renders procedural stub output"
+        )))
+    };
+    if !settings.backend_candle_enabled {
+        return refuse("the candle backend is disabled on this worker".to_owned());
+    }
+    let family = request
+        .model_manifest_entry
+        .get("family")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if family != "wan-video" {
+        return refuse(format!(
+            "no candle video lane loads a checkpoint plan for the {family:?} family"
+        ));
+    }
+    if request.mode != "text_to_video" {
+        return refuse(format!(
+            "the plan-backed Wan lane serves text_to_video only, not {:?}",
+            request.mode
+        ));
+    }
+    if !wan_comfyui_claims(request, settings)? {
+        return refuse(
+            "the plan-backed Wan lane could not resolve this checkpoint's expert layers".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 // There is deliberately NO boolean `wan_comfyui_available` probe any more. It existed only to be
 // called from the router, and answering `bool` is precisely how every refusal this lane raises
 // became a successful procedural-stub render (sc-20644 review blocker 2). Anything that needs the

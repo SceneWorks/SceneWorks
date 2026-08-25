@@ -625,6 +625,35 @@ fn a_staged_relative_path_can_never_escape_the_staging_directory() {
     assert!(!fixture.staging_root().join("escaped.safetensors").exists());
 }
 
+/// `stage_copy_dir` already refuses a symlink it meets while walking. `stage_copy_file` is also a
+/// public entry point — a local-path import of a single file reaches it directly — and it followed
+/// the link, reading bytes from wherever it led, outside the path the user named.
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_at_the_staging_source_root_is_refused() {
+    let fixture = fixture("symlink");
+    let real = fixture.user_file();
+    let link = fixture.library_dir.join("link-to-krea.safetensors");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let ingest = ManagedIngest::begin(&fixture.store, "install-s1", civitai_provenance()).unwrap();
+    let error = ingest
+        .stage_copy_file(&link, KREA_FILE)
+        .expect_err("a symlinked source refuses");
+    assert_eq!(error.code(), "unsupported-source-entry");
+    assert!(
+        !fixture
+            .staging_root()
+            .join("install-s1")
+            .join(KREA_FILE)
+            .exists(),
+        "nothing was staged from the link"
+    );
+    // The real file behind the link is still stageable: the refusal is about the link, not the
+    // bytes.
+    assert!(ingest.stage_copy_file(&real, KREA_FILE).is_ok());
+}
+
 // ---- AC2: parity, duplicate reporting, ownership-safe removal --------------------------------
 
 #[test]
@@ -690,8 +719,13 @@ fn a_managed_copy_and_its_linked_original_share_a_semantic_digest_and_report_eac
 /// The plan's `target_path` is part of its semantic identity, so parity is between copies that hold
 /// the same logical layout — not between any two files with equal bytes. Pinned so a future change
 /// that dropped `target_path` from the digest (making unrelated layouts collide) is caught.
+///
+/// The difference exercised here is the checkpoint's own INTERNAL name, because that is what
+/// `target_path` carries after sc-20651: the directory a single-file checkpoint happens to sit in
+/// is location, not layout, and the two are no longer allowed to be confused (see
+/// `a_checkpoint_linked_at_a_nested_path_is_the_same_checkpoint_as_its_managed_copy`).
 #[test]
-fn a_managed_copy_at_a_different_layout_is_a_different_plan_despite_identical_bytes() {
+fn a_managed_copy_under_a_different_internal_name_is_a_different_plan_despite_identical_bytes() {
     let fixture = fixture("layout");
     let source = fixture.user_file();
 
@@ -701,19 +735,80 @@ fn a_managed_copy_at_a_different_layout_is_a_different_plan_despite_identical_by
         .compile_linked(&root.root_id, KREA_FILE)
         .unwrap();
 
+    let renamed = "kreamania-v2.safetensors";
     let ingest = ManagedIngest::begin(&fixture.store, "install-l1", civitai_provenance()).unwrap();
-    ingest
-        .stage_copy_file(&source, &format!("transformer/{KREA_FILE}"))
-        .unwrap();
-    let managed = ingest
-        .finalize(&format!("transformer/{KREA_FILE}"), None)
-        .unwrap();
+    ingest.stage_copy_file(&source, renamed).unwrap();
+    let managed = ingest.finalize(renamed, None).unwrap();
 
+    assert_eq!(
+        managed.compiled.plan.layers[0].target_path, renamed,
+        "the layer carries the checkpoint's own internal name"
+    );
     assert_ne!(
         managed.compiled.record.summary.semantic_digest,
         linked.record.summary.semantic_digest
     );
     assert!(managed.duplicate_checkpoint_ids().is_empty());
+}
+
+/// BLOCKER 5 (sc-20651): the semantic digest must not know where in the library the checkpoint sits.
+///
+/// A plan layer's `layer_id` and `target_path` used to be taken relative to the LIBRARY ROOT, so a
+/// checkpoint kept a few directories down — the normal case for anyone with an organised library —
+/// compiled to a different semantic digest than the byte-identical managed copy of it, which is a
+/// managed install whose own directory is the root. Linked/managed parity therefore held only for
+/// checkpoints sitting at the very top of a root, and nowhere else.
+///
+/// Both digests below are produced by real production compiles (`compile_linked` through the
+/// approved root, `ManagedIngest::finalize` through the staging/commit path); neither side is
+/// derived from the other.
+#[test]
+fn a_checkpoint_linked_at_a_nested_path_is_the_same_checkpoint_as_its_managed_copy() {
+    let fixture = fixture("nested-parity");
+    let nested_relative = format!("vendors/krea/v2/{KREA_FILE}");
+    let nested = fixture.library_dir.join(&nested_relative);
+    write_krea_native_file(&nested, 0x21);
+
+    let root = fixture.store.approve_root(&fixture.library_dir).unwrap();
+    let linked = fixture
+        .store
+        .compile_linked(&root.root_id, &nested_relative)
+        .unwrap();
+    let managed = ManagedIngest::begin(&fixture.store, "install-n1", civitai_provenance())
+        .unwrap()
+        .stage_and_finalize(&nested);
+
+    assert_eq!(
+        managed.compiled.record.summary.semantic_digest, linked.record.summary.semantic_digest,
+        "a nested linked checkpoint and its managed copy are the same checkpoint"
+    );
+    assert_eq!(
+        managed.compiled.plan.semantic_digest().unwrap(),
+        linked.plan.semantic_digest().unwrap()
+    );
+
+    // The layer identity is the checkpoint's own, with no trace of the library path in it...
+    assert_eq!(linked.plan.layers.len(), 1);
+    assert_eq!(linked.plan.layers[0].target_path, KREA_FILE);
+    assert_eq!(
+        linked.plan.layers[0].layer_id,
+        format!("artifact:{KREA_FILE}")
+    );
+
+    // ...while the LOCATOR — the thing that says where to open the bytes — is still root-relative,
+    // because that is the one place the location genuinely belongs.
+    match &linked.plan.layers[0].source {
+        SourceLocatorV1::Linked { relative_path, .. } => {
+            assert_eq!(relative_path, &nested_relative);
+        }
+        other => panic!("a linked compile produced {other:?}"),
+    }
+
+    // And because the digests now agree, the two copies find each other as duplicates.
+    assert_eq!(
+        managed.duplicate_checkpoint_ids(),
+        [linked_checkpoint_id(&root.root_id, &nested_relative)]
+    );
 }
 
 #[test]

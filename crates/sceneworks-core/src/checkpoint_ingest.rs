@@ -57,7 +57,8 @@ use sha2::{Digest, Sha256};
 
 use crate::checkpoint_import::ManagedProvenanceV1;
 use crate::checkpoint_plan_store::{
-    managed_checkpoint_id, CheckpointPlanError, CheckpointPlanStore, CompiledCheckpointV1,
+    managed_checkpoint_id, portable_relative_path_parts, CheckpointPlanError, CheckpointPlanStore,
+    CompiledCheckpointV1,
 };
 
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
@@ -259,31 +260,12 @@ pub fn provenance_credential_host(source_url: &str) -> Option<String> {
 /// Validate a portable relative path a caller wants to stage. Same shape the plan store enforces on
 /// a compiled layer, applied at the staging boundary so no write can escape the staging directory.
 fn staged_relative_path(relative_path: &str) -> Result<PathBuf, ManagedIngestError> {
-    let invalid = |reason: &'static str| ManagedIngestError::InvalidRelativePath {
-        relative_path: relative_path.to_owned(),
-        reason,
-    };
-    if relative_path.trim().is_empty() {
-        return Err(invalid("empty"));
-    }
-    if relative_path.contains('\\') {
-        return Err(invalid("must use '/' separators"));
-    }
-    let mut out = PathBuf::new();
-    for component in Path::new(relative_path).components() {
-        match component {
-            std::path::Component::Normal(part) => out.push(part),
-            std::path::Component::CurDir => return Err(invalid("contains '.'")),
-            std::path::Component::ParentDir => return Err(invalid("contains '..'")),
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                return Err(invalid("must be relative"))
-            }
+    portable_relative_path_parts(relative_path).map_err(|reason| {
+        ManagedIngestError::InvalidRelativePath {
+            relative_path: relative_path.to_owned(),
+            reason,
         }
-    }
-    if out.as_os_str().is_empty() {
-        return Err(invalid("empty"));
-    }
-    Ok(out)
+    })
 }
 
 /// One in-flight managed ingest.
@@ -422,6 +404,18 @@ impl ManagedIngest {
         source: &Path,
         relative_path: &str,
     ) -> Result<u64, ManagedIngestError> {
+        // A symlink AT THE STAGING SOURCE ROOT gets the same refusal `stage_copy_dir` already gives
+        // a symlink it finds while walking. `stage_copy_dir` only ever reaches this function with a
+        // real file, so without this check the rule held everywhere EXCEPT the one entry point a
+        // caller reaches directly — pointing a local-path import at a symlink read bytes from
+        // wherever it happened to lead, outside the directory the user named.
+        let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ManagedIngestError::UnsupportedSourceEntry {
+                path: source.to_path_buf(),
+                kind: "symbolic link",
+            });
+        }
         let mut file = fs::File::open(source).map_err(|error| io_error(source, error))?;
         self.stage_from_reader(relative_path, &mut file)
     }

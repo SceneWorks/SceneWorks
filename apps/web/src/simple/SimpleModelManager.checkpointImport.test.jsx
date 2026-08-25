@@ -149,6 +149,39 @@ describe("SimpleModelManager checkpoint import (sc-20650)", () => {
     expect(container.querySelector(".checkpoint-credential-notice")).toBeNull();
   });
 
+  // The submit path. Every other test here proves the panel RENDERS from Simple; none of them
+  // proved Simple actually hands it a way to enqueue, so dropping `onImportModel` from the mount
+  // left the whole disclosure inert and no test noticed. Driving a real managed submission through
+  // to the context's `createModelImportJob` is what makes that wire load-bearing.
+  it("enqueues a managed import through the context's createModelImportJob", async () => {
+    await render();
+    await click(section().querySelector(".checkpoint-import-toggle"));
+    await click(
+      [...container.querySelectorAll('[role="radio"]')].find((node) =>
+        node.textContent.startsWith("Add to SceneWorks"),
+      ),
+    );
+    await click(buttonNamed("Hugging Face"));
+    const repo = [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith("Hugging Face repo"))
+      .querySelector("input");
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    await act(async () => {
+      setValue.call(repo, "org/model");
+      repo.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(createModelImportJob).not.toHaveBeenCalled();
+
+    await click(buttonNamed("Queue Import"));
+
+    expect(createModelImportJob).toHaveBeenCalledTimes(1);
+    expect(createModelImportJob).toHaveBeenCalledWith({
+      ownershipMode: "managed",
+      type: "image",
+      source: { kind: "huggingFace", repo: "org/model" },
+    });
+  });
+
   it("surfaces a duplicate-checkpoint warning from a completed import", async () => {
     await render({
       jobs: [{ id: "job-2", type: "model_import", status: "completed", result: { duplicateCheckpointIds: ["managed/i-1"] } }],

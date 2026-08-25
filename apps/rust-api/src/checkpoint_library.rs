@@ -201,7 +201,13 @@ pub(crate) async fn update_library_root(
 pub(crate) async fn remove_library_root(
     State(state): State<AppState>,
     Path(root_id): Path<String>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
 ) -> Result<Json<RemoveLibraryRootResponse>, ApiError> {
+    // The same local-only gate `approve_library_root` and the relink half of `update_library_root`
+    // carry. Approving and relinking are gated because they name a host path; forgetting a library
+    // destroys the plans, records and derivatives that path produced, which is no less a host-state
+    // change, and leaving it open let a remote caller tear down a library it could not have added.
+    require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
     let data_dir = state.settings.data_dir.clone();
     let (removal, derivatives) = tokio::task::spawn_blocking(move || {
         CheckpointDerivativeStore::open(&data_dir)?.remove_root(&root_id)
@@ -305,7 +311,8 @@ fn require_local_peer(peer: Option<SocketAddr>) -> Result<(), ApiError> {
     }
     Err(ApiError::typed(
         StatusCode::FORBIDDEN,
-        "A model library can only be added or relinked from SceneWorks running on this machine.",
+        "A model library can only be added, relinked, or forgotten from SceneWorks running on this \
+         machine.",
         CHECKPOINT_LIBRARY_NOT_PERMITTED_CODE,
         json!({ "reason": "not_a_local_client" }),
     ))

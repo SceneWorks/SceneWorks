@@ -17518,3 +17518,128 @@ fn a_plain_minimax_h3_lora_loads_without_changing_the_schedule() {
     );
     assert_eq!(raw["minimaxH3Turbo"], json!("off"));
 }
+
+// ---- Plan-backed video routing refusals (epic 20398, sc-20651) ----
+
+/// A `VideoRequest` for an imported plan-backed checkpoint: `family` + `importPlan.checkpointId` on
+/// the forwarded `modelManifestEntry`, no installed component paths.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn plan_backed_video_request(family: &str, mode: &str) -> VideoRequest {
+    request(json!({
+        "projectId": "project-1",
+        "model": "imported_wan_2_2_abc123",
+        "mode": mode,
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "id": "imported_wan_2_2_abc123",
+            "family": family,
+            "importPlan": { "checkpointId": "ckpt_wan_abc123" }
+        }
+    }))
+}
+
+/// The message every plan-backed router refusal must carry, asserted through the ROUTER accessor so
+/// a refusal that stops at a resolver and is swallowed on the way out still fails.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn plan_backed_router_refusal(request: &VideoRequest, settings: &Settings) -> String {
+    match resolve_candle_video_route_for_test(request, settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        Ok(()) => panic!("a plan-backed entry must never resolve to a renderable route here"),
+    }
+}
+
+/// **The video twin of `into_unclaimed_refusal`.** `resolve_candle_video_route`'s terminal arm is
+/// `CandleVideoRoute::Stub`, which COMPLETES the job with procedural video — and the
+/// `!backend_candle_enabled` early-out reached it before any plan-backed check existed, so an
+/// imported checkpoint on a candle-disabled worker SUCCEEDED with a moving gradient.
+///
+/// The control at the end is what makes this an assertion about the plan rather than about the
+/// setting: the identical request WITHOUT `importPlan` still resolves, so only the plan flips it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_plan_backed_video_request_refuses_instead_of_stubbing_when_candle_is_disabled() {
+    let settings = Settings {
+        backend_candle_enabled: false,
+        ..crate::test_env::offline_settings()
+    };
+    let message = plan_backed_router_refusal(
+        &plan_backed_video_request("wan-video", "text_to_video"),
+        &settings,
+    );
+    assert!(
+        message.contains("[checkpoint-plan:no-video-lane]")
+            && message.contains("\"ckpt_wan_abc123\"")
+            && message.contains("candle backend is disabled"),
+        "the refusal must name the checkpoint and the reason: {message}"
+    );
+
+    // Control: the same disabled worker still stubs a NON-plan-backed request, unchanged.
+    assert!(
+        resolve_candle_video_route_for_test(
+            &request(json!({
+                "projectId": "project-1",
+                "model": "wan_2_2",
+                "mode": "text_to_video",
+                "prompt": "a fox"
+            })),
+            &settings,
+        )
+        .is_ok(),
+        "the refusal must be keyed on the plan, not on the disabled backend"
+    );
+}
+
+/// The `replace_person` / `extend_clip` / `video_bridge` arms are evaluated BEFORE the ComfyUI Wan
+/// arm, so an imported checkpoint on those modes used to be routed into a builtin Wan-VACE /
+/// SCAIL-2 lane that loads SceneWorks' own weights and never reads the plan's bytes — a silent
+/// substitution, not a stub. It must refuse by name instead, and the refusal must say which mode
+/// the plan-backed lane actually serves.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_plan_backed_video_request_refuses_every_mode_the_plan_lane_does_not_serve() {
+    let settings = Settings {
+        backend_candle_enabled: true,
+        ..crate::test_env::offline_settings()
+    };
+    for mode in [
+        "replace_person",
+        "extend_clip",
+        "video_bridge",
+        "image_to_video",
+        "first_last_frame",
+        "animate_character",
+    ] {
+        let message =
+            plan_backed_router_refusal(&plan_backed_video_request("wan-video", mode), &settings);
+        assert!(
+            message.contains("[checkpoint-plan:no-video-lane]")
+                && message.contains("\"ckpt_wan_abc123\"")
+                && message.contains("text_to_video only")
+                && message.contains(mode),
+            "{mode} must refuse by name: {message}"
+        );
+    }
+}
+
+/// No candle video lane loads a checkpoint plan for any family but Wan, and the ladder's other
+/// engine arms are routed off the MODEL ID — which an imported checkpoint never matches — so a
+/// plan-backed entry of another family would land on `Stub`. Refuse, naming the family.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_plan_backed_video_request_of_a_family_with_no_video_lane_refuses_by_name() {
+    let settings = Settings {
+        backend_candle_enabled: true,
+        ..crate::test_env::offline_settings()
+    };
+    let message = plan_backed_router_refusal(
+        &plan_backed_video_request("ltx-video", "text_to_video"),
+        &settings,
+    );
+    assert!(
+        message.contains("[checkpoint-plan:no-video-lane]")
+            && message.contains("\"ckpt_wan_abc123\"")
+            && message.contains("\"ltx-video\""),
+        "the refusal must name the checkpoint and the family: {message}"
+    );
+}

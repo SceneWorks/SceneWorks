@@ -20283,7 +20283,10 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
 // The fixture and its helpers serve the macOS route probes below (`resolve_image_route` is the
 // MLX test-facing probe); the candle twin of the route is typechecked by `rust:check:candle` and
 // exercised on the Windows candle lane through the shared `checkpoint_plan.rs` handler.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 struct CheckpointPlanFixture {
     _data: tempfile::TempDir,
     _library: tempfile::TempDir,
@@ -20295,7 +20298,10 @@ struct CheckpointPlanFixture {
     root_id: String,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn write_tiny_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
     let mut header = serde_json::Map::new();
     let mut offset = 0_u64;
@@ -20319,7 +20325,10 @@ fn write_tiny_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
     std::fs::write(path, bytes).unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn krea_native_entries() -> Vec<(&'static str, &'static str)> {
     vec![
         ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
@@ -20328,7 +20337,41 @@ fn krea_native_entries() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-#[cfg(target_os = "macos")]
+/// The tensor surface a fused SDXL LDM/A1111 checkpoint is recognized by: the UNet input/middle
+/// block grammar, BOTH CLIP conditioners (the second is what separates SDXL from SD1.5), and the
+/// `first_stage_model` VAE. Mirrors `sceneworks-core`'s own inspector fixture, because the family
+/// verdict this drives is that crate's.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn sdxl_fused_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+            "F16",
+        ),
+        (
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+            "F16",
+        ),
+        ("first_stage_model.encoder.conv_in.weight", "F16"),
+        ("first_stage_model.decoder.conv_out.weight", "F16"),
+    ]
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 impl CheckpointPlanFixture {
     fn new(label: &str, with_base_tier: bool) -> Self {
         let data = tempfile::Builder::new()
@@ -20387,6 +20430,22 @@ impl CheckpointPlanFixture {
             .checkpoint_id
     }
 
+    /// Compile a multi-artifact TREE under `dir`, the shape every ComfyUI family imports as.
+    ///
+    /// `files` is `(path relative to the tree root, tensor surface)`; the artifact's ROLE is the one
+    /// the inspector infers from that path and reconciles against the bytes, exactly as it does for
+    /// a real import — the fixture never names a role itself.
+    #[allow(dead_code)]
+    fn compile_tree(&self, dir: &str, files: &[(&str, Vec<(&str, &str)>)]) -> String {
+        for (relative, entries) in files {
+            write_tiny_safetensors(&self.library_dir.join(dir).join(relative), entries, 0x5a);
+        }
+        self.store
+            .compile_linked(&self.root_id, dir)
+            .unwrap_or_else(|error| panic!("the {dir:?} tree must compile: {error}"))
+            .checkpoint_id
+    }
+
     fn plan_backed_request(&self, checkpoint_id: &str, extra: Value) -> ImageRequest {
         let mut payload = json!({
             "projectId": "p",
@@ -20415,6 +20474,13 @@ impl CheckpointPlanFixture {
     /// Same reason as [`Self::installed_lora`]: once conformance runs through the production seam,
     /// a legitimately-absent install surfaces as the typed refusal it is, and the row stops
     /// measuring the claim.
+    ///
+    /// Only the macOS pose-conformance rows call it; the candle arm's plan-route tests do not go
+    /// through pose, so it is dead there and `-D warnings` says so.
+    #[cfg_attr(
+        all(not(target_os = "macos"), feature = "backend-candle"),
+        allow(dead_code)
+    )]
     fn install_pose_overlay(&self) {
         let snapshot = self
             .settings
@@ -21327,91 +21393,25 @@ fn the_wan_video_lane_sources_a_plan_backed_entry_by_expert_role() {
     );
 }
 
-/// sc-20644 ComfyUI-tree rows (Z-Image, Qwen-Image, FLUX.2) — single-claim conformance and the
-/// bespoke surface sc-20651 deletes, for the three families whose lanes are CANDLE-ONLY.
+/// sc-20644 ComfyUI-tree rows (Z-Image, Qwen-Image, FLUX.2) — the bespoke surface sc-20651 deletes,
+/// and the migration table that names which families have landed.
 ///
-/// These three lanes are `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]`, so
-/// `cargo test` cannot link them here and their behavioural tests first RUN on the windows-candle CI
-/// lane. What IS checkable on every lane, and what this test checks, is that the guards are live
-/// code in the right ORDER — the same posture sc-20636 already took for the Z-Image lane, widened to
-/// all three because two of them did not have the guard at all.
+/// This test USED to also pin the three lanes' guard ORDERING as source text
+/// (`request_is_checkpoint_plan_backed` before the plan source, the plan source before the
+/// `external_base_` id gate). Those claims are now made behaviourally, by
+/// `a_linked_zimage_tree_resolves_all_three_artifacts_from_its_plan` and its Qwen-Image and FLUX.2
+/// siblings: each compiles a real linked tree, drives the real preparer with a model id that carries
+/// NO `external_base_` prefix, and asserts both that a shape the plan route declines resolves from
+/// the plan and that a shape it claims is declined here. A lane that moved its plan source behind
+/// the id gate, or lost its decline, reds those instead — which is strictly stronger than a `find`
+/// over the file's own text (feature-end review blocker 2). The ordering scan is therefore gone
+/// rather than kept alongside them.
 ///
-/// The gap this closes: Qwen-Image and FLUX.2 had no `request_is_checkpoint_plan_backed` decline.
-/// They did not double-claim in practice, because both additionally require an `external_base_*`
-/// model id that a plan-backed entry never has — but an incidental property of how the catalog names
-/// a scanned row is not a claim, and it is exactly the "arm ordering decides" posture the sc-20634
-/// review rejected. Both now decline explicitly, before any source resolution.
-///
-/// Failing mutations: delete the decline from any of the three; move a decline after its lane's
-/// first source resolution; delete a plan-sourced resolver call.
+/// What remains is the half no behaviour can express: an INVENTORY of the bespoke code sc-20651 is
+/// scheduled to delete, so the deletion story has one list to read rather than six files to grep,
+/// and it fails loudly if a symbol disappears early or is renamed.
 #[test]
-fn every_comfyui_tree_lane_declines_a_plan_backed_request_before_resolving_anything() {
-    // `(file, source, the lane's catalog-scan CALL SITE, its plan-sourced resolver CALL SITE)`.
-    //
-    // Both markers are the full call site, not the bare function name: `resolve_<f>_comfyui_paths`
-    // is a SUBSTRING of `resolve_plan_backed_<f>_comfyui_paths`, so matching on the short name makes
-    // "the plan source comes first" trivially true. That is not hypothetical — the mutation that
-    // moved the Z-Image plan source behind the `external_base_` gate passed against the short
-    // markers, which is what turned this into a real assertion.
-    let lanes: [(&str, &str, &str, &str); 3] = [
-        (
-            "zimage_comfyui_candle.rs",
-            include_str!("zimage_comfyui_candle.rs"),
-            "let Some(paths) = resolve_zimage_comfyui_paths(request, settings)? else {",
-            "match resolve_plan_backed_zimage_comfyui_paths(request, settings)? {",
-        ),
-        (
-            "qwen_comfyui_candle.rs",
-            include_str!("qwen_comfyui_candle.rs"),
-            "let Some(paths) = resolve_qwen_comfyui_paths(request, settings)? else {",
-            "match resolve_plan_backed_qwen_comfyui_paths(request, settings)? {",
-        ),
-        (
-            "flux2_comfyui_candle.rs",
-            include_str!("flux2_comfyui_candle.rs"),
-            "let Some(paths) = resolve_flux2_comfyui_paths(request, settings)? else {",
-            "match resolve_plan_backed_flux2_comfyui_paths(request, settings)? {",
-        ),
-    ];
-    for (name, source, scan, plan_source) in lanes {
-        let decline = source
-            .find("if super::request_is_checkpoint_plan_backed(request) {")
-            .unwrap_or_else(|| {
-                panic!("{name}: the lane must explicitly decline a plan-backed request")
-            });
-        let plan_source_at = source.find(plan_source).unwrap_or_else(|| {
-            panic!(
-                "{name}: the lane must source a plan-backed entry's bytes from the plan at the \
-                 call site {plan_source}"
-            )
-        });
-        let scan_at = source
-            .find(scan)
-            .unwrap_or_else(|| panic!("{name}: fixture check — the catalog scan must still exist"));
-        // The `external_base_` id prefix gate belongs to the SCAN, and nothing may stand between a
-        // plan-backed entry and the plan source — least of all a catalog-id shape that a linked
-        // checkpoint never has.
-        let prefix_at = source
-            .find("!request.model.starts_with(\"external_base_\")")
-            .unwrap_or_else(|| {
-                panic!("{name}: fixture check — the scan's id gate must still exist")
-            });
-        assert!(
-            decline < plan_source_at,
-            "{name}: the plan-backed decline must precede the plan-sourced resolution"
-        );
-        assert!(
-            plan_source_at < prefix_at,
-            "{name}: the plan source must precede the `external_base_` id gate — a LINKED tree has \
-             no catalog row and no such id, so gating on it first makes the plan source unreachable"
-        );
-        assert!(
-            prefix_at < scan_at,
-            "{name}: fixture check — the id gate guards the catalog scan, which is what makes the \
-             assertion above meaningful"
-        );
-    }
-
+fn the_comfyui_tree_lanes_bespoke_surface_and_migration_table_are_still_live_code() {
     // ---- the bespoke surface sc-20651 deletes, pinned BY NAME, per family ------------------
     for (name, source, symbols) in [
         (
@@ -22380,19 +22380,13 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
             .sum()
     };
 
-    // Both lanes build their companions through the one shared construction.
-    let plan_companions = imported_base_snapshot_companions(&base, false);
-    let legacy_companions = imported_base_snapshot_companions(&base, false);
+    let companions = imported_base_snapshot_companions(&base, false);
     assert_eq!(
-        plan_companions, legacy_companions,
-        "the plan route and the legacy lane must build the same companion set"
-    );
-    assert_eq!(
-        plan_companions,
+        companions,
         vec![base.join("vae"), base.join("text_encoder")]
     );
     assert!(
-        !plan_companions.contains(&base.join("transformer")),
+        !companions.contains(&base.join("transformer")),
         "the snapshot transformer the imported file replaces must stay out of the floor"
     );
 
@@ -22401,12 +22395,7 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
         .expect("primary pins")
         .target_fingerprint()
         .size;
-    let plan_floor = imported_bytes + companion_bytes(&plan_companions);
-    let legacy_floor = imported_bytes + companion_bytes(&legacy_companions);
-    assert_eq!(
-        plan_floor, legacy_floor,
-        "plan-route floor {plan_floor} must equal the legacy lane's {legacy_floor}"
-    );
+    let plan_floor = imported_bytes + companion_bytes(&companions);
     assert_eq!(plan_floor, 1100 + 170 + 130);
 
     // And it must be strictly cheaper than pricing the whole snapshot dir, which is what the
@@ -22421,6 +22410,1017 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
     // A spec that selected its own encoder drops the bundled one (already covered by its receipt).
     let selected = imported_base_snapshot_companions(&base, true);
     assert_eq!(selected, vec![base.join("vae")]);
+}
+
+/// The other half of the floor-parity claim, and the half the arithmetic above cannot make: the two
+/// routes price the SAME resident base tier.
+///
+/// The previous form of this compared `imported_base_snapshot_companions(&base, false)` to itself
+/// and therefore asserted nothing (feature-end review blocker 4) — the shared construction is
+/// deterministic, so one call always equals another. What is actually at risk is the INPUT: the
+/// plan-driven route reaches its base tier through the checkpoint adapter's declared
+/// `base-snapshot` component and `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`, while the legacy Krea
+/// imported lane reaches its own through `resolve_krea_imported_base_tier`. Two different code
+/// paths, and nothing structural ties them together. If they ever name different directories the
+/// two lanes are admitted on different floors even though the shared companion construction is
+/// byte-identical.
+///
+/// So both sides here are produced by production: the plan side is read off the bundle
+/// `prepare_checkpoint_plan_sources` actually built (its `BASE_SNAPSHOT_COMPONENT` entry), the
+/// legacy side off `resolve_krea_imported_base_tier`. Neither is a restatement of the test's input —
+/// the fixture never tells either lane where the tier is; both discover it from the isolated hub.
+///
+/// Failing mutation (run): point `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`' `krea_2` row at a resolver
+/// returning a different directory — the companion sets and the floors diverge and this reds while
+/// the arithmetic test above stays green.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
+    let fx = CheckpointPlanFixture::new("floor-parity", true);
+    // Give the resident tier a transformer WEIGHT file: it is the one the imported DiT replaces, so
+    // its bytes are what a recursive floor would double-charge, and without it the exclusion below
+    // is unobservable.
+    write_tiny_safetensors(
+        &fx.base_tier
+            .join("transformer/diffusion_pytorch_model.safetensors"),
+        &[("blocks.0.attn.wq.weight", "BF16")],
+        0x11,
+    );
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // ---- the PLAN route's own answer -------------------------------------------------------
+    let plan_request = fx.plan_backed_request(&checkpoint_id, json!({}));
+    let sources = prepare_checkpoint_plan_sources(&plan_request, &fx.settings)
+        .expect("the plan route prepares a plan-backed t2i request")
+        .into_sources()
+        .expect("the plan route claims it");
+    let plan_spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
+    let plan_base = sources
+        .components
+        .iter()
+        .find_map(|(component, source)| match (*component, source) {
+            (gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(dir)) => Some(dir.clone()),
+            _ => None,
+        })
+        .expect("the plan route declares its base snapshot as a directory component");
+    let plan_companions =
+        imported_base_snapshot_companions(&plan_base, plan_spec.text_encoder.is_some());
+
+    // ---- the LEGACY lane's own answer ------------------------------------------------------
+    let legacy_base = resolve_krea_imported_base_tier(&fx.settings)
+        .expect("the legacy lane resolves the same installed tier");
+    let legacy_companions = imported_base_snapshot_companions(&legacy_base, false);
+
+    assert_eq!(
+        plan_base, legacy_base,
+        "the plan route's declared base-snapshot component and the legacy lane's resident tier must \
+         be one directory, or the two lanes are admitted on different floors"
+    );
+    assert_eq!(
+        plan_companions, legacy_companions,
+        "the two lanes' companion sets must be equal"
+    );
+    assert_eq!(
+        plan_companions,
+        vec![plan_base.join("vae"), plan_base.join("text_encoder")],
+        "and the set is the shared TE + VAE only — never the tier's own transformer"
+    );
+
+    let companion_bytes = |dirs: &[PathBuf]| -> u64 {
+        dirs.iter()
+            .map(|dir| crate::mlx_fit_gate::sum_safetensors_bytes(dir))
+            .sum()
+    };
+    // The primary both lanes open is the same file, so equal companion bytes is equal floor.
+    assert_eq!(
+        plan_spec.weights,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
+    );
+    assert_eq!(
+        companion_bytes(&plan_companions),
+        companion_bytes(&legacy_companions)
+    );
+    // Not vacuously zero: the tier really does hold weight bytes, and the excluded transformer's
+    // are really outside the total.
+    assert!(companion_bytes(&plan_companions) > 0);
+    assert!(
+        crate::mlx_fit_gate::sum_safetensors_bytes(&plan_base) > companion_bytes(&plan_companions),
+        "fixture check: the tier's own transformer carries bytes the floor must be excluding"
+    );
+
+    // The candle floor's own production entry point agrees with the construction asserted above.
+    // Candle-only, so this first EXECUTES on the windows-candle lane.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let priced = checkpoint_plan_candle_companion_dirs(&sources, &plan_spec)
+            .expect("the plan route can price every component it declares");
+        assert_eq!(
+            priced, legacy_companions,
+            "the plan route's candle floor must price exactly the legacy lane's companion set"
+        );
+    }
+}
+
+/// Feature-end review (sc-20398, blocker 11) — the plan route's QUANTIZATION gate, driven with
+/// QUANTIZED plans.
+///
+/// The gate is the first arm of `checkpoint_plan_request_shape_refusal`
+/// (`imported_model_quant(request, descriptor, "Checkpoint plan").is_err()`), and it had no worker
+/// coverage at all: nothing proved that a request naming a tier the exact registered provider does
+/// not advertise is refused rather than loaded at some other tier.
+///
+/// Both a plan whose layers are stored INT8 (`I8`) and one stored FP8 (`F8_E4M3`) are driven
+/// through it, because the two facts are easy to conflate and only one is true: the gate reads the
+/// REQUEST's selected tier against the DESCRIPTOR's advertised set, and is indifferent to how the
+/// checkpoint's own bytes happen to be stored. Both plans therefore get the same verdict for the
+/// same request, and the accepted/refused tiers are read off the live descriptor rather than
+/// hard-coded — a registry that widened `supported_quants` must not silently turn this green.
+///
+/// Failing mutation (run): invert the gate to `.is_ok()` in `checkpoint_plan.rs`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_quantized_plan_is_gated_on_the_providers_advertised_tiers_not_on_its_layer_dtype() {
+    let fx = CheckpointPlanFixture::new("quant-gate", true);
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "krea_2",
+        gen_core::ImportedModelSource::TransformerFile,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("fixture check: this backend binds krea_2 transformer-file generation");
+    let supported = descriptor.capabilities.supported_quants;
+    assert!(
+        !supported.is_empty(),
+        "fixture check: the provider advertises at least one tier, or 'accepted' below is vacuous"
+    );
+    // The names a payload may spell, paired with the tier each selects.
+    let named: [(&str, Quant); 3] = [
+        ("q4", Quant::Q4),
+        ("q8", Quant::Q8),
+        ("nvfp4", Quant::Nvfp4),
+    ];
+    let accepted = named
+        .iter()
+        .find(|(_, quant)| supported.contains(quant))
+        .map(|(name, _)| *name)
+        .expect("fixture check: at least one spellable tier is advertised");
+    // A tier the provider does NOT advertise if there is one, else a name no tier answers to —
+    // both reach the same gate, and one of the two always exists.
+    let refused = named
+        .iter()
+        .find(|(_, quant)| !supported.contains(quant))
+        .map(|(name, _)| *name)
+        .unwrap_or("no-such-tier");
+
+    for (label, dtype) in [("int8", "I8"), ("fp8", "F8_E4M3")] {
+        let file = format!("kreamania-{label}.safetensors");
+        let entries = krea_native_entries()
+            .into_iter()
+            .map(|(name, _)| (name, dtype))
+            .collect::<Vec<_>>();
+        let checkpoint_id = fx.compile(&file, &entries);
+        // Fixture check: the quantized bytes really did compile to a backbone layer, so the rows
+        // below measure the quant gate rather than an unimportable file.
+        let resolved = fx.store.resolve(&checkpoint_id).unwrap();
+        assert!(
+            resolved.layers_with_role("transformer").next().is_some(),
+            "{label}: the quantized file still compiles to a transformer layer"
+        );
+
+        let served = fx.plan_backed_request(
+            &checkpoint_id,
+            json!({ "advanced": { "quantTier": accepted } }),
+        );
+        let selection = prepare_checkpoint_plan_sources(&served, &fx.settings)
+            .unwrap_or_else(|error| panic!("{label}: an advertised tier must not refuse: {error}"));
+        assert!(
+            selection.is_available(),
+            "{label}: the plan route must claim a request naming the advertised tier {accepted:?}"
+        );
+
+        let denied = fx.plan_backed_request(
+            &checkpoint_id,
+            json!({ "advanced": { "quantTier": refused } }),
+        );
+        // The refusal surfaces either as a retained decline or as an outright error, depending on
+        // whether this family still has a bespoke lane; both are the gate's verdict, and neither is
+        // swallowed into "served".
+        let message = match prepare_checkpoint_plan_sources(&denied, &fx.settings) {
+            Ok(selection) => {
+                assert!(
+                    !selection.is_available(),
+                    "{label}: tier {refused:?} is not advertised and must not be served"
+                );
+                selection
+                    .into_unclaimed_refusal(&denied)
+                    .expect_err("a declined plan-backed entry retains its typed refusal")
+                    .to_string()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("does not accept the requested quantization tier"),
+            "{label}: the refusal must name the QUANT gate, not some later one: {message}"
+        );
+        assert!(
+            message.contains("[checkpoint-plan:unsupported-operation]"),
+            "{label}: and it must carry the typed code: {message}"
+        );
+    }
+}
+
+/// Feature-end review (sc-20398, blocker 11) — linked/managed parity beyond Krea: the SDXL row.
+///
+/// The Krea row already proves a linked and a managed copy of the same bytes compile to one
+/// semantic plan and each load their OWN verified layer. What it does not prove is that the two
+/// copies take the same ROUTE and are handed the same LOAD SPEC — that is the property that makes
+/// "linked or managed" an ownership choice rather than a different model, and it is asserted here
+/// on a second family whose dialect is a FUSED checkpoint rather than a bare transformer file.
+///
+/// Everything except the primary is expected identical; the primary is expected to DIFFER, each
+/// copy naming its own file. Asserting the second half is what keeps the first from being satisfied
+/// by a route that resolved one copy twice.
+///
+/// Failing mutation (run): return the linked checkpoint's primary for both copies.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_linked_and_a_managed_sdxl_checkpoint_take_one_route_and_get_one_load_spec_shape() {
+    let fx = CheckpointPlanFixture::new("sdxl-parity", true);
+    // The model-agnostic CLIP tokenizer assets the fused-SDXL binding declares as its only required
+    // component. Staged into the isolated hub at the pinned revision the lane resolves against, so
+    // the row measures routing rather than a missing install.
+    let clip = sceneworks_core::hf_home::huggingface_repo_cache_path(
+        &fx.settings.data_dir,
+        "openai/clip-vit-large-patch14",
+    )
+    .expect("safe repo cache path")
+    .join("snapshots")
+    .join("32bd64288804d66eefd0ccbe215aa642df71cc41");
+    std::fs::create_dir_all(&clip).unwrap();
+    std::fs::write(clip.join("vocab.json"), b"{}").unwrap();
+    std::fs::write(clip.join("merges.txt"), b"#\n").unwrap();
+
+    let fused = sdxl_fused_entries();
+    let linked_id = fx.compile("sdxlmania.safetensors", &fused);
+
+    let install_id = "install-sdxlmania";
+    let install_dir = fx.store.install_dir(install_id).unwrap();
+    std::fs::create_dir_all(&install_dir).unwrap();
+    let install_dir = std::fs::canonicalize(&install_dir).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("sdxlmania.safetensors"),
+        install_dir.join("sdxlmania.safetensors"),
+    )
+    .unwrap();
+    let managed = fx
+        .store
+        .compile_managed(
+            install_id,
+            "sdxlmania.safetensors",
+            sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+                source: "local-copy".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sdxl_request = |checkpoint_id: &str| {
+        request(json!({
+            "projectId": "p",
+            "model": "linked_sdxlmania",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "linked_sdxlmania",
+                "catalogScope": "user",
+                "family": "sdxl",
+                "importSourceShape": "fused_checkpoint",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        }))
+    };
+
+    let prepare = |checkpoint_id: &str| {
+        let request = sdxl_request(checkpoint_id);
+        let sources = prepare_checkpoint_plan_sources(&request, &fx.settings)
+            .unwrap_or_else(|error| panic!("a fused SDXL plan must prepare: {error}"))
+            .into_sources()
+            .expect("the plan route claims a fused SDXL text-to-image request");
+        let spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
+        (sources, spec)
+    };
+    let (linked_sources, linked_spec) = prepare(&linked_id);
+    let (managed_sources, managed_spec) = prepare(&managed.checkpoint_id);
+
+    assert_ne!(
+        linked_id, managed.checkpoint_id,
+        "fixture check: two distinct checkpoints, so nothing below reads one record twice"
+    );
+    // Same ROUTE: the same registered provider, source shape and operation on both copies.
+    assert_eq!(linked_sources.descriptor.id, managed_sources.descriptor.id);
+    assert_eq!(
+        linked_sources.source,
+        gen_core::ImportedModelSource::FusedCheckpoint
+    );
+    assert_eq!(linked_sources.source, managed_sources.source);
+    assert_eq!(linked_sources.operation, managed_sources.operation);
+
+    // Same LOAD SPEC in every part the ownership choice must not change.
+    assert_eq!(linked_spec.components, managed_spec.components);
+    assert_eq!(linked_spec.quantize, managed_spec.quantize);
+    assert_eq!(
+        linked_spec.prepared_file_pins().len(),
+        managed_spec.prepared_file_pins().len()
+    );
+    assert!(linked_spec.prepared_file_pins().is_finalized());
+    assert!(managed_spec.prepared_file_pins().is_finalized());
+    assert!(
+        !linked_spec.components.is_empty(),
+        "fixture check: the fused binding really does declare a component, so comparing the \
+         component lists is not comparing two empty vectors"
+    );
+
+    // And the one part that MUST differ: each copy loads its own bytes.
+    assert_eq!(
+        linked_spec.weights,
+        WeightsSource::File(fx.library_dir.join("sdxlmania.safetensors"))
+    );
+    assert_eq!(
+        managed_spec.weights,
+        WeightsSource::File(install_dir.join("sdxlmania.safetensors"))
+    );
+    assert_ne!(linked_spec.weights, managed_spec.weights);
+}
+
+/// Scope addition 12(a) / E4 — a PRE-EPIC manifest entry still resolves the route it always did.
+///
+/// The migration promise of epic 20398 is that a user model imported before the epic — an entry
+/// with a `paths.model` install and NO `importPlan` key at all — keeps working untouched. The plan
+/// route is offered every request first, so the thing that could break it is the plan route
+/// claiming an entry that carries no plan.
+///
+/// The route KIND is pinned to the exact variant rather than "some route resolved": a test that
+/// only asserted `is_some()` would stay green if the entry were rerouted onto the plan lane, which
+/// is precisely the regression.
+///
+/// Failing mutation (run): make `request_is_checkpoint_plan_backed` answer `true` for an entry with
+/// no `importPlan`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pre_epic_imported_entry_with_no_import_plan_resolves_the_route_it_always_did() {
+    let fx = CheckpointPlanFixture::new("e4-migration", true);
+    let install = fx.settings.data_dir.join("models/imports/legacy-kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    write_tiny_safetensors(
+        &install.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert!(
+        !legacy.model_manifest_entry.contains_key("importPlan"),
+        "fixture check: this is the pre-epic entry shape — no importPlan key at all"
+    );
+
+    let prepared = prepare_image_route(&legacy, &fx.settings)
+        .expect("a pre-epic entry must not be refused by the plan route")
+        .expect("a pre-epic entry still has a route");
+    assert_eq!(
+        prepared.kind(),
+        ImageRoute::KreaImported,
+        "the pre-epic entry keeps its legacy imported lane; the plan route must not claim it"
+    );
+    // Its bytes are the ones the pre-epic scan finds, not anything plan-derived.
+    match prepared {
+        PreparedImageRoute::KreaImported(sources) => assert_eq!(
+            sources.dit_pin.loader_path(),
+            install.join("kreamania.safetensors").as_path()
+        ),
+        other => panic!(
+            "expected the legacy imported bundle, got {:?}",
+            other.kind()
+        ),
+    }
+    // The plan route declines it outright rather than retaining a refusal for it.
+    let selection = prepare_checkpoint_plan_sources(&legacy, &fx.settings).unwrap();
+    assert!(!selection.is_available());
+    selection
+        .into_unclaimed_refusal(&legacy)
+        .expect("an entry with no plan is the ONLY shape that may fall through with no refusal");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Store-backed CANDLE coverage for the plan-driven route (sc-20398 feature-end review,
+// blockers 2 and 3).
+//
+// Every store-backed plan-route test above is `#[cfg(target_os = "macos")]`, so the candle arm —
+// which is the ONLY arm that binds Z-Image, Qwen-Image, FLUX.2 and Wan at all — had no store-backed
+// coverage whatsoever, and those four families were guarded solely by `str::find` scans over their
+// own source text. A source scan proves a call site exists; it cannot prove the bytes that reach
+// the loader are the plan's.
+//
+// The tests below compile REAL plans through the real inspector and plan store and then call the
+// real production preparers. `cargo test` cannot link this cfg on a Mac, so they are typechecked
+// locally by `npm run rust:check:candle` and first EXECUTE on the windows-candle CI lane.
+// ---------------------------------------------------------------------------------------------
+
+/// The tensor surface a Z-Image DiT is recognized by: the `noise_refiner` / `context_refiner` /
+/// `cap_embedder` markers `detect_transformer_family` treats as decisive, plus the
+/// `x_embedder.weight` the registered `z-image-comfyui-v1` signature requires.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn zimage_tree_transformer_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.diffusion_model.x_embedder.weight", "BF16"),
+        ("model.diffusion_model.cap_embedder.0.weight", "BF16"),
+        (
+            "model.diffusion_model.noise_refiner.0.attention.qkv.weight",
+            "BF16",
+        ),
+        (
+            "model.diffusion_model.context_refiner.0.attention.qkv.weight",
+            "BF16",
+        ),
+    ]
+}
+
+/// A Qwen3 LLM text encoder: `embed_tokens` plus the per-head `self_attn.q_norm`/`k_norm` pair.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn qwen3_text_encoder_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.embed_tokens.weight", "BF16"),
+        ("model.layers.0.self_attn.q_norm.weight", "BF16"),
+        ("model.layers.0.self_attn.k_norm.weight", "BF16"),
+    ]
+}
+
+/// A diffusers-layout VAE.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn tree_vae_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("encoder.conv_in.weight", "F32"),
+        ("encoder.down.0.block.0.conv1.weight", "F32"),
+        ("encoder.mid.attn_1.q.weight", "F32"),
+        ("decoder.conv_out.weight", "F32"),
+        ("decoder.up.0.block.0.conv1.weight", "F32"),
+        ("decoder.mid.attn_1.q.weight", "F32"),
+    ]
+}
+
+/// The Qwen-Image ComfyUI DiT surface (dual-stream MMDiT with joint-attention `add_q_proj`), and
+/// the `img_in.weight` the `qwen-image-comfyui-v1` signature requires.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn qwen_tree_transformer_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.diffusion_model.img_in.weight", "F8_E4M3"),
+        (
+            "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.attn.to_q.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.img_mlp.net.0.proj.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.txt_mlp.net.0.proj.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.img_mod.1.weight",
+            "F8_E4M3",
+        ),
+    ]
+}
+
+/// The FLUX.2 ComfyUI DiT surface: the SHARED-modulation tensors that separate FLUX.2 from FLUX.1,
+/// plus the `double_blocks.0.img_attn.qkv.weight` the `flux2-comfyui-v1` signature requires.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn flux2_tree_transformer_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "model.diffusion_model.double_blocks.0.img_attn.qkv.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.double_stream_modulation_shift",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.single_stream_modulation.weight",
+            "F8_E4M3",
+        ),
+    ]
+}
+
+/// Stage a fully-present tier of `repo` in the isolated hub: the `text_encoder/`, `vae/` and
+/// `tokenizer/tokenizer.json` every ComfyUI-tree lane borrows from a resident snapshot.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn stage_resident_tier(settings: &Settings, repo: &str, tier: &str) -> PathBuf {
+    let root = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+        .expect("safe repo cache path");
+    let revision = "89abcdef0123456789abcdef0123456789abcdef";
+    let snapshot = root.join("snapshots").join(revision);
+    let dir = if tier.is_empty() {
+        snapshot.clone()
+    } else {
+        snapshot.join(tier)
+    };
+    std::fs::create_dir_all(dir.join("text_encoder")).unwrap();
+    std::fs::create_dir_all(dir.join("vae")).unwrap();
+    std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
+    std::fs::write(dir.join("text_encoder/model.safetensors"), b"te").unwrap();
+    std::fs::write(dir.join("vae/diffusion_pytorch_model.safetensors"), b"vae").unwrap();
+    std::fs::write(dir.join("tokenizer/tokenizer.json"), b"{}").unwrap();
+    std::fs::create_dir_all(root.join("refs")).unwrap();
+    std::fs::write(root.join("refs/main"), revision).unwrap();
+    dir
+}
+
+/// Feature-end review blocker 3 — the CANDLE arm resolves a plan-backed entry end to end through
+/// the production route selector, and a PRE-EPIC entry still takes its legacy lane.
+///
+/// `prepare_candle_image_route` is the candle twin of `prepare_image_route`: it offers the request
+/// to the plan route first and then to every bespoke lane, and it is where the single-claim
+/// discriminator actually decides. Nothing exercised it with a real store before this.
+///
+/// Both halves are here because a route selector can only be wrong in two directions, and one test
+/// per direction is what pins the boundary: the plan-backed entry must reach
+/// `CandleImageRoute::CheckpointPlan` with the plan's own bytes, and the pre-epic entry must NOT.
+///
+/// Compile-verified locally by `npm run rust:check:candle`; first executed on the windows-candle CI
+/// lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn the_candle_route_claims_a_plan_backed_entry_and_leaves_a_pre_epic_entry_on_its_legacy_lane() {
+    let mut fx = CheckpointPlanFixture::new("candle-route", true);
+    fx.settings.backend_candle_enabled = true;
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // ---- the plan-backed entry ----------------------------------------------------------------
+    let plan_backed = fx.plan_backed_request(&checkpoint_id, json!({}));
+    let prepared = prepare_candle_image_route(&plan_backed, &fx.settings)
+        .expect("a plan-backed t2i request must not be refused on the candle arm")
+        .expect("the candle router must claim it");
+    assert_eq!(prepared.kind(), CandleImageRoute::CheckpointPlan);
+    let sources = match prepared {
+        PreparedCandleImageRoute::CheckpointPlan(sources) => *sources,
+        other => panic!("expected the plan bundle, got {:?}", other.kind()),
+    };
+    assert_eq!(sources.checkpoint_id, checkpoint_id);
+    assert_eq!(sources.descriptor.family, "krea_2");
+    assert_eq!(
+        sources.primary,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors")),
+        "the candle arm loads the plan's own verified layer, not a scanned install"
+    );
+    assert_eq!(
+        sources.components,
+        vec![(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(fx.base_tier.clone())
+        )]
+    );
+    let spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
+    assert_eq!(
+        spec.weights,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
+    );
+    assert!(spec.prepared_file_pins().is_finalized());
+    assert_eq!(spec.prepared_file_pins().len(), 1);
+
+    // ---- the PRE-EPIC entry (E4): no `importPlan` key at all -----------------------------------
+    let install = fx.settings.data_dir.join("models/imports/legacy-kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    write_tiny_safetensors(
+        &install.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert!(!legacy.model_manifest_entry.contains_key("importPlan"));
+    let prepared = prepare_candle_image_route(&legacy, &fx.settings)
+        .expect("a pre-epic entry must not be refused")
+        .expect("a pre-epic entry still has a candle route");
+    assert_eq!(
+        prepared.kind(),
+        CandleImageRoute::KreaImported,
+        "the plan route must not claim an entry that carries no plan"
+    );
+    match prepared {
+        PreparedCandleImageRoute::KreaImported(sources) => assert_eq!(
+            sources.dit_pin.loader_path(),
+            install.join("kreamania.safetensors").as_path()
+        ),
+        other => panic!(
+            "expected the legacy imported bundle, got {:?}",
+            other.kind()
+        ),
+    }
+}
+
+/// Feature-end review blocker 2 — the Z-IMAGE row, behaviourally.
+///
+/// A LINKED ComfyUI Z-Image tree (DiT + text encoder + VAE) is compiled by the real inspector,
+/// persisted by the real store, and then handed to the real `prepare_zimage_comfyui_sources` as a
+/// LoRA request — a shape `checkpoint_plan_serves_request_shape` declines, so the bespoke lane owns
+/// it and must source all THREE artifacts from the plan rather than from an `external_base_*`
+/// catalog scan a linked tree can never produce.
+///
+/// What is asserted is the RESOLVED pins the production preparer produced, and that each role
+/// landed on its OWN artifact — the property the source-text ordering scan cannot see at all.
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_linked_zimage_tree_resolves_all_three_artifacts_from_its_plan() {
+    let mut fx = CheckpointPlanFixture::new("zimage-tree", false);
+    fx.settings.backend_candle_enabled = true;
+    // The model-agnostic tokenizer a ComfyUI tree never ships.
+    stage_resident_tier(&fx.settings, "Tongyi-MAI/Z-Image-Turbo", "");
+    let checkpoint_id = fx.compile_tree(
+        "ztree",
+        &[
+            (
+                "unet/z_image_turbo.safetensors",
+                zimage_tree_transformer_entries(),
+            ),
+            (
+                "text_encoder/qwen3.safetensors",
+                qwen3_text_encoder_entries(),
+            ),
+            ("vae/z_image_vae.safetensors", tree_vae_entries()),
+        ],
+    );
+
+    let lane_request = request(json!({
+        "projectId": "p",
+        "model": "linked_ztree",
+        "prompt": "a fox",
+        "count": 1,
+        "loras": [fx.installed_lora("style")],
+        "modelManifestEntry": {
+            "id": "linked_ztree",
+            "catalogScope": "user",
+            "family": "z-image",
+            "importSourceShape": "comfyui_tree",
+            "importPlan": { "checkpointId": checkpoint_id }
+        }
+    }));
+    assert!(
+        !request_is_checkpoint_plan_backed(&lane_request),
+        "fixture check: the plan route declines a LoRA request, so the bespoke lane owns it"
+    );
+
+    let paths = zimage_comfyui_candle::prepare_zimage_comfyui_sources(&lane_request, &fx.settings)
+        .unwrap_or_else(|error| panic!("a linked Z-Image tree must resolve: {error}"))
+        .expect("the bespoke Z-Image lane claims a plan-backed tree");
+    let pins = paths.prepared_file_pins();
+    let tree = fx.library_dir.join("ztree");
+    assert_eq!(
+        pins[0].loader_path(),
+        tree.join("unet/z_image_turbo.safetensors").as_path(),
+        "the transformer must be the plan's own DiT layer"
+    );
+    assert_eq!(
+        pins[1].loader_path(),
+        tree.join("text_encoder/qwen3.safetensors").as_path(),
+        "the text encoder must be the plan's own text_encoder layer, never the DiT again"
+    );
+    assert_eq!(
+        pins[2].loader_path(),
+        tree.join("vae/z_image_vae.safetensors").as_path(),
+        "the VAE must be the plan's own vae layer"
+    );
+
+    // And the spec the loader receives carries exactly those files.
+    let spec = zimage_comfyui_candle::prepare_zimage_comfyui_load_spec_for_request(
+        paths,
+        &lane_request,
+        &fx.settings,
+        zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE,
+    )
+    .expect("the lane assembles a spec");
+    assert_eq!(
+        spec.weights,
+        WeightsSource::File(tree.join("unet/z_image_turbo.safetensors"))
+    );
+    assert!(spec.prepared_file_pins().is_finalized());
+
+    // The other half of single-claim, behaviourally: the SAME entry with a shape the plan route DOES
+    // serve is declined here, so exactly one lane owns each request. The model id carries no
+    // `external_base_` prefix in either direction, which is what proves the lane is deciding on the
+    // plan rather than on the incidental shape of a catalog row's id.
+    let mut claimed = lane_request.clone();
+    claimed.loras.clear();
+    assert!(
+        request_is_checkpoint_plan_backed(&claimed),
+        "fixture check: without the LoRA the plan route claims this request"
+    );
+    assert!(
+        zimage_comfyui_candle::prepare_zimage_comfyui_sources(&claimed, &fx.settings)
+            .expect("the decline is not a refusal")
+            .is_none(),
+        "the bespoke lane must decline a request the plan route claims"
+    );
+}
+
+/// Feature-end review blocker 2 — the QWEN-IMAGE row, behaviourally.
+///
+/// Qwen-Image's tree is a DiT plus an OPTIONAL in-place VAE; its dense text encoder and tokenizer
+/// always come from a resident tier. Both halves of that are asserted: a tree WITH a VAE consumes
+/// it from the plan, and a tree WITHOUT one still resolves and leaves the VAE to the snapshot.
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_linked_qwen_image_tree_consumes_its_optional_vae_from_the_plan() {
+    let mut fx = CheckpointPlanFixture::new("qwen-tree", false);
+    fx.settings.backend_candle_enabled = true;
+    stage_resident_tier(&fx.settings, "SceneWorks/qwen-image-mlx", "bf16");
+
+    let lane_request = |checkpoint_id: &str, id: &str| {
+        request(json!({
+            "projectId": "p",
+            "model": format!("linked_{id}"),
+            "prompt": "a fox",
+            "count": 1,
+            "loras": [fx.installed_lora("style")],
+            "modelManifestEntry": {
+                "id": format!("linked_{id}"),
+                "catalogScope": "user",
+                "family": "qwen-image",
+                "importSourceShape": "comfyui_tree",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        }))
+    };
+
+    // ---- with the in-place VAE ----------------------------------------------------------------
+    let with_vae = fx.compile_tree(
+        "qtree",
+        &[
+            (
+                "unet/qwen_image_fp8.safetensors",
+                qwen_tree_transformer_entries(),
+            ),
+            ("vae/qwen_image_vae.safetensors", tree_vae_entries()),
+        ],
+    );
+    let req = lane_request(&with_vae, "qtree");
+    assert!(!request_is_checkpoint_plan_backed(&req));
+    let paths = qwen_comfyui_candle::prepare_qwen_comfyui_sources(&req, &fx.settings)
+        .unwrap_or_else(|error| panic!("a linked Qwen-Image tree must resolve: {error}"))
+        .expect("the bespoke Qwen-Image lane claims a plan-backed tree");
+    let pins = paths.prepared_file_pins();
+    let tree = fx.library_dir.join("qtree");
+    assert_eq!(
+        pins.len(),
+        2,
+        "the DiT and the tree's own VAE are both plan-sourced"
+    );
+    assert_eq!(
+        pins[0].loader_path(),
+        tree.join("unet/qwen_image_fp8.safetensors").as_path()
+    );
+    assert_eq!(
+        pins[1].loader_path(),
+        tree.join("vae/qwen_image_vae.safetensors").as_path()
+    );
+
+    // ---- without it: still resolves, and the VAE falls back to the resident tier ---------------
+    let without_vae = fx.compile_tree(
+        "qtree-bare",
+        &[(
+            "unet/qwen_image_fp8.safetensors",
+            qwen_tree_transformer_entries(),
+        )],
+    );
+    let bare_req = lane_request(&without_vae, "qtree-bare");
+    let bare = qwen_comfyui_candle::prepare_qwen_comfyui_sources(&bare_req, &fx.settings)
+        .unwrap_or_else(|error| panic!("a VAE-less Qwen-Image tree must still resolve: {error}"))
+        .expect("the lane claims it");
+    let bare_pins = bare.prepared_file_pins();
+    assert_eq!(
+        bare_pins.len(),
+        1,
+        "an absent optional role is the family's signal to use its resident tier, not a refusal"
+    );
+    assert_eq!(
+        bare_pins[0].loader_path(),
+        fx.library_dir
+            .join("qtree-bare/unet/qwen_image_fp8.safetensors")
+            .as_path()
+    );
+
+    // Single-claim, behaviourally: the same entry with a shape the plan route DOES serve is
+    // declined here. Neither request's model id carries an `external_base_` prefix, so the lane is
+    // deciding on the plan rather than on the incidental shape of a catalog row's id.
+    let mut claimed = req.clone();
+    claimed.loras.clear();
+    assert!(request_is_checkpoint_plan_backed(&claimed));
+    assert!(
+        qwen_comfyui_candle::prepare_qwen_comfyui_sources(&claimed, &fx.settings)
+            .expect("the decline is not a refusal")
+            .is_none(),
+        "the bespoke lane must decline a request the plan route claims"
+    );
+}
+
+/// Feature-end review blocker 2 — the FLUX.2 row, behaviourally.
+///
+/// FLUX.2's tree is the DiT ALONE: its Mistral-3 encoder, VAE and tokenizer always come from a
+/// resident tier, so the lane declares NO consumed sidecar. Both consequences are asserted — the
+/// DiT-only tree resolves to the plan's own layer, and a tree carrying a VAE the lane would
+/// silently ignore REFUSES as an unconsumed layer rather than loading a snapshot's copy in its
+/// place (E8).
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_linked_flux2_tree_loads_the_plans_dit_and_refuses_a_layer_the_lane_would_ignore() {
+    let mut fx = CheckpointPlanFixture::new("flux2-tree", false);
+    fx.settings.backend_candle_enabled = true;
+    stage_resident_tier(&fx.settings, "SceneWorks/flux2-dev-mlx", "bf16");
+
+    let lane_request = |checkpoint_id: &str, id: &str| {
+        request(json!({
+            "projectId": "p",
+            "model": format!("linked_{id}"),
+            "prompt": "a fox",
+            "count": 1,
+            "loras": [fx.installed_lora("style")],
+            "modelManifestEntry": {
+                "id": format!("linked_{id}"),
+                "catalogScope": "user",
+                "family": "flux2",
+                "importSourceShape": "comfyui_tree",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        }))
+    };
+
+    let dit_only = fx.compile_tree(
+        "ftree",
+        &[(
+            "unet/flux2_dev_fp8mixed.safetensors",
+            flux2_tree_transformer_entries(),
+        )],
+    );
+    let req = lane_request(&dit_only, "ftree");
+    assert!(!request_is_checkpoint_plan_backed(&req));
+    let paths = flux2_comfyui_candle::prepare_flux2_comfyui_sources(&req, &fx.settings)
+        .unwrap_or_else(|error| panic!("a linked FLUX.2 tree must resolve: {error}"))
+        .expect("the bespoke FLUX.2 lane claims a plan-backed tree");
+    let (spec, _snapshot) = flux2_comfyui_candle::prepare_flux2_comfyui_load_spec_for_request(
+        paths,
+        flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+        &req,
+        &fx.settings,
+        flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE,
+    )
+    .expect("the lane assembles a spec");
+    assert_eq!(
+        spec.weights,
+        WeightsSource::File(
+            fx.library_dir
+                .join("ftree/unet/flux2_dev_fp8mixed.safetensors")
+        ),
+        "the DiT must be the plan's own layer"
+    );
+    assert!(spec.prepared_file_pins().is_finalized());
+
+    // A tree carrying an artifact the lane declares NEITHER required nor optional refuses.
+    let with_vae = fx.compile_tree(
+        "ftree-vae",
+        &[
+            (
+                "unet/flux2_dev_fp8mixed.safetensors",
+                flux2_tree_transformer_entries(),
+            ),
+            ("vae/flux2_vae.safetensors", tree_vae_entries()),
+        ],
+    );
+    let error = match flux2_comfyui_candle::prepare_flux2_comfyui_sources(
+        &lane_request(&with_vae, "ftree-vae"),
+        &fx.settings,
+    ) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("a layer the lane would silently ignore must refuse, not be dropped"),
+    };
+    assert!(
+        error.contains("[checkpoint-plan:unconsumed-layer]"),
+        "the refusal must name the unconsumed layer: {error}"
+    );
+
+    // Single-claim, behaviourally: the same entry with a shape the plan route DOES serve is
+    // declined here. Neither request's model id carries an `external_base_` prefix, so the lane is
+    // deciding on the plan rather than on the incidental shape of a catalog row's id.
+    let mut claimed = req.clone();
+    claimed.loras.clear();
+    assert!(request_is_checkpoint_plan_backed(&claimed));
+    assert!(
+        flux2_comfyui_candle::prepare_flux2_comfyui_sources(&claimed, &fx.settings)
+            .expect("the decline is not a refusal")
+            .is_none(),
+        "the bespoke lane must decline a request the plan route claims"
+    );
+}
+
+/// Feature-end review minor — `checkpoint_plan_bespoke_roles` DECLINES another family's request.
+///
+/// The two other bespoke plan-source helpers (`checkpoint_plan_bespoke_primary` and
+/// `checkpoint_plan_bespoke_tree`) ask `checkpoint_plan_entry_routes_to` before they open the plan
+/// store; the roles-only helper — the one the Wan video lane uses — did not. So a plan-backed entry
+/// declaring ANY other family reached the store and tripped the FATAL `family-mismatch` refusal,
+/// which the router propagates with `?`: a perfectly good checkpoint killed the job the moment the
+/// Wan lane was offered it. That is the exact bug review blocker 1 of sc-20644 fixed in the other
+/// two helpers, and it was still live here.
+///
+/// The two halves are kept distinct because collapsing them is the bug:
+///   * DECLARED family is another lane's → `Ok(None)`.
+///   * DECLARED family is THIS lane's but the PLAN disagrees → still fatal.
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn the_roles_helper_declines_another_familys_entry_and_still_refuses_a_mislabelled_one() {
+    let fx = CheckpointPlanFixture::new("roles-gate", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    let entry = |family: &str| {
+        json!({
+            "id": "linked_kreamania",
+            "catalogScope": "user",
+            "family": family,
+            "importPlan": { "checkpointId": checkpoint_id }
+        })
+        .as_object()
+        .cloned()
+        .unwrap()
+    };
+
+    // A krea_2 checkpoint offered to the Wan lane: not this lane's request, so it declines.
+    let declined = checkpoint_plan_bespoke_roles(
+        &entry("krea_2"),
+        &fx.settings,
+        "wan-video",
+        &["transformer"],
+        &[],
+    )
+    .expect("another family's entry must DECLINE, never raise family-mismatch");
+    assert!(
+        declined.is_none(),
+        "the roles helper must decline an entry whose declared family routes elsewhere"
+    );
+
+    // An entry DECLARING wan-video whose plan says krea_2 is a corrupt/edited entry: still fatal.
+    let error = match checkpoint_plan_bespoke_roles(
+        &entry("wan-video"),
+        &fx.settings,
+        "wan-video",
+        &["transformer"],
+        &[],
+    ) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("a mislabelled entry must not load through another family's loader"),
+    };
+    assert!(
+        error.contains("[checkpoint-plan:family-mismatch]"),
+        "the refusal must stay the family-mismatch one: {error}"
+    );
 }
 
 /// sc-20644: a provider component whose bytes belong to the checkpoint itself is sourced from the

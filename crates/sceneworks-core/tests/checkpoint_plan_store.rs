@@ -184,7 +184,10 @@ fn compile_linked_persists_plan_record_and_bindings_deterministically() {
     assert_eq!(first.plan.layers.len(), 1);
     let layer = &first.plan.layers[0];
     assert_eq!(layer.role, "transformer");
-    assert_eq!(layer.target_path, "checkpoints/kreamania.safetensors");
+    // CHECKPOINT-relative, not root-relative (sc-20651): the `checkpoints/` directory is where the
+    // user keeps this file, and the semantic identity must not know that. The locator below still
+    // does.
+    assert_eq!(layer.target_path, "kreamania.safetensors");
     match &layer.source {
         SourceLocatorV1::Linked {
             root_id,
@@ -1922,5 +1925,167 @@ fn a_wan_tree_with_an_in_place_umt5_encoder_compiles_to_named_expert_and_encoder
         .iter()
         .find(|layer| layer.role == "text_encoder")
         .expect("the compiled plan carries a text_encoder layer");
-    assert_eq!(encoder.target_path, "tree/text_encoder/umt5.safetensors");
+    // Relative to the checkpoint (`tree/`), not to the library root (sc-20651).
+    assert_eq!(encoder.target_path, "text_encoder/umt5.safetensors");
+}
+
+// =============================================================================================
+// sc-20651 feature-end round 1
+// =============================================================================================
+
+/// An install id names a DIRECTORY. Windows resolves its reserved device names ahead of any file
+/// of the same stem, extension and case ignored, and silently strips a trailing `.` — so
+/// `con.safetensors` and `model.` are ids that either cannot be created there or address something
+/// other than the directory this store believes it owns. Refused on every platform, so a library
+/// built on macOS is not one Windows cannot open.
+#[test]
+fn install_ids_windows_cannot_address_are_refused() {
+    use sceneworks_core::checkpoint_plan_store::validate_install_id;
+
+    for reserved in [
+        "CON",
+        "con",
+        "Con",
+        "PRN",
+        "AUX",
+        "NUL",
+        "nul",
+        "COM1",
+        "com9",
+        "LPT1",
+        "lpt9",
+        "con.safetensors",
+        "NUL.gguf",
+        "com1.bin",
+    ] {
+        let error = validate_install_id(reserved)
+            .expect_err("a Windows reserved device name must be refused");
+        assert_eq!(error.code(), "invalid-install-id", "{reserved:?}");
+    }
+    for trailing_dot in ["model.", "krea.v2."] {
+        let error = validate_install_id(trailing_dot).expect_err("a trailing dot must be refused");
+        assert_eq!(error.code(), "invalid-install-id", "{trailing_dot:?}");
+    }
+    // Neighbouring ids that only LOOK reserved stay usable, so this is a rule and not a blanket.
+    for allowed in [
+        "console",
+        "com0",
+        "com10",
+        "lpt0",
+        "connect",
+        "nula",
+        "auxiliary",
+        "model.v2",
+        "COM1x",
+    ] {
+        validate_install_id(allowed).unwrap_or_else(|error| panic!("{allowed:?}: {error}"));
+    }
+}
+
+/// `derive_root_id` digests the path's OWN bytes. Hashing `to_string_lossy` instead mapped every
+/// invalid UTF-8 sequence to U+FFFD, so a library directory whose name is not valid UTF-8 derived
+/// the SAME id as a different directory literally named with the replacement character — one id,
+/// two roots, and the second approval collided with the first.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_root_path_does_not_collide_with_its_lossy_spelling() {
+    use sceneworks_core::checkpoint_plan_store::derive_root_id;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = PathBuf::from(OsStr::from_bytes(b"/tmp/library-\xff"));
+    let lossy = PathBuf::from(raw.to_string_lossy().to_string());
+    assert_ne!(raw, lossy, "premise check: the two paths genuinely differ");
+    assert_ne!(
+        derive_root_id(&raw),
+        derive_root_id(&lossy),
+        "two different directories must never derive one root id"
+    );
+}
+
+/// One relative-path rule, shared. There used to be five near-copies of it — the contract
+/// validator, this store's, the ingest's staging validator, the derivative output validator and the
+/// inspector's `safe_relative_path` — so a path the document contract refuses could still be
+/// accepted at one of the other four. Every path below is refused by the contract validator
+/// (`SourceLocatorV1::linked`, which is what a persisted document is parsed through), and the
+/// assertion is that each of the other call sites refuses it too.
+#[test]
+fn every_relative_path_call_site_refuses_what_the_contract_refuses() {
+    let fx = fixture("shared-path-rules");
+    let ingest = sceneworks_core::checkpoint_ingest::ManagedIngest::begin(
+        &fx.store,
+        "install-path-rules",
+        ManagedProvenanceV1 {
+            source: "civitai".to_owned(),
+            ..ManagedProvenanceV1::default()
+        },
+    )
+    .unwrap();
+    const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    for candidate in [
+        "../escape.safetensors",
+        "a/../b.safetensors",
+        "/absolute.safetensors",
+        "dir\\model.safetensors",
+        "./model.safetensors",
+        "drive:model.safetensors",
+        "bad\u{0007}name.safetensors",
+        "",
+        "   ",
+    ] {
+        // The contract validator, exercised through the document type it guards.
+        assert!(
+            SourceLocatorV1::linked("root", candidate, DIGEST).is_err(),
+            "premise check: the contract must refuse {candidate:?}"
+        );
+        // ...the plan store's public fail-fast entry point,
+        assert!(
+            validate_linked_relative_path(candidate).is_err(),
+            "plan store accepted {candidate:?}"
+        );
+        // ...the inspector's request validator,
+        assert!(
+            CheckpointInspectionRequestV1::linked(
+                "cp",
+                fx.library_dir.as_path(),
+                candidate,
+                "root"
+            )
+            .is_err(),
+            "inspector accepted {candidate:?}"
+        );
+        // ...and the ingest's staging boundary, which is the one that turns a path into a write.
+        assert!(
+            ingest.staged_path(candidate).is_err(),
+            "ingest staging accepted {candidate:?}"
+        );
+    }
+
+    // An empty path COMPONENT is only reachable at the string-typed boundaries: `a//b` is not a
+    // path a `PathBuf` can hold — it round-trips as `a/b` — so once the inspector has built its
+    // native path from the validated parts there is nothing left to refuse.
+    for candidate in ["a//b.safetensors", "trailing/"] {
+        assert!(
+            SourceLocatorV1::linked("root", candidate, DIGEST).is_err(),
+            "premise check: the contract must refuse {candidate:?}"
+        );
+        assert!(
+            validate_linked_relative_path(candidate).is_err(),
+            "plan store accepted {candidate:?}"
+        );
+        assert!(
+            ingest.staged_path(candidate).is_err(),
+            "ingest staging accepted {candidate:?}"
+        );
+    }
+
+    // An ordinary nested path still works everywhere, so none of the above is a blanket refusal.
+    let good = "vendor/krea/model.safetensors";
+    assert!(SourceLocatorV1::linked("root", good, DIGEST).is_ok());
+    assert!(validate_linked_relative_path(good).is_ok());
+    assert!(
+        CheckpointInspectionRequestV1::linked("cp", fx.library_dir.as_path(), good, "root").is_ok()
+    );
+    assert!(ingest.staged_path(good).is_ok());
 }

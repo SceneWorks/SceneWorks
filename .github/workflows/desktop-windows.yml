@@ -172,6 +172,14 @@ jobs:
       # filter above reaches it and it needs its own `--test` target.
       - name: Run Windows checkpoint plan store regressions
         run: cargo test -p sceneworks-core --test checkpoint_plan_store
+      # The checkpoint inspector's Windows-only junction probe
+      # (`windows_directory_junctions_are_confined_as_reparse_points`, `#[cfg(windows)]`): a
+      # directory junction whose target leaves the checkpoint root must be diagnosed
+      # `PathEscapesRoot` with an empty inventory. It lives in its own INTEGRATION test binary
+      # beside `checkpoint_plan_store`, so it needs its own `--test` target too — without this
+      # step the probe never executes anywhere, since Windows is the only OS that compiles it.
+      - name: Run Windows checkpoint inspector regressions
+        run: cargo test -p sceneworks-core --test checkpoint_inspector
       - name: Run desktop Rust tests
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint

@@ -1096,6 +1096,160 @@ fn deserialization_rejects_noncanonical_plan_and_mismatched_catalog_digest() {
     assert!(serde_json::from_value::<CheckpointCatalogRecordV1>(record_value).is_err());
 }
 
+/// BLOCKER 9 (sc-20651): the refusal-code → corrective-action map is ONE contract across two
+/// languages, and both sides are held to the same checked-in fixture.
+///
+/// The Rust store decides which refusals are repairable (`CheckpointPlanError::lifecycle_action`,
+/// which is what `checkpoint_status` turns into Needs Relink / Needs Rescan) and the web client
+/// decides which refusals get a button (`apps/web/src/checkpointLibrary.js`, `REFUSAL_ACTION`).
+/// They each used to carry their own list and had already drifted: the client offered no action for
+/// `path-escapes-root`, `invalid-relative-path` or `unsupported-locator`, all three of which the
+/// store classifies as rescannable, so those users saw a dead end.
+///
+/// EQUALITY, not containment, in both directions: a code added on one side alone must fail here or
+/// in `apps/web/src/checkpointLibrary.test.js`. The Rust side is enumerated over EVERY
+/// `CheckpointPlanError` variant, and `lifecycle_action` has no wildcard arm, so a new variant
+/// cannot slip in unclassified either.
+#[test]
+fn the_refusal_action_contract_matches_the_shared_fixture() {
+    use sceneworks_core::checkpoint_plan_store::CheckpointPlanError as E;
+    use std::collections::BTreeMap;
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/schemas/checkpoint-refusal-actions.json");
+    let fixture: Value = serde_json::from_str(&fs::read_to_string(&path).expect("read fixture"))
+        .expect("fixture JSON parses");
+    let expected: BTreeMap<String, String> = fixture["actions"]
+        .as_object()
+        .expect("the fixture declares an actions map")
+        .iter()
+        .map(|(code, action)| {
+            (
+                code.clone(),
+                action.as_str().expect("action is a string").to_owned(),
+            )
+        })
+        .collect();
+    assert!(!expected.is_empty(), "the fixture is not empty");
+
+    let text = || "x".to_owned();
+    let path_value = || PathBuf::from("/library");
+    // Every variant of the error type, so the "no other code carries an action" half is real.
+    let all: Vec<E> = vec![
+        E::UnknownRoot { root_id: text() },
+        E::RootUnavailable {
+            root_id: text(),
+            path: path_value(),
+        },
+        E::RootNotApprovable {
+            path: path_value(),
+            reason: text(),
+        },
+        E::InvalidRelativePath {
+            relative_path: text(),
+            reason: text(),
+        },
+        E::InvalidRootLabel {
+            label: text(),
+            reason: text(),
+        },
+        E::RootAlreadyApproved {
+            root_id: text(),
+            existing_root_id: text(),
+            path: path_value(),
+        },
+        E::UnrunnableSource {
+            checkpoint_id: text(),
+            diagnostics: Vec::new(),
+        },
+        E::UnknownCheckpoint {
+            checkpoint_id: text(),
+        },
+        E::MissingPlan {
+            checkpoint_id: text(),
+            plan_id: text(),
+        },
+        E::PlanTampered {
+            checkpoint_id: text(),
+            reason: text(),
+        },
+        E::SourceMissing {
+            checkpoint_id: text(),
+            relative_path: text(),
+            path: path_value(),
+        },
+        E::SourceDrifted {
+            checkpoint_id: text(),
+            relative_path: text(),
+            expected_sha256: text(),
+            actual_sha256: text(),
+        },
+        E::UnsupportedLocator {
+            checkpoint_id: text(),
+            layer_id: text(),
+            kind: "linked",
+        },
+        E::InvalidInstallId {
+            install_id: text(),
+            reason: "x",
+        },
+        E::InstallUnavailable {
+            install_id: text(),
+            path: path_value(),
+        },
+        E::InstallIdTaken {
+            install_id: text(),
+            checkpoint_id: text(),
+            path: path_value(),
+        },
+        E::LocatorOwnershipMismatch {
+            checkpoint_id: text(),
+            layer_id: text(),
+            expected: "linked",
+        },
+        E::PathEscapesRoot {
+            checkpoint_id: text(),
+            relative_path: text(),
+            root_path: path_value(),
+            resolved_path: path_value(),
+        },
+        E::InvalidPlanId {
+            plan_id: text(),
+            reason: "x",
+        },
+        E::RootIdCollision {
+            root_id: text(),
+            existing_path: path_value(),
+            path: path_value(),
+        },
+        E::Contract(
+            SourceLocatorV1::linked("", "model.safetensors", DIGEST)
+                .expect_err("a blank root id is a contract failure"),
+        ),
+        E::Corrupt {
+            what: text(),
+            message: text(),
+        },
+        E::Io {
+            path: path_value(),
+            message: text(),
+        },
+    ];
+
+    let actual: BTreeMap<String, String> = all
+        .iter()
+        .filter_map(|error| {
+            error
+                .lifecycle_action()
+                .map(|action| (error.code().to_owned(), action.as_str().to_owned()))
+        })
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the store's repairable refusals must equal the shared fixture exactly"
+    );
+}
+
 #[test]
 fn published_schema_covers_every_contract_and_uses_strict_versioned_variants() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

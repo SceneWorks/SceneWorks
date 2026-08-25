@@ -1,5 +1,9 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// Only the Windows junction fixture holds an owned path; gated so the macOS/Linux build does not
+// warn on an unused import under `-D warnings`.
+#[cfg(windows)]
+use std::path::PathBuf;
 
 use sceneworks_core::checkpoint_import::{ManagedProvenanceV1, SourceLocatorV1};
 use sceneworks_core::checkpoint_inspector::{
@@ -613,7 +617,7 @@ fn path_confinement_errors_are_typed_and_do_not_read_outside_the_root() {
     let request = CheckpointInspectionRequestV1::linked(
         "escape",
         temp.path(),
-        PathBuf::from("../outside.safetensors"),
+        "../outside.safetensors",
         "comfy-primary",
     );
     assert!(request.is_err());
@@ -1639,4 +1643,176 @@ fn the_expert_layer_roles_are_the_spelling_the_adapter_topology_projects_onto() 
     // And the same projection already holds for the component id the two repos share today, which
     // is the precedent this follows rather than invents.
     assert_eq!(project("base-snapshot"), "base_snapshot");
+}
+
+// =============================================================================================
+// sc-20651 feature-end round 1
+// =============================================================================================
+
+/// BLOCKER 8: an unrecognised GGUF `general.architecture` used to be folded into a family named
+/// after the raw string, so the checkpoint inspected Ready, was offered as selectable, and only
+/// failed when a render tried to load it. The safetensors/JSON path already fails closed here —
+/// `normalize_family` returning `None` leaves no backbone family and the inspection refuses with
+/// `MissingFamilyEvidence` — and the GGUF path now refuses with the same code.
+#[test]
+fn an_unknown_gguf_architecture_refuses_at_inspection() {
+    let temp = TempDir::new().unwrap();
+    write_tiny_gguf(&temp.path().join("mystery.gguf"), "notamodelfamily");
+    write_tiny_gguf(&temp.path().join("known.gguf"), "flux");
+
+    let unknown = inspect_checkpoint(&linked_request(temp.path(), "mystery.gguf"));
+    assert!(
+        !unknown.is_runnable(),
+        "an unloadable architecture must not inspect as runnable"
+    );
+    assert!(
+        unknown.inventory.records.is_empty() && unknown.plans.is_empty(),
+        "a refused checkpoint compiles to nothing selectable"
+    );
+    // The TYPED code, not merely "some error": this is the refusal the safetensors arm gives.
+    let codes: Vec<CheckpointDiagnosticCodeV1> =
+        unknown.diagnostics.iter().map(|item| item.code).collect();
+    assert!(
+        codes.contains(&CheckpointDiagnosticCodeV1::MissingFamilyEvidence),
+        "expected MissingFamilyEvidence, got {codes:?}"
+    );
+    assert!(
+        unknown
+            .diagnostics
+            .iter()
+            .any(|item| item.message.contains("notamodelfamily")),
+        "the refusal names the architecture it could not place"
+    );
+
+    // A known architecture is untouched, so this is a fail-CLOSED rule and not a fail-everything.
+    let known = inspect_checkpoint(&linked_request(temp.path(), "known.gguf"));
+    assert!(known.is_runnable(), "{:?}", known.diagnostics);
+    assert_eq!(known.plans[0].family, "flux");
+}
+
+/// A diagnostic about the checkpoint's INTERNAL structure names its shards the way the checkpoint
+/// does, not the way the library root happens to. Reporting `vendors/acme/indexed/model-…` told the
+/// user about a path the index file does not contain and cannot be edited to match.
+#[test]
+fn an_index_diagnostic_names_shards_relative_to_the_checkpoint() {
+    let temp = TempDir::new().unwrap();
+    let checkpoint = temp.path().join("vendors/acme/indexed");
+    write_safetensors(
+        &checkpoint.join("model-00001-of-00001.safetensors"),
+        &qwen_transformer_entries(),
+        Some(json!({"format": "pt"})),
+    );
+    fs::write(
+        checkpoint.join("model.safetensors.index.json"),
+        br#"{"metadata":{},"weight_map":{"ghost.weight":"model-00001-of-00001.safetensors"}}"#,
+    )
+    .unwrap();
+
+    let inspection = inspect_checkpoint(&linked_request(temp.path(), "vendors/acme/indexed"));
+    let mismatch = inspection
+        .diagnostics
+        .iter()
+        .find(|item| item.code == CheckpointDiagnosticCodeV1::IndexTensorMismatch)
+        .unwrap_or_else(|| panic!("expected an index mismatch: {:?}", inspection.diagnostics));
+    assert!(
+        mismatch
+            .message
+            .contains("'model-00001-of-00001.safetensors'"),
+        "{}",
+        mismatch.message
+    );
+    assert!(
+        !mismatch.message.contains("vendors/acme/indexed"),
+        "the library path must not appear in a diagnostic about the checkpoint's own contents: {}",
+        mismatch.message
+    );
+}
+
+/// BLOCKER 5, at the inspector: the compiled plan's layer identity is relative to the CHECKPOINT,
+/// so the same directory checkpoint inspected at two different depths under two different roots
+/// produces one semantic digest. Both plans below come from real `inspect_checkpoint` runs.
+#[test]
+fn a_plans_layer_identity_does_not_move_with_the_checkpoint() {
+    let shallow_root = TempDir::new().unwrap();
+    let deep_root = TempDir::new().unwrap();
+    for (root, prefix) in [
+        (shallow_root.path(), "bundle"),
+        (deep_root.path(), "vendors/acme/2026/bundle"),
+    ] {
+        write_safetensors(
+            &root.join(prefix).join("transformer/model.safetensors"),
+            &qwen_transformer_entries(),
+            Some(json!({"format": "pt"})),
+        );
+        write_safetensors(
+            &root.join(prefix).join("vae/model.safetensors"),
+            &vae_entries(),
+            Some(json!({"format": "pt"})),
+        );
+        fs::write(
+            root.join(prefix).join("model_index.json"),
+            br#"{"_class_name":"QwenImagePipeline","transformer":["diffusers","QwenImageTransformer2DModel"],"vae":["diffusers","AutoencoderKL"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(prefix).join("transformer/config.json"),
+            br#"{"_class_name":"QwenImageTransformer2DModel"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(prefix).join("vae/config.json"),
+            br#"{"_class_name":"AutoencoderKL"}"#,
+        )
+        .unwrap();
+    }
+
+    let shallow = inspect_checkpoint(&linked_request(shallow_root.path(), "bundle"));
+    let deep = inspect_checkpoint(&linked_request(
+        deep_root.path(),
+        "vendors/acme/2026/bundle",
+    ));
+    assert!(shallow.is_runnable(), "{:?}", shallow.diagnostics);
+    assert!(deep.is_runnable(), "{:?}", deep.diagnostics);
+
+    let paths = |plan: &sceneworks_core::checkpoint_import::ImportPlanV1| {
+        let mut out: Vec<String> = plan
+            .layers
+            .iter()
+            .map(|layer| layer.target_path.clone())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(
+        paths(&shallow.plans[0]),
+        vec![
+            "model_index.json".to_owned(),
+            "transformer/config.json".to_owned(),
+            "transformer/model.safetensors".to_owned(),
+            "vae/config.json".to_owned(),
+            "vae/model.safetensors".to_owned(),
+        ],
+        "layer paths are checkpoint-relative"
+    );
+    assert_eq!(paths(&deep.plans[0]), paths(&shallow.plans[0]));
+    assert_eq!(
+        deep.plans[0].semantic_digest().unwrap(),
+        shallow.plans[0].semantic_digest().unwrap(),
+        "depth under the library root is location, not identity"
+    );
+    // The locators still carry the real, root-relative places the bytes live.
+    let deep_locator_paths: Vec<String> = deep.plans[0]
+        .layers
+        .iter()
+        .map(|layer| match &layer.source {
+            SourceLocatorV1::Linked { relative_path, .. } => relative_path.clone(),
+            other => panic!("linked inspection produced {other:?}"),
+        })
+        .collect();
+    assert!(
+        deep_locator_paths
+            .iter()
+            .all(|path| path.starts_with("vendors/acme/2026/bundle/")),
+        "{deep_locator_paths:?}"
+    );
 }

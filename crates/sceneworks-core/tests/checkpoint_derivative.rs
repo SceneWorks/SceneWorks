@@ -687,11 +687,19 @@ fn an_altered_derivative_bundle_is_refused_at_the_lease_boundary() {
     let mut tampered = fs::read(&staged).unwrap();
     tampered.reverse();
     fs::write(&staged, tampered).unwrap();
-    assert!(
-        fx.store.acquire(&resolved, &request()).is_err()
-            || fx.store.acquire(&resolved, &request()).unwrap().is_none(),
-        "an altered derivative never reaches a loader"
-    );
+    // The TYPED refusal, not `is_err() || is_none()`: an or over two outcomes passes whichever one
+    // happens, so it could never have told a re-hash failure apart from the entry simply being
+    // gone, and it would have kept passing if the store stopped checking at all.
+    match fx.store.acquire(&resolved, &request()) {
+        Err(CheckpointDerivativeError::Cache(error)) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("index.json") || message.contains("digest"),
+                "the refusal names what failed re-validation: {message}"
+            );
+        }
+        other => panic!("an altered derivative bundle must refuse at the lease, got {other:?}"),
+    }
 }
 
 /// The request validator refuses key material it cannot key on, rather than digesting it and
@@ -713,6 +721,17 @@ fn unkeyable_requests_refuse() {
     assert!(refuse(|request| request.outputs.clear()).contains("at least one output"));
     assert!(refuse(|request| request.outputs = vec!["../x".to_owned()]).contains("'..'"));
     assert!(refuse(|request| request.outputs = vec!["/abs".to_owned()]).contains("relative"));
+    // The derivative output validator is the shared one now, so the rules the document contract
+    // enforces reach here too rather than stopping at the four that used to be duplicated.
+    assert!(refuse(|request| request.outputs = vec!["c:idx.json".to_owned()]).contains("':'"));
+    assert!(
+        refuse(|request| request.outputs = vec!["a//b.json".to_owned()])
+            .contains("empty path component")
+    );
+    assert!(
+        refuse(|request| request.outputs = vec!["bad\u{0007}.json".to_owned()])
+            .contains("control characters")
+    );
     assert!(
         refuse(|request| request.outputs = vec!["a.json".to_owned(), "a.json".to_owned()])
             .contains("declared twice")
@@ -765,4 +784,69 @@ fn the_derivative_store_uses_the_shared_marked_cache_root() {
         shared.root(),
         fx.data_dir.join("models").join("resolved").as_path()
     );
+}
+
+/// BLOCKER 6 (sc-20651): a MANAGED install produces derivatives.
+///
+/// `ensure` used to parse a LINKED checkpoint id to find the directory the source bytes sit under,
+/// and refused everything else with "is not a linked checkpoint" before a producer ever ran — so
+/// every checkpoint the user brought in through "Add to SceneWorks" silently had no derived index,
+/// no normalized layout and no backend repack, for the whole life of the feature.
+///
+/// The install below is built through the real staging/commit ingest, not by hand.
+#[test]
+fn a_managed_install_produces_and_serves_derivatives() {
+    use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
+    use sceneworks_core::checkpoint_ingest::ManagedIngest;
+
+    let data = fixture_dir("managed-derivative-data");
+    let source_dir = fixture_dir("managed-derivative-source");
+    let data_dir = fs::canonicalize(data.path()).unwrap();
+    let source = fs::canonicalize(source_dir.path())
+        .unwrap()
+        .join("dit.safetensors");
+    write_krea_native_file(&source, 11);
+
+    let plans = CheckpointPlanStore::open(&data_dir);
+    let ingest = ManagedIngest::begin(
+        &plans,
+        "krea-managed",
+        ManagedProvenanceV1 {
+            source: "local_path".to_owned(),
+            ..ManagedProvenanceV1::default()
+        },
+    )
+    .unwrap();
+    ingest.stage_copy_file(&source, "dit.safetensors").unwrap();
+    let install = ingest.finalize("dit.safetensors", None).unwrap();
+    assert_eq!(install.checkpoint_id, "managed/krea-managed");
+
+    let store = CheckpointDerivativeStore::open(&data_dir).unwrap();
+    let outcome = store
+        .ensure(&install.checkpoint_id, &request(), write_index)
+        .unwrap_or_else(|error| panic!("a managed install must produce derivatives: {error}"));
+    assert!(
+        matches!(outcome, CheckpointDerivativeOutcomeV1::Produced(_)),
+        "{outcome:?}"
+    );
+
+    // The published entry is keyed to this checkpoint, resolvable and leasable — i.e. the
+    // derivative really was produced against the MANAGED install directory, which is the only
+    // directory these bytes exist in.
+    let resolved = plans.resolve(&install.checkpoint_id).unwrap();
+    let metadata = store
+        .lookup(&resolved, &request())
+        .unwrap()
+        .expect("the produced derivative is published and complete");
+    assert_eq!(
+        metadata.derived_from.as_deref(),
+        Some(install.checkpoint_id.as_str())
+    );
+    assert!(store.acquire(&resolved, &request()).unwrap().is_some());
+
+    // And removal reaches it by the same identity.
+    let removed = store
+        .remove_derivatives_for_checkpoint(&install.checkpoint_id)
+        .unwrap();
+    assert_eq!(removed.len(), 1);
 }

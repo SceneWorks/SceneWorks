@@ -251,11 +251,37 @@ async fn the_library_root_lifecycle_is_reachable_over_http() {
     );
 
     // ---- removed ----------------------------------------------------------------------------
-    let (status, removal) = request(
+    // Forgetting a library destroys the plans, records and derivatives that path produced, so it
+    // carries the same loopback gate as adding and relinking (sc-20651): a LAN peer cannot tear
+    // down a library it could never have added.
+    let (status, denied) = request(
         app.clone(),
         "DELETE",
         &format!("/api/v1/models/library-roots/{root_id}"),
         Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied:?}");
+    assert_eq!(denied["context"]["reason"], json!("not_a_local_client"));
+    let (_, still_there) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/models/library-roots",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        still_there["roots"].as_array().expect("roots").len(),
+        1,
+        "the refused delete changed nothing"
+    );
+
+    let (status, removal) = request_with_peer(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/models/library-roots/{root_id}"),
+        Value::Null,
+        LOCAL_PEER,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{removal:?}");

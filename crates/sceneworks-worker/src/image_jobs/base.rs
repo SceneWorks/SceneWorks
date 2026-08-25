@@ -1352,6 +1352,20 @@ fn prepare_candle_image_route(
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedCandleImageRoute>> {
     if !settings.backend_candle_enabled {
+        // This early-out returns BEFORE `prepare_checkpoint_plan_sources` runs, so the
+        // `into_unclaimed_refusal` re-raise below never fires and a plan-backed entry falls all the
+        // way to `generate_stub_stream` — the job COMPLETES with procedural output under the user's
+        // imported checkpoint id (sc-20651). Refuse in the same typed shape instead. The macOS twin
+        // `prepare_image_route` has no such early-out, so it needs no counterpart.
+        if let Some(checkpoint_id) =
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: the candle \
+                 backend is disabled on this worker, and a plan-backed entry never renders \
+                 procedural stub output"
+            )));
+        }
         return Ok(None);
     }
     // The plan-driven route is offered the request first (sc-20634). Per-request claim, exactly as
@@ -1414,6 +1428,74 @@ fn prepare_candle_image_route(
         )),
         route => PreparedCandleImageRoute::Plain(route),
     }))
+}
+
+/// The `!backend_candle_enabled` early-out of [`prepare_candle_image_route`] returns before
+/// `prepare_checkpoint_plan_sources` runs, so `into_unclaimed_refusal` never fires and a plan-backed
+/// entry falls through to `generate_stub_stream` — the job COMPLETES with procedural output under
+/// the user's imported checkpoint id (sc-20651). The refusal is asserted at that seam, and the
+/// control proves it is keyed on the PLAN and not on the disabled backend.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_disabled_plan_backed_refusal_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(entry: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({
+                "projectId": "project-1",
+                "model": "imported_krea_abc123",
+                "mode": "text_to_image",
+                "prompt": "a fox",
+                "modelManifestEntry": entry
+            })
+            .as_object()
+            .expect("payload object"),
+        )
+    }
+
+    fn candle_disabled_settings() -> Settings {
+        Settings {
+            backend_candle_enabled: false,
+            ..crate::test_env::offline_settings()
+        }
+    }
+
+    #[test]
+    fn a_plan_backed_image_request_refuses_instead_of_stubbing_when_candle_is_disabled() {
+        let settings = candle_disabled_settings();
+        let routed = prepare_candle_image_route(
+            &request(json!({
+                "id": "imported_krea_abc123",
+                "family": "krea_2",
+                "importPlan": { "checkpointId": "ckpt_krea_abc123" }
+            })),
+            &settings,
+        );
+        // `PreparedCandleImageRoute` is not `Debug`, so match rather than `expect_err`.
+        let error = match routed {
+            Err(error) => error,
+            Ok(_) => panic!("a plan-backed entry must never fall through to the stub generator"),
+        };
+        match error {
+            WorkerError::InvalidPayload(message) => assert!(
+                message.contains("[checkpoint-plan:no-adapter-binding]")
+                    && message.contains("\"ckpt_krea_abc123\""),
+                "the refusal must name the checkpoint: {message}"
+            ),
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        }
+
+        // Control: the identical entry WITHOUT a plan still takes the early-out unchanged.
+        let control = prepare_candle_image_route(
+            &request(json!({ "id": "krea_2", "family": "krea_2" })),
+            &settings,
+        );
+        assert!(
+            matches!(control, Ok(None)),
+            "the refusal must be keyed on the plan, not on the disabled backend"
+        );
+    }
 }
 
 /// Couples a route-owned File source bundle to the immutable generation plan without widening the

@@ -1478,7 +1478,7 @@ fn cross_process_store_child() {
 /// last line of defence if a producer ever writes to the staging path by some other means.
 fn derived_plan(outputs: &[&str]) -> DerivedArtifactPlan {
     let identity = ArtifactIdentity::pinned(
-        "sceneworks-checkpoint-derivative/linked",
+        "sceneworks-checkpoint-derivative/checkpoint",
         REVISION_A,
         "derived",
     )

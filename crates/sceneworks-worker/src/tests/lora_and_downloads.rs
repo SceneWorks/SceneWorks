@@ -2323,25 +2323,51 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
 }
 
 /// AC1: a hash-mismatched ingest leaves no runnable partial install — no install directory, no
-/// manifest entry, no plan, no catalog record.
+/// manifest entry, no plan, no catalog record — AND the terminal failure it reports NAMES the
+/// digest mismatch. "Nothing installed" alone is satisfied by any failure whatsoever (a 404, a
+/// panic in the compiler, a disk error), so without the message assertions this test would pass
+/// for a refusal that never checked a digest at all.
 #[tokio::test]
 async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
     let _env = isolate_hf_cache();
-    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     let fixture = managed_import_fixture(base_url).await;
+    // The digest the ingest will actually compute over the bytes it staged, derived here from the
+    // source file itself rather than restated — the declared digest below is deliberately not it.
+    let actual = sha256_hex(&fixture.source);
+    let declared = "a".repeat(64);
+    assert_ne!(actual, declared, "the fixture must really mismatch");
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
 
-    super::model_jobs::run_model_import_job(
-        &api,
-        &fixture.settings,
-        &client,
-        &fixture.job(Some(&"a".repeat(64))),
-    )
-    .await
-    .expect("a hash mismatch fails the job rather than erroring the worker");
+    super::model_jobs::run_model_import_job(&api, &fixture.settings, &client, &fixture.job(Some(&declared)))
+        .await
+        .expect("a hash mismatch fails the job rather than erroring the worker");
 
     fixture.assert_nothing_installed("hash mismatch");
+
+    let posts = posts.lock().expect("posts lock");
+    let failure = posts
+        .iter()
+        .find(|post| post.get("status").and_then(Value::as_str) == Some("failed"))
+        .unwrap_or_else(|| panic!("expected a failed progress post, got {posts:?}"));
+    let detail = failure
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("a failed import must carry an error detail: {failure:?}"));
+    assert!(
+        detail.contains("integrity check"),
+        "the failure must name the integrity check, got {detail:?}"
+    );
+    // Both digests, so the operator can see WHICH bytes arrived and what was expected.
+    assert!(
+        detail.contains(&actual),
+        "the failure must name the digest actually computed ({actual}), got {detail:?}"
+    );
+    assert!(
+        detail.contains(&declared),
+        "the failure must name the declared digest ({declared}), got {detail:?}"
+    );
 }
 
 /// AC1: a cancelled ingest leaves no runnable partial install. The cancel arrives through the same
