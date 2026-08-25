@@ -152,6 +152,15 @@ enum ImageRoute {
     /// keys on that descriptor id), unlike S3 which swaps to `krea_2_turbo`. Reference/edit/pose/PiD
     /// shapes are rejected loudly by the lane (multi-phase renders from pure noise).
     KreaMultiPhase,
+    /// A user model bound to a persisted checkpoint import plan (epic 20398, sc-20634): its manifest
+    /// entry carries `importPlan.checkpointId`, the plan store resolves and re-verifies the plan, and
+    /// the provider is selected by family + source shape + operation through the registry. Claimed
+    /// BEFORE every bespoke imported lane, but PER REQUEST, not per entry (sc-20636): this skeleton
+    /// serves plain text-to-image only, so a managed entry's family lane keeps the edit / pose /
+    /// reference / LoRA / Hires.fix shapes it had before the import. Exactly one lane owns each
+    /// REQUEST; the entry itself may be served by two. A request no lane claims at all is a typed
+    /// refusal, never the stub.
+    CheckpointPlan,
     /// An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
     /// `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
     /// assembly lane, which pairs the imported transformer with a resident `krea_2` base tier (shared
@@ -244,9 +253,11 @@ pub(crate) fn mlx_flux_strict_control_engine_id(model: &str) -> Option<&'static 
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn resolve_image_route_with_imported_availability(
     request: &ImageRequest,
     settings: &Settings,
+    checkpoint_plan_available: bool,
     imported_control_available: bool,
     imported_available: bool,
     sdxl_imported_available: bool,
@@ -307,6 +318,10 @@ fn resolve_image_route_with_imported_availability(
         // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
         // sibling of the `krea_edit_available` arm above.
         Some(ImageRoute::KreaTurboOnRaw)
+    } else if checkpoint_plan_available {
+        // A plan-backed user checkpoint (epic 20398, sc-20634): the persisted ImportPlanV1 is the
+        // route's sole source of truth. Claimed before every bespoke imported lane.
+        Some(ImageRoute::CheckpointPlan)
     } else if imported_control_available {
         // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch
         // rides the file-loaded imported DiT (the imported twin of the `KreaControl` arm above).
@@ -377,6 +392,57 @@ fn resolve_image_route_with_imported_availability(
     }
 }
 
+/// Plan-route availability for the test-only route probes, with refusals made loud.
+///
+/// `prepare_checkpoint_plan_sources` has four outcomes: not plan-backed (an empty selection),
+/// servable (`is_available()`), a typed refusal (`Err`), and a DECLINE that retains the refusal for
+/// the router's zero-lane fall-through. Only the first is "this route is unavailable"; the other
+/// three mean the route OWNS the entry. Folding the refusal into `false` made every plan refusal
+/// indistinguishable from a missing route in the probes.
+///
+/// Gated per lane rather than a bare `#[cfg(test)]`: this helper only exists where a route probe
+/// does, and `tests/test_builtin_manifest_audit.py` treats the first line-initial `#[cfg(test)]`
+/// as the start of this file's test module — a bare one here would truncate the audited region to
+/// the first 400 lines and silently drop base.rs's `repo` / `modelPath` lanes from the inventory.
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+fn checkpoint_plan_available_or_panic(request: &ImageRequest, settings: &Settings) -> bool {
+    match prepare_checkpoint_plan_sources(request, settings) {
+        Ok(selection) => selection.is_available(),
+        Err(error) => panic!(
+            "the plan-driven route refused {:?} while probing which route claims it; probe with \
+             `prepare_checkpoint_plan_sources` directly to assert on a refusal: {error}",
+            request.model
+        ),
+    }
+}
+
+/// The companion directories a candle floor prices for an imported single-file load that pairs a
+/// user checkpoint with a resident family base snapshot.
+///
+/// The base snapshot is a COMPANION, never the weights: the imported file REPLACES the snapshot's
+/// `transformer/`, so pricing the snapshot directory recursively charges the DiT twice — the exact
+/// double-claim `base_admission::imported_file_floor_excludes_the_replaced_snapshot_transformer`
+/// exists to forbid. A selected encoder is already represented by the spec's prepared contract
+/// receipt, so the bundled `text_encoder/` is priced only when the spec has none of its own.
+///
+/// Shared rather than duplicated: the legacy Krea imported lane and the plan-driven checkpoint
+/// route must be admitted on an identical floor for the same file + base, and equality by
+/// construction is the only version of that which cannot drift.
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+pub(super) fn imported_base_snapshot_companions(
+    base_dir: &Path,
+    spec_has_selected_text_encoder: bool,
+) -> Vec<PathBuf> {
+    let mut companions = vec![base_dir.join("vae")];
+    if !spec_has_selected_text_encoder {
+        companions.push(base_dir.join("text_encoder"));
+    }
+    companions
+}
+
 /// Test-facing pure route probe. Production uses [`prepare_image_route`] so payload-selected File
 /// sources stay pinned from selection through dispatch instead of being resolved a second time after
 /// the async preamble.
@@ -385,6 +451,11 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
     resolve_image_route_with_imported_availability(
         request,
         settings,
+        // Loud, not `matches!`: a plan-backed entry that REFUSES is a typed diagnostic, and
+        // collapsing it into "route unavailable" would make every refusal look like a missing
+        // route in the probes (sc-20634 review). Callers that want to observe a refusal call
+        // `prepare_checkpoint_plan_sources` directly.
+        checkpoint_plan_available_or_panic(request, settings),
         krea_imported_control_available(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
@@ -395,6 +466,7 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
 #[cfg(target_os = "macos")]
 enum PreparedImageRoute {
     Plain(ImageRoute),
+    CheckpointPlan(Box<PreparedCheckpointPlanSources>),
     KreaImported(Box<PreparedKreaImportedSources>),
     KreaImportedControl(Box<PreparedKreaImportedControlSources>),
     SdxlImported(Box<PreparedSdxlImportedSources>),
@@ -406,6 +478,7 @@ impl PreparedImageRoute {
     fn kind(&self) -> ImageRoute {
         match self {
             Self::Plain(route) => *route,
+            Self::CheckpointPlan(_) => ImageRoute::CheckpointPlan,
             Self::KreaImported(_) => ImageRoute::KreaImported,
             Self::KreaImportedControl(_) => ImageRoute::KreaImportedControl,
             Self::SdxlImported(_) => ImageRoute::SdxlImported,
@@ -422,6 +495,11 @@ fn prepare_image_route(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedImageRoute>> {
+    // The plan-driven route is offered the request first. It claims the shapes it serves; a shape
+    // it does not serve declines to the entry's own bespoke family lane when the entry has loadable
+    // bytes, and refuses outright when it does not. The decline RETAINS its refusal, re-raised
+    // below if no lane claims the request at all (sc-20636).
+    let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
     let imported_control = prepare_krea_imported_control_sources(request, settings)?;
     let imported = if imported_control.is_none() {
         prepare_krea_imported_sources(request, settings)?
@@ -433,14 +511,26 @@ fn prepare_image_route(
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         settings,
+        checkpoint_plan.is_available(),
         imported_control.is_some(),
         imported.is_some(),
         sdxl.is_some(),
         mage_finetuned.is_some(),
     ) else {
+        // Zero lanes claimed the request. For a plan-backed entry that is never "no route": the
+        // plan route declined only because the entry has SceneWorks-owned bytes some bespoke lane
+        // could load, and here that lane did not materialize. Falling out with `Ok(None)` lands the
+        // job in `generate_stub_stream`, which COMPLETES it with procedural stub output — so
+        // re-raise the retained typed refusal instead (sc-20636 review).
+        checkpoint_plan.into_unclaimed_refusal(request)?;
         return Ok(None);
     };
     Ok(Some(match kind {
+        ImageRoute::CheckpointPlan => PreparedImageRoute::CheckpointPlan(Box::new(
+            checkpoint_plan
+                .into_sources()
+                .expect("prepared checkpoint plan route lost its sources"),
+        )),
         ImageRoute::KreaImportedControl => PreparedImageRoute::KreaImportedControl(
             Box::new(imported_control.expect("prepared imported-control route lost its sources")),
         ),
@@ -524,6 +614,8 @@ impl ImageRoute {
             // conditioning; strict-pose requests use the separate control route above.
             | ImageRoute::KreaImported
             | ImageRoute::SdxlImported
+            // Plan-driven checkpoints (sc-20634) are plain per-image txt2img: `count` renders.
+            | ImageRoute::CheckpointPlan
             // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
             // renders, each its own seed. No angle/pose grouping (the lane claims no conditioning).
             | ImageRoute::MageFinetuned
@@ -540,6 +632,7 @@ impl ImageRoute {
         match self {
             ImageRoute::SdxlControl => SDXL_CONTROL_ADAPTER_LABEL,
             ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
+            ImageRoute::CheckpointPlan => CHECKPOINT_PLAN_ENGINE,
             ImageRoute::KreaImported | ImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             ImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
@@ -610,6 +703,9 @@ enum CandleImageRoute {
     KreaImported,
     /// Strict-pose control over an imported Krea DiT, one image per pose.
     KreaImportedControl,
+    /// Off-Mac twin of [`ImageRoute::CheckpointPlan`] (sc-20634): a plan-backed user checkpoint
+    /// resolved through the plan store and rendered by the registry-bound candle provider.
+    CheckpointPlan,
     /// A generated full-fine-tune Mage transformer paired with the installed Base TE/VAE.
     MageFinetuned,
     /// Off-Mac twin of [`ImageRoute::SdxlImported`], loaded by candle from the fused checkpoint plus
@@ -948,6 +1044,7 @@ impl CandleImageRoute {
             }
             CandleImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
             CandleImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
+            CandleImageRoute::CheckpointPlan => CHECKPOINT_PLAN_ENGINE,
             CandleImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             CandleImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             CandleImageRoute::SdxlIpAdapter => sdxl_ipadapter::SDXL_IPADAPTER_ENGINE,
@@ -987,6 +1084,7 @@ impl CandleImageRoute {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 enum PreparedCandleImageRoute {
     Plain(CandleImageRoute),
+    CheckpointPlan(Box<PreparedCheckpointPlanSources>),
     KreaImported(Box<PreparedKreaImportedSources>),
     SdxlImported(Box<PreparedSdxlImportedSources>),
     ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
@@ -1000,6 +1098,7 @@ impl PreparedCandleImageRoute {
     fn kind(&self) -> CandleImageRoute {
         match self {
             Self::Plain(route) => *route,
+            Self::CheckpointPlan(_) => CandleImageRoute::CheckpointPlan,
             Self::KreaImported(_) => CandleImageRoute::KreaImported,
             Self::SdxlImported(_) => CandleImageRoute::SdxlImported,
             Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
@@ -1022,6 +1121,7 @@ impl PreparedCandleImageRoute {
 fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
     settings: &Settings,
+    checkpoint_plan_available: bool,
     imported_available: bool,
     sdxl_imported_available: bool,
     zimage_comfyui_available: bool,
@@ -1141,6 +1241,10 @@ fn resolve_candle_image_route_with_prepared_availability(
         // for this t2i story (sc-13883). The candle twin of the MLX `resolve_image_route` `KreaTurboOnRaw`
         // arm; placed AFTER the edit lane, BEFORE the generic txt2img arm.
         Some(CandleImageRoute::KreaTurboOnRaw)
+    } else if checkpoint_plan_available {
+        // A plan-backed user checkpoint (epic 20398, sc-20634): claimed before every bespoke imported
+        // lane; the plan store is the route's sole source of truth.
+        Some(CandleImageRoute::CheckpointPlan)
     } else if krea_imported_control_available(request, settings) {
         // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch rides
         // the file-loaded imported DiT. Checked BEFORE the plain imported arm so a pose set renders one
@@ -1244,6 +1348,8 @@ fn resolve_candle_image_route(
     resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
+        // See the macOS twin: a typed refusal must surface, not read as "route unavailable".
+        checkpoint_plan_available_or_panic(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),
@@ -1261,8 +1367,26 @@ fn prepare_candle_image_route(
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedCandleImageRoute>> {
     if !settings.backend_candle_enabled {
+        // This early-out returns BEFORE `prepare_checkpoint_plan_sources` runs, so the
+        // `into_unclaimed_refusal` re-raise below never fires and a plan-backed entry falls all the
+        // way to `generate_stub_stream` — the job COMPLETES with procedural output under the user's
+        // imported checkpoint id (sc-20651). Refuse in the same typed shape instead. The macOS twin
+        // `prepare_image_route` has no such early-out, so it needs no counterpart.
+        if let Some(checkpoint_id) =
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?}: the candle \
+                 backend is disabled on this worker, and a plan-backed entry never renders \
+                 procedural stub output"
+            )));
+        }
         return Ok(None);
     }
+    // The plan-driven route is offered the request first (sc-20634). Per-request claim, exactly as
+    // in the macOS twin: it takes the shapes it serves, the family's bespoke lane keeps the rest,
+    // and the decline's retained refusal is re-raised below when no lane claims it (sc-20636).
+    let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
     // A pose-bearing imported checkpoint is claimed by the `KreaImportedControl` arm, which resolves
     // its own sources; skip pinning a second File token for the plain imported bundle in that case
     // (mirrors the macOS `prepare_image_route` guard).
@@ -1279,6 +1403,7 @@ fn prepare_candle_image_route(
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
+        checkpoint_plan.is_available(),
         imported.is_some(),
         sdxl.is_some(),
         zimage.is_some(),
@@ -1286,9 +1411,18 @@ fn prepare_candle_image_route(
         flux2.is_some(),
         mage_finetuned.is_some(),
     ) else {
+        // See the macOS twin: zero lanes claimed a plan-backed entry means the bespoke lane the
+        // plan route deferred to does not exist for this shape. Raise the retained typed refusal
+        // rather than dropping through to `generate_stub_stream`'s procedural output (sc-20636).
+        checkpoint_plan.into_unclaimed_refusal(request)?;
         return Ok(None);
     };
     Ok(Some(match kind {
+        CandleImageRoute::CheckpointPlan => PreparedCandleImageRoute::CheckpointPlan(Box::new(
+            checkpoint_plan
+                .into_sources()
+                .expect("prepared checkpoint plan route lost its sources"),
+        )),
         CandleImageRoute::KreaImported => PreparedCandleImageRoute::KreaImported(
             Box::new(imported.expect("prepared imported route lost its sources")),
         ),
@@ -1309,6 +1443,74 @@ fn prepare_candle_image_route(
         )),
         route => PreparedCandleImageRoute::Plain(route),
     }))
+}
+
+/// The `!backend_candle_enabled` early-out of [`prepare_candle_image_route`] returns before
+/// `prepare_checkpoint_plan_sources` runs, so `into_unclaimed_refusal` never fires and a plan-backed
+/// entry falls through to `generate_stub_stream` — the job COMPLETES with procedural output under
+/// the user's imported checkpoint id (sc-20651). The refusal is asserted at that seam, and the
+/// control proves it is keyed on the PLAN and not on the disabled backend.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_disabled_plan_backed_refusal_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(entry: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({
+                "projectId": "project-1",
+                "model": "imported_krea_abc123",
+                "mode": "text_to_image",
+                "prompt": "a fox",
+                "modelManifestEntry": entry
+            })
+            .as_object()
+            .expect("payload object"),
+        )
+    }
+
+    fn candle_disabled_settings() -> Settings {
+        Settings {
+            backend_candle_enabled: false,
+            ..crate::test_env::offline_settings()
+        }
+    }
+
+    #[test]
+    fn a_plan_backed_image_request_refuses_instead_of_stubbing_when_candle_is_disabled() {
+        let settings = candle_disabled_settings();
+        let routed = prepare_candle_image_route(
+            &request(json!({
+                "id": "imported_krea_abc123",
+                "family": "krea_2",
+                "importPlan": { "checkpointId": "ckpt_krea_abc123" }
+            })),
+            &settings,
+        );
+        // `PreparedCandleImageRoute` is not `Debug`, so match rather than `expect_err`.
+        let error = match routed {
+            Err(error) => error,
+            Ok(_) => panic!("a plan-backed entry must never fall through to the stub generator"),
+        };
+        match error {
+            WorkerError::InvalidPayload(message) => assert!(
+                message.contains("[checkpoint-plan:no-adapter-binding]")
+                    && message.contains("\"ckpt_krea_abc123\""),
+                "the refusal must name the checkpoint: {message}"
+            ),
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        }
+
+        // Control: the identical entry WITHOUT a plan still takes the early-out unchanged.
+        let control = prepare_candle_image_route(
+            &request(json!({ "id": "krea_2", "family": "krea_2" })),
+            &settings,
+        );
+        assert!(
+            matches!(control, Ok(None)),
+            "the refusal must be keyed on the plan, not on the disabled backend"
+        );
+    }
 }
 
 /// Couples a route-owned File source bundle to the immutable generation plan without widening the

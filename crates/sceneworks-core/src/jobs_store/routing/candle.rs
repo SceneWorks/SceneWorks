@@ -737,6 +737,10 @@ pub(crate) fn video_request_is_candle_eligible(
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
                 || bernini_video_candle_eligible(model, payload)
+                // An imported plan-backed Wan checkpoint (epic 20398): its model id is in no static
+                // routed list, so every predicate above answers `false` and the job would be
+                // refused at enqueue even though the candle ComfyUI Wan T2V lane serves it.
+                || plan_backed_wan_video_candle_eligible(payload)
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
@@ -751,6 +755,45 @@ pub(crate) fn video_request_is_candle_eligible(
         }
         _ => false,
     }
+}
+
+/// The one video shape a PLAN-BACKED manifest entry (`importPlan.checkpointId`, epic 20398) is
+/// claimable on: candle's in-place ComfyUI Wan **T2V** lane.
+///
+/// Keyed entirely on the forwarded `modelManifestEntry`, never on the model id — an imported
+/// checkpoint's id is in no static routed list and never will be, which is exactly why every other
+/// video predicate answered `false` for it and `create_video_job` returned `400` for a job the
+/// worker's `wan_comfyui_claims` would have taken (sc-20651).
+///
+/// Deliberately narrow on all three axes, because a claim is a promise a worker arm exists:
+/// * **family** — only `wan-video`. `resolve_wan_comfyui_paths` refuses any other family outright,
+///   and no other candle video lane consults a plan at all.
+/// * **mode** — only `text_to_video`. `resolve_candle_video_route` routes `extend_clip` /
+///   `video_bridge` / `replace_person` to the Wan-VACE / SCAIL-2 arms *before* the ComfyUI Wan arm
+///   is consulted, so a plan-backed entry on those modes never reaches a lane that can load its
+///   bytes. Claiming them would trade a `400` for a queued job that later refuses.
+/// * **shape** — no source/last-frame/clip conditioning. The T2V lane consumes none of it, and the
+///   claim must not admit a request whose conditioning would be silently dropped.
+///
+/// This is a claim, not a load: the worker still verifies the plan fail-closed (drift, missing
+/// tier, missing expert role) and raises a typed refusal when it cannot.
+pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return false;
+    };
+    if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
+        return false;
+    }
+    if crate::jobs_store::routing::catalog::checkpoint_plan_checkpoint_id(entry).is_none() {
+        return false;
+    }
+    if payload.get("mode").and_then(Value::as_str) != Some("text_to_video") {
+        return false;
+    }
+    !has_nonempty_string(payload, "sourceAssetId")
+        && !has_nonempty_string(payload, "lastFrameAssetId")
+        && !has_nonempty_string(payload, "sourceClipAssetId")
+        && !has_nonempty_string(payload, "bridgeRightClipAssetId")
 }
 
 /// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the

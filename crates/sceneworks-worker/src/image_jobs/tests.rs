@@ -6539,6 +6539,8 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
     let model = InstantId::load(&paths).expect("InstantID load");
     let scrfd = Weights::from_file(&scrfd_path).expect("SCRFD weights");
     let arcface = Weights::from_file(&arcface_path).expect("ArcFace weights");
+    // `mut`: `largest_face` takes `&mut self` at the pinned inference revision — it stages the
+    // conditioning components in and out around the detection (inference sc-20762).
     let mut model = model.with_face(&scrfd, &arcface).expect("face stack");
 
     // Reference identity embedding (frontal source).
@@ -17592,10 +17594,23 @@ fn resolve_krea_imported_base_tier_requires_installed_base() {
             "{label}: must be the friendly typed InvalidPayload error, not a generic Engine load \
              failure, got: {err:?}"
         );
+        // The TAG is the primary assertion (sc-20651 feature-end review). This resolver is
+        // registered in the plan route's resident-base-tier table, so its refusal is a
+        // checkpoint-plan refusal and is keyed like every other one; the two `contains` over whole
+        // user-facing sentences this replaced asserted the copywriting, which is free to change,
+        // and not the refusal class, which is not.
         assert!(
-            msg.contains("Krea 2 base model is not installed")
-                && msg.contains("install the Krea 2"),
-            "{label}: error must direct the user to install the Krea 2 base first, got: {msg}"
+            msg.contains("[checkpoint-plan:missing-component]"),
+            "{label}: the missing resident base must refuse with its checkpoint-plan tag, got: {msg}"
+        );
+        // Plus ONE narrow prose check, on the ACTIONABLE INSTRUCTION alone. The tag proves the
+        // class; it cannot prove the user was told what to do about it, so a message that became
+        // empty, generic, or component-shaped ("… requires component text_encoder") would satisfy a
+        // tag-only assertion while leaving the user with no next step. The rest of the sentence
+        // stays free to be reworded.
+        assert!(
+            msg.contains("install the Krea 2 (Turbo) base model first"),
+            "{label}: the refusal must still tell the user to install the base model, got: {msg}"
         );
     };
 
@@ -19938,6 +19953,9 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "KreaMultiPhase",
         // Imported / in-place external bases: a single user-supplied checkpoint.
         "KreaImported",
+        // Plan-driven checkpoint (sc-20634): one plan-resolved primary file + the family's resident
+        // base components, loaded by the registry-bound provider; no second network.
+        "CheckpointPlan",
         "MageFinetuned",
         "SdxlImported",
         "ZimageComfyui",
@@ -20013,6 +20031,17 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             include_str!("mage_finetuned.rs"),
             "admit_candle_load_spec_floor(",
         ),
+        // The plan route pairs a plan-resolved primary File with the family's resident base
+        // snapshot, exactly like `KreaImported` — so it must use the SAME prepared-pin floor over
+        // explicit companion dirs. `admit_candle_load_spec_floor` prices every `spec.components`
+        // value recursively, which for a base snapshot would charge the replaced `transformer/`
+        // (i.e. the plan's own DiT) a second time and over-refuse (sc-20634 review).
+        (
+            "CheckpointPlan",
+            "checkpoint_plan.rs",
+            include_str!("checkpoint_plan.rs"),
+            "prepare_cached_candle_base_floor(",
+        ),
         (
             "ZimageComfyui",
             "zimage_comfyui_candle.rs",
@@ -20038,6 +20067,32 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "admit_candle_base_floor_with_resident_overlay(",
         ),
     ];
+    // A pure substring grep says nothing about what a route does NOT call. Both routes that pair
+    // an imported primary File with a resident base snapshot must be free of the recursive
+    // component floor, or the marker above would keep passing beside a live double-claim.
+    for (route, file, source) in [
+        (
+            "CheckpointPlan",
+            "checkpoint_plan.rs",
+            include_str!("checkpoint_plan.rs"),
+        ),
+        (
+            "KreaImported",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+        ),
+    ] {
+        assert!(
+            !source
+                .lines()
+                .any(|line| line.contains("admit_candle_load_spec_floor(")
+                    && !line.trim_start().starts_with("//")),
+            "{route} ({file}) must NOT price its base snapshot through \
+             `admit_candle_load_spec_floor`: that prices every component value recursively, so the \
+             snapshot's replaced `transformer/` — the imported DiT itself — would be charged twice"
+        );
+    }
+
     for (route, file, source, marker) in BASE_ADMITTED {
         let gate = source
             .lines()
@@ -20083,31 +20138,48 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // lanes. Their primary source must remain `File`, their companion snapshot must be explicit, and the
     // live handoff must go through the cached loader. The gate above separately proves the Candle
     // live-VRAM floor remains ahead of that handoff.
-    const REGISTRY_IMPORTED: &[(&str, &str, &str)] = &[
+    //
+    // The plan-driven route is the one entry with a different primary marker, and deliberately
+    // (sc-20644): its primary is whatever the family's registered dialect declares its loader opens,
+    // which for a component-directory dialect is a `Dir`, not a `File`. The invariant it must keep is
+    // therefore "the primary is what `checkpoint_plan_primary` resolved from the PLAN" rather than
+    // "the primary is literally a File" — so its marker is the construction that builds the spec from
+    // that value. Deleting or inlining it past the plan still turns this red.
+    const REGISTRY_IMPORTED: &[(&str, &str, &str, &str)] = &[
         (
             "KreaImported",
             "krea_imported.rs",
             include_str!("krea_imported.rs"),
+            "LoadSpec::new(WeightsSource::File(",
+        ),
+        (
+            "CheckpointPlan",
+            "checkpoint_plan.rs",
+            include_str!("checkpoint_plan.rs"),
+            "LoadSpec::new(sources.primary.clone())",
         ),
         (
             "ZimageComfyui",
             "zimage_comfyui_candle.rs",
             include_str!("zimage_comfyui_candle.rs"),
+            "LoadSpec::new(WeightsSource::File(",
         ),
         (
             "QwenImageComfyui",
             "qwen_comfyui_candle.rs",
             include_str!("qwen_comfyui_candle.rs"),
+            "LoadSpec::new(WeightsSource::File(",
         ),
         (
             "Flux2Comfyui",
             "flux2_comfyui_candle.rs",
             include_str!("flux2_comfyui_candle.rs"),
+            "LoadSpec::new(WeightsSource::File(",
         ),
     ];
-    for (route, file, source) in REGISTRY_IMPORTED {
+    for (route, file, source, primary_marker) in REGISTRY_IMPORTED {
         for marker in [
-            "LoadSpec::new(WeightsSource::File(",
+            *primary_marker,
             "with_component(",
             "start_cached_gen_stream",
         ] {
@@ -20530,6 +20602,4925 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
     assert!(
         step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
         "the Step arm is the POST that carries the parked frame"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Plan-driven checkpoint route (epic 20398, sc-20634)
+// ---------------------------------------------------------------------------------------------
+
+/// Shared fixture for the plan-driven route: an isolated HF hub carrying a complete
+/// `SceneWorks/krea-2-turbo-mlx` dense `bf16/` base tier (the shared components a bare transformer
+/// plan needs), a linked library root holding a tiny Krea-2-native safetensors, and that file
+/// compiled into a persisted plan under `settings.data_dir`.
+// The fixture and its helpers serve the macOS route probes below (`resolve_image_route` is the
+// MLX test-facing probe); the candle twin of the route is typechecked by `rust:check:candle` and
+// exercised on the Windows candle lane through the shared `checkpoint_plan.rs` handler.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct CheckpointPlanFixture {
+    _data: tempfile::TempDir,
+    _library: tempfile::TempDir,
+    _hf: EnvVars,
+    settings: Settings,
+    library_dir: PathBuf,
+    base_tier: PathBuf,
+    store: sceneworks_core::checkpoint_plan_store::CheckpointPlanStore,
+    root_id: String,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_tiny_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
+    let mut header = serde_json::Map::new();
+    let mut offset = 0_u64;
+    for (name, dtype) in entries {
+        let width = match *dtype {
+            "F16" | "BF16" => 2,
+            "F32" => 4,
+            _ => 1,
+        };
+        header.insert(
+            (*name).to_owned(),
+            json!({"dtype": dtype, "shape": [1], "data_offsets": [offset, offset + width]}),
+        );
+        offset += width;
+    }
+    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(encoded);
+    bytes.resize(bytes.len() + offset as usize, fill);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn krea_native_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
+        ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
+        ("model.diffusion_model.first.weight", "BF16"),
+    ]
+}
+
+/// The tensor surface a fused SDXL LDM/A1111 checkpoint is recognized by: the UNet input/middle
+/// block grammar, BOTH CLIP conditioners (the second is what separates SDXL from SD1.5), and the
+/// `first_stage_model` VAE. Mirrors `sceneworks-core`'s own inspector fixture, because the family
+/// verdict this drives is that crate's.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn sdxl_fused_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+            "F16",
+        ),
+        (
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+            "F16",
+        ),
+        ("first_stage_model.encoder.conv_in.weight", "F16"),
+        ("first_stage_model.decoder.conv_out.weight", "F16"),
+    ]
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl CheckpointPlanFixture {
+    fn new(label: &str, with_base_tier: bool) -> Self {
+        let data = tempfile::Builder::new()
+            .prefix(&format!("plan-route-{label}-data-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let library = tempfile::Builder::new()
+            .prefix(&format!("plan-route-{label}-lib-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let hub = data.path().join("hub");
+        std::fs::create_dir_all(&hub).unwrap();
+        let hf = isolate_hf_hub_cache_to(&hub);
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let repo_dir = hub.join("models--SceneWorks--krea-2-turbo-mlx");
+        let base_tier = repo_dir.join("snapshots").join(revision).join("bf16");
+        if with_base_tier {
+            for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
+                std::fs::create_dir_all(base_tier.join(sub)).unwrap();
+            }
+            std::fs::write(base_tier.join("transformer/config.json"), b"{}").unwrap();
+            std::fs::write(base_tier.join("text_encoder/model.safetensors"), b"te").unwrap();
+            std::fs::write(
+                base_tier.join("vae/diffusion_pytorch_model.safetensors"),
+                b"vae",
+            )
+            .unwrap();
+            std::fs::write(base_tier.join("tokenizer/tokenizer.json"), b"{}").unwrap();
+            std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
+            std::fs::write(repo_dir.join("refs/main"), revision).unwrap();
+        }
+        let mut settings = Settings::from_env();
+        settings.data_dir = data.path().to_path_buf();
+        settings.external_model_roots = Vec::new();
+        let library_dir = std::fs::canonicalize(library.path()).unwrap();
+        let store =
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+        let root_id = store.approve_root(&library_dir).unwrap().root_id;
+        Self {
+            _data: data,
+            _library: library,
+            _hf: hf,
+            settings,
+            library_dir,
+            base_tier,
+            store,
+            root_id,
+        }
+    }
+
+    fn compile(&self, relative_path: &str, entries: &[(&str, &str)]) -> String {
+        write_tiny_safetensors(&self.library_dir.join(relative_path), entries, 0x5a);
+        self.store
+            .compile_linked(&self.root_id, relative_path)
+            .unwrap()
+            .checkpoint_id
+    }
+
+    /// Compile a multi-artifact TREE under `dir`, the shape every ComfyUI family imports as.
+    ///
+    /// `files` is `(path relative to the tree root, tensor surface)`; the artifact's ROLE is the one
+    /// the inspector infers from that path and reconciles against the bytes, exactly as it does for
+    /// a real import — the fixture never names a role itself.
+    #[allow(dead_code)]
+    fn compile_tree(&self, dir: &str, files: &[(&str, Vec<(&str, &str)>)]) -> String {
+        for (relative, entries) in files {
+            write_tiny_safetensors(&self.library_dir.join(dir).join(relative), entries, 0x5a);
+        }
+        self.store
+            .compile_linked(&self.root_id, dir)
+            .unwrap_or_else(|error| panic!("the {dir:?} tree must compile: {error}"))
+            .checkpoint_id
+    }
+
+    fn plan_backed_request(&self, checkpoint_id: &str, extra: Value) -> ImageRequest {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "linked_kreamania",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "linked_kreamania",
+                "catalogScope": "user",
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                payload[key] = value.clone();
+            }
+        }
+        request(payload)
+    }
+
+    /// Install the pose ControlNet overlay into the isolated hub at the pinned revision the lane
+    /// resolves against, so a POSE row measures the routing rule rather than a missing install.
+    ///
+    /// Same reason as [`Self::installed_lora`]: once conformance runs through the production seam,
+    /// a legitimately-absent install surfaces as the typed refusal it is, and the row stops
+    /// measuring the claim.
+    ///
+    /// Only the macOS pose-conformance rows call it; the candle arm's plan-route tests do not go
+    /// through pose, so it is dead there and `-D warnings` says so.
+    #[cfg_attr(
+        all(not(target_os = "macos"), feature = "backend-candle"),
+        allow(dead_code)
+    )]
+    fn install_pose_overlay(&self) {
+        let snapshot = self
+            .settings
+            .data_dir
+            .join("hub")
+            .join("models--SceneWorks--krea2-pose-controlnet-beta")
+            .join("snapshots")
+            .join(KREA_CONTROL_OVERLAY_REVISION);
+        write_tiny_safetensors(
+            &snapshot.join("control_step5000.safetensors"),
+            &[("control.0.weight", "F32")],
+            0x33,
+        );
+    }
+
+    /// Install a real adapter file under the app-managed LoRA root and return the payload entry
+    /// that resolves to it.
+    ///
+    /// A LoRA row in a claim matrix must carry bytes that actually resolve. Without one,
+    /// `resolve_prepared_adapters` fails with "LoRA is missing a usable path" and the row stops
+    /// measuring the routing rule it exists to measure — which the old `matches!(…, Ok(Some(_)))`
+    /// probe silently absorbed into "declined" (review blocker 1 / major 4).
+    fn installed_lora(&self, name: &str) -> Value {
+        let path = self
+            .settings
+            .data_dir
+            .join("loras")
+            .join(name)
+            .join("adapter.safetensors");
+        write_tiny_safetensors(&path, &[("lora_A.weight", "F32")], 0x77);
+        json!({ "name": name, "weight": 0.4, "installedPath": path.to_str().unwrap() })
+    }
+}
+
+/// Single-claim conformance (sc-20634): a plan-backed entry is claimed by the plan-driven route and
+/// declined by the legacy imported Krea lane; a legacy `paths.model` entry is claimed by the legacy
+/// lane and never by the plan route; an entry carrying both is owned by the plan route alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
+    let fx = CheckpointPlanFixture::new("claim", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let plan_backed = fx.plan_backed_request(&checkpoint_id, json!({}));
+
+    assert_eq!(
+        resolve_image_route(&plan_backed, &fx.settings),
+        Some(ImageRoute::CheckpointPlan),
+        "a plan-backed entry takes the plan-driven route"
+    );
+    assert!(
+        !krea_imported_available(&plan_backed, &fx.settings),
+        "the legacy imported lane must decline a plan-backed entry"
+    );
+    assert!(prepare_krea_imported_sources(&plan_backed, &fx.settings)
+        .unwrap()
+        .is_none());
+    let prepared = prepare_checkpoint_plan_sources(&plan_backed, &fx.settings)
+        .unwrap()
+        .into_sources()
+        .expect("plan-backed entry prepares");
+    assert_eq!(prepared.checkpoint_id, checkpoint_id);
+    assert_eq!(prepared.descriptor.id, "krea_2_turbo");
+    assert_eq!(prepared.descriptor.family, "krea_2");
+    assert_eq!(
+        prepared.source,
+        gen_core::ImportedModelSource::TransformerFile
+    );
+    assert_eq!(
+        prepared.primary,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
+    );
+    assert_eq!(
+        prepared.components,
+        vec![(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(fx.base_tier.clone())
+        )]
+    );
+    // The spec the route loads is the exact spec the legacy lane builds for the same file + base:
+    // primary File + the named base component, nothing else.
+    let spec = checkpoint_plan_load_spec(&prepared, None).unwrap();
+    let legacy_spec = LoadSpec::new(WeightsSource::File(
+        fx.library_dir.join("kreamania.safetensors"),
+    ))
+    .with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(fx.base_tier.clone()),
+    );
+    assert_eq!(spec.weights, legacy_spec.weights);
+    assert_eq!(spec.components, legacy_spec.components);
+    assert!(spec.quantize.is_none());
+    assert!(spec.prepared_file_pins().is_finalized());
+    assert_eq!(spec.prepared_file_pins().len(), 1);
+
+    // The legacy shape: an app-managed install dir holding the lone checkpoint, no `importPlan`.
+    let install = fx.settings.data_dir.join("models/imports/kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        install.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert_eq!(
+        resolve_image_route(&legacy, &fx.settings),
+        Some(ImageRoute::KreaImported),
+        "the legacy lane still serves `paths.model` installs beside the plan route"
+    );
+    assert!(
+        !prepare_checkpoint_plan_sources(&legacy, &fx.settings)
+            .unwrap()
+            .is_available(),
+        "the plan route never claims a legacy entry"
+    );
+
+    // Both markers on one entry: the plan route owns it, the legacy resolver declines it outright.
+    let both = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "importPlan": { "checkpointId": checkpoint_id },
+            "paths": { "model": install.to_str().unwrap() }
+        }}),
+    );
+    assert_eq!(
+        resolve_image_route(&both, &fx.settings),
+        Some(ImageRoute::CheckpointPlan)
+    );
+    assert!(resolve_imported_krea_dit_pin(&both, &fx.settings)
+        .unwrap()
+        .is_none());
+    assert!(prepare_krea_imported_control_sources(&both, &fx.settings)
+        .unwrap()
+        .is_none());
+
+    // The OTHER imported lanes decline a plan-backed entry too (sc-20634 review). Each is handed an
+    // entry carrying ITS OWN markers plus `importPlan.checkpointId`, so a lane that relied on the
+    // resolver's arm order rather than an explicit guard would claim it here. Arm ordering is not a
+    // claim: it silently makes whichever lane happens to be checked first the owner.
+    let marked = |family: &str, shape: &str, extra: Value| -> ImageRequest {
+        let mut entry = json!({
+            "id": "linked_marked",
+            "catalogScope": "user",
+            "family": family,
+            "importSourceShape": shape,
+            "importPlan": { "checkpointId": checkpoint_id },
+            "paths": { "model": install.to_str().unwrap() }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                entry[key] = value.clone();
+            }
+        }
+        request(json!({
+            "projectId": "p",
+            "model": "external_base_marked",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": entry,
+        }))
+    };
+
+    let sdxl = marked("sdxl", "fused_checkpoint", json!({}));
+    assert!(
+        prepare_sdxl_imported_sources(&sdxl, &fx.settings)
+            .unwrap()
+            .is_none(),
+        "imported SDXL must decline a plan-backed entry rather than rely on arm ordering"
+    );
+    assert!(!sdxl_imported_available(&sdxl, &fx.settings));
+
+    // Mage needs a COMPLETE fine-tuned transformer dir to be claimable at all, so build the exact
+    // fixture its own lane test uses and only then add the plan marker: an entry that this lane
+    // would otherwise claim is the only fixture that can prove the guard, rather than proving the
+    // fixture was unclaimable for some unrelated reason.
+    let mage_dir = tempfile::tempdir().unwrap();
+    let (mage_settings, mage_checkpoint) = mage_finetuned_settings_with_checkpoint(mage_dir.path());
+    let mage_path = mage_checkpoint.to_str().unwrap().to_owned();
+    let mage_entry = |plan_backed: bool| {
+        let mut entry = json!({ "family": "mage-flow", "paths": { "model": mage_path } });
+        if plan_backed {
+            entry["importPlan"] = json!({ "checkpointId": checkpoint_id });
+        }
+        request(json!({
+            "projectId": "p",
+            "model": "finetune_9f3c0a11",
+            "mode": "text_to_image",
+            "modelManifestEntry": entry,
+        }))
+    };
+    assert!(
+        mage_finetuned_available(&mage_entry(false), &mage_settings),
+        "fixture check: without the plan marker this entry IS claimed by the Mage lane"
+    );
+    let mage = mage_entry(true);
+    assert!(
+        prepare_mage_finetuned_transformer(&mage, &mage_settings)
+            .unwrap()
+            .is_none(),
+        "the Mage fine-tuned lane must decline a plan-backed entry"
+    );
+    assert!(!mage_finetuned_available(&mage, &mage_settings));
+
+    // `zimage_comfyui_available` is candle-only; its guard sits in the shared
+    // `prepare_zimage_comfyui_sources`, pinned here as source text so the macOS lane still proves
+    // the guard is live code rather than a comment (`cargo test` cannot link the candle cfg here).
+    let zimage_source = include_str!("zimage_comfyui_candle.rs");
+    let start = zimage_source
+        .find("pub(super) fn prepare_zimage_comfyui_sources(")
+        .expect("the shared ComfyUI Z-Image source preparation must exist");
+    let prepare = &zimage_source[start..start + 1200.min(zimage_source.len() - start)];
+    assert!(
+        prepare.contains("request_is_checkpoint_plan_backed(request)"),
+        "the ComfyUI Z-Image lane must explicitly decline a plan-backed entry:\n{prepare}"
+    );
+    let guard_at = prepare
+        .find("request_is_checkpoint_plan_backed(request)")
+        .expect("guard present");
+    let first_claim = prepare
+        .find("imported_generate_request_supported(")
+        .expect("the lane resolves its descriptor");
+    assert!(
+        guard_at < first_claim,
+        "the plan-backed decline must precede any source resolution in the ComfyUI Z-Image lane"
+    );
+}
+
+/// sc-20644 Krea row, AC1 — the FULL Krea 2 surface runs off the plan's verified layer, and a
+/// LINKED copy and a MANAGED copy of the same bytes are the same model.
+///
+/// Two properties, and neither is provable from the plan route alone:
+///
+///   * **same semantic plan** — `compile_linked` and `compile_managed` over identical bytes produce
+///     the same semantic digest (E1). The two records differ only in source-binding identity, which
+///     is what makes "linked or managed" an ownership choice rather than a different model.
+///   * **same inputs to the same body** — for every request shape the plan route does NOT serve
+///     (LoRA, img2img, edit, pose, multi-phase, Hires.fix), the bespoke Krea lane now resolves its
+///     primary to the PLAN's verified layer instead of declining. The LoadSpec the lane assembles
+///     and the per-image seed sequence are therefore identical to the legacy `paths.model` route's
+///     for the same request, which is what makes a fixed-seed render equal across routes: same
+///     weights bytes, same components, same seeds, one generation body.
+///
+/// Before this row a plan-backed Krea entry had NO lane for any of those shapes — importing a
+/// checkpoint removed capabilities it had, and a linked checkpoint could never reach them at all.
+///
+/// Failing mutations: delete the `checkpoint_plan_bespoke_primary_pin` call in
+/// `resolve_imported_krea_dit_pin` (every non-t2i shape loses its lane); return the managed
+/// checkpoint's layer for the linked request (paths diverge); drop `layers_with_role` filtering in
+/// `checkpoint_plan_primary_selection` (wrong layer selected).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_krea_full_surface_loads_the_plans_verified_layer_for_linked_and_managed_copies() {
+    let fx = CheckpointPlanFixture::new("krea-full-surface", true);
+    let linked_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // The MANAGED copy: the same bytes under the app-owned installs tree, compiled by the same
+    // inspector through the managed entry point.
+    let install_id = "install-kreamania";
+    let install_dir = fx.store.install_dir(install_id).unwrap();
+    std::fs::create_dir_all(&install_dir).unwrap();
+    // The store resolves an install through its own canonicalization, so compare against the
+    // canonical spelling rather than the `/var` alias the temp dir hands out on macOS. A
+    // machine-dependent prefix is never asserted — only that the two spellings name one file.
+    let install_dir = std::fs::canonicalize(&install_dir).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        install_dir.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let managed = fx
+        .store
+        .compile_managed(
+            install_id,
+            "kreamania.safetensors",
+            sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+                source: "local-copy".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let linked_resolved = fx.store.resolve(&linked_id).unwrap();
+    let managed_resolved = fx.store.resolve(&managed.checkpoint_id).unwrap();
+    assert_eq!(
+        linked_resolved.record.plan.semantic_digest, managed_resolved.record.plan.semantic_digest,
+        "E1: the same bytes compile to the same SEMANTIC plan under either ownership"
+    );
+    assert_ne!(
+        linked_id, managed.checkpoint_id,
+        "fixture check: the two copies are distinct checkpoints, so the assertions below are not \
+         reading one record twice"
+    );
+
+    // A LoRA request: a shape the plan route declines by construction, so this is the bespoke lane.
+    let lora_request = |checkpoint_id: &str| {
+        fx.plan_backed_request(
+            checkpoint_id,
+            json!({ "loras": [fx.installed_lora("style")] }),
+        )
+    };
+    for (checkpoint_id, expected) in [
+        (
+            linked_id.as_str(),
+            fx.library_dir.join("kreamania.safetensors"),
+        ),
+        (
+            managed.checkpoint_id.as_str(),
+            install_dir.join("kreamania.safetensors"),
+        ),
+    ] {
+        let request = lora_request(checkpoint_id);
+        assert!(
+            !request_is_checkpoint_plan_backed(&request),
+            "fixture check: the plan route does not serve a LoRA request, so the bespoke lane owns it"
+        );
+        let pin = resolve_imported_krea_dit_pin(&request, &fx.settings)
+            .expect("a plan-backed Krea entry resolves its primary through the plan")
+            .expect("the bespoke lane claims the LoRA shape a plan-backed entry used to lose");
+        assert_eq!(
+            pin.loader_path(),
+            expected.as_path(),
+            "the lane loads THIS checkpoint's own verified layer, never the other copy's"
+        );
+    }
+
+    // The legacy `paths.model` route for the same bytes: same primary, same spec shape, same seeds.
+    let legacy_install = fx.settings.data_dir.join("models/legacy-kreamania");
+    std::fs::create_dir_all(&legacy_install).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        legacy_install.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "count": 3,
+        "seed": 4242,
+        "loras": [{ "name": "style", "weight": 0.4 }],
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": legacy_install.to_str().unwrap() }
+        }
+    }));
+    let legacy_pin = resolve_imported_krea_dit_pin(&legacy, &fx.settings)
+        .unwrap()
+        .expect("fixture check: the legacy scan still finds its install");
+    assert_eq!(
+        legacy_pin.loader_path(),
+        legacy_install.join("kreamania.safetensors").as_path()
+    );
+    assert_eq!(
+        std::fs::read(legacy_pin.loader_path()).unwrap(),
+        std::fs::read(fx.library_dir.join("kreamania.safetensors")).unwrap(),
+        "fixture check: the legacy route and the plan routes open byte-identical weights, which is \
+         the premise a same-seed render equality rests on"
+    );
+
+    // Seeds are request-derived, not route-derived: the same request renders the same seed sequence
+    // on either route, so identical weights + identical spec + identical seeds is same-seed equality.
+    let mut plan_backed_seeded = fx.plan_backed_request(&linked_id, json!({}));
+    plan_backed_seeded.count = legacy.count;
+    plan_backed_seeded.seed = legacy.seed;
+    plan_backed_seeded.loras = legacy.loras.clone();
+    let seeds = |r: &ImageRequest| -> Vec<i64> {
+        (0..r.count as usize).map(|i| resolve_seed(r, i)).collect()
+    };
+    assert_eq!(seeds(&plan_backed_seeded), seeds(&legacy));
+    assert_eq!(seeds(&legacy).len(), 3);
+}
+
+/// sc-20644 review blocker 1 — a bespoke plan-source helper DECLINES a request belonging to another
+/// family, and `family-mismatch` stays fatal only for the case it was written for.
+///
+/// Every bespoke lane is offered every plan-backed request whose shape the plan route declined,
+/// including requests belonging to other families. Before the declared-family gate, each helper
+/// opened the plan store for all of them and compared the PLAN's family against the ASKING lane's,
+/// so a perfectly good `krea_2` checkpoint raised a FATAL `[checkpoint-plan:family-mismatch]` the
+/// moment any other family's lane was offered it. `prepare_image_route` propagates that with `?`,
+/// so the job died rather than being served by the lane that owns it.
+///
+/// The two halves are distinguished here because collapsing them is exactly the bug:
+///   * DECLARED family is another lane's → `Ok(None)`. Not this lane's request.
+///   * DECLARED family is THIS lane's but the PLAN disagrees → still fatal. That is a corrupt or
+///     edited entry, and loading it through the wrong family's loader is the silent substitution
+///     E8 forbids.
+///
+/// Failing mutations: delete the `checkpoint_plan_entry_routes_to` guard (the foreign-family probe
+/// raises instead of declining); make `checkpoint_plan_family_matches` return `Ok(())` (the
+/// mislabelled entry loads through the wrong loader).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bespoke_plan_source_declines_another_familys_request_and_still_refuses_a_mislabelled_entry() {
+    let fx = CheckpointPlanFixture::new("family-gate", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    let entry_declaring = |family: &str| {
+        let mut request = fx.plan_backed_request(
+            &checkpoint_id,
+            json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+        );
+        request
+            .model_manifest_entry
+            .insert("family".to_owned(), Value::String(family.to_owned()));
+        request
+    };
+
+    // The reproduction: a plan-backed krea_2 entry the plan route declines (Hires.fix), offered to
+    // a lane that is not its own. It must DECLINE, not raise.
+    let krea_entry = entry_declaring("krea_2");
+    assert!(
+        !request_is_checkpoint_plan_backed(&krea_entry),
+        "fixture check: the plan route declines Hires.fix, which is what offers this request to          every other lane"
+    );
+    for foreign in ["mage-flow", "sdxl", "z-image", "qwen-image", "flux2"] {
+        assert!(
+            matches!(
+                checkpoint_plan_bespoke_primary_pin(&krea_entry, &fx.settings, foreign),
+                Ok(None)
+            ),
+            "the {foreign} lane must DECLINE a krea_2 request, not raise family-mismatch"
+        );
+    }
+    // And the lane that DOES own it still resolves it.
+    assert!(
+        checkpoint_plan_bespoke_primary_pin(&krea_entry, &fx.settings, "krea_2")
+            .expect("the owning lane resolves")
+            .is_some()
+    );
+
+    // The other half: an entry DECLARING a family its plan does not match is still fatal. This is
+    // the corrupt/edited-entry case `family-mismatch` exists for.
+    let mislabelled = entry_declaring("sdxl");
+    let error = checkpoint_plan_bespoke_primary_pin(&mislabelled, &fx.settings, "sdxl")
+        .expect_err("an entry whose declared family its plan contradicts must refuse")
+        .to_string();
+    assert!(
+        error.contains("[checkpoint-plan:family-mismatch]") && error.contains("krea_2"),
+        "the refusal must name the plan's real family: {error}"
+    );
+
+    // End to end through the PRODUCTION seam: the reproduced case is served, not fatal.
+    let prepared = prepare_image_route(&krea_entry, &fx.settings)
+        .expect("the reproduced case must not die in route preparation")
+        .expect("a plan-backed Hires.fix request is served by the family's own lane");
+    assert_eq!(prepared.kind(), ImageRoute::KreaImported);
+}
+
+/// sc-20644 Krea row, AC2 — per-request single-claim conformance across the FULL surface, plus the
+/// exact bespoke surface sc-20651 deletes, pinned by name.
+///
+/// The claim is per REQUEST, not per entry, so proving it on one shape proves nothing: the row
+/// widened the bespoke lane to serve every plan-backed shape the plan route declines, and the two
+/// gates that keep them disjoint (`checkpoint_plan_serves_request_shape` and the
+/// `request_is_checkpoint_plan_backed` early return in `resolve_imported_krea_dit_pin`) are now
+/// load-bearing for six shapes rather than none. The matrix below walks them.
+///
+/// Failing mutations (each run individually): delete the `request_is_checkpoint_plan_backed` early
+/// return in `resolve_imported_krea_dit_pin` → the t2i row is claimed twice; drop `loras.is_empty()`
+/// from `checkpoint_plan_serves_request_shape` → the LoRA row is claimed twice; drop
+/// `hires_fix.enabled` → the Hires row is claimed twice.
+#[cfg(target_os = "macos")]
+#[test]
+fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
+    let fx = CheckpointPlanFixture::new("krea-single-claim", true);
+    fx.install_pose_overlay();
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // Each lane's OWN claim answer, in the same terms the lane's production preparation uses: the
+    // plan route's availability, the bespoke non-pose lane (shape gate + a resolvable primary, the
+    // two halves of `prepare_krea_imported_sources` before adapters), and the bespoke pose lane
+    // (`prepare_krea_imported_control_sources`' own pose condition). A source resolution that
+    // ERRORS still counts as a claim: the lane took the request and refused it, which is a claim
+    // with a typed refusal, not a decline.
+    let plan_claims = |r: &ImageRequest| {
+        prepare_checkpoint_plan_sources(r, &fx.settings)
+            .map(|selection| selection.is_available())
+            .unwrap_or(true)
+    };
+    let primary_resolves =
+        |r: &ImageRequest| !matches!(resolve_imported_krea_dit_pin(r, &fx.settings), Ok(None));
+    let krea_claims = |r: &ImageRequest| {
+        pose_entries(r).is_empty()
+            && krea_imported_request_shape_available(r)
+            && primary_resolves(r)
+    };
+    let krea_pose_claims = |r: &ImageRequest| {
+        r.mode != "edit_image"
+            && !pose_entries(r).is_empty()
+            && krea_imported_request_shape_available(r)
+            && primary_resolves(r)
+    };
+
+    let shapes: Vec<(&str, ImageRequest)> = vec![
+        ("t2i", fx.plan_backed_request(&checkpoint_id, json!({}))),
+        (
+            "img2img",
+            fx.plan_backed_request(&checkpoint_id, json!({ "referenceAssetId": "asset-1" })),
+        ),
+        (
+            "lora",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "loras": [fx.installed_lora("style")] }),
+            ),
+        ),
+        (
+            "edit",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "mode": "edit_image", "referenceAssetId": "asset-1" }),
+            ),
+        ),
+        (
+            "pose",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "advanced": { "poses": [{ "id": "a" }] } }),
+            ),
+        ),
+        (
+            "multiphase",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "advanced": { "phases": [
+                    { "steps": 4, "guidance": 3.0 },
+                    { "steps": 4, "guidance": 1.0 }
+                ] } }),
+            ),
+        ),
+        (
+            "hires",
+            fx.plan_backed_request(
+                &checkpoint_id,
+                json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+            ),
+        ),
+    ];
+
+    for (label, request) in &shapes {
+        let claimants: Vec<&str> = [
+            ("checkpoint-plan", plan_claims(request)),
+            ("krea-imported", krea_claims(request)),
+            ("krea-imported-control", krea_pose_claims(request)),
+        ]
+        .into_iter()
+        .filter_map(|(name, claimed)| claimed.then_some(name))
+        .collect();
+        assert_eq!(
+            claimants.len(),
+            1,
+            "{label}: exactly one lane may claim a plan-backed request, got {claimants:?}"
+        );
+        // Through the PRODUCTION seam, which propagates a lane's `Err` with `?` rather than
+        // discarding it. `resolve_image_route` consults the `*_available` probes, and those
+        // `matches!(…, Ok(Some(_)))` a production error into `false` — so a request that KILLS the
+        // job in production reads here as "declined, some other lane has it". That is exactly how
+        // the fatal cross-family `family-mismatch` hid behind a green conformance test (review
+        // blocker 1), so the assertion now runs where the error can reach it.
+        assert!(
+            prepare_image_route(request, &fx.settings)
+                .unwrap_or_else(|error| panic!(
+                    "{label}: route preparation must not fail for a plan-backed request: {error}"
+                ))
+                .is_some(),
+            "{label}: a plan-backed request must never fall through to the procedural stub"
+        );
+    }
+
+    // The route the claim resolves to, named, so a mutation that moves a shape to the wrong lane is
+    // caught even when the count stays at one. Also through the production seam, for the reason
+    // above.
+    let route_of = |label: &str| {
+        let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
+        prepare_image_route(request, &fx.settings)
+            .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
+            .map(|prepared| prepared.kind())
+    };
+    assert_eq!(route_of("t2i"), Some(ImageRoute::CheckpointPlan));
+    assert_eq!(route_of("lora"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("edit"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("multiphase"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("hires"), Some(ImageRoute::KreaImported));
+    assert_eq!(route_of("pose"), Some(ImageRoute::KreaImportedControl));
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME -------------------------------
+    //
+    // sc-20651 removes the Krea family's filesystem-scan source resolution once its one-time
+    // catalog migration has given every legacy entry a plan. Naming those symbols here means that
+    // deletion is mechanical and this test is what tells sc-20651 it removed the right things: the
+    // day the scan goes, this list is what has to be updated, and nothing else in the row.
+    //
+    // sc-20651 determination — the lane is RETAINED. The deletion condition above is "EVERY legacy
+    // entry has a plan", and the code puts two shapes permanently outside it. These are not the
+    // retryable refusals (a torn install, drifted bytes, an unsupported quant), which a later boot
+    // can compile into success; they are DIVERGENCES between the gate that let an entry into the
+    // catalog and the gate that lets it into the plan store, so the migration re-skips them on
+    // every boot forever:
+    //
+    // * SELECTOR divergence. The import job admits an install whose primary is the lone top-level
+    //   `.safetensors` (`base_weights::imported_model_primary_weight_file`); the migration requires
+    //   the lone top-level WEIGHT file, counting `.safetensors` AND `.gguf`
+    //   (`checkpoint_catalog_migration::lone_top_level_weight_file`). An HF-repo import with no
+    //   `files` filter copies the whole repo, so a community repo shipping a GGUF beside its
+    //   safetensors installs and renders, and can never be migrated.
+    // * ADDRESS divergence. The migration migrates only an entry whose `paths.model` round-trips
+    //   through `CheckpointPlanStore::install_dir(<dir name>)` — the proof it addresses a managed
+    //   install, pinned by
+    //   `checkpoint_catalog_migration::a_nested_install_path_is_not_a_managed_install_and_is_never_compiled`.
+    //   Only sc-20636 made that true of NEW imports, via `managed_install_id_for_target`;
+    //   `paths::resolve_model_import_target` accepts any payload `targetDir` under
+    //   `<data>/models`, so a pre-epic entry installed anywhere else under `models/` has no
+    //   addressable install id at all.
+    //
+    // A refused, declined or skipped entry's only remaining route is this scan, so the scan stays.
+    let source = include_str!("krea_imported.rs");
+    for symbol in [
+        // The scan itself — the three predicates that decide "is this a single-file import".
+        "fn is_single_file_checkpoint(",
+        "fn is_diffusers_snapshot_dir(",
+        "fn imported_dit_file(",
+        // The claim branch that keeps the two routes disjoint.
+        "if request_is_checkpoint_plan_backed(request) {",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Krea bespoke surface sc-20651 DELETES must be live code, not a comment: {symbol}"
+        );
+    }
+    // The must-OUTLIVE half, separately, with its own message: both halves have to be live code
+    // today, so one shared assertion would hold them — but they say opposite things about what
+    // sc-20651 may remove, and the reader of a red is the deletion story deciding what to delete.
+    let must_outlive = "checkpoint_plan_bespoke_primary_pin(request, settings, \"krea_2\")";
+    assert!(
+        source.contains(must_outlive),
+        "the Krea plan-backed source that must OUTLIVE the deletion is gone: {must_outlive}"
+    );
+    // Ordering: the plan-backed decline precedes the plan-backed SOURCE, which precedes the scan.
+    // Reversing any pair either double-claims or scans a linked entry that has nothing to scan.
+    let decline_at = source
+        .find("if request_is_checkpoint_plan_backed(request) {")
+        .unwrap();
+    let plan_source_at = source
+        .find("checkpoint_plan_bespoke_primary_pin(request, settings, \"krea_2\")")
+        .unwrap();
+    let scan_at = source.find("imported_dit_file(&confined)").unwrap();
+    assert!(
+        decline_at < plan_source_at && plan_source_at < scan_at,
+        "decline → plan source → filesystem scan, in that order"
+    );
+}
+
+/// sc-20644 Krea row — a plan the bespoke lane cannot fully consume refuses during PLANNING.
+///
+/// A linked Krea checkpoint compiled from a directory carries its own `vae` and `text_encoder`
+/// layers. The bespoke lane pairs a bare transformer with the RESIDENT base tier's encoder and VAE,
+/// so serving that plan would load the plan's transformer while silently substituting other bytes
+/// for two layers the plan declares — consuming the plan partly while claiming it fully (E7/E8).
+/// It refuses instead, with the plan store's own code, before any loader is constructed.
+///
+/// Failing mutation: drop the `checkpoint_plan_unconsumed_layers` call from
+/// `checkpoint_plan_bespoke_primary_pin` → the lane silently loads the transformer alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_krea_plan_with_layers_the_bespoke_lane_cannot_source_refuses_during_planning() {
+    let fx = CheckpointPlanFixture::new("krea-unconsumed", true);
+    write_tiny_safetensors(
+        &fx.library_dir.join("tree/transformer/model.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    write_tiny_safetensors(
+        &fx.library_dir
+            .join("tree/vae/diffusion_pytorch_model.safetensors"),
+        &[("decoder.conv_in.weight", "F32")],
+        0x11,
+    );
+    let compiled = match fx.store.compile_linked(&fx.root_id, "tree") {
+        Ok(compiled) => compiled,
+        // A tree the inspector will not call runnable is not the fixture this test needs; say so
+        // rather than passing for the wrong reason.
+        Err(error) => panic!("fixture check: the multi-layer tree must compile: {error}"),
+    };
+    let resolved = fx.store.resolve(&compiled.checkpoint_id).unwrap();
+    assert!(
+        resolved.plan.layers.len() > 1,
+        "fixture check: the plan must carry more than the backbone, got {:?}",
+        checkpoint_plan_layer_roles(&resolved)
+    );
+
+    let request = fx.plan_backed_request(
+        &compiled.checkpoint_id,
+        json!({ "loras": [fx.installed_lora("style")] }),
+    );
+    let error = resolve_imported_krea_dit_pin(&request, &fx.settings)
+        .expect_err("a plan the lane cannot fully consume must refuse, not load its backbone")
+        .to_string();
+    assert!(
+        // ONE tag, not an `a || b` (sc-20651 feature-end review). The disjunction accepted the
+        // WRONG refusal as well as the right one: `unsupported-operation` is the LoRA shape being
+        // declined, which is a different fact from "the plan carries a layer this lane cannot
+        // source". A mutation that made the lane refuse the LoRA before ever looking at the plan's
+        // layers still passed. The fixture's unconsumed `vae` layer is what this test is about, so
+        // it asserts that verdict alone.
+        error.contains("[checkpoint-plan:unconsumed-layer]"),
+        "the refusal must name the UNCONSUMED LAYER, got: {error}"
+    );
+}
+
+/// The tensor surface a fused SDXL LDM/A1111 checkpoint is recognized by — the adapter's own
+/// `sdxl-ldm-v1` signature key, plus enough of the fused container's other stages that the
+/// inspector classifies the file as a fused CHECKPOINT rather than a bare transformer.
+#[cfg(target_os = "macos")]
+fn sdxl_ldm_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+            "F16",
+        ),
+        (
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+            "F16",
+        ),
+        (
+            "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+            "F16",
+        ),
+        ("first_stage_model.encoder.conv_in.weight", "F16"),
+        ("first_stage_model.decoder.conv_out.weight", "F16"),
+    ]
+}
+
+/// sc-20644 review blocker 1, for the three CANDLE-ONLY ComfyUI-tree lanes.
+///
+/// The three tree lanes are on the reviewer's blocker-1 list too: each reaches
+/// `checkpoint_plan_bespoke_tree` for any plan-backed entry whose shape the plan route declined,
+/// including another family's. `cargo test` cannot link those lanes on macOS, but the guard they
+/// all funnel through IS linkable here, so the behaviour is asserted directly on the shared helper
+/// for each of the three family spellings — which is where the fix lives and where a regression
+/// would land.
+///
+/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
+/// `checkpoint_plan_bespoke_tree` (the shared helper the three lanes call).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_tree_source_helper_declines_another_familys_request() {
+    let fx = CheckpointPlanFixture::new("tree-cross-family", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+    );
+    assert!(
+        !request_is_checkpoint_plan_backed(&request),
+        "fixture check: the plan route declines Hires.fix, which offers this to every other lane"
+    );
+    // The tree helper is candle-gated, so assert through the shared entry point every tree lane
+    // funnels through — `checkpoint_plan_bespoke_primary`, which carries the same guard and IS
+    // linkable on this config. The tree helper's own copy of the guard is pinned as source text
+    // below, in the ordering test.
+    for foreign in ["z-image", "qwen-image", "flux2"] {
+        assert!(
+            matches!(
+                checkpoint_plan_bespoke_primary_pin(&request, &fx.settings, foreign),
+                Ok(None)
+            ),
+            "the {foreign} lane must DECLINE a krea_2 request rather than raise family-mismatch"
+        );
+    }
+    // And the guard is live code in the TREE helper too, not only in the primary one.
+    let source = include_str!("checkpoint_plan.rs");
+    let tree_at = source
+        .find("pub(crate) fn checkpoint_plan_bespoke_tree(")
+        .expect("the tree helper must exist");
+    let tree_body = &source[tree_at..tree_at + 1400.min(source.len() - tree_at)];
+    let guard_at = tree_body
+        .find("checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family)")
+        .expect("the tree helper must ask the declared-family question");
+    let store_at = tree_body
+        .find("CheckpointPlanStore::open(")
+        .expect("the tree helper opens the store");
+    assert!(
+        guard_at < store_at,
+        "the declared-family gate must precede opening the plan store: another family's request          must not even resolve a plan"
+    );
+}
+
+/// sc-20644 Wan row — the video lane sources a plan-backed entry by NAMED EXPERT ROLE, claims it
+/// without an `external_base_` id, and its deletable surface is pinned.
+///
+/// Wan is the family that forced the checkpoint plan to grow a vocabulary. Its ComfyUI checkpoint has
+/// two backbones — a high-noise and a low-noise expert, selected per denoise step and not
+/// interchangeable — so it has no single primary to derive. Until `checkpoint_inspector` could tell
+/// the two apart, a compiled Wan plan carried two anonymous `transformer` layers and every consumer
+/// could only refuse it as an ambiguous primary. The inspector half of that is proven executably in
+/// `sceneworks-core`'s own suite (`a_comfyui_wan_tree_compiles_to_two_named_expert_layers`); this is
+/// the worker half.
+///
+/// The Wan lane is candle-only (`cfg(all(not(target_os = "macos"), feature = "backend-candle"))`),
+/// so `cargo test` cannot link it here and its behavioural test first RUNS on the windows-candle CI
+/// lane. What is checkable on every build config — and what this asserts — is that the guards are
+/// live code in the right ORDER, the same posture sc-20636 took for the Z-Image lane.
+///
+/// Failing mutations: delete the plan-source call from `resolve_wan_comfyui_paths`; move it after the
+/// `usable` / `components[]` catalog gates; drop the `plan_backed` disjunct from
+/// `wan_comfyui_available`.
+#[test]
+fn the_wan_video_lane_sources_a_plan_backed_entry_by_expert_role() {
+    let source = include_str!("../video_jobs/candle.rs");
+
+    // The plan source is reached BEFORE every gate that describes a scanned catalog row. A linked
+    // Wan checkpoint has no `usable` flag and no `components[]`, so any of them running first makes
+    // the plan source unreachable.
+    let plan_source_at = source
+        .find("resolve_plan_backed_wan_comfyui_paths(request, settings)?")
+        .expect("the Wan lane must source a plan-backed entry from the plan");
+    for (gate, what) in [
+        (
+            "entry.get(\"usable\").and_then(Value::as_bool)",
+            "the `usable` catalog flag",
+        ),
+        (
+            "entry.get(\"components\").and_then(Value::as_array)",
+            "the `components[]` assembly",
+        ),
+    ] {
+        let gate_at = source
+            .find(gate)
+            .unwrap_or_else(|| panic!("fixture check: {what} must still exist"));
+        assert!(
+            plan_source_at < gate_at,
+            "the plan source must precede {what}; a linked checkpoint has neither"
+        );
+    }
+
+    // Both experts are resolved BY NAME from the plan's own role vocabulary — never positionally,
+    // and never from the catalog's `components[]` role strings.
+    for role in ["TRANSFORMER_HIGH_ROLE", "TRANSFORMER_LOW_ROLE"] {
+        assert!(
+            source.contains(&format!("sceneworks_core::checkpoint_inspector::{role}")),
+            "the Wan lane must name the {role} plan layer explicitly"
+        );
+    }
+    // The two optional in-place artifacts stay optional on the plan route too (sc-10909), and the
+    // T2V-only channel gate is applied to the PLAN's own high expert rather than skipped.
+    assert!(
+        source.contains("&[\"text_encoder\", \"vae\"],"),
+        "the in-place UMT5 encoder and VAE stay OPTIONAL on the plan route"
+    );
+    // The T2V-only channel gate lives INSIDE the plan-sourced resolver and REFUSES by name.
+    //
+    // The previous form of this assertion was an `a || b` over two positions and was vacuous —
+    // worse, the branch it accepted pinned the very `Ok(None)` that sent a plan-backed I2V pair to
+    // `CandleVideoRoute::Stub` (review blocker 3 / minor 9). One fact is asserted now: the gate is
+    // inside the plan resolver, and it produces a typed refusal rather than a decline.
+    let resolver_at = source
+        .find("fn resolve_plan_backed_wan_comfyui_paths(")
+        .expect("the plan-sourced resolver must exist");
+    let resolver_end = source[resolver_at..]
+        .find("\n}\n")
+        .map(|offset| resolver_at + offset)
+        .expect("the resolver has an end");
+    let resolver = &source[resolver_at..resolver_end];
+    assert!(
+        resolver.contains("wan_expert_in_channels(&high)"),
+        "the T2V-only channel gate must be applied to the PLAN's own high expert"
+    );
+    assert!(
+        resolver.contains("[checkpoint-plan:unsupported-operation]")
+            && resolver.contains("WAN_I2V_IN_CHANNELS"),
+        "a plan-backed I2V pair must REFUSE by name, naming the channel count — declining sends it \
+         to the catalog gates a linked entry can never satisfy, and from there to Stub:\n{resolver}"
+    );
+
+    // The claim propagates a refusal instead of answering a bool, and no longer rests on the
+    // `external_base_` id prefix alone.
+    let claims_at = source
+        .find("pub(super) fn wan_comfyui_claims(")
+        .expect("the Wan claim predicate must exist and must be the fallible one");
+    let claims = &source[claims_at..claims_at + 900.min(source.len() - claims_at)];
+    assert!(
+        claims.contains("checkpoint_plan_checkpoint_id(&request.model_manifest_entry)"),
+        "a plan-backed Wan entry must be claimable without an `external_base_` id:\n{claims}"
+    );
+    assert!(
+        claims.contains("resolve_wan_comfyui_paths(request, settings)?"),
+        "the claim must PROPAGATE a refusal; answering a bool is how every Wan refusal became a \
+         successful stub render:\n{claims}"
+    );
+    assert!(
+        !source.contains("fn wan_comfyui_available("),
+        "the bool probe must be gone entirely — leaving it invites the router back onto it"
+    );
+    // And the router consults the fallible form with `?`.
+    let router = include_str!("../video_jobs/mod.rs");
+    assert!(
+        router.contains("wan_comfyui_claims(request, settings)?"),
+        "the candle video router must propagate the Wan lane's refusal rather than fall to Stub"
+    );
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME -------------------------------
+    //
+    // sc-20651 determination — the Wan lane is RETAINED, not deleted. Its bespoke scan is reachable
+    // only for an entry with NO `importPlan.checkpointId` AND an `external_base_*` model id (see
+    // `wan_comfyui_claims`). `external_base_*` rows are SYNTHESIZED per catalog snapshot by
+    // `apps/rust-api::external_base_models::scan_external_base_models` and never written to
+    // `user.models.jsonc`, so there is no catalog record for the one-time migration to stamp an
+    // `importPlan` onto: that population is structurally un-migratable. The successor path is the
+    // user adding the ComfyUI library as an approved root through the sc-20650 UI, which produces
+    // real LINKED entries the plan route serves — not a deletion of this lane.
+    //
+    // `WAN_COMFYUI_SNAPSHOT_TIERS` moved into the must-outlive half for a second, narrower reason:
+    // the earlier form of this list had it in the deletable half while naming
+    // `fn wan_comfyui_snapshot_dir(` as must-outlive, and that function is its SOLE reader
+    // (`video_jobs/candle.rs`). The two cannot be separated, so the pair survives together.
+    //
+    // The two halves are SEPARATE arrays with separate messages (feature-end review minor 9). Both
+    // must be live code today, so one shared assertion could hold them — but the halves say
+    // opposite things about the FUTURE, and the reader of a red is the deletion story deciding what
+    // to remove. A failure that names only "the bespoke surface sc-20651 deletes" while the missing
+    // symbol is one this row must never delete points that reader at exactly the wrong action.
+    for symbol in [
+        "fn resolve_wan_comfyui_paths(",
+        "entry.get(\"usable\").and_then(Value::as_bool)",
+        "entry.get(\"components\").and_then(Value::as_array)",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Wan bespoke surface sc-20651 DELETES must be live code, not already gone: {symbol}"
+        );
+    }
+    for symbol in [
+        "fn resolve_plan_backed_wan_comfyui_paths(",
+        "fn wan_comfyui_snapshot_dir(",
+        "WAN_COMFYUI_SNAPSHOT_TIERS",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Wan plan-backed surface that must OUTLIVE the deletion is gone: {symbol}"
+        );
+    }
+
+    // The expert roles are the inspector's, spelled once, so the plan writer and the plan reader
+    // cannot drift apart.
+    assert_eq!(
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+        "transformer_high"
+    );
+    assert_eq!(
+        sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE,
+        "transformer_low"
+    );
+}
+
+/// sc-20644 ComfyUI-tree rows (Z-Image, Qwen-Image, FLUX.2) — the bespoke surface sc-20651 deletes,
+/// and the migration table that names which families have landed.
+///
+/// This test USED to also pin the three lanes' guard ORDERING as source text
+/// (`request_is_checkpoint_plan_backed` before the plan source, the plan source before the
+/// `external_base_` id gate). Those claims are now made behaviourally, by
+/// `a_linked_zimage_tree_resolves_all_three_artifacts_from_its_plan` and its Qwen-Image and FLUX.2
+/// siblings: each compiles a real linked tree, drives the real preparer with a model id that carries
+/// NO `external_base_` prefix, and asserts both that a shape the plan route declines resolves from
+/// the plan and that a shape it claims is declined here. A lane that moved its plan source behind
+/// the id gate, or lost its decline, reds those instead — which is strictly stronger than a `find`
+/// over the file's own text (feature-end review blocker 2). The ordering scan is therefore gone
+/// rather than kept alongside them.
+///
+/// What remains is the half no behaviour can express: an INVENTORY of the bespoke code sc-20651 is
+/// scheduled to delete, so the deletion story has one list to read rather than six files to grep,
+/// and it fails loudly if a symbol disappears early or is renamed.
+#[test]
+fn the_comfyui_tree_lanes_bespoke_surface_and_migration_table_are_still_live_code() {
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME, per family ------------------
+    //
+    // sc-20651 determination — all three lanes are RETAINED. Each one's bespoke scan is reachable
+    // only for an entry with NO `importPlan.checkpointId` AND an `external_base_*` model id (the
+    // `request.model.starts_with("external_base_")` gate in each `prepare_*_comfyui_sources`).
+    // `external_base_*` rows are SYNTHESIZED per catalog snapshot by
+    // `apps/rust-api::external_base_models::scan_external_base_models` and never persisted to
+    // `user.models.jsonc`, so there is no catalog record for the one-time migration to stamp an
+    // `importPlan` onto — that population is structurally un-migratable. The successor path is the
+    // user adding the ComfyUI library as an approved root through the sc-20650 UI, which produces
+    // real LINKED entries the plan route serves; it does not retire these lanes.
+    for (name, source, symbols) in [
+        (
+            "zimage_comfyui_candle.rs",
+            include_str!("zimage_comfyui_candle.rs"),
+            &[
+                "pub(super) fn resolve_zimage_comfyui_paths(",
+                "entry.get(\"usable\").and_then(Value::as_bool)",
+                "entry.get(\"components\").and_then(Value::as_array)",
+                "ZIMAGE_COMFYUI_TOKENIZER_REPO",
+            ][..],
+        ),
+        (
+            "qwen_comfyui_candle.rs",
+            include_str!("qwen_comfyui_candle.rs"),
+            &[
+                "pub(super) fn resolve_qwen_comfyui_paths(",
+                "entry.get(\"usable\").and_then(Value::as_bool)",
+                "entry.get(\"components\").and_then(Value::as_array)",
+                "QWEN_COMFYUI_SNAPSHOT_TIERS",
+            ][..],
+        ),
+        (
+            "flux2_comfyui_candle.rs",
+            include_str!("flux2_comfyui_candle.rs"),
+            &[
+                "pub(super) fn resolve_flux2_comfyui_paths(",
+                "entry.get(\"usable\").and_then(Value::as_bool)",
+                "entry.get(\"components\").and_then(Value::as_array)",
+                "FLUX2_COMFYUI_SNAPSHOT_TIERS",
+            ][..],
+        ),
+    ] {
+        for symbol in symbols {
+            assert!(
+                source.contains(symbol),
+                "{name}: the surface sc-20651 deletes must be live code: {symbol}"
+            );
+        }
+    }
+
+    // And the migration table names exactly the families whose rows have landed, so sc-20651 has one
+    // list to read rather than six files to grep.
+    let plan_source = include_str!("checkpoint_plan.rs");
+    for family in [
+        "\"krea_2\"",
+        "\"sdxl\"",
+        "\"mage-flow\"",
+        "\"z-image\"",
+        "\"qwen-image\"",
+        "\"flux2\"",
+    ] {
+        let table_at = plan_source
+            .find("const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES:")
+            .expect("the migration table must exist");
+        let table_end = plan_source[table_at..]
+            .find("];")
+            .expect("the migration table is a slice literal");
+        assert!(
+            plan_source[table_at..table_at + table_end].contains(family),
+            "the migration table must name {family}, whose row has landed"
+        );
+    }
+}
+
+/// The tensor surface a Mage-Flow transformer directory is recognized by: exactly the published
+/// twelve `transformer_blocks`, each carrying the Mage-specific modulation and dual-stream MLP
+/// names. The exact block count is load-bearing in `detect_transformer_family` — it is what keeps
+/// the broader Qwen-Image arm from claiming a Mage DiT — so the fixture reproduces it rather than
+/// truncating.
+#[cfg(target_os = "macos")]
+fn mage_flow_entries() -> Vec<(String, &'static str)> {
+    let mut entries = Vec::new();
+    for block in 0..12 {
+        for leaf in [
+            "attn.add_q_proj.weight",
+            "img_mlp.net.0.proj.weight",
+            "txt_mlp.net.0.proj.weight",
+            "img_mod.1.weight",
+            "txt_mod.1.weight",
+        ] {
+            entries.push((format!("transformer_blocks.{block}.{leaf}"), "BF16"));
+        }
+    }
+    entries
+}
+
+/// sc-20644 review blocker 1, REPRODUCED against the Mage-Flow lane end to end.
+///
+/// The reviewer's exact case: a plan-backed `krea_2` entry carrying Hires.fix. The plan route
+/// declines the shape, which offers the request to every other lane, and
+/// `prepare_mage_finetuned_transformer` reached its plan-source resolver for it. That resolver
+/// opened the plan store and compared the PLAN's family (`krea_2`) against the ASKING lane's
+/// (`mage-flow`), raising a FATAL `[checkpoint-plan:family-mismatch]` — which
+/// `prepare_image_route` propagates with `?`, killing a job the Krea lane was about to serve.
+///
+/// Asserted at BOTH levels, because either alone is weaker than it looks: the Mage resolver must
+/// return `Ok(None)` (not raise), and the whole route preparation must reach `KreaImported`. The
+/// second is the one that would have caught this in the first place.
+///
+/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
+/// `checkpoint_plan_bespoke_primary` — the Mage resolver raises and route preparation dies.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_backed_krea_hires_request_is_declined_by_the_mage_lane_not_fatal() {
+    let fx = CheckpointPlanFixture::new("mage-cross-family", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
+    );
+    assert_eq!(
+        request
+            .model_manifest_entry
+            .get("family")
+            .and_then(Value::as_str),
+        Some("krea_2"),
+        "fixture check: the entry declares krea_2, which is what makes this a CROSS-family probe"
+    );
+    assert!(
+        !request_is_checkpoint_plan_backed(&request),
+        "fixture check: the plan route declines Hires.fix, which is what offers this request to          the Mage-Flow lane at all"
+    );
+
+    // The Mage-Flow lane declines rather than raising.
+    assert!(
+        matches!(
+            resolve_plan_backed_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "the Mage-Flow plan-source resolver must DECLINE a krea_2 request"
+    );
+    assert!(
+        matches!(
+            prepare_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "and so must the lane's whole preparation"
+    );
+
+    // End to end: the job is served by the lane that owns it, not killed in route preparation.
+    let prepared = prepare_image_route(&request, &fx.settings)
+        .expect("route preparation must not fail: this is the reviewer's reproduced crash")
+        .expect("a plan-backed Hires.fix request is served by the Krea lane");
+    assert_eq!(prepared.kind(), ImageRoute::KreaImported);
+}
+
+/// sc-20644 Mage-Flow row — a plan-backed Mage-Flow fine-tune loads from the plan's verified
+/// component DIRECTORY, and its request shapes are single-claimed.
+///
+/// Mage-Flow is the row that proves the seam is shape-general rather than file-shaped: its only
+/// registered dialect is `diffusers` → `TransformerDirectory`, so its plan's primary is a directory
+/// and it uses `checkpoint_plan_bespoke_primary_dir`. It is also the family whose adapter's portable
+/// `family` (`mage_flow`) differs from the spelling a compiled plan records and the adapter registry
+/// is keyed on (`mage-flow`); passing the wrong one answers "no adapter" for a family this backend
+/// binds, which is why `MAGE_FLOW_PLAN_FAMILY` is named and asserted here.
+///
+/// Failing mutations: spell `MAGE_FLOW_PLAN_FAMILY` as `mage_flow`; delete the plan-sourced resolver
+/// call in `prepare_mage_finetuned_transformer`; drop the `is_mage_flow_transformer_dir`
+/// completeness probe from the plan-sourced resolver.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
+    let fx = CheckpointPlanFixture::new("mage-plan-dir", true);
+    let entries = mage_flow_entries();
+    let borrowed: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|(name, dtype)| (name.as_str(), *dtype))
+        .collect();
+    write_tiny_safetensors(
+        &fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
+        &borrowed,
+        0x33,
+    );
+    std::fs::write(
+        fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
+        br#"{"_class_name":"MageFlowTransformer2DModel"}"#,
+    )
+    .unwrap();
+    let compiled = fx
+        .store
+        .compile_linked(&fx.root_id, "mage-tune")
+        .expect("fixture check: a complete Mage-Flow transformer directory must compile");
+    let resolved = fx.store.resolve(&compiled.checkpoint_id).unwrap();
+    assert_eq!(
+        resolved.family(),
+        MAGE_FLOW_PLAN_FAMILY,
+        "the spelling a compiled plan records IS the one the lane passes to the adapter registry"
+    );
+
+    let request = request(json!({
+        "projectId": "p",
+        "model": "linked_mage_tune",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "id": "linked_mage_tune",
+            "catalogScope": "user",
+            "family": "mage-flow",
+            "importSourceShape": "transformer_directory",
+            "importPlan": { "checkpointId": compiled.checkpoint_id }
+        }
+    }));
+
+    // The plan's DIRECTORY reaches the lane, and the lane pins the two fixed files inside it —
+    // through the same helper the filesystem scan uses, so the two routes cannot pin different
+    // things.
+    let prepared = resolve_plan_backed_mage_finetuned_transformer(&request, &fx.settings)
+        .expect("a plan-backed Mage-Flow entry resolves its directory through the plan")
+        .expect("the row's plan-sourced resolver claims it");
+    assert_eq!(prepared.directory, fx.library_dir.join("mage-tune"));
+    assert_eq!(
+        prepared.weights.loader_path(),
+        fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE)
+    );
+    assert_eq!(
+        prepared.config.loader_path(),
+        fx.library_dir
+            .join("mage-tune")
+            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE)
+    );
+
+    // Single claim, and the plan route's shared components come from the FAMILY's own resolver.
+    //
+    // This fixture deliberately does NOT install the Mage-Flow base tier, because that is what makes
+    // the next assertion meaningful: the plan route reaches
+    // `resolve_mage_finetuned_components` — the same function the bespoke lane calls — and surfaces
+    // ITS actionable message verbatim, rather than the generic "this runtime cannot supply that
+    // component for that family" it produced before this row. A missing component therefore fails
+    // during PLANNING, with one message, whichever route asked.
+    let plan_refusal = match prepare_checkpoint_plan_sources(&request, &fx.settings) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!(
+            "t2i on a plan-backed Mage entry is the plan route's, and its base tier is absent, so \
+             it must refuse rather than prepare"
+        ),
+    };
+    assert!(
+        plan_refusal.contains("install the Mage-Flow Base model (bf16) first")
+            && plan_refusal.contains("text_encoder"),
+        "the plan route must surface the family's own component diagnostic: {plan_refusal}"
+    );
+    assert!(
+        matches!(
+            prepare_mage_finetuned_transformer(&request, &fx.settings),
+            Ok(None)
+        ),
+        "and the bespoke lane must decline the request the plan route claimed"
+    );
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME ------------------------------
+    //
+    // sc-20651 determination — the lane is RETAINED, for the Krea reason plus one of its own. The
+    // shared reason, in full on the Krea row: the deletion condition is "every legacy entry has a
+    // plan", and the selector and address divergences between the import gate and the migration's
+    // candidate gate put two shapes permanently outside it, on top of the retryable refusals (torn
+    // install, drifted bytes, unsupported quant). The Mage-specific reason: a Mage-Flow fine-tune
+    // lives at `<data>/models/finetunes/<loraId>`, OUTSIDE `CheckpointPlanStore::installs_root()`,
+    // so `compile_managed` cannot address it at all — and `resolve_mage_finetuned_components` is a
+    // registered row of the plan route's own `CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS`, so it can
+    // never be deleted while the plan route serves this family.
+    let source = include_str!("mage_finetuned.rs");
+    for symbol in [
+        "fn resolve_mage_finetuned_transformer(",
+        "if request_is_checkpoint_plan_backed(request) {",
+        "checkpoint_plan_bespoke_primary_dir(request, settings, MAGE_FLOW_PLAN_FAMILY)",
+        "is_mage_flow_transformer_dir(&path)",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the Mage-Flow bespoke surface sc-20651 DELETES must be live code: {symbol}"
+        );
+    }
+    // The must-OUTLIVE half, separately: `resolve_mage_finetuned_components` is a registered row of
+    // `CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS`, so a red naming it is the opposite instruction
+    // to a red naming the scan above.
+    let must_outlive = "fn resolve_mage_finetuned_components(";
+    assert!(
+        source.contains(must_outlive),
+        "the Mage-Flow component resolver that must OUTLIVE the deletion is gone: {must_outlive}"
+    );
+    let plan_source_at = source
+        .find("resolve_plan_backed_mage_finetuned_transformer(request, settings)?")
+        .expect("the plan-sourced resolver is reached from the prepare wrapper");
+    let scan_at = source
+        .find("resolve_mage_finetuned_transformer(request, settings)\n}")
+        .expect("the filesystem scan is the fallback");
+    assert!(
+        plan_source_at < scan_at,
+        "the plan source must precede the filesystem scan: a linked entry has nothing to scan"
+    );
+}
+
+/// Populate the isolated Hugging Face cache with the model-agnostic CLIP tokenizer assets — at the
+/// exact pinned revisions the SDXL lane and the plan route both resolve against — that a fused SDXL
+/// checkpoint borrows from outside itself. Without them the fused route's tokenizer components are
+/// genuinely absent and every claim probe below would be measuring a missing install rather than
+/// the routing rule.
+///
+/// BOTH backends' spellings are installed, because the two declare the same assets differently:
+/// MLX's single `ldm_tokenizer` (CLIP-L `vocab.json` + `merges.txt`) and candle's
+/// `tokenizer_clip_l` + `tokenizer_clip_bigg` (one `tokenizer.json` per repo). Installing only the
+/// MLX pair left every candle-side caller measuring the missing bigG install (sc-20651).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn install_sdxl_clip_tokenizer_assets(settings: &Settings) {
+    let snapshot = settings
+        .data_dir
+        .join("hub")
+        .join("models--openai--clip-vit-large-patch14")
+        .join("snapshots")
+        .join(SDXL_CLIP_L_REVISION);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(snapshot.join("vocab.json"), b"{}").unwrap();
+    std::fs::write(snapshot.join("merges.txt"), b"#version: 0.2\n").unwrap();
+    std::fs::write(snapshot.join("tokenizer.json"), b"{}").unwrap();
+    let bigg = settings
+        .data_dir
+        .join("hub")
+        .join("models--laion--CLIP-ViT-bigG-14-laion2B-39B-b160k")
+        .join("snapshots")
+        .join(SDXL_CLIP_BIGG_REVISION);
+    std::fs::create_dir_all(&bigg).unwrap();
+    std::fs::write(bigg.join("tokenizer.json"), b"{}").unwrap();
+}
+
+/// sc-20644 SDXL row, AC1 + AC2 — a plan-backed fused SDXL checkpoint runs its full surface off the
+/// plan's verified FUSED layer, and every request shape has exactly one claiming lane.
+///
+/// Same mechanism as the Krea row and deliberately so: the SDXL lane's primary is one FILE, the
+/// shape rule that picks it is derived from the adapter's dialect (`ldm` → `FusedCheckpoint`, whose
+/// backbone is the inspector's `checkpoint` role) rather than from the family name, and the plan
+/// route keeps only the shapes its own body implements. What the row adds beyond wiring is that a
+/// LINKED fused checkpoint — no installed path, so nothing for the directory scan to find — can now
+/// reach edit / LoRA / img2img / Hires at all.
+///
+/// Failing mutations: delete the `checkpoint_plan_bespoke_primary_pin` call in
+/// `resolve_imported_sdxl_pin`; remove `"sdxl"` from
+/// `CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES`; disable the plan-backed decline in
+/// `resolve_imported_sdxl_pin`.
+#[cfg(target_os = "macos")]
+#[test]
+fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
+    let fx = CheckpointPlanFixture::new("sdxl-single-claim", true);
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
+    let checkpoint_id = fx.compile("communityxl.safetensors", &sdxl_ldm_entries());
+    let resolved = fx.store.resolve(&checkpoint_id).unwrap();
+    assert_eq!(
+        resolved.family(),
+        "sdxl",
+        "fixture check: the plan must compile as SDXL, or every assertion below is vacuous"
+    );
+
+    let sdxl_request = |extra: Value| {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "linked_communityxl",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "linked_communityxl",
+                "catalogScope": "user",
+                "family": "sdxl",
+                "importSourceShape": "fused_checkpoint",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                payload[key] = value.clone();
+            }
+        }
+        request(payload)
+    };
+
+    // The plan route's own availability, and the SDXL lane's two halves (shape gate + a resolvable
+    // primary) — the same terms `prepare_sdxl_imported_sources` uses. An ERRORING source resolution
+    // still counts as a claim: the lane took the request and refused it.
+    let plan_claims = |r: &ImageRequest| {
+        prepare_checkpoint_plan_sources(r, &fx.settings)
+            .map(|selection| selection.is_available())
+            .unwrap_or(true)
+    };
+    let sdxl_claims = |r: &ImageRequest| {
+        sdxl_imported_request_shape_available(r)
+            && !matches!(resolve_imported_sdxl_pin(r, &fx.settings), Ok(None))
+    };
+
+    let shapes: Vec<(&str, ImageRequest)> = vec![
+        ("t2i", sdxl_request(json!({}))),
+        (
+            "img2img",
+            sdxl_request(json!({ "referenceAssetId": "asset-1" })),
+        ),
+        (
+            "edit",
+            sdxl_request(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" })),
+        ),
+        (
+            "lora",
+            sdxl_request(json!({ "loras": [fx.installed_lora("sdxl-style")] })),
+        ),
+        (
+            "hires",
+            sdxl_request(json!({ "hiresFix": { "enabled": true, "scale": 1.5 } })),
+        ),
+    ];
+    for (label, request) in &shapes {
+        let claimants: Vec<&str> = [
+            ("checkpoint-plan", plan_claims(request)),
+            ("sdxl-imported", sdxl_claims(request)),
+        ]
+        .into_iter()
+        .filter_map(|(name, claimed)| claimed.then_some(name))
+        .collect();
+        assert_eq!(
+            claimants.len(),
+            1,
+            "{label}: exactly one lane may claim a plan-backed SDXL request, got {claimants:?}"
+        );
+        // Through the PRODUCTION seam, which propagates a lane's `Err` with `?`. The
+        // `*_available` probes `resolve_image_route` consults turn a production error into
+        // `false`, so a request that KILLS the job would read here as "declined" (review major 4).
+        assert!(
+            prepare_image_route(request, &fx.settings)
+                .unwrap_or_else(|error| panic!(
+                    "{label}: route preparation must not fail for a plan-backed request: {error}"
+                ))
+                .is_some(),
+            "{label}: a plan-backed request must never fall through to the procedural stub"
+        );
+    }
+    let route_of = |label: &str| {
+        let (_, request) = shapes.iter().find(|(name, _)| *name == label).unwrap();
+        prepare_image_route(request, &fx.settings)
+            .unwrap_or_else(|error| panic!("{label}: route preparation failed: {error}"))
+            .map(|prepared| prepared.kind())
+    };
+    assert_eq!(route_of("t2i"), Some(ImageRoute::CheckpointPlan));
+    assert_eq!(route_of("edit"), Some(ImageRoute::SdxlImported));
+    assert_eq!(route_of("lora"), Some(ImageRoute::SdxlImported));
+    assert_eq!(route_of("hires"), Some(ImageRoute::SdxlImported));
+
+    // AC1 — the bespoke lane opens the PLAN's verified layer, in place, for a linked checkpoint.
+    let edit = sdxl_request(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }));
+    let pin = resolve_imported_sdxl_pin(&edit, &fx.settings)
+        .unwrap()
+        .expect("a plan-backed SDXL entry resolves its fused primary through the plan");
+    assert_eq!(
+        pin.loader_path(),
+        fx.library_dir.join("communityxl.safetensors"),
+        "the lane loads the LINKED file in place; nothing was copied or scanned"
+    );
+
+    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME ------------------------------
+    //
+    // sc-20651 determination — the lane is RETAINED, same reason as Krea, argued in full there. The
+    // deletion condition is "every legacy entry has a plan", and two divergences between the gate
+    // that admits an entry to the catalog and the gate that admits it to the plan store (the lone-
+    // weight-file selector; the managed-install-id round trip) put shapes permanently outside it,
+    // on top of the retryable refusals — torn install, drifted bytes, unsupported quant. Every one
+    // of them keeps this scan as its only route.
+    let source = include_str!("sdxl_imported.rs");
+    for symbol in [
+        "fn resolve_imported_sdxl_pin(",
+        "if request_is_checkpoint_plan_backed(request) {",
+        "checkpoint_plan_bespoke_primary_pin(request, settings, \"sdxl\")",
+        // The scan: SDXL shares Krea's `imported_dit_file` predicate plus its own path chain.
+        "imported_dit_file(&confined)",
+        "fn sdxl_imported_request_shape_available(",
+    ] {
+        assert!(
+            source.contains(symbol),
+            "the SDXL bespoke surface sc-20651 deletes must be live code: {symbol}"
+        );
+    }
+    let decline_at = source
+        .find("if request_is_checkpoint_plan_backed(request) {")
+        .unwrap();
+    let plan_source_at = source
+        .find("checkpoint_plan_bespoke_primary_pin(request, settings, \"sdxl\")")
+        .unwrap();
+    let scan_at = source.find("imported_dit_file(&confined)").unwrap();
+    assert!(
+        decline_at < plan_source_at && plan_source_at < scan_at,
+        "decline → plan source → filesystem scan, in that order"
+    );
+}
+
+/// sc-20644 SDXL row — the imported candle lane stages the components the DESCRIPTOR declares, and
+/// a fused checkpoint's declaration does not include the fp16-fix VAE.
+///
+/// A fused LDM checkpoint carries its own VAE, so the candle binding registers
+/// `LDM_REQUIRED_COMPONENTS` — the two model-agnostic tokenizers — and the loader takes the VAE from
+/// `ldm.vae`; `SdxlComponents::from_spec` makes `vae_fp16_fix` optional for a fused source and
+/// simply drops it. The lane nevertheless staged all three unconditionally, downloading ~335 MB from
+/// `madebyollin/sdxl-vae-fp16-fix` on every imported render for a component nothing reads. Driving
+/// the loop from `descriptor.required_components` removes the download without changing a render.
+///
+/// Both halves are checked: the REGISTRY half here (the declaration itself, executable on this
+/// backend) and the STRUCTURAL half by source text, because `attach_imported_sdxl_components` is
+/// candle-only and async over an `ApiClient`, so `cargo test` cannot link it on this lane.
+///
+/// Failing mutations: re-add `"vae_fp16_fix"` to the staged set unconditionally; iterate
+/// `SDXL_IMPORTED_COMPONENT_SOURCES` instead of `descriptor.required_components`.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_imported_sdxl_lane_stages_only_the_components_its_descriptor_declares() {
+    // The registry half. MLX declares `ldm_tokenizer`; candle declares the two tokenizers. Neither
+    // declares the fp16-fix VAE for a FUSED source — which is the whole claim.
+    for operation in [
+        gen_core::ImportedModelOperation::Generate,
+        gen_core::ImportedModelOperation::Edit,
+    ] {
+        let Some(descriptor) = crate::inference_runtime::imported_model_descriptor(
+            "sdxl",
+            gen_core::ImportedModelSource::FusedCheckpoint,
+            operation,
+        ) else {
+            continue;
+        };
+        assert!(
+            !descriptor.required_components.contains(&"vae_fp16_fix"),
+            "{operation:?}: a fused SDXL checkpoint carries its own VAE, so the provider must not \
+             declare the fp16-fix VAE; declared {:?}",
+            descriptor.required_components
+        );
+        assert!(
+            !descriptor.required_components.is_empty(),
+            "{operation:?}: fixture check — the fused route does declare components, so an empty \
+             staged set would not be a vacuous pass"
+        );
+    }
+
+    // The structural half: the staging loop is descriptor-driven, and the VAE is reachable only
+    // through the source table it consults — never named unconditionally beside the tokenizers.
+    let source = include_str!("sdxl_imported.rs");
+    assert!(
+        source.contains("for component in descriptor.required_components {"),
+        "the candle component staging must iterate the resolved descriptor's declaration"
+    );
+    let table_at = source
+        .find("const SDXL_IMPORTED_COMPONENT_SOURCES:")
+        .expect("the component source table must exist");
+    let table = &source[table_at..];
+    let loop_at = table
+        .find("for component in descriptor.required_components {")
+        .expect("the staging loop follows the table");
+    assert!(
+        !table[..loop_at].is_empty() && table[..loop_at].contains("\"vae_fp16_fix\""),
+        "the VAE stays available as catalog DATA for the snapshot route that does declare it"
+    );
+    assert!(
+        !table[loop_at..].contains("\"vae_fp16_fix\""),
+        "nothing after the descriptor-driven loop may name the VAE: staging it unconditionally is \
+         the ~335 MB dead download this row removed"
+    );
+}
+
+/// The plan route runs the SAME MLX admission as the legacy Krea imported lane (sc-20634 review).
+///
+/// It previously ran `apply_residency_policy` plus the bare `start_cached_gen_stream`, which
+/// `stream.rs` implements by DECLINING the warm policy — i.e. no manifest/geometry-aware fit gate
+/// and no request-scoped memory at all — for exactly the same weights the bespoke lane admits
+/// through `MlxRequestPlan` + the request-state seam. Two halves are pinned here:
+///
+///   * behavioural — the geometry the plan route prices is byte-for-byte the identity the legacy
+///     lane prices for the same request (no conditioning, no hires, no adapters);
+///   * structural — the handler actually reaches the request-state seam and the request plan, and
+///     no longer reaches the bare seam. `evaluate_request` needs a loaded generator, so the seam
+///     itself is source-text pinned rather than executed.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
+    let request = request(json!({
+        "projectId": "p",
+        "model": "linked_kreamania",
+        "prompt": "a fox",
+        "width": 768, "height": 1024, "count": 3,
+        "modelManifestEntry": { "catalogScope": "user", "family": "krea_2" }
+    }));
+
+    // The legacy lane's inputs for a plain txt2img job: no conditioning, no hires, no adapters —
+    // which is the only shape `prepare_checkpoint_plan_sources` lets onto this route.
+    let legacy = krea_imported_memory_inputs(&request, &[], None, 0);
+    let plan = checkpoint_plan_memory_inputs(&request);
+    assert_eq!((plan.width, plan.height), (legacy.width, legacy.height));
+    assert_eq!(plan.count, legacy.count);
+    assert_eq!(plan.mode, legacy.mode);
+    assert_eq!(plan.overlay, legacy.overlay);
+    assert_eq!(plan.adapter_count, legacy.adapter_count);
+    assert_eq!(plan.has_reference, legacy.has_reference);
+    assert_eq!(plan.reference_count, legacy.reference_count);
+    assert_eq!(plan.use_pid, legacy.use_pid);
+    assert_eq!(plan.has_phases, legacy.has_phases);
+    // Not vacuous: the geometry priced is the request's, not a default.
+    assert_eq!((plan.width, plan.height, plan.count), (768, 1024, 3));
+
+    let source = include_str!("checkpoint_plan.rs");
+    let live = |needle: &str| {
+        source
+            .lines()
+            .any(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
+    };
+    for marker in [
+        "MlxRequestPlan::try_for_spec_and_manifest(",
+        "start_cached_gen_stream_with_request_state(",
+        "crate::mlx_fit_gate::evaluate_request(",
+        "WarmPolicyOnce::new(warm_policy)",
+    ] {
+        assert!(
+            live(marker),
+            "the plan route's MLX arm must reach `{marker}` — the seam the legacy Krea imported \
+             lane uses for the same weights"
+        );
+    }
+    // `start_cached_gen_stream(` is the bare seam, which declines the warm policy outright. The
+    // candle arm uses `start_cached_gen_stream_after_cold_admission`, so neither name may appear
+    // bare — check for the exact call, not the prefix.
+    assert!(
+        !source.lines().any(|line| {
+            line.contains("start_cached_gen_stream(") && !line.trim_start().starts_with("//")
+        }),
+        "the plan route must NOT use the bare cached seam: it settles the warm policy with \
+         `RouteHasNoRequestScopedMemory`, i.e. no MLX request admission at all"
+    );
+    assert!(
+        !source.lines().any(|line| {
+            line.contains("apply_residency_policy(") && !line.trim_start().starts_with("//")
+        }),
+        "the generator cache runs `apply_residency_policy` inside its own cold loader; the legacy \
+         Krea imported lane leaves it there, and so must this route"
+    );
+}
+
+/// The test-only route probes must not turn a typed plan refusal into "route unavailable"
+/// (sc-20634 review). `prepare_checkpoint_plan_sources` has three outcomes and only `Ok(None)`
+/// means "not this route"; folding `Err` into `false` made every refusal read as a missing route,
+/// which is exactly how a live refusal could hide behind a green probe assertion.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_route_probe_surfaces_a_plan_refusal_instead_of_reporting_no_route() {
+    let fx = CheckpointPlanFixture::new("probe", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let request = fx.plan_backed_request(&checkpoint_id, json!({}));
+    assert_eq!(
+        resolve_image_route(&request, &fx.settings),
+        Some(ImageRoute::CheckpointPlan),
+        "a servable plan-backed entry still probes as the plan route"
+    );
+
+    // Drift the source so the plan resolves to a typed refusal.
+    let file = fx.library_dir.join("kreamania.safetensors");
+    let original = std::fs::read(&file).unwrap();
+    let mut mutated = original.clone();
+    let last = mutated.len() - 1;
+    mutated[last] ^= 0xff;
+    std::fs::write(&file, &mutated).unwrap();
+    assert!(
+        prepare_checkpoint_plan_sources(&request, &fx.settings).is_err(),
+        "fixture check: the drifted source must refuse"
+    );
+
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let probed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        resolve_image_route(&request, &fx.settings)
+    }));
+    std::panic::set_hook(previous_hook);
+
+    let payload = probed.expect_err(
+        "a refusing plan-backed entry must surface loudly from the probe, not resolve to a route",
+    );
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("the plan-driven route refused") && message.contains("source-drifted"),
+        "the probe must carry the typed refusal it saw: {message}"
+    );
+
+    std::fs::write(&file, &original).unwrap();
+    assert_eq!(
+        resolve_image_route(&request, &fx.settings),
+        Some(ImageRoute::CheckpointPlan),
+        "restoring the bytes restores the route: the panic was the refusal, not the fixture"
+    );
+}
+
+/// Every plan-route refusal is typed and raised before any loader is constructed (sc-20634):
+/// unknown checkpoint, drifted source, missing source, a family without an adapter binding on this
+/// backend, a missing required component, and an operation the skeleton does not serve.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_route_refuses_before_load_with_typed_diagnostics() {
+    let fx = CheckpointPlanFixture::new("refuse", true);
+    let refusal = |request: &ImageRequest, settings: &Settings| -> String {
+        match prepare_checkpoint_plan_sources(request, settings) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+            Ok(selection) => panic!(
+                "expected a refusal, got {:?}",
+                selection
+                    .into_sources()
+                    .map(|sources| sources.checkpoint_id)
+            ),
+        }
+    };
+
+    // Unknown checkpoint identity.
+    let unknown = fx.plan_backed_request("linked/root-nope/missing.safetensors", json!({}));
+    let message = refusal(&unknown, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:unknown-checkpoint]"),
+        "{message}"
+    );
+
+    // Drifted source (same size, different bytes) refuses with the expected/actual digests.
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let file = fx.library_dir.join("kreamania.safetensors");
+    let original = std::fs::read(&file).unwrap();
+    let mut mutated = original.clone();
+    let last = mutated.len() - 1;
+    mutated[last] ^= 0xff;
+    std::fs::write(&file, &mutated).unwrap();
+    let drifted = fx.plan_backed_request(&checkpoint_id, json!({}));
+    let message = refusal(&drifted, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:source-drifted]") && message.contains("rescan"),
+        "{message}"
+    );
+    std::fs::write(&file, &original).unwrap();
+    assert!(prepare_checkpoint_plan_sources(&drifted, &fx.settings)
+        .unwrap()
+        .is_available());
+
+    // Missing source.
+    std::fs::remove_file(&file).unwrap();
+    let message = refusal(&drifted, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:source-missing]"),
+        "{message}"
+    );
+
+    // A family the inspector knows but no MLX adapter binds (Z-Image is Candle-only): refused at
+    // the registry authority, before any base/component resolution.
+    let zimage_id = fx.compile(
+        "zimage.safetensors",
+        &[
+            ("noise_refiner.0.attention.qkv.weight", "BF16"),
+            ("context_refiner.0.attention.qkv.weight", "BF16"),
+        ],
+    );
+    let zimage = fx.plan_backed_request(&zimage_id, json!({}));
+    let message = refusal(&zimage, &fx.settings);
+    assert!(
+        message.starts_with("[checkpoint-plan:no-adapter-binding]") && message.contains("z-image"),
+        "{message}"
+    );
+
+    // An operation this route's body does not serve DECLINES, retaining its refusal, so the
+    // family's own lane can take it (sc-20644). It is re-raised verbatim only if no lane claims —
+    // which is what `into_unclaimed_refusal` is for, and what a family with no landed row still
+    // gets. A shape refusal is the ONE class that declines this way: every refusal above is one no
+    // other lane could fix, so each still refuses in PLANNING rather than moving into a loader.
+    let compiled = fx.compile("kreamania.safetensors", &krea_native_entries());
+    let edit = fx.plan_backed_request(
+        &compiled,
+        json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
+    );
+    let declined = prepare_checkpoint_plan_sources(&edit, &fx.settings).unwrap();
+    assert!(
+        !declined.is_available(),
+        "the plan route has no edit surface"
+    );
+    let message = declined
+        .into_unclaimed_refusal(&edit)
+        .expect_err("the decline retains the typed refusal for the no-lane case")
+        .to_string();
+    assert!(
+        message.starts_with("[checkpoint-plan:unsupported-operation]"),
+        "{message}"
+    );
+    assert_eq!(
+        resolve_image_route(&edit, &fx.settings),
+        Some(ImageRoute::KreaImported),
+        "and with the Krea row landed, a lane does claim it"
+    );
+}
+
+/// Missing required component (sc-20634): the provider declares `base_snapshot`, the family's
+/// resident base tier is not installed, so the route refuses with the install-the-base diagnostic
+/// before any load. Its own test: the fixture holds the crate-wide env lock (non-reentrant), so a
+/// second isolated hub cannot coexist with the one above.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_route_refuses_when_the_family_base_tier_is_not_installed() {
+    let bare = CheckpointPlanFixture::new("refuse-nobase", false);
+    let bare_id = bare.compile("kreamania.safetensors", &krea_native_entries());
+    let bare_request = bare.plan_backed_request(&bare_id, json!({}));
+    let message = match prepare_checkpoint_plan_sources(&bare_request, &bare.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(selection) => panic!(
+            "a missing base tier must refuse, got {:?}",
+            selection
+                .into_sources()
+                .map(|sources| sources.checkpoint_id)
+        ),
+    };
+    assert!(
+        message.contains("install the Krea 2 (Turbo) base model first"),
+        "missing base tier must surface the install-the-base refusal: {message}"
+    );
+}
+
+/// The plan's primary layer selection is role-driven and fail-closed (sc-20634): a plan without a
+/// transformer/fused-checkpoint layer is a typed missing-component refusal, two primaries are
+/// ambiguous, and exactly one maps to the registry source shape it implies.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, CheckpointContainerV1, ImportLayerV1, ImportPlanV1,
+        SourceLocatorV1,
+    };
+    use sceneworks_core::checkpoint_plan_store::{ResolvedCheckpointV1, ResolvedLayerV1};
+
+    let resolved = |roles: &[&str]| -> ResolvedCheckpointV1 {
+        let layers: Vec<ImportLayerV1> = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| ImportLayerV1 {
+                layer_id: format!("artifact:{index}-{role}.safetensors"),
+                role: (*role).to_owned(),
+                target_path: format!("{index}-{role}.safetensors"),
+                // Every layer this fixture synthesizes is a `.safetensors` artifact and the
+                // scenario means it: these rows exercise the ROLE rules, so they carry the
+                // container the inspector would actually have recorded for those bytes.
+                container: CheckpointContainerV1::Safetensors,
+                source: SourceLocatorV1::linked(
+                    "root-test",
+                    format!("{index}-{role}.safetensors"),
+                    "0".repeat(64),
+                )
+                .unwrap(),
+            })
+            .collect();
+        let plan = ImportPlanV1::new("plan-test", "krea_2", layers.clone()).unwrap();
+        let record = CheckpointCatalogRecordV1::from_plan("linked/root-test/x", &plan).unwrap();
+        ResolvedCheckpointV1 {
+            checkpoint_id: "linked/root-test/x".to_owned(),
+            record,
+            layers: plan
+                .layers
+                .iter()
+                .cloned()
+                .map(|layer| ResolvedLayerV1 {
+                    path: PathBuf::from("/library").join(&layer.target_path),
+                    layer,
+                    rehashed: false,
+                })
+                .collect(),
+            plan,
+        }
+    };
+
+    use gen_core::ImportedModelSource::{
+        ComfyUiTree, FusedCheckpoint, TransformerDirectory, TransformerFile,
+    };
+
+    // sc-20644: the source shape is the ADAPTER's declaration, and the primary is whichever backbone
+    // role that shape implies — a `checkpoint` layer for a fused dialect, a `transformer` for every
+    // other. The two questions are separate, so a plan is never resolved by guessing which of its
+    // roles "looks like" the backbone.
+    let transformer_only = resolved(&["transformer"]);
+    for shape in [TransformerFile, ComfyUiTree] {
+        let selection = checkpoint_plan_primary_selection(&transformer_only, shape).unwrap();
+        assert!(
+            selection.directory.is_none(),
+            "{shape:?} hands the loader the backbone FILE, not its directory"
+        );
+        assert_eq!(selection.layers.len(), 1);
+        assert_eq!(selection.layers[0].layer.role, "transformer");
+    }
+    let fused_only = resolved(&["checkpoint"]);
+    let fused = checkpoint_plan_primary_selection(&fused_only, FusedCheckpoint).unwrap();
+    assert!(fused.directory.is_none());
+    assert_eq!(fused.layers[0].layer.role, "checkpoint");
+
+    // A component-directory dialect hands the loader the DIRECTORY and consumes every plan layer
+    // inside it — the `config.json` sidecar a diffusers transformer dir carries included. Without
+    // that, the sidecar would be reported as an unsourced layer and a perfectly ordinary fine-tune
+    // would refuse.
+    let component_dir = resolved(&["transformer", "descriptor"]);
+    let directory =
+        checkpoint_plan_primary_selection(&component_dir, TransformerDirectory).unwrap();
+    assert_eq!(directory.directory.as_deref(), Some(Path::new("/library")));
+    assert_eq!(
+        directory
+            .layers
+            .iter()
+            .map(|layer| layer.layer.role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["transformer", "descriptor"],
+        "the backbone leads, and its co-located sidecar is consumed by the directory"
+    );
+
+    // The backbone role is shape-derived, so asking a fused shape of a transformer-only plan (and
+    // vice versa) is a MISSING primary, not a silently accepted neighbour.
+    let missing =
+        checkpoint_plan_primary_selection(&resolved(&["vae", "text_encoder"]), TransformerFile)
+            .expect_err("no primary layer must refuse");
+    assert!(
+        missing
+            .to_string()
+            .contains("[checkpoint-plan:missing-component]"),
+        "{missing}"
+    );
+    let wrong_shape = checkpoint_plan_primary_selection(&transformer_only, FusedCheckpoint)
+        .expect_err("a fused dialect needs a fused-checkpoint layer");
+    assert!(
+        wrong_shape
+            .to_string()
+            .contains("[checkpoint-plan:missing-component]"),
+        "{wrong_shape}"
+    );
+    let ambiguous = checkpoint_plan_primary_selection(
+        &resolved(&["transformer", "transformer"]),
+        TransformerFile,
+    )
+    .expect_err("two primaries must refuse");
+    assert!(
+        ambiguous
+            .to_string()
+            .contains("[checkpoint-plan:ambiguous-component]"),
+        "{ambiguous}"
+    );
+    // A transformer beside a fused checkpoint still refuses, but now as an UNCONSUMED layer: the
+    // shape says which one is the backbone, and the other is bytes nobody loads.
+    let mixed = resolved(&["transformer", "checkpoint"]);
+    let selection = checkpoint_plan_primary_selection(&mixed, TransformerFile).unwrap();
+    let consumed = selection
+        .layers
+        .iter()
+        .map(|layer| layer.layer.layer_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let error = checkpoint_plan_unconsumed_layers(&mixed, &consumed)
+        .expect_err("the unclaimed fused-checkpoint layer must refuse");
+    assert!(
+        error
+            .to_string()
+            .contains("[checkpoint-plan:unconsumed-layer]"),
+        "{error}"
+    );
+}
+
+/// Candle floor parity for the plan-driven route (sc-20634 review): for the same imported file and
+/// the same resident base tier, the plan route and the legacy Krea imported lane must be admitted
+/// on the IDENTICAL floor. The base snapshot is a companion whose `transformer/` the imported file
+/// replaces, so pricing the snapshot recursively — which is what `admit_candle_load_spec_floor`
+/// does to every `spec.components` value — charges the DiT twice and over-refuses.
+///
+/// The floor is `prepared File pins + distinct weight bytes of the companion dirs`. The companion
+/// construction is now shared by both lanes, so this asserts the shared construction excludes the
+/// replaced transformer and that the resulting byte totals agree. It runs on every lane rather
+/// than only the candle one: `cargo test` cannot link the candle cfg on a Mac, so a candle-gated
+/// assertion here would first execute on CI (see `scripts/check-candle-build.mjs`).
+///
+/// Gated to the lanes where `base.rs` is actually included (see `image_jobs.rs`) — macOS or
+/// candle. The Linux/candle-off `parity` lane compiles this file but NOT `base.rs`, so an ungated
+/// `#[test]` here cannot see `imported_base_snapshot_companions` and breaks that lane's build.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("plan-floor-{}-", std::process::id()))
+        .tempdir()
+        .unwrap();
+    let imported = temp.path().join("kreamania.safetensors");
+    let base = temp.path().join("base");
+    std::fs::write(&imported, vec![0_u8; 1100]).unwrap();
+    for (sub, bytes) in [
+        ("text_encoder", 130_usize),
+        ("vae", 170),
+        // The snapshot's OWN transformer — replaced by `imported`, and the thing that must not be
+        // priced. Deliberately the largest, the way a 26 GB DiT dwarfs its companions.
+        ("transformer", 9000),
+    ] {
+        std::fs::create_dir_all(base.join(sub)).unwrap();
+        std::fs::write(base.join(sub).join("model.safetensors"), vec![0_u8; bytes]).unwrap();
+    }
+
+    let companion_bytes = |dirs: &[PathBuf]| -> u64 {
+        dirs.iter()
+            .map(|dir| crate::mlx_fit_gate::sum_safetensors_bytes(dir))
+            .sum()
+    };
+
+    let companions = imported_base_snapshot_companions(&base, false);
+    assert_eq!(
+        companions,
+        vec![base.join("vae"), base.join("text_encoder")]
+    );
+    assert!(
+        !companions.contains(&base.join("transformer")),
+        "the snapshot transformer the imported file replaces must stay out of the floor"
+    );
+
+    // The floor: the imported file's prepared pin size plus the companion dirs' weight bytes.
+    let imported_bytes = gen_core::PinnedWeightsFile::pin(&imported)
+        .expect("primary pins")
+        .target_fingerprint()
+        .size;
+    let plan_floor = imported_bytes + companion_bytes(&companions);
+    assert_eq!(plan_floor, 1100 + 170 + 130);
+
+    // And it must be strictly cheaper than pricing the whole snapshot dir, which is what the
+    // component-recursive floor would have done: exactly the replaced transformer's bytes cheaper.
+    let recursive_floor = imported_bytes + crate::mlx_fit_gate::sum_safetensors_bytes(&base);
+    assert_eq!(
+        recursive_floor - plan_floor,
+        9000,
+        "the difference between the two floors is precisely the replaced snapshot transformer"
+    );
+
+    // A spec that selected its own encoder drops the bundled one (already covered by its receipt).
+    let selected = imported_base_snapshot_companions(&base, true);
+    assert_eq!(selected, vec![base.join("vae")]);
+}
+
+/// Write a minimal but REAL GGUF v3 container — the same container the production inspector parses,
+/// ported in structure from `sceneworks-core`'s own `write_tiny_gguf` inspector fixture and not
+/// weakened: the `general.architecture` / `general.alignment` metadata pair, one F32 tensor
+/// descriptor, and the aligned tensor data.
+///
+/// It must be a real container rather than a stub, because the whole chain under test is driven by
+/// the inspector's own header verdict: `validate_gguf` reads `general.architecture` and maps it
+/// through `normalize_family`, and the direct-file GGUF branch assigns the `checkpoint` role. A
+/// mock that merely claimed to be GGUF would prove nothing about what production does.
+/// The outcome of the production image router, in the one shape both lanes share.
+///
+/// `prepare_image_route` / `PreparedImageRoute` (MLX) and `prepare_candle_image_route` /
+/// `PreparedCandleImageRoute` (candle) are cfg-split twins: different symbols, same plan-route
+/// contract. Both offer the plan route first, and both re-raise a RETAINED refusal through
+/// `CheckpointPlanSelection::into_unclaimed_refusal` when no lane claims the request. A test that
+/// named only the macOS half would therefore assert a lane-neutral claim while compiling on one
+/// lane, so a candle-only regression in the other router would ship green — which is exactly what
+/// happened to the plan-backed refusals (sc-20651 feature-end review, major 5).
+///
+/// Only the two variants those tests inspect are carried through; everything else collapses to its
+/// route label, which is all a failure message needs.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+enum RoutedImageLane {
+    CheckpointPlan(Box<PreparedCheckpointPlanSources>),
+    KreaImported(Box<PreparedKreaImportedSources>),
+    Other(String),
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+impl RoutedImageLane {
+    fn label(&self) -> String {
+        match self {
+            Self::CheckpointPlan(_) => "CheckpointPlan".to_owned(),
+            Self::KreaImported(_) => "KreaImported".to_owned(),
+            Self::Other(label) => label.clone(),
+        }
+    }
+}
+
+/// Drive whichever production router this lane compiles, and normalize its result.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn prepare_image_route_on_this_lane(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<RoutedImageLane>> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(prepare_image_route(request, settings)?.map(|route| {
+            let label = format!("{:?}", route.kind());
+            match route {
+                PreparedImageRoute::CheckpointPlan(sources) => {
+                    RoutedImageLane::CheckpointPlan(sources)
+                }
+                PreparedImageRoute::KreaImported(sources) => RoutedImageLane::KreaImported(sources),
+                _ => RoutedImageLane::Other(label),
+            }
+        }))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(prepare_candle_image_route(request, settings)?.map(|route| {
+            let label = format!("{:?}", route.kind());
+            match route {
+                PreparedCandleImageRoute::CheckpointPlan(sources) => {
+                    RoutedImageLane::CheckpointPlan(sources)
+                }
+                PreparedCandleImageRoute::KreaImported(sources) => {
+                    RoutedImageLane::KreaImported(sources)
+                }
+                _ => RoutedImageLane::Other(label),
+            }
+        }))
+    }
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn write_gguf_checkpoint(path: &Path, architecture: &str) {
+    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend(value.to_le_bytes());
+    }
+    fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+        bytes.extend(value.to_le_bytes());
+    }
+    fn push_gguf_string(bytes: &mut Vec<u8>, value: &str) {
+        push_u64(bytes, value.len() as u64);
+        bytes.extend(value.as_bytes());
+    }
+
+    let mut bytes = b"GGUF".to_vec();
+    push_u32(&mut bytes, 3); // version
+    push_u64(&mut bytes, 1); // tensor count
+    push_u64(&mut bytes, 2); // metadata count
+
+    push_gguf_string(&mut bytes, "general.architecture");
+    push_u32(&mut bytes, 8); // string
+    push_gguf_string(&mut bytes, architecture);
+    push_gguf_string(&mut bytes, "general.alignment");
+    push_u32(&mut bytes, 4); // u32
+    push_u32(&mut bytes, 32);
+
+    push_gguf_string(&mut bytes, "model.weight");
+    push_u32(&mut bytes, 1); // dimension count
+    push_u64(&mut bytes, 1); // dimension 0
+    push_u32(&mut bytes, 0); // F32
+    push_u64(&mut bytes, 0); // data offset, relative to the aligned data section
+
+    // The data section starts at the next alignment boundary. Computed from the buffer rather than
+    // written as a literal, so the fixture carries no byte offset that could drift into a golden.
+    let aligned = bytes.len().div_ceil(32) * 32;
+    bytes.resize(aligned, 0);
+    bytes.extend(1_f32.to_le_bytes());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// sc-20651 feature-end review — a plan whose primary layer is a GGUF container is REFUSED by name,
+/// never served to a loader that reads safetensors.
+///
+/// The defect this pins was live and silent. The epic's family-coverage matrix names GGUF cases and
+/// the codec is tested in the inference repo, but nothing on the SceneWorks side ever looked at the
+/// container: `ImportLayerV1` did not carry one, so `checkpoint_plan_primary_selection` picked the
+/// backbone by ROLE alone. A direct-file GGUF is given the `checkpoint` role by the inspector and
+/// `general.architecture: "sdxl"` maps to the `sdxl` family, whose `ldm` dialect declares
+/// `FusedCheckpoint`, whose backbone role is exactly `checkpoint` — so the GGUF matched, was pinned,
+/// and reached `LoadSpec::new(sources.primary)` bound for the safetensors fused-SDXL loader.
+/// `prepare_image_route` returned `PreparedImageRoute::CheckpointPlan`. No refusal anywhere.
+///
+/// Two details make this test measure the claim rather than an accident, and both were how the
+/// defect stayed invisible:
+///
+/// * The CLIP-L tokenizer is installed, and the reason is subtler than it looks. With the gate in
+///   place the container refusal fires FIRST — `checkpoint_plan_primary` runs before the component
+///   loop — so this test is green either way, and the install looks redundant. It is not: it is
+///   what makes the MUTATION honest. Remove the gate with the tokenizer absent and the route
+///   refuses `[checkpoint-plan:missing-component] ... vocab.json is not installed` instead, so the
+///   mutation red points at the tokenizer rather than at the GGUF that was just served. Worse, a
+///   weaker version of this test that asserted only "the route refuses" would be FULLY GREEN with
+///   the container gate deleted outright, because something else refuses for an unrelated reason.
+///   That is the exact false-green mechanism that let the defect ship. Both halves — installing the
+///   tokenizer AND asserting the exact tag rather than mere failure — are load-bearing, and each
+///   was mutation-checked separately.
+/// * The fixture asserts its own premises with `panic!("fixture check: ...")` rather than returning:
+///   if the GGUF ever stops compiling to an `sdxl` `checkpoint` layer, the shape this test is
+///   written against is gone and the assertions below would be vacuous.
+///
+/// Failing mutation (run): widen `CHECKPOINT_PLAN_WEIGHTS_CONTAINERS` to include
+/// `CheckpointContainerV1::Gguf` — the GGUF is served again, `prepare_checkpoint_plan_sources`
+/// returns an available selection, and this test reds on the refusal assertion.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn a_gguf_backed_plan_is_refused_by_container_and_never_reaches_the_safetensors_loader() {
+    let fx = CheckpointPlanFixture::new("gguf-container", true);
+    // Both halves of the "no other refusal can mask this one" setup.
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
+    write_gguf_checkpoint(&fx.library_dir.join("communityxl.gguf"), "sdxl");
+
+    let checkpoint_id = fx
+        .store
+        .compile_linked(&fx.root_id, "communityxl.gguf")
+        .unwrap_or_else(|error| {
+            panic!("fixture check: the GGUF must compile to a plan, or the route is never reached: {error}")
+        })
+        .checkpoint_id;
+    let resolved = fx
+        .store
+        .resolve(&checkpoint_id)
+        .unwrap_or_else(|error| panic!("fixture check: the compiled plan must resolve: {error}"));
+
+    // The premises the defect depended on. If any of these stop holding, the GGUF no longer lands
+    // on the fused-SDXL backbone role and this test would pass for the wrong reason.
+    if resolved.family() != "sdxl" {
+        panic!(
+            "fixture check: the GGUF must compile as the sdxl family (whose ldm dialect is \
+             FusedCheckpoint, backbone role \"checkpoint\"), got {:?}",
+            resolved.family()
+        );
+    }
+    let containers: Vec<_> = resolved
+        .layers
+        .iter()
+        .map(|layer| (layer.layer.role.as_str(), layer.layer.container))
+        .collect();
+    if containers != vec![("checkpoint", CheckpointContainerV1::Gguf)] {
+        panic!(
+            "fixture check: the plan must be exactly one GGUF `checkpoint` layer — the shape that \
+             matches the fused-SDXL backbone rule — got {containers:?}"
+        );
+    }
+
+    let request = request(json!({
+        "projectId": "p",
+        "model": "linked_communityxl",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "id": "linked_communityxl",
+            "catalogScope": "user",
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "importPlan": { "checkpointId": checkpoint_id }
+        }
+    }));
+
+    // The plan route refuses, by container, with the typed tag.
+    let message = match prepare_checkpoint_plan_sources(&request, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Ok(selection) => panic!(
+            "a GGUF-backed plan must never be served: prepare_checkpoint_plan_sources returned a \
+             selection (available={})",
+            selection.is_available()
+        ),
+        Err(other) => panic!("expected a typed InvalidPayload refusal, got {other:?}"),
+    };
+    assert!(
+        message.contains("[checkpoint-plan:unsupported-container]"),
+        "the refusal must carry the typed container tag: {message}"
+    );
+    assert!(
+        message.contains("Gguf"),
+        "the refusal must name the container it refused: {message}"
+    );
+    assert!(
+        message.contains("communityxl.gguf"),
+        "the refusal must name the offending file: {message}"
+    );
+
+    // And the whole router refuses too, rather than declining the entry into some other lane or
+    // falling through to a route that produces output. `prepare_image_route` offers the plan route
+    // first and propagates its refusal with `?`, so this is the shape the job actually dies in.
+    match prepare_image_route_on_this_lane(&request, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => assert!(
+            message.contains("[checkpoint-plan:unsupported-container]"),
+            "the router must surface the container refusal verbatim: {message}"
+        ),
+        Ok(route) => panic!(
+            "a GGUF-backed plan must not resolve to any image route, got {:?}",
+            route.map(|route| route.label())
+        ),
+        Err(other) => panic!("expected a typed InvalidPayload refusal, got {other:?}"),
+    }
+}
+
+/// The SECOND hop of the container refusal, and the one the linked test above cannot reach: a
+/// MANAGED install never surfaces the refusal from `prepare_checkpoint_plan_sources` at all.
+///
+/// The two ownership shapes take different paths out of the same gate. `checkpoint_plan_primary`
+/// raises the container error for both, but `prepare_checkpoint_plan_sources` routes it through
+/// `checkpoint_plan_unservable`, whose predicate is `checkpoint_plan_entry_has_bespoke_lane` —
+/// `imported_entry_loadable_path`. A LINKED entry has no loadable path, so the refusal is raised
+/// immediately and the test above sees it as an `Err`. A MANAGED entry carries `paths.model`, so the
+/// route DECLINES instead: `prepare_checkpoint_plan_sources` returns `Ok` with an unavailable
+/// selection that merely RETAINS the message, and the refusal only becomes an error later, when the
+/// router finds no lane claimed the request and calls
+/// `CheckpointPlanSelection::into_unclaimed_refusal`.
+///
+/// That decline is load-bearing for other shapes (an edit on a managed Krea entry must reach the
+/// family's bespoke lane), so it must not be hardened into an `Err`. What has to hold instead is
+/// that the container refusal SURVIVES the hop: it must arrive at the caller with its typed tag
+/// intact rather than being swallowed into a decline that some lane then serves, or falling through
+/// to `generate_stub_stream` and completing the job with procedural output. Nothing tested that.
+///
+/// The premises are asserted with `panic!("fixture check: ...")` rather than `return`, because each
+/// one is what makes the hop the one under test: if the managed entry ever stops having a loadable
+/// path, or `prepare_checkpoint_plan_sources` starts refusing outright, this test would be
+/// exercising the linked path again and asserting nothing new.
+///
+/// Failing mutation (run): make `into_unclaimed_refusal` drop the retained message — replace its
+/// `if let Some(message) = self.declined` arm with a fall-through to the `no-adapter-binding`
+/// default. The route still refuses, so a weaker "the router errors" assertion stays green, but the
+/// container tag is gone and this test reds on the tag assertion.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn a_managed_gguf_plan_keeps_the_container_refusal_across_the_unclaimed_refusal_hop() {
+    use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
+    use sceneworks_core::checkpoint_ingest::ManagedIngest;
+
+    let fx = CheckpointPlanFixture::new("gguf-container-managed", true);
+    // Same "no other refusal can mask this one" setup as the linked twin: with the tokenizer absent
+    // the route would refuse `[checkpoint-plan:missing-component]` instead and the mutation red
+    // would point at the tokenizer rather than at the GGUF.
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
+    let staged = fx.library_dir.join("communityxl.gguf");
+    write_gguf_checkpoint(&staged, "sdxl");
+
+    // The real managed-ownership path: stage into the ingest session, then finalize, exactly as an
+    // import does. The install directory and the plan both come from the store, never from the test.
+    let ingest = ManagedIngest::begin(
+        &fx.store,
+        "install-communityxl",
+        ManagedProvenanceV1 {
+            source: "local_path".to_owned(),
+            ..ManagedProvenanceV1::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("fixture check: the managed ingest must begin: {error}"));
+    ingest
+        .stage_copy_file(&staged, "communityxl.gguf")
+        .unwrap_or_else(|error| panic!("fixture check: staging the GGUF must succeed: {error}"));
+    let install = ingest
+        .finalize("communityxl.gguf", None)
+        .unwrap_or_else(|error| {
+            panic!("fixture check: the GGUF must compile to a managed plan, or the route is never reached: {error}")
+        });
+    let install_dir = fx
+        .store
+        .resolve_install("install-communityxl")
+        .unwrap_or_else(|error| panic!("fixture check: the install must exist: {error}"));
+
+    let resolved = fx
+        .store
+        .resolve(&install.checkpoint_id)
+        .unwrap_or_else(|error| panic!("fixture check: the compiled plan must resolve: {error}"));
+    if resolved.family() != "sdxl" {
+        panic!(
+            "fixture check: the GGUF must compile as the sdxl family (whose ldm dialect is \
+             FusedCheckpoint, backbone role \"checkpoint\"), got {:?}",
+            resolved.family()
+        );
+    }
+    let containers: Vec<_> = resolved
+        .layers
+        .iter()
+        .map(|layer| (layer.layer.role.as_str(), layer.layer.container))
+        .collect();
+    if containers != vec![("checkpoint", CheckpointContainerV1::Gguf)] {
+        panic!(
+            "fixture check: the plan must be exactly one GGUF `checkpoint` layer — the shape that \
+             matches the fused-SDXL backbone rule — got {containers:?}"
+        );
+    }
+
+    let request = request(json!({
+        "projectId": "p",
+        "model": "managed_communityxl",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "id": "managed_communityxl",
+            "catalogScope": "user",
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "importPlan": { "checkpointId": install.checkpoint_id },
+            "paths": { "model": install_dir.to_str().unwrap() }
+        }
+    }));
+
+    // Premise 1: this really is the managed shape — the entry has a LOADABLE path, which is the one
+    // input that makes `checkpoint_plan_unservable` decline rather than refuse. Without this the
+    // test below would be re-running the linked case.
+    if sceneworks_core::jobs_store::imported_entry_loadable_path(&request.model_manifest_entry)
+        .is_none()
+    {
+        panic!(
+            "fixture check: a managed entry must carry a loadable `paths.model`, or the decline \
+             branch under test is never taken"
+        );
+    }
+
+    // Premise 2: the second hop is real. Unlike the linked twin, the plan route does NOT return an
+    // Err here — it returns an unavailable selection holding the retained message.
+    match prepare_checkpoint_plan_sources(&request, &fx.settings) {
+        Ok(selection) => {
+            if selection.is_available() {
+                panic!(
+                    "a GGUF-backed plan must never be served: prepare_checkpoint_plan_sources \
+                     returned an AVAILABLE selection for the managed copy"
+                );
+            }
+        }
+        Err(error) => panic!(
+            "fixture check: the managed copy must DECLINE, not refuse directly — that is what makes \
+             the unclaimed-refusal hop the thing under test. Got {error:?}"
+        ),
+    }
+
+    // The claim: the refusal survives the hop with its typed tag, rather than being swallowed into a
+    // decline that some lane serves or a stub render that completes the job.
+    match prepare_image_route_on_this_lane(&request, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => {
+            assert!(
+                message.contains("[checkpoint-plan:unsupported-container]"),
+                "the retained container refusal must survive `into_unclaimed_refusal` verbatim, \
+                 not be replaced by the generic no-adapter-binding message: {message}"
+            );
+            assert!(
+                message.contains("Gguf"),
+                "the refusal must still name the container it refused: {message}"
+            );
+            assert!(
+                message.contains("communityxl.gguf"),
+                "the refusal must still name the offending file: {message}"
+            );
+        }
+        Ok(route) => panic!(
+            "a managed GGUF-backed plan must not resolve to any image route, got {:?}",
+            route.map(|route| route.label())
+        ),
+        Err(other) => panic!("expected a typed InvalidPayload refusal, got {other:?}"),
+    }
+}
+
+/// The other half of the floor-parity claim, and the half the arithmetic above cannot make: the two
+/// routes price the SAME resident base tier.
+///
+/// The previous form of this compared `imported_base_snapshot_companions(&base, false)` to itself
+/// and therefore asserted nothing (feature-end review blocker 4) — the shared construction is
+/// deterministic, so one call always equals another. What is actually at risk is the INPUT: the
+/// plan-driven route reaches its base tier through the checkpoint adapter's declared
+/// `base-snapshot` component and `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`, while the legacy Krea
+/// imported lane reaches its own through `resolve_krea_imported_base_tier`. Two different code
+/// paths, and nothing structural ties them together. If they ever name different directories the
+/// two lanes are admitted on different floors even though the shared companion construction is
+/// byte-identical.
+///
+/// So both sides here are produced by production: the plan side is read off the bundle
+/// `prepare_checkpoint_plan_sources` actually built (its `BASE_SNAPSHOT_COMPONENT` entry), the
+/// legacy side off `resolve_krea_imported_base_tier`. Neither is a restatement of the test's input —
+/// the fixture never tells either lane where the tier is; both discover it from the isolated hub.
+///
+/// Failing mutation (run): point `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`' `krea_2` row at a resolver
+/// returning a different directory — the companion sets and the floors diverge and this reds while
+/// the arithmetic test above stays green.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
+    let fx = CheckpointPlanFixture::new("floor-parity", true);
+    // Give the resident tier a transformer WEIGHT file: it is the one the imported DiT replaces, so
+    // its bytes are what a recursive floor would double-charge, and without it the exclusion below
+    // is unobservable.
+    write_tiny_safetensors(
+        &fx.base_tier
+            .join("transformer/diffusion_pytorch_model.safetensors"),
+        &[("blocks.0.attn.wq.weight", "BF16")],
+        0x11,
+    );
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // ---- the PLAN route's own answer -------------------------------------------------------
+    let plan_request = fx.plan_backed_request(&checkpoint_id, json!({}));
+    let sources = prepare_checkpoint_plan_sources(&plan_request, &fx.settings)
+        .expect("the plan route prepares a plan-backed t2i request")
+        .into_sources()
+        .expect("the plan route claims it");
+    let plan_spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
+    let plan_base = sources
+        .components
+        .iter()
+        .find_map(|(component, source)| match (*component, source) {
+            (gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(dir)) => Some(dir.clone()),
+            _ => None,
+        })
+        .expect("the plan route declares its base snapshot as a directory component");
+    let plan_companions =
+        imported_base_snapshot_companions(&plan_base, plan_spec.text_encoder.is_some());
+
+    // ---- the LEGACY lane's own answer ------------------------------------------------------
+    let legacy_base = resolve_krea_imported_base_tier(&fx.settings)
+        .expect("the legacy lane resolves the same installed tier");
+    let legacy_companions = imported_base_snapshot_companions(&legacy_base, false);
+
+    assert_eq!(
+        plan_base, legacy_base,
+        "the plan route's declared base-snapshot component and the legacy lane's resident tier must \
+         be one directory, or the two lanes are admitted on different floors"
+    );
+    assert_eq!(
+        plan_companions, legacy_companions,
+        "the two lanes' companion sets must be equal"
+    );
+    assert_eq!(
+        plan_companions,
+        vec![plan_base.join("vae"), plan_base.join("text_encoder")],
+        "and the set is the shared TE + VAE only — never the tier's own transformer"
+    );
+
+    let companion_bytes = |dirs: &[PathBuf]| -> u64 {
+        dirs.iter()
+            .map(|dir| crate::mlx_fit_gate::sum_safetensors_bytes(dir))
+            .sum()
+    };
+    // The primary both lanes open is the same file, so equal companion bytes is equal floor.
+    assert_eq!(
+        plan_spec.weights,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
+    );
+    assert_eq!(
+        companion_bytes(&plan_companions),
+        companion_bytes(&legacy_companions)
+    );
+    // Not vacuously zero: the tier really does hold weight bytes, and the excluded transformer's
+    // are really outside the total.
+    assert!(companion_bytes(&plan_companions) > 0);
+    assert!(
+        crate::mlx_fit_gate::sum_safetensors_bytes(&plan_base) > companion_bytes(&plan_companions),
+        "fixture check: the tier's own transformer carries bytes the floor must be excluding"
+    );
+
+    // The candle floor's own production entry point agrees with the construction asserted above.
+    // Candle-only, so this first EXECUTES on the windows-candle lane.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let priced = checkpoint_plan_candle_companion_dirs(&sources, &plan_spec)
+            .expect("the plan route can price every component it declares");
+        assert_eq!(
+            priced, legacy_companions,
+            "the plan route's candle floor must price exactly the legacy lane's companion set"
+        );
+    }
+}
+
+/// Feature-end review (sc-20398, blocker 11) — the plan route's QUANTIZATION gate, driven with
+/// QUANTIZED plans.
+///
+/// The gate is the first arm of `checkpoint_plan_request_shape_refusal`
+/// (`imported_model_quant(request, descriptor, "Checkpoint plan").is_err()`), and it had no worker
+/// coverage at all: nothing proved that a request naming a tier the exact registered provider does
+/// not advertise is refused rather than loaded at some other tier.
+///
+/// Both a plan whose layers are stored INT8 (`I8`) and one stored FP8 (`F8_E4M3`) are driven
+/// through it, because the two facts are easy to conflate and only one is true: the gate reads the
+/// REQUEST's selected tier against the DESCRIPTOR's advertised set, and is indifferent to how the
+/// checkpoint's own bytes happen to be stored. Both plans therefore get the same verdict for the
+/// same request, and the accepted/refused tiers are read off the live descriptor rather than
+/// hard-coded — a registry that widened `supported_quants` must not silently turn this green.
+///
+/// Failing mutation (run): invert the gate to `.is_ok()` in `checkpoint_plan.rs`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_quantized_plan_is_gated_on_the_providers_advertised_tiers_not_on_its_layer_dtype() {
+    let fx = CheckpointPlanFixture::new("quant-gate", true);
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "krea_2",
+        gen_core::ImportedModelSource::TransformerFile,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("fixture check: this backend binds krea_2 transformer-file generation");
+    let supported = descriptor.capabilities.supported_quants;
+    assert!(
+        !supported.is_empty(),
+        "fixture check: the provider advertises at least one tier, or 'accepted' below is vacuous"
+    );
+    // The names a payload may spell, paired with the tier each selects.
+    let named: [(&str, Quant); 3] = [
+        ("q4", Quant::Q4),
+        ("q8", Quant::Q8),
+        ("nvfp4", Quant::Nvfp4),
+    ];
+    let accepted = named
+        .iter()
+        .find(|(_, quant)| supported.contains(quant))
+        .map(|(name, _)| *name)
+        .expect("fixture check: at least one spellable tier is advertised");
+    // A tier the provider does NOT advertise if there is one, else a name no tier answers to —
+    // both reach the same gate, and one of the two always exists.
+    let refused = named
+        .iter()
+        .find(|(_, quant)| !supported.contains(quant))
+        .map(|(name, _)| *name)
+        .unwrap_or("no-such-tier");
+
+    for (label, dtype) in [("int8", "I8"), ("fp8", "F8_E4M3")] {
+        let file = format!("kreamania-{label}.safetensors");
+        let entries = krea_native_entries()
+            .into_iter()
+            .map(|(name, _)| (name, dtype))
+            .collect::<Vec<_>>();
+        let checkpoint_id = fx.compile(&file, &entries);
+        // Fixture check: the quantized bytes really did compile to a backbone layer, so the rows
+        // below measure the quant gate rather than an unimportable file.
+        let resolved = fx.store.resolve(&checkpoint_id).unwrap();
+        assert!(
+            resolved.layers_with_role("transformer").next().is_some(),
+            "{label}: the quantized file still compiles to a transformer layer"
+        );
+
+        let served = fx.plan_backed_request(
+            &checkpoint_id,
+            json!({ "advanced": { "quantTier": accepted } }),
+        );
+        let selection = prepare_checkpoint_plan_sources(&served, &fx.settings)
+            .unwrap_or_else(|error| panic!("{label}: an advertised tier must not refuse: {error}"));
+        assert!(
+            selection.is_available(),
+            "{label}: the plan route must claim a request naming the advertised tier {accepted:?}"
+        );
+
+        let denied = fx.plan_backed_request(
+            &checkpoint_id,
+            json!({ "advanced": { "quantTier": refused } }),
+        );
+        // The refusal surfaces either as a retained decline or as an outright error, depending on
+        // whether this family still has a bespoke lane; both are the gate's verdict, and neither is
+        // swallowed into "served".
+        let message = match prepare_checkpoint_plan_sources(&denied, &fx.settings) {
+            Ok(selection) => {
+                assert!(
+                    !selection.is_available(),
+                    "{label}: tier {refused:?} is not advertised and must not be served"
+                );
+                selection
+                    .into_unclaimed_refusal(&denied)
+                    .expect_err("a declined plan-backed entry retains its typed refusal")
+                    .to_string()
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("does not accept the requested quantization tier"),
+            "{label}: the refusal must name the QUANT gate, not some later one: {message}"
+        );
+        assert!(
+            message.contains("[checkpoint-plan:unsupported-operation]"),
+            "{label}: and it must carry the typed code: {message}"
+        );
+    }
+}
+
+/// Feature-end review (sc-20398, blocker 11) — linked/managed parity beyond Krea: the SDXL row.
+///
+/// The Krea row already proves a linked and a managed copy of the same bytes compile to one
+/// semantic plan and each load their OWN verified layer. What it does not prove is that the two
+/// copies take the same ROUTE and are handed the same LOAD SPEC — that is the property that makes
+/// "linked or managed" an ownership choice rather than a different model, and it is asserted here
+/// on a second family whose dialect is a FUSED checkpoint rather than a bare transformer file.
+///
+/// Everything except the primary is expected identical; the primary is expected to DIFFER, each
+/// copy naming its own file. Asserting the second half is what keeps the first from being satisfied
+/// by a route that resolved one copy twice.
+///
+/// Failing mutation (run): return the linked checkpoint's primary for both copies.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_linked_and_a_managed_sdxl_checkpoint_take_one_route_and_get_one_load_spec_shape() {
+    let fx = CheckpointPlanFixture::new("sdxl-parity", true);
+    // The model-agnostic CLIP tokenizer assets the fused-SDXL binding declares as its required
+    // components — BOTH backends' spellings, staged into the isolated hub at the pinned revisions
+    // the lane resolves against, so the row measures routing rather than a missing install.
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
+
+    let fused = sdxl_fused_entries();
+    let linked_id = fx.compile("sdxlmania.safetensors", &fused);
+
+    let install_id = "install-sdxlmania";
+    let install_dir = fx.store.install_dir(install_id).unwrap();
+    std::fs::create_dir_all(&install_dir).unwrap();
+    let install_dir = std::fs::canonicalize(&install_dir).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("sdxlmania.safetensors"),
+        install_dir.join("sdxlmania.safetensors"),
+    )
+    .unwrap();
+    let managed = fx
+        .store
+        .compile_managed(
+            install_id,
+            "sdxlmania.safetensors",
+            sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+                source: "local-copy".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sdxl_request = |checkpoint_id: &str| {
+        request(json!({
+            "projectId": "p",
+            "model": "linked_sdxlmania",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "linked_sdxlmania",
+                "catalogScope": "user",
+                "family": "sdxl",
+                "importSourceShape": "fused_checkpoint",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        }))
+    };
+
+    let prepare = |checkpoint_id: &str| {
+        let request = sdxl_request(checkpoint_id);
+        let sources = prepare_checkpoint_plan_sources(&request, &fx.settings)
+            .unwrap_or_else(|error| panic!("a fused SDXL plan must prepare: {error}"))
+            .into_sources()
+            .expect("the plan route claims a fused SDXL text-to-image request");
+        let spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
+        (sources, spec)
+    };
+    let (linked_sources, linked_spec) = prepare(&linked_id);
+    let (managed_sources, managed_spec) = prepare(&managed.checkpoint_id);
+
+    assert_ne!(
+        linked_id, managed.checkpoint_id,
+        "fixture check: two distinct checkpoints, so nothing below reads one record twice"
+    );
+    // Same ROUTE: the same registered provider, source shape and operation on both copies.
+    assert_eq!(linked_sources.descriptor.id, managed_sources.descriptor.id);
+    assert_eq!(
+        linked_sources.source,
+        gen_core::ImportedModelSource::FusedCheckpoint
+    );
+    assert_eq!(linked_sources.source, managed_sources.source);
+    assert_eq!(linked_sources.operation, managed_sources.operation);
+
+    // Same LOAD SPEC in every part the ownership choice must not change.
+    assert_eq!(linked_spec.components, managed_spec.components);
+    assert_eq!(linked_spec.quantize, managed_spec.quantize);
+    assert_eq!(
+        linked_spec.prepared_file_pins().len(),
+        managed_spec.prepared_file_pins().len()
+    );
+    assert!(linked_spec.prepared_file_pins().is_finalized());
+    assert!(managed_spec.prepared_file_pins().is_finalized());
+    assert!(
+        !linked_spec.components.is_empty(),
+        "fixture check: the fused binding really does declare a component, so comparing the \
+         component lists is not comparing two empty vectors"
+    );
+
+    // And the one part that MUST differ: each copy loads its own bytes.
+    assert_eq!(
+        linked_spec.weights,
+        WeightsSource::File(fx.library_dir.join("sdxlmania.safetensors"))
+    );
+    assert_eq!(
+        managed_spec.weights,
+        WeightsSource::File(install_dir.join("sdxlmania.safetensors"))
+    );
+    assert_ne!(linked_spec.weights, managed_spec.weights);
+}
+
+/// Scope addition 12(a) / E4 — a PRE-EPIC manifest entry still resolves the route it always did.
+///
+/// The migration promise of epic 20398 is that a user model imported before the epic — an entry
+/// with a `paths.model` install and NO `importPlan` key at all — keeps working untouched. The plan
+/// route is offered every request first, so the thing that could break it is the plan route
+/// claiming an entry that carries no plan.
+///
+/// The route KIND is pinned to the exact variant rather than "some route resolved": a test that
+/// only asserted `is_some()` would stay green if the entry were rerouted onto the plan lane, which
+/// is precisely the regression.
+///
+/// Failing mutation (run): make `request_is_checkpoint_plan_backed` answer `true` for an entry with
+/// no `importPlan`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pre_epic_imported_entry_with_no_import_plan_resolves_the_route_it_always_did() {
+    let fx = CheckpointPlanFixture::new("e4-migration", true);
+    let install = fx.settings.data_dir.join("models/imports/legacy-kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    write_tiny_safetensors(
+        &install.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert!(
+        !legacy.model_manifest_entry.contains_key("importPlan"),
+        "fixture check: this is the pre-epic entry shape — no importPlan key at all"
+    );
+
+    let prepared = prepare_image_route(&legacy, &fx.settings)
+        .expect("a pre-epic entry must not be refused by the plan route")
+        .expect("a pre-epic entry still has a route");
+    assert_eq!(
+        prepared.kind(),
+        ImageRoute::KreaImported,
+        "the pre-epic entry keeps its legacy imported lane; the plan route must not claim it"
+    );
+    // Its bytes are the ones the pre-epic scan finds, not anything plan-derived.
+    match prepared {
+        PreparedImageRoute::KreaImported(sources) => assert_eq!(
+            sources.dit_pin.loader_path(),
+            install.join("kreamania.safetensors").as_path()
+        ),
+        other => panic!(
+            "expected the legacy imported bundle, got {:?}",
+            other.kind()
+        ),
+    }
+    // The plan route declines it outright rather than retaining a refusal for it.
+    let selection = prepare_checkpoint_plan_sources(&legacy, &fx.settings).unwrap();
+    assert!(!selection.is_available());
+    selection
+        .into_unclaimed_refusal(&legacy)
+        .expect("an entry with no plan is the ONLY shape that may fall through with no refusal");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Store-backed CANDLE coverage for the plan-driven route (sc-20398 feature-end review,
+// blockers 2 and 3).
+//
+// Every store-backed plan-route test above is `#[cfg(target_os = "macos")]`, so the candle arm —
+// which is the ONLY arm that binds Z-Image, Qwen-Image, FLUX.2 and Wan at all — had no store-backed
+// coverage whatsoever, and those four families were guarded solely by `str::find` scans over their
+// own source text. A source scan proves a call site exists; it cannot prove the bytes that reach
+// the loader are the plan's.
+//
+// The tests below compile REAL plans through the real inspector and plan store and then call the
+// real production preparers. `cargo test` cannot link this cfg on a Mac, so they are typechecked
+// locally by `npm run rust:check:candle` and first EXECUTE on the windows-candle CI lane.
+// ---------------------------------------------------------------------------------------------
+
+/// The tensor surface a Z-Image DiT is recognized by: the `noise_refiner` / `context_refiner` /
+/// `cap_embedder` markers `detect_transformer_family` treats as decisive, plus the
+/// `x_embedder.weight` the registered `z-image-comfyui-v1` signature requires.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn zimage_tree_transformer_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.diffusion_model.x_embedder.weight", "BF16"),
+        ("model.diffusion_model.cap_embedder.0.weight", "BF16"),
+        (
+            "model.diffusion_model.noise_refiner.0.attention.qkv.weight",
+            "BF16",
+        ),
+        (
+            "model.diffusion_model.context_refiner.0.attention.qkv.weight",
+            "BF16",
+        ),
+    ]
+}
+
+/// A Qwen3 LLM text encoder: `embed_tokens` plus the per-head `self_attn.q_norm`/`k_norm` pair.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn qwen3_text_encoder_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.embed_tokens.weight", "BF16"),
+        ("model.layers.0.self_attn.q_norm.weight", "BF16"),
+        ("model.layers.0.self_attn.k_norm.weight", "BF16"),
+    ]
+}
+
+/// A diffusers-layout VAE.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn tree_vae_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("encoder.conv_in.weight", "F32"),
+        ("encoder.down.0.block.0.conv1.weight", "F32"),
+        ("encoder.mid.attn_1.q.weight", "F32"),
+        ("decoder.conv_out.weight", "F32"),
+        ("decoder.up.0.block.0.conv1.weight", "F32"),
+        ("decoder.mid.attn_1.q.weight", "F32"),
+    ]
+}
+
+/// The Qwen-Image ComfyUI DiT surface (dual-stream MMDiT with joint-attention `add_q_proj`), and
+/// the `img_in.weight` the `qwen-image-comfyui-v1` signature requires.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn qwen_tree_transformer_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("model.diffusion_model.img_in.weight", "F8_E4M3"),
+        (
+            "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.attn.to_q.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.img_mlp.net.0.proj.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.txt_mlp.net.0.proj.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.transformer_blocks.0.img_mod.1.weight",
+            "F8_E4M3",
+        ),
+    ]
+}
+
+/// The FLUX.2 ComfyUI DiT surface: the SHARED-modulation tensors that separate FLUX.2 from FLUX.1,
+/// plus the `double_blocks.0.img_attn.qkv.weight` the `flux2-comfyui-v1` signature requires.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn flux2_tree_transformer_entries() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "model.diffusion_model.double_blocks.0.img_attn.qkv.weight",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.double_stream_modulation_shift",
+            "F8_E4M3",
+        ),
+        (
+            "model.diffusion_model.single_stream_modulation.weight",
+            "F8_E4M3",
+        ),
+    ]
+}
+
+/// Stage a fully-present tier of `repo` in the isolated hub: the `text_encoder/`, `vae/` and
+/// `tokenizer/tokenizer.json` every ComfyUI-tree lane borrows from a resident snapshot.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn stage_resident_tier(settings: &Settings, repo: &str, tier: &str) -> PathBuf {
+    let root = sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
+        .expect("safe repo cache path");
+    let revision = "89abcdef0123456789abcdef0123456789abcdef";
+    let snapshot = root.join("snapshots").join(revision);
+    let dir = if tier.is_empty() {
+        snapshot.clone()
+    } else {
+        snapshot.join(tier)
+    };
+    std::fs::create_dir_all(dir.join("text_encoder")).unwrap();
+    std::fs::create_dir_all(dir.join("vae")).unwrap();
+    std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
+    std::fs::write(dir.join("text_encoder/model.safetensors"), b"te").unwrap();
+    std::fs::write(dir.join("vae/diffusion_pytorch_model.safetensors"), b"vae").unwrap();
+    std::fs::write(dir.join("tokenizer/tokenizer.json"), b"{}").unwrap();
+    std::fs::create_dir_all(root.join("refs")).unwrap();
+    std::fs::write(root.join("refs/main"), revision).unwrap();
+    dir
+}
+
+/// Feature-end review blocker 3 — the CANDLE arm resolves a plan-backed entry end to end through
+/// the production route selector, and a PRE-EPIC entry still takes its legacy lane.
+///
+/// `prepare_candle_image_route` is the candle twin of `prepare_image_route`: it offers the request
+/// to the plan route first and then to every bespoke lane, and it is where the single-claim
+/// discriminator actually decides. Nothing exercised it with a real store before this.
+///
+/// Both halves are here because a route selector can only be wrong in two directions, and one test
+/// per direction is what pins the boundary: the plan-backed entry must reach
+/// `CandleImageRoute::CheckpointPlan` with the plan's own bytes, and the pre-epic entry must NOT.
+///
+/// Compile-verified locally by `npm run rust:check:candle`; first executed on the windows-candle CI
+/// lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn the_candle_route_claims_a_plan_backed_entry_and_leaves_a_pre_epic_entry_on_its_legacy_lane() {
+    let mut fx = CheckpointPlanFixture::new("candle-route", true);
+    fx.settings.backend_candle_enabled = true;
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // ---- the plan-backed entry ----------------------------------------------------------------
+    let plan_backed = fx.plan_backed_request(&checkpoint_id, json!({}));
+    let prepared = prepare_candle_image_route(&plan_backed, &fx.settings)
+        .expect("a plan-backed t2i request must not be refused on the candle arm")
+        .expect("the candle router must claim it");
+    assert_eq!(prepared.kind(), CandleImageRoute::CheckpointPlan);
+    let sources = match prepared {
+        PreparedCandleImageRoute::CheckpointPlan(sources) => *sources,
+        other => panic!("expected the plan bundle, got {:?}", other.kind()),
+    };
+    assert_eq!(sources.checkpoint_id, checkpoint_id);
+    assert_eq!(sources.descriptor.family, "krea_2");
+    assert_eq!(
+        sources.primary,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors")),
+        "the candle arm loads the plan's own verified layer, not a scanned install"
+    );
+    assert_eq!(
+        sources.components,
+        vec![(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(fx.base_tier.clone())
+        )]
+    );
+    let spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
+    assert_eq!(
+        spec.weights,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
+    );
+    assert!(spec.prepared_file_pins().is_finalized());
+    assert_eq!(spec.prepared_file_pins().len(), 1);
+
+    // ---- the PRE-EPIC entry (E4): no `importPlan` key at all -----------------------------------
+    let install = fx.settings.data_dir.join("models/imports/legacy-kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    write_tiny_safetensors(
+        &install.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let legacy = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert!(!legacy.model_manifest_entry.contains_key("importPlan"));
+    let prepared = prepare_candle_image_route(&legacy, &fx.settings)
+        .expect("a pre-epic entry must not be refused")
+        .expect("a pre-epic entry still has a candle route");
+    assert_eq!(
+        prepared.kind(),
+        CandleImageRoute::KreaImported,
+        "the plan route must not claim an entry that carries no plan"
+    );
+    match prepared {
+        PreparedCandleImageRoute::KreaImported(sources) => assert_eq!(
+            sources.dit_pin.loader_path(),
+            install.join("kreamania.safetensors").as_path()
+        ),
+        other => panic!(
+            "expected the legacy imported bundle, got {:?}",
+            other.kind()
+        ),
+    }
+}
+
+/// Feature-end review blocker 2 — the Z-IMAGE row, behaviourally.
+///
+/// A LINKED ComfyUI Z-Image tree (DiT + text encoder + VAE) is compiled by the real inspector,
+/// persisted by the real store, and then handed to the real `prepare_zimage_comfyui_sources` as a
+/// LoRA request — a shape `checkpoint_plan_serves_request_shape` declines, so the bespoke lane owns
+/// it and must source all THREE artifacts from the plan rather than from an `external_base_*`
+/// catalog scan a linked tree can never produce.
+///
+/// What is asserted is the RESOLVED pins the production preparer produced, and that each role
+/// landed on its OWN artifact — the property the source-text ordering scan cannot see at all.
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_linked_zimage_tree_resolves_all_three_artifacts_from_its_plan() {
+    let mut fx = CheckpointPlanFixture::new("zimage-tree", false);
+    fx.settings.backend_candle_enabled = true;
+    // The model-agnostic tokenizer a ComfyUI tree never ships.
+    stage_resident_tier(&fx.settings, "Tongyi-MAI/Z-Image-Turbo", "");
+    let checkpoint_id = fx.compile_tree(
+        "ztree",
+        &[
+            (
+                "unet/z_image_turbo.safetensors",
+                zimage_tree_transformer_entries(),
+            ),
+            (
+                "text_encoder/qwen3.safetensors",
+                qwen3_text_encoder_entries(),
+            ),
+            ("vae/z_image_vae.safetensors", tree_vae_entries()),
+        ],
+    );
+
+    let lane_request = request(json!({
+        "projectId": "p",
+        "model": "linked_ztree",
+        "prompt": "a fox",
+        "count": 1,
+        "loras": [fx.installed_lora("style")],
+        "modelManifestEntry": {
+            "id": "linked_ztree",
+            "catalogScope": "user",
+            "family": "z-image",
+            "importSourceShape": "comfyui_tree",
+            "importPlan": { "checkpointId": checkpoint_id }
+        }
+    }));
+    assert!(
+        !request_is_checkpoint_plan_backed(&lane_request),
+        "fixture check: the plan route declines a LoRA request, so the bespoke lane owns it"
+    );
+
+    let paths = zimage_comfyui_candle::prepare_zimage_comfyui_sources(&lane_request, &fx.settings)
+        .unwrap_or_else(|error| panic!("a linked Z-Image tree must resolve: {error}"))
+        .expect("the bespoke Z-Image lane claims a plan-backed tree");
+    let pins = paths.prepared_file_pins();
+    let tree = fx.library_dir.join("ztree");
+    assert_eq!(
+        pins[0].loader_path(),
+        tree.join("unet/z_image_turbo.safetensors").as_path(),
+        "the transformer must be the plan's own DiT layer"
+    );
+    assert_eq!(
+        pins[1].loader_path(),
+        tree.join("text_encoder/qwen3.safetensors").as_path(),
+        "the text encoder must be the plan's own text_encoder layer, never the DiT again"
+    );
+    assert_eq!(
+        pins[2].loader_path(),
+        tree.join("vae/z_image_vae.safetensors").as_path(),
+        "the VAE must be the plan's own vae layer"
+    );
+
+    // And the spec the loader receives carries exactly those files.
+    let spec = zimage_comfyui_candle::prepare_zimage_comfyui_load_spec_for_request(
+        paths,
+        &lane_request,
+        &fx.settings,
+        zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE,
+    )
+    .expect("the lane assembles a spec");
+    assert_eq!(
+        spec.weights,
+        WeightsSource::File(tree.join("unet/z_image_turbo.safetensors"))
+    );
+    assert!(spec.prepared_file_pins().is_finalized());
+
+    // The other half of single-claim, behaviourally: the SAME entry with a shape the plan route DOES
+    // serve is declined here, so exactly one lane owns each request. The model id carries no
+    // `external_base_` prefix in either direction, which is what proves the lane is deciding on the
+    // plan rather than on the incidental shape of a catalog row's id.
+    let mut claimed = lane_request.clone();
+    claimed.loras.clear();
+    assert!(
+        request_is_checkpoint_plan_backed(&claimed),
+        "fixture check: without the LoRA the plan route claims this request"
+    );
+    assert!(
+        zimage_comfyui_candle::prepare_zimage_comfyui_sources(&claimed, &fx.settings)
+            .expect("the decline is not a refusal")
+            .is_none(),
+        "the bespoke lane must decline a request the plan route claims"
+    );
+}
+
+/// Feature-end review blocker 2 — the QWEN-IMAGE row, behaviourally.
+///
+/// Qwen-Image's tree is a DiT plus an OPTIONAL in-place VAE; its dense text encoder and tokenizer
+/// always come from a resident tier. Both halves of that are asserted: a tree WITH a VAE consumes
+/// it from the plan, and a tree WITHOUT one still resolves and leaves the VAE to the snapshot.
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_linked_qwen_image_tree_consumes_its_optional_vae_from_the_plan() {
+    let mut fx = CheckpointPlanFixture::new("qwen-tree", false);
+    fx.settings.backend_candle_enabled = true;
+    stage_resident_tier(&fx.settings, "SceneWorks/qwen-image-mlx", "bf16");
+
+    let lane_request = |checkpoint_id: &str, id: &str| {
+        request(json!({
+            "projectId": "p",
+            "model": format!("linked_{id}"),
+            "prompt": "a fox",
+            "count": 1,
+            "loras": [fx.installed_lora("style")],
+            "modelManifestEntry": {
+                "id": format!("linked_{id}"),
+                "catalogScope": "user",
+                "family": "qwen-image",
+                "importSourceShape": "comfyui_tree",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        }))
+    };
+
+    // ---- with the in-place VAE ----------------------------------------------------------------
+    let with_vae = fx.compile_tree(
+        "qtree",
+        &[
+            (
+                "unet/qwen_image_fp8.safetensors",
+                qwen_tree_transformer_entries(),
+            ),
+            ("vae/qwen_image_vae.safetensors", tree_vae_entries()),
+        ],
+    );
+    let req = lane_request(&with_vae, "qtree");
+    assert!(!request_is_checkpoint_plan_backed(&req));
+    let paths = qwen_comfyui_candle::prepare_qwen_comfyui_sources(&req, &fx.settings)
+        .unwrap_or_else(|error| panic!("a linked Qwen-Image tree must resolve: {error}"))
+        .expect("the bespoke Qwen-Image lane claims a plan-backed tree");
+    let pins = paths.prepared_file_pins();
+    let tree = fx.library_dir.join("qtree");
+    assert_eq!(
+        pins.len(),
+        2,
+        "the DiT and the tree's own VAE are both plan-sourced"
+    );
+    assert_eq!(
+        pins[0].loader_path(),
+        tree.join("unet/qwen_image_fp8.safetensors").as_path()
+    );
+    assert_eq!(
+        pins[1].loader_path(),
+        tree.join("vae/qwen_image_vae.safetensors").as_path()
+    );
+
+    // ---- without it: still resolves, and the VAE falls back to the resident tier ---------------
+    let without_vae = fx.compile_tree(
+        "qtree-bare",
+        &[(
+            "unet/qwen_image_fp8.safetensors",
+            qwen_tree_transformer_entries(),
+        )],
+    );
+    let bare_req = lane_request(&without_vae, "qtree-bare");
+    let bare = qwen_comfyui_candle::prepare_qwen_comfyui_sources(&bare_req, &fx.settings)
+        .unwrap_or_else(|error| panic!("a VAE-less Qwen-Image tree must still resolve: {error}"))
+        .expect("the lane claims it");
+    let bare_pins = bare.prepared_file_pins();
+    assert_eq!(
+        bare_pins.len(),
+        1,
+        "an absent optional role is the family's signal to use its resident tier, not a refusal"
+    );
+    assert_eq!(
+        bare_pins[0].loader_path(),
+        fx.library_dir
+            .join("qtree-bare/unet/qwen_image_fp8.safetensors")
+            .as_path()
+    );
+
+    // Single-claim, behaviourally: the same entry with a shape the plan route DOES serve is
+    // declined here. Neither request's model id carries an `external_base_` prefix, so the lane is
+    // deciding on the plan rather than on the incidental shape of a catalog row's id.
+    let mut claimed = req.clone();
+    claimed.loras.clear();
+    assert!(request_is_checkpoint_plan_backed(&claimed));
+    assert!(
+        qwen_comfyui_candle::prepare_qwen_comfyui_sources(&claimed, &fx.settings)
+            .expect("the decline is not a refusal")
+            .is_none(),
+        "the bespoke lane must decline a request the plan route claims"
+    );
+}
+
+/// Feature-end review blocker 2 — the FLUX.2 row, behaviourally.
+///
+/// FLUX.2's tree is the DiT ALONE: its Mistral-3 encoder, VAE and tokenizer always come from a
+/// resident tier, so the lane declares NO consumed sidecar. Both consequences are asserted — the
+/// DiT-only tree resolves to the plan's own layer, and a tree carrying a VAE the lane would
+/// silently ignore REFUSES as an unconsumed layer rather than loading a snapshot's copy in its
+/// place (E8).
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn a_linked_flux2_tree_loads_the_plans_dit_and_refuses_a_layer_the_lane_would_ignore() {
+    let mut fx = CheckpointPlanFixture::new("flux2-tree", false);
+    fx.settings.backend_candle_enabled = true;
+    stage_resident_tier(&fx.settings, "SceneWorks/flux2-dev-mlx", "bf16");
+
+    let lane_request = |checkpoint_id: &str, id: &str| {
+        request(json!({
+            "projectId": "p",
+            "model": format!("linked_{id}"),
+            "prompt": "a fox",
+            "count": 1,
+            "loras": [fx.installed_lora("style")],
+            "modelManifestEntry": {
+                "id": format!("linked_{id}"),
+                "catalogScope": "user",
+                "family": "flux2",
+                "importSourceShape": "comfyui_tree",
+                "importPlan": { "checkpointId": checkpoint_id }
+            }
+        }))
+    };
+
+    let dit_only = fx.compile_tree(
+        "ftree",
+        &[(
+            "unet/flux2_dev_fp8mixed.safetensors",
+            flux2_tree_transformer_entries(),
+        )],
+    );
+    let req = lane_request(&dit_only, "ftree");
+    assert!(!request_is_checkpoint_plan_backed(&req));
+    let paths = flux2_comfyui_candle::prepare_flux2_comfyui_sources(&req, &fx.settings)
+        .unwrap_or_else(|error| panic!("a linked FLUX.2 tree must resolve: {error}"))
+        .expect("the bespoke FLUX.2 lane claims a plan-backed tree");
+    let (spec, _snapshot) = flux2_comfyui_candle::prepare_flux2_comfyui_load_spec_for_request(
+        paths,
+        flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+        &req,
+        &fx.settings,
+        flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE,
+    )
+    .expect("the lane assembles a spec");
+    assert_eq!(
+        spec.weights,
+        WeightsSource::File(
+            fx.library_dir
+                .join("ftree/unet/flux2_dev_fp8mixed.safetensors")
+        ),
+        "the DiT must be the plan's own layer"
+    );
+    assert!(spec.prepared_file_pins().is_finalized());
+
+    // A tree carrying an artifact the lane declares NEITHER required nor optional refuses.
+    let with_vae = fx.compile_tree(
+        "ftree-vae",
+        &[
+            (
+                "unet/flux2_dev_fp8mixed.safetensors",
+                flux2_tree_transformer_entries(),
+            ),
+            ("vae/flux2_vae.safetensors", tree_vae_entries()),
+        ],
+    );
+    let error = match flux2_comfyui_candle::prepare_flux2_comfyui_sources(
+        &lane_request(&with_vae, "ftree-vae"),
+        &fx.settings,
+    ) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("a layer the lane would silently ignore must refuse, not be dropped"),
+    };
+    assert!(
+        error.contains("[checkpoint-plan:unconsumed-layer]"),
+        "the refusal must name the unconsumed layer: {error}"
+    );
+
+    // Single-claim, behaviourally: the same entry with a shape the plan route DOES serve is
+    // declined here. Neither request's model id carries an `external_base_` prefix, so the lane is
+    // deciding on the plan rather than on the incidental shape of a catalog row's id.
+    let mut claimed = req.clone();
+    claimed.loras.clear();
+    assert!(request_is_checkpoint_plan_backed(&claimed));
+    assert!(
+        flux2_comfyui_candle::prepare_flux2_comfyui_sources(&claimed, &fx.settings)
+            .expect("the decline is not a refusal")
+            .is_none(),
+        "the bespoke lane must decline a request the plan route claims"
+    );
+}
+
+/// Feature-end review minor — `checkpoint_plan_bespoke_roles` DECLINES another family's request.
+///
+/// The two other bespoke plan-source helpers (`checkpoint_plan_bespoke_primary` and
+/// `checkpoint_plan_bespoke_tree`) ask `checkpoint_plan_entry_routes_to` before they open the plan
+/// store; the roles-only helper — the one the Wan video lane uses — did not. So a plan-backed entry
+/// declaring ANY other family reached the store and tripped the FATAL `family-mismatch` refusal,
+/// which the router propagates with `?`: a perfectly good checkpoint killed the job the moment the
+/// Wan lane was offered it. That is the exact bug review blocker 1 of sc-20644 fixed in the other
+/// two helpers, and it was still live here.
+///
+/// The two halves are kept distinct because collapsing them is the bug:
+///   * DECLARED family is another lane's → `Ok(None)`.
+///   * DECLARED family is THIS lane's but the PLAN disagrees → still fatal.
+///
+/// Compile-verified locally; first executed on the windows-candle CI lane.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn the_roles_helper_declines_another_familys_entry_and_still_refuses_a_mislabelled_one() {
+    let fx = CheckpointPlanFixture::new("roles-gate", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    let entry = |family: &str| {
+        json!({
+            "id": "linked_kreamania",
+            "catalogScope": "user",
+            "family": family,
+            "importPlan": { "checkpointId": checkpoint_id }
+        })
+        .as_object()
+        .cloned()
+        .unwrap()
+    };
+
+    // A krea_2 checkpoint offered to the Wan lane: not this lane's request, so it declines.
+    let declined = checkpoint_plan_bespoke_roles(
+        &entry("krea_2"),
+        &fx.settings,
+        "wan-video",
+        &["transformer"],
+        &[],
+    )
+    .expect("another family's entry must DECLINE, never raise family-mismatch");
+    assert!(
+        declined.is_none(),
+        "the roles helper must decline an entry whose declared family routes elsewhere"
+    );
+
+    // An entry DECLARING wan-video whose plan says krea_2 is a corrupt/edited entry: still fatal.
+    let error = match checkpoint_plan_bespoke_roles(
+        &entry("wan-video"),
+        &fx.settings,
+        "wan-video",
+        &["transformer"],
+        &[],
+    ) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("a mislabelled entry must not load through another family's loader"),
+    };
+    assert!(
+        error.contains("[checkpoint-plan:family-mismatch]"),
+        "the refusal must stay the family-mismatch one: {error}"
+    );
+}
+
+/// sc-20644: a provider component whose bytes belong to the checkpoint itself is sourced from the
+/// checkpoint's own PLAN LAYERS, not assembled from a catalog row.
+///
+/// This is the mechanism the ComfyUI-tree families (Z-Image, Qwen-Image, FLUX.2) need: their
+/// providers declare `comfyui_text_encoder` / `comfyui_vae` components, and those files sit beside
+/// the DiT in the same tree. Sourcing them from the plan is what makes every byte the route loads a
+/// byte the inspector hashed and the store re-verified — the difference between a plan load and the
+/// live filesystem assembly it replaces.
+///
+/// Backend-neutral, so it runs on the MLX lane too even though no MLX catalog registers a
+/// ComfyUI-tree adapter: the helper under test is family-agnostic by construction.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn checkpoint_plan_sources_declared_components_from_the_plans_own_layers() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, CheckpointContainerV1, ImportLayerV1, ImportPlanV1,
+        SourceLocatorV1,
+    };
+    use sceneworks_core::checkpoint_plan_store::{ResolvedCheckpointV1, ResolvedLayerV1};
+
+    let tree = tempfile::Builder::new()
+        .prefix(&format!("plan-components-{}-", std::process::id()))
+        .tempdir()
+        .unwrap();
+    let root = std::fs::canonicalize(tree.path()).unwrap();
+
+    let resolved = |roles: &[&str]| -> ResolvedCheckpointV1 {
+        let layers: Vec<ImportLayerV1> = roles
+            .iter()
+            .map(|role| {
+                let name = format!("{role}.safetensors");
+                std::fs::write(root.join(&name), b"weights").unwrap();
+                ImportLayerV1 {
+                    layer_id: format!("artifact:{name}"),
+                    role: (*role).to_owned(),
+                    target_path: name.clone(),
+                    // Real `.safetensors` bytes are written above, so this is the verdict the
+                    // inspector would have recorded for them.
+                    container: CheckpointContainerV1::Safetensors,
+                    source: SourceLocatorV1::linked("root-test", name, "0".repeat(64)).unwrap(),
+                }
+            })
+            .collect();
+        let plan = ImportPlanV1::new("plan-test", "z-image", layers.clone()).unwrap();
+        let record = CheckpointCatalogRecordV1::from_plan("linked/root-test/x", &plan).unwrap();
+        ResolvedCheckpointV1 {
+            checkpoint_id: "linked/root-test/x".to_owned(),
+            record,
+            layers: plan
+                .layers
+                .iter()
+                .cloned()
+                .map(|layer| ResolvedLayerV1 {
+                    path: root.join(&layer.target_path),
+                    layer,
+                    rehashed: false,
+                })
+                .collect(),
+            plan,
+        }
+    };
+
+    let tree_plan = resolved(&["transformer", "text_encoder", "vae"]);
+    let (source, layer_id, pin) =
+        checkpoint_plan_component_from_layers(&tree_plan, gen_core::COMFYUI_VAE_COMPONENT, "vae")
+            .expect("the plan's vae layer sources the declared component");
+    assert_eq!(
+        source,
+        WeightsSource::File(root.join("vae.safetensors")),
+        "the component is the plan's OWN vae file, not a resident tier's"
+    );
+    assert_eq!(layer_id, "artifact:vae.safetensors");
+    assert_eq!(pin.loader_path(), root.join("vae.safetensors"));
+
+    // Missing and duplicated roles both refuse during planning, naming the component that could not
+    // be sourced — never a `None` that a loader would discover later (E7).
+    let no_encoder = resolved(&["transformer", "vae"]);
+    let missing = checkpoint_plan_component_from_layers(
+        &no_encoder,
+        gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
+        "text_encoder",
+    )
+    .expect_err("a declared component with no plan layer must refuse");
+    let message = missing.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:missing-component]")
+            && message.contains(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT),
+        "{message}"
+    );
+}
+
+/// sc-20644: a family's truth — which backends it may run on, and what on-disk shape its loader
+/// opens — is read from the REGISTERED checkpoint adapter, never from a branch on the family name in
+/// this repository (E2). This is what makes adding a family a registration rather than a worker
+/// edit, and it is the property every family row of sc-20644 depends on.
+///
+/// Asserted against the LIVE registry of this build, so a catalog that stops registering a family,
+/// or registers it with a different dialect shape, turns this red rather than silently changing what
+/// the plan route loads.
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_plan_family_truth_is_read_from_the_registered_adapter() {
+    let id = "linked/root-test/x";
+    // The three families the MLX catalog registers adapters for, and the source shape each one's
+    // dialect table declares. The shapes differ (a single DiT file, a fused LDM checkpoint, a
+    // diffusers component directory), which is exactly why the route must not guess.
+    for (family, expected) in [
+        ("krea_2", gen_core::ImportedModelSource::TransformerFile),
+        ("sdxl", gen_core::ImportedModelSource::FusedCheckpoint),
+        (
+            "mage-flow",
+            gen_core::ImportedModelSource::TransformerDirectory,
+        ),
+    ] {
+        let adapter = checkpoint_plan_adapter(family, id)
+            .unwrap_or_else(|error| panic!("{family} must have a registered adapter: {error}"));
+        assert_eq!(
+            checkpoint_plan_source_shape(adapter, id).unwrap(),
+            expected,
+            "{family} source shape must come from its registered dialect table"
+        );
+        checkpoint_plan_backend_eligible(adapter, id)
+            .unwrap_or_else(|error| panic!("{family} declares MLX eligible: {error}"));
+    }
+
+    // A family this build registers no adapter for refuses BY NAME during planning, rather than
+    // reaching a loader or falling through to the procedural stub (E7).
+    let unknown = checkpoint_plan_adapter("wan-video", id)
+        .expect_err("an unregistered family must refuse, not resolve");
+    let message = unknown.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:no-adapter-binding]") && message.contains("wan-video"),
+        "{message}"
+    );
+
+    // Backend eligibility is the ADAPTER's declaration, not "did a provider happen to bind". Today
+    // every registered adapter declares the backend it was registered on, so the refusing case is
+    // unreachable through the live registry — assert it against an explicit registration instead of
+    // leaving the guard with no proof it can ever fire.
+    let candle_only = gen_core::CheckpointAdapterRegistration {
+        eligible_backends: &[gen_core::CheckpointBackend::Candle],
+        ..gen_core::Z_IMAGE_CHECKPOINT_ADAPTER
+    };
+    let refusal = checkpoint_plan_backend_eligible(&candle_only, id)
+        .expect_err("an MLX build must refuse a Candle-only family");
+    let message = refusal.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:backend-ineligible]") && message.contains("z-image"),
+        "{message}"
+    );
+    assert!(
+        matches!(refusal, WorkerError::InvalidPayload(_)),
+        "backend ineligibility is a typed payload diagnostic, not an engine error"
+    );
+}
+
+/// The plan is consumed everywhere or refused (sc-20634 review). The inspector emits multi-layer
+/// plans — a linked directory Krea checkpoint compiles to `transformer` + `vae` + `text_encoder` —
+/// and this route sources only the primary layer, taking the rest from the resident base tier.
+/// Loading the plan's transformer while silently substituting the base tier's VAE for the plan's
+/// own is a silent substitution, so a plan with any unconsumed layer refuses instead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_plan_with_a_layer_this_route_cannot_source_refuses_instead_of_substituting() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, CheckpointContainerV1, ImportLayerV1, ImportPlanV1,
+        SourceLocatorV1,
+    };
+    use sceneworks_core::checkpoint_plan_store::{ResolvedCheckpointV1, ResolvedLayerV1};
+
+    let resolved = |roles: &[&str]| -> ResolvedCheckpointV1 {
+        let layers: Vec<ImportLayerV1> = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| ImportLayerV1 {
+                layer_id: format!("artifact:{index}-{role}.safetensors"),
+                role: (*role).to_owned(),
+                target_path: format!("{index}-{role}.safetensors"),
+                // Every layer this fixture synthesizes is a `.safetensors` artifact and the
+                // scenario means it: these rows exercise the ROLE rules, so they carry the
+                // container the inspector would actually have recorded for those bytes.
+                container: CheckpointContainerV1::Safetensors,
+                source: SourceLocatorV1::linked(
+                    "root-test",
+                    format!("{index}-{role}.safetensors"),
+                    "0".repeat(64),
+                )
+                .unwrap(),
+            })
+            .collect();
+        let plan = ImportPlanV1::new("plan-test", "krea_2", layers).unwrap();
+        let record = CheckpointCatalogRecordV1::from_plan("linked/root-test/x", &plan).unwrap();
+        ResolvedCheckpointV1 {
+            checkpoint_id: "linked/root-test/x".to_owned(),
+            record,
+            layers: plan
+                .layers
+                .iter()
+                .cloned()
+                .map(|layer| ResolvedLayerV1 {
+                    path: PathBuf::from("/library").join(&layer.target_path),
+                    layer,
+                    rehashed: false,
+                })
+                .collect(),
+            plan,
+        }
+    };
+
+    // The consumed set a `TransformerFile` primary produces, as the route computes it.
+    let consumed_by_primary = |resolved: &ResolvedCheckpointV1| {
+        checkpoint_plan_primary_selection(resolved, gen_core::ImportedModelSource::TransformerFile)
+            .unwrap()
+            .layers
+            .iter()
+            .map(|layer| layer.layer.layer_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    // The single-layer plan the skeleton serves: nothing is left unconsumed.
+    let single = resolved(&["transformer"]);
+    checkpoint_plan_unconsumed_layers(&single, &consumed_by_primary(&single))
+        .expect("a lone primary consumes the plan");
+
+    // The two-layer plan the inspector emits for a linked DIRECTORY checkpoint.
+    let two_layer = resolved(&["transformer", "vae"]);
+    let error = checkpoint_plan_unconsumed_layers(&two_layer, &consumed_by_primary(&two_layer))
+        .expect_err("an unsourced vae layer must refuse");
+    let message = error.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:unconsumed-layer]"),
+        "{message}"
+    );
+    assert!(
+        message.contains("vae") && message.contains("\"transformer\""),
+        "the refusal must name the unsourced role and the primary it kept: {message}"
+    );
+    assert!(
+        matches!(error, WorkerError::InvalidPayload(_)),
+        "the refusal is a typed payload diagnostic, not an engine error"
+    );
+
+    // Every additional role the inspector can emit is covered, not just `vae`.
+    let full = resolved(&["transformer", "vae", "text_encoder", "descriptor"]);
+    let message = checkpoint_plan_unconsumed_layers(&full, &consumed_by_primary(&full))
+        .expect_err("three unsourced layers must refuse")
+        .to_string();
+    for role in ["vae", "text_encoder", "descriptor"] {
+        assert!(message.contains(role), "{role} missing from: {message}");
+    }
+}
+
+/// Real-weight fixed-seed parity for the universal-import walking skeleton (sc-20634): the SAME
+/// community Krea 2 dense DiT (`kreamania_variant5`), the SAME seed/size/steps, rendered once
+/// through today's `KreaImported` lane (an app-managed install dir) and once through the
+/// plan-driven route (approved linked root → compiled `ImportPlanV1` → `CheckpointPlan` route →
+/// registry-bound `krea_2_turbo` provider). The two images must be byte-identical. The plan
+/// compile is the real full-content inspection of the 26 GB file, and the route's resolve
+/// re-verifies the source before the load.
+///
+/// Both sides render through the PRODUCTION admission seam
+/// (`generator_cache::with_cached_generator_for_request`, which is exactly what
+/// `start_cached_gen_stream_with_request_state` wraps) plus `mlx_fit_gate::evaluate_request` and
+/// `memory_strategy::generate_with_scope` — not a raw `LoadSpec` handed to `inference_runtime::load`.
+/// So the byte-identical claim covers the residency policy the cache selects, the warm/loaded-policy
+/// settlement, and the per-request memory strategy, not just the spec. Only the job/asset plumbing
+/// (`generate_checkpoint_plan_stream`'s API client, `JobSnapshot`, and asset writes) is omitted;
+/// none of it can influence pixels.
+///
+/// ```text
+/// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
+/// #           KREA_HF_HUB=$HOME/.cache/huggingface/hub   (where the krea-2-turbo-mlx base tier lives)
+/// #           KREA_PLAN_DATA_DIR=<dir>  (persist the app data dir across runs so the 26 GB
+/// #                                      full-content compile runs once; defaults to a temp dir)
+/// # defaults: KREA_STEPS=2 KREA_W=512 KREA_H=512 KREA_SEED=42  KREA_OUT_DIR=/tmp/checkpoint_plan_parity
+/// cargo test -p sceneworks-worker --release checkpoint_plan_route_mlx_gpu_parity -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real-weight MLX parity; needs the ~26 GB community Krea 2 DiT + the SceneWorks/krea-2-turbo-mlx bf16 base cached + an Apple-Silicon Mac"]
+async fn checkpoint_plan_route_mlx_gpu_parity() {
+    use crate::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
+    use sha2::{Digest, Sha256};
+
+    let home = std::env::var("HOME").expect("HOME");
+    let dit_src = PathBuf::from(env_or(
+        "KREA_IMPORTED_DIT",
+        &format!("{home}/models/kreamania_variant5.safetensors"),
+    ));
+    assert!(
+        dit_src.is_file(),
+        "imported DiT not found at {} — set KREA_IMPORTED_DIT",
+        dit_src.display()
+    );
+    let library_dir = std::fs::canonicalize(dit_src.parent().expect("DiT parent")).unwrap();
+    let file_name = dit_src
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("utf-8 file name")
+        .to_owned();
+
+    let temp_data_dir = tempfile::Builder::new()
+        .prefix(&format!("checkpoint-plan-parity-{}-", std::process::id()))
+        .tempdir()
+        .expect("data dir");
+    let data_dir = std::env::var_os("KREA_PLAN_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temp_data_dir.path().to_path_buf());
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let real_hub = PathBuf::from(env_or(
+        "KREA_HF_HUB",
+        &format!("{home}/.cache/huggingface/hub"),
+    ));
+    assert!(
+        real_hub.is_dir(),
+        "HF hub not found at {} — set KREA_HF_HUB to the hub holding SceneWorks/krea-2-turbo-mlx",
+        real_hub.display()
+    );
+    let _hf = isolate_hf_hub_cache_to(&real_hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.clone();
+    settings.external_model_roots.push(library_dir.clone());
+
+    let steps: u32 = env_or("KREA_STEPS", "2").parse().expect("KREA_STEPS");
+    let w: u32 = env_or("KREA_W", "512").parse().expect("KREA_W");
+    let h: u32 = env_or("KREA_H", "512").parse().expect("KREA_H");
+    let seed: u64 = env_or("KREA_SEED", "42").parse().expect("KREA_SEED");
+    let prompt = env_or(
+        "KREA_PROMPT",
+        "a photorealistic portrait of a red fox sitting in a sunlit autumn forest, sharp focus, \
+         shallow depth of field",
+    );
+    let out_dir = PathBuf::from(env_or("KREA_OUT_DIR", "/tmp/checkpoint_plan_parity"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    // ---- PLAN: approve the library root, compile the linked checkpoint, route through the plan ----
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let root = store
+        .approve_root(&library_dir)
+        .expect("approve library root");
+    let checkpoint_id =
+        sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(&root.root_id, &file_name);
+    let compile_started = std::time::Instant::now();
+    // A persisted data dir (KREA_PLAN_DATA_DIR) keeps the one-time full-content compile of the
+    // 26 GB file across runs; `resolve` below still re-verifies the bytes on every run.
+    let compiled = match store.record(&checkpoint_id) {
+        Ok(record) => {
+            let plan = store
+                .plan(&checkpoint_id, &record.plan.plan_id)
+                .expect("persisted plan for the persisted record");
+            eprintln!(
+                "COMPILE reused persisted plan {} for {checkpoint_id}",
+                plan.plan_id
+            );
+            sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1 {
+                checkpoint_id: checkpoint_id.clone(),
+                record,
+                plan,
+                // Not re-derived for a reused persisted plan: this fixture only needs the plan
+                // itself, and duplicate reporting is covered by `tests/checkpoint_ingest.rs`.
+                duplicate_checkpoint_ids: Vec::new(),
+            }
+        }
+        Err(_) => store
+            .compile_linked(&root.root_id, &file_name)
+            .expect("compile the linked Krea 2 checkpoint"),
+    };
+    eprintln!(
+        "COMPILE checkpoint_id={} plan_id={} family={} layers={} semantic_digest={} seconds={:.1}",
+        compiled.checkpoint_id,
+        compiled.plan.plan_id,
+        compiled.plan.family,
+        compiled.plan.layers.len(),
+        compiled.record.plan.semantic_digest,
+        compile_started.elapsed().as_secs_f64()
+    );
+    assert_eq!(compiled.plan.family, "krea_2");
+    let plan_request = request(json!({
+        "projectId": "p",
+        "model": "linked_kreamania_v5",
+        "prompt": prompt,
+        "width": w, "height": h,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "importPlan": { "checkpointId": compiled.checkpoint_id }
+        }
+    }));
+    // Prepare first so a refusal surfaces its typed diagnostic instead of an opaque route miss.
+    let prepared = prepare_checkpoint_plan_sources(&plan_request, &settings)
+        .unwrap_or_else(|error| panic!("plan route refused the compiled checkpoint: {error}"))
+        .into_sources()
+        .expect("plan route prepares");
+    assert_eq!(
+        resolve_image_route(&plan_request, &settings),
+        Some(ImageRoute::CheckpointPlan),
+        "ROUTE EVIDENCE: a plan-backed krea_2 t2i job takes the plan-driven route"
+    );
+    assert_eq!(prepared.descriptor.id, "krea_2_turbo");
+    assert_eq!(
+        prepared.primary,
+        WeightsSource::File(library_dir.join(&file_name))
+    );
+    // Rendered as the route builds it (plain resident spec): the production handler additionally
+    // runs `apply_residency_policy`, which the existing KreaImported smoke proves numerically inert
+    // (streamed == resident, byte-identical), so the parity question here is purely the route.
+    let plan_spec = checkpoint_plan_load_spec(&prepared, None).expect("plan load spec");
+
+    // ---- LEGACY: today's KreaImported lane over an app-managed install dir (the S0c shape) ----
+    let install_dir = data_dir.join("models/imports/kreamania_v5");
+    std::fs::create_dir_all(&install_dir).expect("install dir");
+    let install_link = install_dir.join(&file_name);
+    if !install_link.exists() {
+        std::os::unix::fs::symlink(&dit_src, &install_link).expect("symlink DiT");
+    }
+    let legacy_request = request(json!({
+        "projectId": "p",
+        "model": "imported_kreamania_v5",
+        "prompt": prompt,
+        "width": w, "height": h,
+        "modelManifestEntry": {
+            "catalogScope": "user",
+            "family": "krea_2",
+            "paths": { "model": install_dir.to_str().unwrap() }
+        }
+    }));
+    assert_eq!(
+        resolve_image_route(&legacy_request, &settings),
+        Some(ImageRoute::KreaImported),
+        "ROUTE EVIDENCE: the legacy install-dir job still takes the bespoke imported lane"
+    );
+    let legacy_dit = resolve_imported_krea_dit(&legacy_request, &settings)
+        .expect("resolve ok")
+        .expect("legacy DiT resolves");
+    let base = resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base");
+    assert_eq!(
+        prepared.components,
+        vec![(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(base.clone())
+        )],
+        "both routes pair the DiT with the same resident base tier"
+    );
+    let mut legacy_spec = LoadSpec::new(WeightsSource::File(legacy_dit.clone())).with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(base.clone()),
+    );
+    // The legacy lane finalizes its pins before planning; match it so both sides present the same
+    // prepared spec to `try_for_spec_and_manifest`.
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut legacy_spec,
+        [gen_core::PinnedWeightsFile::pin(&legacy_dit).expect("legacy DiT pins")],
+        "Krea 2 imported source preparation failed",
+    )
+    .expect("legacy spec prepares");
+
+    let make_req = || GenerationRequest {
+        prompt: prompt.clone(),
+        width: w,
+        height: h,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(steps),
+        guidance: None,
+        ..Default::default()
+    };
+    // The production admission both lanes run: the manifest/geometry-aware request plan, the cached
+    // generator seam (which is where `apply_residency_policy` and the warm/loaded policy live), the
+    // per-request memory evaluation, and the memory-scoped generate. `render` differs between the
+    // two sides ONLY in which request/spec it is handed.
+    let render = |label: &'static str,
+                  spec: LoadSpec,
+                  route_request: ImageRequest,
+                  memory_inputs: crate::mlx_fit_gate::MlxRequestInputs|
+     -> std::pin::Pin<Box<dyn std::future::Future<Output = (Image, String)>>> {
+        let prompt_request = make_req();
+        let out_dir = out_dir.clone();
+        Box::pin(async move {
+            mlx_rs::memory::clear_cache();
+            let started = std::time::Instant::now();
+            let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
+                "krea_2_turbo",
+                &route_request.model,
+                &spec,
+                Some(&route_request.model_manifest_entry),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("[{label}] request plan: {error}"));
+            let image = crate::generator_cache::with_cached_generator_for_request(
+                "krea_2_turbo",
+                spec,
+                format!("[{label}] load failed"),
+                move |generator,
+                      cache_state,
+                      loaded_policy,
+                      warm_policy,
+                      external_committed_bytes,
+                      _provider_resident_bytes| {
+                    let evaluation = crate::mlx_fit_gate::evaluate_request(
+                        generator,
+                        &memory_plan,
+                        &memory_inputs,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy,
+                        external_committed_bytes,
+                    )?;
+                    let _request_memory_limit = evaluation
+                        .process_limit_bytes
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    let mut request = prompt_request;
+                    request.memory = Some(evaluation.memory);
+                    let output = crate::memory_strategy::generate_with_scope(
+                        generator,
+                        &mut request,
+                        Some(&evaluation.context),
+                        &mut |_| {},
+                    )
+                    .map_err(|error| WorkerError::Engine(error.to_string()))?;
+                    match output {
+                        GenerationOutput::Images(mut images) => {
+                            Ok(images.pop().expect("one image"))
+                        }
+                        other => panic!("expected Images, got {other:?}"),
+                    }
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("[{label}] production admission: {error}"));
+            let load_seconds = started.elapsed().as_secs_f64();
+            assert_eq!((image.width, image.height), (w, h));
+            let std = image_std(&image);
+            assert!(
+                std > DEGENERATE_STD_FLOOR_DEFAULT,
+                "[{label}] degenerate render"
+            );
+            let sha = format!("{:x}", Sha256::digest(&image.pixels));
+            let png = out_dir.join(format!("{label}.png"));
+            save_png(&image, &png);
+            eprintln!(
+                "RESULT label={label} geometry={w}x{h} steps={steps} seed={seed} \
+                 pixel_sha256={sha} std={std:.3} admission_seconds={load_seconds:.2} \
+                 total_seconds={:.2} output={} entry=production_admission",
+                started.elapsed().as_secs_f64(),
+                png.display()
+            );
+            mlx_rs::memory::clear_cache();
+            (image, sha)
+        })
+    };
+
+    // Each lane's own memory-inputs builder, not one shared call: two independent admissions.
+    let (legacy_image, legacy_sha) = render(
+        "legacy_krea_imported",
+        legacy_spec,
+        legacy_request.clone(),
+        krea_imported_memory_inputs(&legacy_request, &[], None, 0),
+    )
+    .await;
+    let (plan_image, plan_sha) = render(
+        "plan_driven_route",
+        plan_spec,
+        plan_request.clone(),
+        checkpoint_plan_memory_inputs(&plan_request),
+    )
+    .await;
+    let byte_delta = legacy_image
+        .pixels
+        .iter()
+        .zip(&plan_image.pixels)
+        .filter(|(left, right)| left != right)
+        .count();
+    eprintln!(
+        "PARITY lhs=legacy_krea_imported rhs=plan_driven_route byte_delta={byte_delta} \
+         legacy_sha256={legacy_sha} plan_sha256={plan_sha}"
+    );
+    // Persist the legacy sha next to the PNGs so a render of the same file/base/request on another
+    // inference revision (e.g. the inference-side `variant5_native_file_render_fixed_seed_sha`)
+    // can be compared against today's path without re-running this lane.
+    std::fs::write(out_dir.join("legacy_pixel_sha256.txt"), &legacy_sha).expect("write sha");
+    assert_eq!(
+        legacy_image.pixels, plan_image.pixels,
+        "plan-driven route must be byte-identical to today's Krea path at a fixed seed \
+         (legacy {legacy_sha}, plan {plan_sha}, {byte_delta} differing bytes)"
+    );
+    assert_eq!(legacy_sha, plan_sha);
+}
+
+/// End-to-end reachability (sc-20635, AC1): approve a library root → compile a linked checkpoint →
+/// let the MODEL-IMPORT stamp build the manifest entry → `prepare_image_route` selects
+/// `ImageRoute::CheckpointPlan` and hands the handler the plan's own weights.
+///
+/// This is the link sc-20634's review found missing: `approve_root`/`compile_linked` had no
+/// non-test caller, so a compiled plan was a file on disk nothing could select. The entry here is
+/// NOT hand-written — it is exactly what `model_jobs::linked_checkpoint_manifest_entry` produces
+/// for this compile, which is what `run_model_import_job` upserts into `user.models.jsonc`.
+///
+/// Failing mutation: delete the `entry.insert("importPlan", …)` line in
+/// `linked_checkpoint_manifest_entry` and this goes red — `resolve_image_route` returns `None`
+/// (nothing claims the entry) instead of `CheckpointPlan`.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_approved_root_becomes_a_selectable_plan_backed_model_through_the_import_stamp() {
+    let fx = CheckpointPlanFixture::new("reachability", true);
+    write_tiny_safetensors(
+        &fx.library_dir.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let compiled = fx
+        .store
+        .compile_linked(&fx.root_id, "kreamania.safetensors")
+        .expect("the linked checkpoint compiles");
+
+    // The manifest entry the API queued, before the worker's stamp: no plan, no install path.
+    let queued: JsonObject = json!({
+        "id": "linked_kreamania",
+        "name": "kreamania",
+        "type": "image",
+        "catalogScope": "user",
+        "source": {
+            "provider": "linked-library",
+            "rootId": fx.root_id,
+            "relativePath": "kreamania.safetensors",
+        },
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&queued),
+        None,
+        "SANITY: the queued entry is not yet plan-backed"
+    );
+
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled);
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+        Some(compiled.checkpoint_id.as_str()),
+        "the import stamps the persisted identity, which is the ONLY selection discriminator"
+    );
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("krea_2"),
+        "the compiled plan's family is stamped so the catalog can route it"
+    );
+    assert!(
+        entry
+            .get("paths")
+            .and_then(Value::as_object)
+            .and_then(|paths| paths.get("model"))
+            .is_none(),
+        "a linked entry carries no install path: nothing was installed"
+    );
+    // Identity is rootId + relativePath, never an absolute path (E6).
+    let serialized = serde_json::to_string(&entry).unwrap();
+    assert!(
+        !serialized.contains(fx.library_dir.to_str().unwrap()),
+        "no absolute library path may reach the manifest entry: {serialized}"
+    );
+
+    let mut payload = json!({
+        "projectId": "p",
+        "model": "linked_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+    });
+    payload["modelManifestEntry"] = Value::Object(entry);
+    let request = request(payload);
+
+    let prepared = prepare_image_route(&request, &fx.settings)
+        .expect("route preparation succeeds")
+        .expect("a plan-backed entry is claimed by a route");
+    assert_eq!(
+        prepared.kind(),
+        ImageRoute::CheckpointPlan,
+        "ROUTE EVIDENCE: an approved root's compiled checkpoint is selectable end to end"
+    );
+    let PreparedImageRoute::CheckpointPlan(sources) = prepared else {
+        panic!("the plan route must carry its own prepared sources");
+    };
+    assert_eq!(sources.checkpoint_id, compiled.checkpoint_id);
+    assert_eq!(
+        sources.primary,
+        WeightsSource::File(fx.library_dir.join("kreamania.safetensors")),
+        "the handler loads the LINKED file in place; nothing was copied"
+    );
+}
+
+/// AC1 lifecycle → routing: a compiled checkpoint whose library moved stops being selectable with
+/// its typed refusal, and a relink of the SAME root id makes it selectable again without
+/// recompiling. The manifest entry never changes: it carries the identity, not the path.
+#[cfg(target_os = "macos")]
+#[test]
+fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_entry() {
+    let fx = CheckpointPlanFixture::new("relink-route", true);
+    write_tiny_safetensors(
+        &fx.library_dir.join("kreamania.safetensors"),
+        &krea_native_entries(),
+        0x5a,
+    );
+    let compiled = fx
+        .store
+        .compile_linked(&fx.root_id, "kreamania.safetensors")
+        .unwrap();
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(
+        json!({"id": "linked_kreamania", "catalogScope": "user", "type": "image"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        &compiled,
+    );
+    let mut payload = json!({
+        "projectId": "p",
+        "model": "linked_kreamania",
+        "prompt": "a fox",
+        "count": 1,
+    });
+    payload["modelManifestEntry"] = Value::Object(entry);
+    let request = request(payload);
+    assert_eq!(
+        prepare_image_route(&request, &fx.settings)
+            .unwrap()
+            .map(|route| route.kind()),
+        Some(ImageRoute::CheckpointPlan)
+    );
+
+    // The user moves the library.
+    let moved = tempfile::Builder::new()
+        .prefix(&format!("plan-route-moved-{}-", std::process::id()))
+        .tempdir()
+        .unwrap();
+    let moved_dir = std::fs::canonicalize(moved.path()).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        moved_dir.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    std::fs::remove_file(fx.library_dir.join("kreamania.safetensors")).unwrap();
+
+    // Now the route refuses LOUDLY with the plan store's typed diagnostic rather than silently
+    // falling through to another lane or the stub.
+    let error = match prepare_image_route(&request, &fx.settings) {
+        Err(error) => error.to_string(),
+        Ok(route) => panic!(
+            "a plan-backed entry whose source is gone is a refusal, not a route miss (got {:?})",
+            route.map(|route| route.kind())
+        ),
+    };
+    assert!(
+        error.contains("[checkpoint-plan:source-missing]"),
+        "{error}"
+    );
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        sceneworks_core::checkpoint_plan_store::LinkedCheckpointStateV1::NeedsRescan
+    );
+
+    // Relink the SAME root id at the library's new home: selectable again, same entry, no
+    // recompile, and the plan's layer now resolves under the new directory.
+    fx.store.relink_root(&fx.root_id, &moved_dir).unwrap();
+    let prepared = prepare_image_route(&request, &fx.settings)
+        .unwrap()
+        .expect("the relinked checkpoint is selectable again");
+    assert_eq!(prepared.kind(), ImageRoute::CheckpointPlan);
+    let PreparedImageRoute::CheckpointPlan(sources) = prepared else {
+        panic!("the plan route must carry its own prepared sources");
+    };
+    assert_eq!(
+        sources.primary,
+        WeightsSource::File(moved_dir.join("kreamania.safetensors"))
+    );
+}
+
+/// The import stamp itself, on EVERY lane (sc-20635).
+///
+/// `linked_checkpoint_manifest_entry` is platform-independent, but the two reachability tests above
+/// need a real MLX-lane compile and are macOS-gated, so the "remove the stamp → nothing can select
+/// this entry" mutation was caught on exactly one of the three build configurations. This asserts
+/// the two properties the stamp exists for, from a hand-built compile result that needs no weights
+/// and no backend: `importPlan.checkpointId` is present (the ONLY selection discriminator), and
+/// `paths.model` is absent (nothing was installed, and a bespoke imported lane would otherwise
+/// claim the entry too).
+///
+/// Failing mutations: delete the `entry.insert("importPlan", …)` line, or delete the
+/// `paths.remove("model")` line.
+#[test]
+fn the_linked_import_stamp_carries_the_plan_identity_and_no_install_path() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, ImportPlanReferenceV1, ImportPlanSummaryV1, ImportPlanV1,
+        CHECKPOINT_IMPORT_CONTRACT_VERSION,
+    };
+    use sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1;
+
+    let checkpoint_id = "linked/root-0123456789abcdef012/kreamania.safetensors";
+    let plan_id = "checkpoint-plan-0123456789abcdef";
+    let semantic_digest = "0".repeat(64);
+    let compiled = CompiledCheckpointV1 {
+        checkpoint_id: checkpoint_id.to_owned(),
+        record: CheckpointCatalogRecordV1 {
+            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+            checkpoint_id: checkpoint_id.to_owned(),
+            plan: ImportPlanReferenceV1 {
+                schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+                plan_id: plan_id.to_owned(),
+                semantic_digest: semantic_digest.clone(),
+                source_binding_identity: checkpoint_id.to_owned(),
+            },
+            summary: ImportPlanSummaryV1 {
+                schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+                family: "krea_2".to_owned(),
+                layer_count: 1,
+                layer_roles: vec!["dit".to_owned()],
+                semantic_digest: semantic_digest.clone(),
+            },
+        },
+        plan: ImportPlanV1 {
+            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+            plan_id: plan_id.to_owned(),
+            family: "krea_2".to_owned(),
+            layers: Vec::new(),
+        },
+        // sc-20636 reports same-digest siblings on a compile; the stamp does not read them.
+        duplicate_checkpoint_ids: Vec::new(),
+    };
+
+    // An entry that arrived carrying an install path — the shape the fetch-import lane produces —
+    // so the removal is exercised rather than merely absent.
+    let queued = json!({
+        "id": "linked_kreamania",
+        "type": "image",
+        "catalogScope": "user",
+        "paths": { "model": "/tmp/should-not-survive" },
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&queued),
+        None,
+        "SANITY: the queued entry is not yet plan-backed"
+    );
+
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled);
+    assert_eq!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
+        Some(checkpoint_id),
+        "without the stamp nothing can select a compiled plan"
+    );
+    assert_eq!(
+        entry["importPlan"]["planId"],
+        Value::String(plan_id.to_owned())
+    );
+    assert_eq!(entry.get("family").and_then(Value::as_str), Some("krea_2"));
+    assert!(
+        entry
+            .get("paths")
+            .and_then(Value::as_object)
+            .and_then(|paths| paths.get("model"))
+            .is_none(),
+        "a linked entry names no install directory: {entry:?}"
+    );
+}
+
+/// sc-20636: importing a model under managed ownership must not REMOVE a capability the entry had.
+///
+/// A managed install carries `importPlan.checkpointId` AND `paths.model`. The plan-driven skeleton
+/// serves plain text-to-image only, so the claim is per-request: this route takes the shapes it
+/// serves and the family's bespoke lane keeps the rest. Exactly one lane owns each request, and a
+/// LINKED entry — which has no bespoke lane — still refuses loudly.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_serve() {
+    let fx = CheckpointPlanFixture::new("managed-claim", true);
+    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
+
+    // The managed shape: the plan identity plus the SceneWorks-owned install the import wrote.
+    let install = fx.settings.data_dir.join("models/imports/kreamania");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::copy(
+        fx.library_dir.join("kreamania.safetensors"),
+        install.join("kreamania.safetensors"),
+    )
+    .unwrap();
+    let managed = |extra: Value| -> ImageRequest {
+        let mut payload = json!({
+            "projectId": "p",
+            "model": "managed_kreamania",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": {
+                "id": "managed_kreamania",
+                "catalogScope": "user",
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "importPlan": { "checkpointId": checkpoint_id },
+                "paths": { "model": install.to_str().unwrap() }
+            }
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                payload[key] = value.clone();
+            }
+        }
+        request(payload)
+    };
+
+    // Plain text-to-image: the plan route owns it, and the bespoke lane declines.
+    let plain = managed(json!({}));
+    assert_eq!(
+        resolve_image_route(&plain, &fx.settings),
+        Some(ImageRoute::CheckpointPlan)
+    );
+    assert!(!krea_imported_available(&plain, &fx.settings));
+
+    // Edit: the plan route DECLINES (it has no edit surface yet) and the bespoke lane claims it, so
+    // the capability the entry had before it was plan-backed survives.
+    let edit = managed(json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }));
+    assert!(
+        !prepare_checkpoint_plan_sources(&edit, &fx.settings)
+            .unwrap()
+            .is_available(),
+        "an edit on a managed entry must not be claimed by the plan route"
+    );
+    assert!(
+        !matches!(
+            resolve_image_route(&edit, &fx.settings),
+            Some(ImageRoute::CheckpointPlan)
+        ),
+        "the plan route must not own an edit request"
+    );
+    assert!(
+        krea_imported_available(&edit, &fx.settings),
+        "the family's bespoke lane keeps the shapes the plan route does not serve"
+    );
+
+    // A LoRA on a managed entry: same rule.
+    let with_lora = managed(json!({ "loras": [{ "id": "style", "weight": 0.8 }] }));
+    assert!(!prepare_checkpoint_plan_sources(&with_lora, &fx.settings)
+        .unwrap()
+        .is_available());
+    assert!(krea_imported_available(&with_lora, &fx.settings));
+
+    // A LINKED entry carrying a provenance-only `source.path` is STILL a linked entry: that field
+    // is a data-dir-relative breadcrumb an import writes, not bytes any lane can load. Reading it
+    // as an installed path (which `imported_entry_installed_path` does, for admission) made the
+    // route believe a bespoke lane existed, decline to it, and point it at a path it must not read
+    // (sc-20636 review). The decline predicate uses loadable paths only.
+    let linked_with_provenance_path = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({
+            "mode": "edit_image",
+            "sourceAssetId": "asset-1",
+            "modelManifestEntry": {
+                "id": "linked_kreamania",
+                "catalogScope": "user",
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "importPlan": { "checkpointId": checkpoint_id },
+                "source": { "provider": "local", "path": "models/imports/kreamania" }
+            }
+        }),
+    );
+    assert!(
+        sceneworks_core::jobs_store::imported_entry_installed_path(
+            &linked_with_provenance_path.model_manifest_entry
+        )
+        .is_some(),
+        "premise: the admission reading DOES see `source.path`; without that this is vacuous"
+    );
+    assert!(
+        sceneworks_core::jobs_store::imported_entry_loadable_path(
+            &linked_with_provenance_path.model_manifest_entry
+        )
+        .is_none(),
+        "a provenance breadcrumb is not a loadable path"
+    );
+    assert!(
+        !prepare_checkpoint_plan_sources(&linked_with_provenance_path, &fx.settings)
+            .unwrap()
+            .is_available(),
+        "the plan route never claims an edit; a provenance breadcrumb changes nothing about that"
+    );
+    // sc-20644 (Krea row) changed the ANSWER here, not the rule: a linked Krea checkpoint now has a
+    // bespoke lane, because that lane sources the plan's own verified layer rather than scanning an
+    // install directory. So the route declines to it instead of refusing, and the shape is served —
+    // which is the capability a linked import used to lack entirely. The provenance breadcrumb is
+    // still never read: the lane's primary is the plan's layer, under the LIBRARY root.
+    let pin = resolve_imported_krea_dit_pin(&linked_with_provenance_path, &fx.settings)
+        .unwrap()
+        .expect("a linked Krea entry's bespoke lane sources the plan's verified layer");
+    assert_eq!(
+        pin.loader_path(),
+        fx.library_dir.join("kreamania.safetensors")
+    );
+    assert!(
+        krea_imported_available(&linked_with_provenance_path, &fx.settings),
+        "the bespoke lane claims the edit the plan route declined"
+    );
+
+    // The same unsupported shape on a plain LINKED entry: declined by the plan route, served by the
+    // family's lane, never a stub.
+    let linked_edit = fx.plan_backed_request(
+        &checkpoint_id,
+        json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
+    );
+    assert!(!prepare_checkpoint_plan_sources(&linked_edit, &fx.settings)
+        .unwrap()
+        .is_available());
+    assert_eq!(
+        resolve_image_route(&linked_edit, &fx.settings),
+        Some(ImageRoute::KreaImported),
+        "a linked Krea edit is served, not refused (sc-20644 Krea row)"
+    );
+
+    // Integrity refusals are NEVER declined, even for a managed entry with a bespoke lane: falling
+    // back to a lane that would load the very bytes the plan rejected is a silent substitution.
+    let file = fx.library_dir.join("kreamania.safetensors");
+    let original = std::fs::read(&file).unwrap();
+    let mut mutated = original.clone();
+    let last = mutated.len() - 1;
+    mutated[last] ^= 0xff;
+    std::fs::write(&file, &mutated).unwrap();
+    let message = match prepare_checkpoint_plan_sources(&plain, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(selection) => panic!(
+            "drifted bytes must refuse even with a bespoke lane present, got {:?}",
+            selection
+                .into_sources()
+                .map(|sources| sources.checkpoint_id)
+        ),
+    };
+    assert!(
+        message.starts_with("[checkpoint-plan:source-drifted]"),
+        "{message}"
+    );
+    std::fs::write(&file, &original).unwrap();
+
+    // A family with no adapter binding on this backend is a route-capability refusal, so a managed
+    // entry declines to its bespoke lane there too.
+    let zimage_id = fx.compile(
+        "zimage.safetensors",
+        &[
+            ("noise_refiner.0.attention.qkv.weight", "BF16"),
+            ("context_refiner.0.attention.qkv.weight", "BF16"),
+        ],
+    );
+    let zimage_managed = request(json!({
+        "projectId": "p",
+        "model": "managed_zimage",
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "id": "managed_zimage",
+            "catalogScope": "user",
+            "family": "z-image",
+            "importSourceShape": "transformer_file",
+            "importPlan": { "checkpointId": zimage_id },
+            "paths": { "model": install.to_str().unwrap() }
+        }
+    }));
+    assert!(
+        !prepare_checkpoint_plan_sources(&zimage_managed, &fx.settings)
+            .unwrap()
+            .is_available(),
+        "an unbound family is a route-capability refusal, so the plan route does not claim it"
+    );
+
+    // ...but `z-image` has NO bespoke imported lane, so nothing else claims it either. That zero-lane
+    // fall-through is the whole point of this block (sc-20636 review): `Ok(None)` out of
+    // `prepare_image_route` lands the job in `generate_stub_stream` and it COMPLETES with procedural
+    // stub output — a managed import silently producing fake pixels. Assert the premise (no lane) and
+    // then the terminal outcome (a typed refusal, never a stub).
+    assert!(
+        resolve_image_route(&zimage_managed, &fx.settings).is_none(),
+        "premise: no image lane claims an unbound managed family; without that this assertion is vacuous"
+    );
+    assert!(
+        !krea_imported_available(&zimage_managed, &fx.settings),
+        "premise: the krea lane must not claim a z-image entry"
+    );
+    let message = match prepare_image_route(&zimage_managed, &fx.settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected InvalidPayload, got {other:?}"),
+        Ok(None) => panic!(
+            "a plan-backed entry no lane claims must refuse; Ok(None) reaches generate_stub_stream \
+             and completes the job with procedural stub output"
+        ),
+        Ok(Some(route)) => panic!("no lane should claim this request, got {:?}", route.kind()),
+    };
+    assert!(
+        message.starts_with("[checkpoint-plan:no-adapter-binding]"),
+        "the zero-lane fall-through must surface the plan route's own typed refusal: {message}"
+    );
+    assert!(
+        message.contains(&zimage_id),
+        "the refusal must name the checkpoint that could not be routed: {message}"
+    );
+}
+
+/// Scope addition 12(a) / E4, second half (sc-20651) — the sibling of
+/// [`a_pre_epic_imported_entry_with_no_import_plan_resolves_the_route_it_always_did`]: the same
+/// pre-epic entry, put through the REAL migration pass, still names the same model and still
+/// renders the same bytes.
+///
+/// The first half proves an unmigrated entry keeps its legacy lane. This half proves the migration
+/// itself is not the thing that breaks it. Both the migration and the route preparation are driven
+/// through production functions — nothing is hand-stamped — because the regression this guards
+/// against is precisely a stamp that is subtly not what the route reads.
+///
+/// The claim is USER-VISIBLE behavior, not route identity: after migration the plan route legitimately
+/// claims the entry (that is the point of the epic), so what must not change is the model id, the
+/// entry's `paths.model`, the fact that a route resolves at all, and — the load-bearing one — the
+/// weight file the resolved route loads. A test that only asserted "some route resolved" would stay
+/// green if migration pointed the model at different bytes.
+///
+/// Failing mutations (each run separately):
+///   * make the stamp also overwrite `paths` — the `paths.model` equality fails;
+///   * stamp a `checkpointId` for a different managed install (`format!("{id}-other")`) — the plan
+///     route finds no record, the entry falls back to its legacy lane, and the route-kind assertion
+///     fails.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn a_migrated_pre_epic_entry_keeps_its_model_id_and_loads_the_same_weights() {
+    let fx = CheckpointPlanFixture::new("e4-migrated", true);
+    let install = fx.settings.data_dir.join("models/imports/legacy-kreamania");
+    let weights = install.join("kreamania.safetensors");
+    write_tiny_safetensors(&weights, &krea_native_entries(), 0x5a);
+
+    let legacy_entry = json!({
+        "id": "imported_kreamania",
+        "name": "Kreamania",
+        "type": "image",
+        "catalogScope": "user",
+        "family": "krea_2",
+        "importSourceShape": "transformer_file",
+        "paths": { "model": install.to_str().unwrap() }
+    });
+    let image_request = |entry: &Value| {
+        request(json!({
+            "projectId": "p",
+            "model": "imported_kreamania",
+            "prompt": "a fox",
+            "count": 1,
+            "modelManifestEntry": entry.clone()
+        }))
+    };
+
+    // BEFORE: the pre-epic entry takes its bespoke Krea lane and loads the install file.
+    let before_request = image_request(&legacy_entry);
+    assert!(
+        !before_request
+            .model_manifest_entry
+            .contains_key("importPlan"),
+        "fixture check: this is the pre-epic entry shape — no importPlan key at all"
+    );
+    let before = prepare_image_route_on_this_lane(&before_request, &fx.settings)
+        .expect("a pre-epic entry must not be refused")
+        .expect("a pre-epic entry still has a route");
+    match before {
+        RoutedImageLane::KreaImported(sources) => {
+            assert_eq!(sources.dit_pin.loader_path(), weights.as_path())
+        }
+        other => panic!(
+            "expected the legacy imported bundle, got {:?}",
+            other.label()
+        ),
+    }
+
+    // Drive the REAL migration over a REAL user catalog, exactly as worker startup does.
+    let config_dir = fx.settings.data_dir.join("config");
+    std::fs::create_dir_all(config_dir.join("manifests")).unwrap();
+    let manifest_path = config_dir.join("manifests/user.models.jsonc");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&json!({"schemaVersion": 1, "models": [legacy_entry.clone()]}))
+            .unwrap(),
+    )
+    .unwrap();
+    let summary = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(
+            crate::checkpoint_catalog_migration::migrate_legacy_checkpoint_catalog(
+                &config_dir,
+                &fx.settings.data_dir,
+            ),
+        )
+        .expect("the migration pass must not abort");
+    assert_eq!(
+        (summary.attempted, summary.migrated),
+        (1, 1),
+        "premise: the pre-epic entry must actually migrate, or everything below is vacuous: {:?}",
+        summary.failures
+    );
+
+    let migrated: Value = serde_json::from_str(&strip_jsonc_comments(
+        &std::fs::read_to_string(&manifest_path).unwrap(),
+    ))
+    .unwrap();
+    let migrated_entry = migrated["models"][0].clone();
+
+    // The saved-workflow keys: the id a project references and the install path every existing
+    // consumer of this entry reads.
+    assert_eq!(migrated_entry["id"], legacy_entry["id"]);
+    assert_eq!(migrated_entry["paths"], legacy_entry["paths"]);
+    assert!(
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(
+            migrated_entry.as_object().unwrap()
+        )
+        .is_some(),
+        "premise: the entry really is plan-backed now"
+    );
+
+    // AFTER: still routes (never refused, never the stub fall-through) and still loads the very
+    // same file.
+    let after_request = image_request(&migrated_entry);
+    let after = prepare_image_route_on_this_lane(&after_request, &fx.settings)
+        .expect("a migrated entry must not be refused")
+        .expect("a migrated entry still has a route");
+    assert_eq!(
+        after.label(),
+        "CheckpointPlan",
+        "migration is what MOVES the entry onto the plan route; falling back to the legacy lane \
+         here would mean the stamp the route reads is not the one that was written"
+    );
+    let after_weights = match after {
+        RoutedImageLane::CheckpointPlan(sources) => {
+            match checkpoint_plan_load_spec(&sources, None)
+                .expect("the migrated plan implies a load spec")
+                .weights
+            {
+                WeightsSource::File(path) => path,
+                other => panic!("the migrated plan must load a single weight FILE, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "a migrated pre-epic entry must keep a weight-loading lane, got {:?}",
+            other.label()
+        ),
+    };
+    // Compared canonicalized: the plan store records the install path it canonicalized at compile
+    // time, and on macOS a temp dir under `/var` canonicalizes to `/private/var`. Both sides are
+    // resolved so the comparison is about WHICH FILE, not which spelling of it.
+    assert_eq!(
+        std::fs::canonicalize(&after_weights).unwrap(),
+        std::fs::canonicalize(&weights).unwrap(),
+        "migration must not change which bytes the model renders from"
     );
 }
 

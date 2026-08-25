@@ -4,6 +4,9 @@ use sceneworks_core::base_weights::{
     detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
     BaseWeightDetection, ComponentRole,
 };
+use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
+use sceneworks_core::checkpoint_ingest::ManagedIngest;
+use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
 
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
 /// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
@@ -4647,12 +4650,291 @@ async fn stable_model_file_sha256(
     Ok((hash, after))
 }
 
+/// The manifest entry a compiled linked checkpoint becomes (epic 20398, sc-20635).
+///
+/// This is the stamp that makes a linked checkpoint REACHABLE. `importPlan.checkpointId` is the
+/// persisted identity — `rootId + relativePath`, never an absolute path (E6) — and it is the single
+/// discriminator every consumer keys on: the scheduler's imported claim
+/// (`jobs_store::checkpoint_plan_checkpoint_id`), the worker's route selection
+/// (`image_jobs::checkpoint_plan`), and every bespoke imported lane's decline. Without it a
+/// compiled plan is a file on disk nothing can select.
+///
+/// A plan-backed entry carries NO `paths.model`. The plan-driven route resolves the plan's own
+/// layers through the plan store; writing an install path here would both be a lie (nothing was
+/// installed) and hand the entry to a bespoke lane as well, breaking the single-claim invariant.
+pub(crate) fn linked_checkpoint_manifest_entry(
+    mut entry: JsonObject,
+    compiled: &sceneworks_core::checkpoint_plan_store::CompiledCheckpointV1,
+) -> JsonObject {
+    entry
+        .entry("family")
+        .or_insert_with(|| Value::String(compiled.plan.family.clone()));
+    entry.insert(
+        "importPlan".to_owned(),
+        json!({
+            "checkpointId": compiled.checkpoint_id,
+            "planId": compiled.plan.plan_id,
+            "semanticDigest": compiled.record.plan.semantic_digest,
+        }),
+    );
+    // A linked checkpoint is referenced in place; nothing was copied into an app-owned install
+    // directory, so any inherited install path would name a directory that does not exist.
+    if let Some(paths) = entry.get_mut("paths").and_then(Value::as_object_mut) {
+        paths.remove("model");
+    }
+    let model_type = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("image")
+        .to_owned();
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    apply_model_manifest_defaults(&mut entry, &model_type, family.as_deref());
+    entry
+}
+
+/// Compile a linked checkpoint under an approved root and register it as a selectable model.
+///
+/// Nothing is downloaded, copied, moved or deleted: the only writes are the plan store's own
+/// documents under `<data>/checkpoints/` and the manifest entry (E6).
+async fn run_linked_checkpoint_import_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    root_id: &str,
+    relative_path: &str,
+) -> WorkerResult<()> {
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Importing,
+            0.1,
+            "Inspecting the linked checkpoint.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let root_id = root_id.to_owned();
+    let relative_path = relative_path.to_owned();
+    // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
+    let compiled =
+        match tokio::task::spawn_blocking(move || store.compile_linked(&root_id, &relative_path))
+            .await
+        {
+            Ok(Ok(compiled)) => compiled,
+            // Every refusal is already a typed `[checkpoint-plan:<code>]` diagnostic naming what is
+            // wrong with the source; surface it verbatim rather than flattening it to "import failed".
+            Ok(Err(error)) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(error.to_string()),
+                )
+                .await;
+            }
+            Err(error) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(format!("Checkpoint inspection task failed: {error}")),
+                )
+                .await;
+            }
+        };
+
+    if let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        let manifest_entry = linked_checkpoint_manifest_entry(manifest_entry, &compiled);
+        let manifest_path = model_manifest_target(settings, &job.payload)?;
+        upsert_manifest_entry(&manifest_path, "models", manifest_entry).await?;
+    }
+
+    let mut result = JsonObject::new();
+    result.insert(
+        "modelId".to_owned(),
+        job.payload.get("modelId").cloned().unwrap_or(Value::Null),
+    );
+    result.insert(
+        "checkpointId".to_owned(),
+        Value::String(compiled.checkpoint_id.clone()),
+    );
+    result.insert(
+        "importPlanId".to_owned(),
+        Value::String(compiled.plan.plan_id.clone()),
+    );
+    result.insert(
+        "family".to_owned(),
+        Value::String(compiled.plan.family.clone()),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Linked checkpoint registered.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The managed install id for a resolved model-import target directory (sc-20636).
+///
+/// The install id is the target directory's own name, so a managed install occupies exactly the
+/// path imported models have always occupied (`<data>/models/imports/<name>`) and every existing
+/// consumer of `paths.model` keeps working. The store's own [`CheckpointPlanStore::install_dir`] is
+/// then required to reproduce that same path, which is what proves the id addresses the intended
+/// directory rather than merely looking plausible.
+fn managed_install_id_for_target(
+    store: &CheckpointPlanStore,
+    target_dir: &Path,
+) -> WorkerResult<String> {
+    let install_id = target_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Model import target {} does not name an install directory",
+                target_dir.display()
+            ))
+        })?
+        .to_owned();
+    // Normalized the same way `resolve_model_import_target` normalized `target_dir`: on macOS a
+    // data dir under `/var` canonicalizes to `/private/var`, so a lexical comparison would reject
+    // the very directory the store derived.
+    let derived = store
+        .install_dir(&install_id)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let derived = crate::paths::normalize_existing_or_absolute(&derived)?;
+    if derived != target_dir {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Model import target {} is not the managed install directory for {install_id:?} ({})",
+            target_dir.display(),
+            derived.display()
+        )));
+    }
+    Ok(install_id)
+}
+
+/// The provenance a managed install records, taken from the `importProvenance` the API normalised
+/// from either the discriminated source or the legacy flat fields.
+///
+/// A payload with no provenance is a job queued by an older API build; it records the ingest source
+/// as `legacy-import` rather than guessing, so the field is never silently wrong.
+fn managed_provenance_from_payload(payload: &JsonObject) -> WorkerResult<ManagedProvenanceV1> {
+    let Some(object) = payload.get("importProvenance").and_then(Value::as_object) else {
+        return Ok(ManagedProvenanceV1::of_source("legacy-import"));
+    };
+    let field = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let provenance = ManagedProvenanceV1 {
+        source: field("source").unwrap_or_else(|| "legacy-import".to_owned()),
+        reference: field("reference"),
+        url: field("url"),
+        version_id: field("versionId"),
+        file_id: field("fileId"),
+        credential_host: field("credentialHost"),
+    };
+    provenance
+        .validate()
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    Ok(provenance)
+}
+
+/// A staged artifact's path relative to the staging root, in the portable `/`-separated spelling
+/// the plan contract uses.
+fn managed_staged_relative_path(staging_dir: &Path, file: &Path) -> WorkerResult<String> {
+    let relative = file.strip_prefix(staging_dir).map_err(|_| {
+        WorkerError::InvalidPayload(format!(
+            "Imported checkpoint {} is not inside the import staging directory {}",
+            file.display(),
+            staging_dir.display()
+        ))
+    })?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(
+                part.to_str()
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "Imported checkpoint path {} is not valid UTF-8",
+                            relative.display()
+                        ))
+                    })?
+                    .to_owned(),
+            ),
+            _ => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Imported checkpoint path {} is not a confined relative path",
+                    relative.display()
+                )))
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Imported checkpoint path is empty".to_owned(),
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
 pub(crate) async fn run_model_import_job(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // Linked (in-place) ownership is its own transaction: no transfer, no install directory, no
+    // `paths.model` (sc-20635). Dispatched before anything below so the download-oriented path
+    // cannot reach a plan-backed entry at all.
+    if let Some(root_id) = optional_payload_string(&job.payload, "linkedRootId") {
+        let Some(relative_path) = optional_payload_string(&job.payload, "linkedRelativePath")
+        else {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(
+                    "A linked checkpoint import requires both linkedRootId and \
+                     linkedRelativePath."
+                        .to_owned(),
+                ),
+            )
+            .await;
+        };
+        let (root_id, relative_path) = (root_id.to_owned(), relative_path.to_owned());
+        return run_linked_checkpoint_import_job(api, settings, job, &root_id, &relative_path)
+            .await;
+    }
     let repo = optional_payload_string(&job.payload, "repo");
     let source_url = optional_payload_string(&job.payload, "sourceUrl");
     let source_path = optional_payload_string(&job.payload, "sourcePath");
@@ -4666,8 +4948,31 @@ pub(crate) async fn run_model_import_job(
             .data_dir
             .join("models")
             .join("imports")
-            .join(target_name),
+            .join(&target_name),
     )?;
+
+    // sc-20636 (epic 20398): every managed source — HF repo, source URL, Civitai, upload, local
+    // copy — transfers into a STAGING directory and reaches `target_dir` only through one atomic
+    // rename in `ManagedIngest::finalize`, after its bytes have been hashed and fully validated. A
+    // cancel, a crash, a full disk, or a hash mismatch therefore all end with no directory at
+    // `target_dir` at all, so no partially-transferred model is ever addressable, selectable, or
+    // written to the manifest. The transfer code below is unchanged and simply points at staging.
+    let plan_store = CheckpointPlanStore::open(&settings.data_dir);
+    let install_id = managed_install_id_for_target(&plan_store, &target_dir)?;
+    let provenance = managed_provenance_from_payload(&job.payload)?;
+    let ingest = match ManagedIngest::begin(&plan_store, &install_id, provenance) {
+        Ok(ingest) => ingest,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await
+        }
+    };
+    let staging_dir = ingest.staging_dir().to_path_buf();
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
@@ -4715,7 +5020,7 @@ pub(crate) async fn run_model_import_job(
                 cancel_message: "Model import canceled by user.",
                 fresh_download: false,
             },
-            &target_dir,
+            &staging_dir,
             &snapshot,
             &mut progress,
         )
@@ -4733,7 +5038,7 @@ pub(crate) async fn run_model_import_job(
         )?;
         import_lora_source_path(
             &source_path,
-            &target_dir,
+            &staging_dir,
             payload_bool(&job.payload, "uploadedSourcePath"),
         )
         .await?;
@@ -4748,7 +5053,7 @@ pub(crate) async fn run_model_import_job(
                 fresh_download: false,
             },
             source_url,
-            &target_dir,
+            &staging_dir,
         )
         .await?;
     } else {
@@ -4761,7 +5066,7 @@ pub(crate) async fn run_model_import_job(
         .await;
     }
 
-    let imported_model_file = imported_model_primary_weight_file(&target_dir);
+    let imported_model_file = imported_model_primary_weight_file(&staging_dir);
     let mut model_file_sha256 = None;
     let mut verified_model_file_identity = None;
 
@@ -4827,7 +5132,7 @@ pub(crate) async fn run_model_import_job(
                     &detection,
                     BaseWeightDetection::Recognized(verdict)
                         if verdict.family.as_deref() == Some("mage-flow")
-                ) && !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&target_dir)
+                ) && !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&staging_dir)
                 {
                     return fail_job(
                         api,
@@ -4856,7 +5161,7 @@ pub(crate) async fn run_model_import_job(
                             ComponentRole::Transformer
                                 if verdict.family.as_deref() == Some("mage-flow")
                                     && sceneworks_core::base_weights::is_mage_flow_transformer_dir(
-                                        &target_dir,
+                                        &staging_dir,
                                     ) =>
                             {
                                 "transformer_directory"
@@ -4906,7 +5211,7 @@ pub(crate) async fn run_model_import_job(
         }
     };
 
-    let detected_family = match detect_model_family(&target_dir) {
+    let detected_family = match detect_model_family(&staging_dir) {
         // A diffusers dir / LoRA is classified here; a bare base DiT is not, so fall back to the
         // base-weight verdict's family (sc-14108).
         Ok(detected) => detected.or(base_weight_family),
@@ -4947,8 +5252,10 @@ pub(crate) async fn run_model_import_job(
             verified_model_file_identity = Some(identity);
         }
     }
+    // Written into STAGING, so the tree that commits is already complete. The marker is a hidden
+    // dot-file, which the inspector skips, so it is not part of the compiled plan.
     write_model_install_marker(
-        &target_dir,
+        &staging_dir,
         &job.payload,
         repo.unwrap_or(""),
         &job.id,
@@ -4956,6 +5263,58 @@ pub(crate) async fn run_model_import_job(
         model_file_sha256.as_deref(),
     )
     .await?;
+
+    // ---- commit ---------------------------------------------------------------------------
+    // Everything above ran against staged bytes. This is the point of no return: one rename, then
+    // the plan/record/bindings publication. A refusal here still leaves nothing at `target_dir`.
+    let primary_relative = match imported_model_file.as_ref() {
+        Some(file) => managed_staged_relative_path(&staging_dir, file)?,
+        None => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import is not supported for this file.",
+                Some("No safetensors base-weight file was found in the imported model.".to_owned()),
+            )
+            .await
+        }
+    };
+    // The DECLARED digest, not the one just computed from these bytes. Handing `finalize` the
+    // file's own hash would make its integrity check compare the bytes to themselves and pass
+    // unconditionally — a disabled guard that still looks like a guard. The block above verifies
+    // and fails first with a more actionable message; this is the transactional line of defence
+    // behind it, so a caller that reaches `finalize` by any other route is still checked.
+    let declared_sha256 =
+        optional_payload_string(&job.payload, "expectedSha256").and_then(normalize_sha256);
+    let install = match ingest.finalize(&primary_relative, declared_sha256.as_deref()) {
+        Ok(install) => install,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await
+        }
+    };
+    // The commit landed where the job was told to install. `managed_install_id_for_target` already
+    // proved the two agree; re-checked here against the normalized form because everything below
+    // records `target_dir` as the entry's installed path.
+    debug_assert_eq!(
+        crate::paths::normalize_existing_or_absolute(&install.install_path).ok(),
+        Some(target_dir.clone())
+    );
+    if !install.duplicate_checkpoint_ids().is_empty() {
+        // Reported, never acted on: a user may legitimately keep both a linked library copy and a
+        // managed one, so neither is deleted and the import still succeeds (AC2).
+        tracing::info!(
+            checkpoint_id = %install.checkpoint_id,
+            duplicates = %install.duplicate_checkpoint_ids().join(", "),
+            "imported checkpoint duplicates checkpoints already known to this install"
+        );
+    }
+
     if let Some(manifest_entry) = job
         .payload
         .get("manifestEntry")
@@ -4972,6 +5331,17 @@ pub(crate) async fn run_model_import_job(
             manifest_entry.insert(
                 "importSourceShape".to_owned(),
                 Value::String(source.to_owned()),
+            );
+            // The plan binding (epic 20398): a managed install is selectable through the
+            // plan-driven route by the checkpoint identity its published plan carries. Stamped
+            // beside `importSourceShape` because the scheduler's imported claim requires BOTH — a
+            // source shape and a source hint — and only an entry the base-weight gate classified
+            // has a shape. `paths.model` is written too: the plan-driven route serves plain
+            // text-to-image only, and the family's bespoke lane keeps every shape it does not
+            // serve, so importing through the plan never removes a capability the entry had.
+            manifest_entry.insert(
+                "importPlan".to_owned(),
+                json!({ "checkpointId": install.checkpoint_id }),
             );
         }
         if let Some(quant) = import_quant_format {
@@ -4990,6 +5360,14 @@ pub(crate) async fn run_model_import_job(
             .and_then(Value::as_str)
             .map(str::to_owned);
         apply_model_manifest_defaults(&mut manifest_entry, &model_type, family.as_deref());
+        // `paths.model` names the directory this job actually INSTALLED into, so every entry that
+        // reaches here gets one — including a MANAGED plan-backed entry, which carries both the
+        // install path and `importPlan.checkpointId` and whose bespoke lane still serves the
+        // request shapes the plan route does not (sc-20636).
+        //
+        // A LINKED import never reaches this code at all: it is dispatched to
+        // `run_linked_checkpoint_import_job` at the top of this function and installs nothing, and
+        // `linked_checkpoint_manifest_entry` strips any inherited `paths.model` itself (sc-20635).
         if let Some(paths) = manifest_entry
             .entry("paths")
             .or_insert_with(|| json!({}))
@@ -5033,6 +5411,14 @@ pub(crate) async fn run_model_import_job(
         import_quant_format
             .map(|quant| Value::String(quant.to_owned()))
             .unwrap_or(Value::Null),
+    );
+    // sc-20636: the duplicates the compile found, on the JOB RESULT and not only in a log line.
+    // "This is the same checkpoint you already have as X" is the user's decision to make — nothing
+    // deletes either copy — and a `tracing::info!` never reaches them. Always present (an empty
+    // array when there are none) so a client can render it without probing for the key.
+    result.insert(
+        "duplicateCheckpointIds".to_owned(),
+        json!(install.duplicate_checkpoint_ids()),
     );
     result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
     update_job(

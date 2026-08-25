@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "ebcdc7da79612d19dfe1dbc748c55a9ffe8336e6",
+    "inferenceRevision": "6d8be650d34d53b7539cb55c8dee862bd0863960",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -1191,7 +1191,7 @@
     {
       "family": "sdxl",
       "source": "fused_checkpoint",
-      "operation": "edit",
+      "operation": "generate",
       "providerId": "sdxl",
       "conditioning": [
         "control"
@@ -1207,21 +1207,19 @@
       "registryCached": true
     },
     {
-      "family": "sdxl",
-      "source": "fused_checkpoint",
+      "family": "wan-video",
+      "source": "comfy_ui_tree",
       "operation": "generate",
-      "providerId": "sdxl",
-      "conditioning": [
-        "control"
-      ],
-      "supportsLora": true,
-      "supportsLokr": true,
+      "providerId": "wan2_2_t2v_14b",
+      "conditioning": [],
+      "supportsLora": false,
+      "supportsLokr": false,
       "supportedQuants": [
         "q4",
         "q8"
       ],
       "supportsKvCache": false,
-      "supportsSequentialOffload": false,
+      "supportsSequentialOffload": true,
       "registryCached": true
     },
     {

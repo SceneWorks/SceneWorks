@@ -298,7 +298,9 @@ describe("ModelManagerScreen gated-model notice", () => {
 
   it("renders no gated notice for a non-gated model", async () => {
     await render([PLAIN_MODEL]);
-    expect(invoke).not.toHaveBeenCalledWith("list_credentials", undefined);
+    // The keychain IS read on every catalog now — the import panel's Civitai / Hugging Face
+    // sources are offered whether or not the catalog holds a gated model (sc-20650). What must
+    // stay absent is the CARD's credential UI.
     expect(container.textContent).not.toContain("Gated download");
     expect(container.querySelector(".model-gated-notice")).toBeNull();
   });
@@ -403,8 +405,9 @@ describe("ModelManagerScreen gated-model notice", () => {
     await render([LICENSE_ACK_ONLY_MODEL]);
     await selectTab(container, "Video Models");
     expect(container.querySelector(".model-gated-notice")).toBeTruthy();
-    // The credential half is entirely absent.
-    expect(invoke).not.toHaveBeenCalledWith("list_credentials", undefined);
+    // The credential half is entirely absent FROM THE CARD. (The keychain read itself is no longer
+    // keyed on the catalog holding a gated model: the import panel's Civitai / Hugging Face sources
+    // need it on every catalog — sc-20650. The card must still show none of it.)
     expect(container.textContent).not.toContain("Gated download");
     expect(container.textContent).not.toContain("Add token in Settings");
     expect(container.textContent).not.toContain("Request access on Hugging Face");

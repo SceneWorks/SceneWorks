@@ -68,6 +68,17 @@ const MAGE_FINETUNED_MEMORY_ROUTE: &str = "mage_finetuned";
 const MAGE_FINETUNED_DEFAULT_STEPS: u32 = 30;
 const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 
+/// The family spelling a COMPILED PLAN records for Mage-Flow.
+///
+/// Mage-Flow is the one shipped family whose checkpoint adapter's portable `family` (`mage_flow`)
+/// differs from its `compatibility_projection.family` (`mage-flow`). The PROJECTION spelling is the
+/// one that matters here, twice over: `checkpoint_inspector::normalize_family` maps every Mage
+/// spelling onto `mage-flow`, so that is what a compiled plan records, and
+/// `inference_runtime::checkpoint_adapter` is keyed on the projection too. Passing the portable
+/// `mage_flow` instead would silently answer "no adapter for this family" for a family this backend
+/// really does bind — which is why the value is named rather than spelled inline at the call site.
+const MAGE_FLOW_PLAN_FAMILY: &str = "mage-flow";
+
 #[derive(Debug, PartialEq, Eq)]
 struct PreparedMageFinetunedTransformer {
     directory: PathBuf,
@@ -128,6 +139,9 @@ fn resolve_mage_finetuned_transformer(
     if !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path) {
         return Ok(None);
     }
+    // An app-managed install: `pin_app_managed_model_file` is the right confinement, because these
+    // bytes ARE under a declared app root and nothing else has vouched for them. The plan-sourced
+    // resolver below deliberately uses a different authority; see its comment.
     let config = crate::paths::pin_app_managed_model_file(
         settings,
         &path.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
@@ -142,6 +156,51 @@ fn resolve_mage_finetuned_transformer(
         directory: path,
         config,
         weights,
+    }))
+}
+
+/// The PLAN-sourced Mage-Flow transformer directory, for a plan-backed entry whose request the
+/// plan-driven route does not claim.
+///
+/// Mage-Flow's only registered dialect is `diffusers` → `TransformerDirectory`, so its plan's
+/// primary is a DIRECTORY, not a file — the reason this row uses
+/// [`checkpoint_plan_bespoke_primary_dir`] rather than the single-file helper the Krea and SDXL rows
+/// use. The verified directory is then handed to the SAME pinning the scan uses, after the same
+/// completeness probe, so a plan whose directory is missing either fixed file refuses here rather
+/// than deep in the load (E7).
+///
+/// This is also the only way a LINKED Mage-Flow fine-tune is loadable at all: a linked checkpoint
+/// has no `paths.model` for the scan above to find.
+fn resolve_plan_backed_mage_finetuned_transformer(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    let Some(selected) =
+        checkpoint_plan_bespoke_primary_dir(request, settings, MAGE_FLOW_PLAN_FAMILY)?
+    else {
+        return Ok(None);
+    };
+    if !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&selected.directory) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] the compiled Mage-Flow checkpoint resolves to {}, \
+             which is not a complete transformer component directory (both {} and {} must be \
+             present)",
+            selected.directory.display(),
+            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE,
+            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE
+        )));
+    }
+    // The pins come from the PLAN's own verified layers, never from
+    // `paths::pin_app_managed_model_file`: a linked library root is an APPROVED root of the
+    // checkpoint plan store, not an app-managed root, so app-managed confinement rejects every
+    // linked checkpoint by construction. The store already resolved the approved root and re-checked
+    // each layer's bytes, which is a strictly stronger guarantee than a path-shape confinement.
+    Ok(Some(PreparedMageFinetunedTransformer {
+        config: selected
+            .pin_named(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE)?,
+        weights: selected
+            .pin_named(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE)?,
+        directory: selected.directory,
     }))
 }
 
@@ -221,6 +280,12 @@ fn prepare_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven
+    // route; this bespoke lane never also claims it, so one entry has exactly one owner. Explicit
+    // rather than left to arm ordering in the resolver (sc-20634 review): ordering is not a claim.
+    if request_is_checkpoint_plan_backed(request) {
+        return Ok(None);
+    }
     let Some(descriptor) = imported_generate_request_supported(
         request,
         "mage-flow",
@@ -230,6 +295,13 @@ fn prepare_mage_finetuned_transformer(
     };
     if imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow").is_err() {
         return Ok(None);
+    }
+    // A plan-backed entry whose request the plan route does NOT claim still runs here, on the
+    // plan's verified component directory rather than a scan of `paths.model`. This is what keeps a
+    // Mage-Flow fine-tune servable after it is imported, and the only way a LINKED one — which has
+    // no installed path at all — is loadable (sc-20644 Mage-Flow row).
+    if let Some(prepared) = resolve_plan_backed_mage_finetuned_transformer(request, settings)? {
+        return Ok(Some(prepared));
     }
     resolve_mage_finetuned_transformer(request, settings)
 }

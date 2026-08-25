@@ -1588,6 +1588,45 @@ async fn reconcile_deleted_source(
     }
 }
 
+/// Drop the plan-store documents and cached derivatives a deleted LINKED model owned.
+///
+/// Keyed on `importPlan.checkpointId` — the same discriminator the scheduler and the worker's
+/// route selection use — so a model that is not plan-backed does nothing here. Never touches the
+/// linked library and never removes the approved root: only this checkpoint's record, plan,
+/// bindings and derivatives.
+///
+/// Failures become warnings rather than failing the delete: the manifest entry is already gone by
+/// this point, so refusing here would leave the catalog and the plan store disagreeing with no way
+/// to retry.
+async fn forget_linked_checkpoint(state: &AppState, entry: &Value) -> Vec<String> {
+    let Some(checkpoint_id) = entry
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(str::to_owned)
+    else {
+        return Vec::new();
+    };
+    let data_dir = state.settings.data_dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?
+            .invalidate_checkpoint(&checkpoint_id)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(_)) => Vec::new(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "forgetting a linked checkpoint failed after a model delete");
+            vec![format!(
+                "This model's import plan and cached derivatives could not be removed: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "the linked-checkpoint cleanup task failed");
+            vec!["This model's import plan and cached derivatives could not be removed.".to_owned()]
+        }
+    }
+}
+
 pub(crate) async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -1675,6 +1714,12 @@ pub(crate) async fn delete_model(
     }
     let mut warnings =
         catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
+    // A plan-backed (linked) model's bytes are not ours, but its plan documents and derivatives
+    // are. Without this the manifest entry went away and the record, plan, bindings and every
+    // cached derivative stayed behind forever — reachable by nothing, reclaimable by nothing.
+    // E6 still holds exactly: this drops SceneWorks-owned documents, never a library file, and
+    // never the approved root itself (other checkpoints under it stay valid).
+    warnings.extend(forget_linked_checkpoint(&state, cleanup_source).await);
     // The source is gone; reclaim (or surface) every resolved-cache entry that depended on it.
     warnings.extend(
         reconcile_deleted_source(
@@ -1692,6 +1737,97 @@ pub(crate) async fn delete_model(
         )
         .await,
     );
+    // ---- checkpoint teardown (epic 20398) ---------------------------------------------------
+    // `remove_whole_model_artifacts` removed the BYTES. A plan-backed entry also owns documents
+    // under `<data>/checkpoints/` — catalog record, plan, bindings — which that sweep never sees.
+    // Left behind for a MANAGED install they make the id permanently un-reimportable: the manifest
+    // entry is gone, so this route's `existing_ids` check passes on the next import, and the
+    // worker's `ManagedIngest::begin` then refuses forever with `InstallIdTaken` naming a path that
+    // no longer exists.
+    //
+    // Deliberately one block that discriminates on ownership, because the two ownerships need
+    // opposite treatment and only ONE of them is this story's.
+    let plan_checkpoint_id = cleanup_source
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(str::to_owned);
+    match plan_checkpoint_id.as_deref().map(|checkpoint_id| {
+        (
+            checkpoint_id,
+            sceneworks_core::checkpoint_plan_store::managed_install_id(checkpoint_id),
+        )
+    }) {
+        // MANAGED: SceneWorks owns the install tree, so the record, plan and bindings go with it.
+        Some((checkpoint_id, Some(install_id))) => {
+            let data_dir = state.settings.data_dir.clone();
+            let owned_install_id = install_id.to_owned();
+            let owned_checkpoint_id = checkpoint_id.to_owned();
+            // Through the DERIVATIVE store, not `CheckpointPlanStore::remove_managed` directly:
+            // the plan store's own removal drops the record and `remove_dir_all`s the install tree
+            // with nothing asking about derivatives first, so a leased or pinned derivative was
+            // orphaned — its source bytes and plan gone, and its `derivedFrom` checkpoint id (the
+            // only handle any later invalidation has) no longer resolving to anything. The
+            // derivative store removes derivatives FIRST and refuses the whole teardown if one is
+            // still in use, which is the same ordering the linked path above already had
+            // (sc-20651 feature-end review).
+            //
+            // But a REFUSAL cannot be honoured HERE, and only here: by this point
+            // `remove_whole_model_artifacts` has already deleted the install bytes and the manifest
+            // entry is already gone. Holding the plan record back for the derivative's sake would
+            // therefore strand the record with no bytes under it, and `ManagedIngest::begin` would
+            // refuse this install id FOREVER with `InstallIdTaken` naming a path that no longer
+            // exists — the model becomes permanently un-reimportable. So the record is cleared
+            // regardless, and the derivative that could not be reclaimed is NAMED in a warning:
+            // it is orphaned either way once the bytes are gone, and a named orphan is one the user
+            // can find and evict, while a silent one is not. Every other caller of
+            // `remove_managed_install` still gets the refuse-first behaviour, which is correct for
+            // them: their bytes are still there to hold.
+            let outcome = tokio::task::spawn_blocking(move || {
+                managed_checkpoint_teardown(&data_dir, &owned_install_id, &owned_checkpoint_id)
+            })
+            .await;
+            let report = match outcome {
+                Ok(report) => report,
+                Err(error) => ManagedTeardownReport {
+                    failure: Some(error.to_string()),
+                    orphaned_derivatives: Vec::new(),
+                    fallback_failure: Some(error.to_string()),
+                },
+            };
+            // The files are already gone; a failure here cannot un-delete the model, so it is
+            // surfaced rather than raised. The warning names the checkpoint because that id is the
+            // only handle on the stranded record.
+            if let Some(failure) = report.failure {
+                tracing::warn!(
+                    checkpoint_id = %checkpoint_id,
+                    error = %failure,
+                    orphaned_derivatives = report.orphaned_derivatives.len(),
+                    cleared = report.fallback_failure.is_none(),
+                    "managed checkpoint teardown failed after a model delete"
+                );
+                if let Some(fallback_failure) = report.fallback_failure {
+                    warnings.push(format!(
+                        "The managed checkpoint {checkpoint_id} could not be removed ({fallback_failure}); re-importing this model id may be refused until it is cleared."
+                    ));
+                } else {
+                    let orphans = if report.orphaned_derivatives.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        report.orphaned_derivatives.join(", ")
+                    };
+                    warnings.push(format!(
+                        "The managed checkpoint {checkpoint_id} was removed, but its cached derivatives could not be reclaimed ({failure}); orphaned resolved-cache entries: {orphans}. Unpin or release them to free that space."
+                    ));
+                }
+            }
+        }
+        // LINKED (or any non-managed checkpoint id): the bytes are the user's own library copy,
+        // which this route never owned, so `remove_managed` must not be reached — it would be the
+        // wrong operation on the wrong tree. Invalidating a linked entry's plan and the derivatives
+        // compiled from it is sc-20635's work; this arm is where it lands.
+        Some((_, None)) => {}
+        None => {}
+    }
     let policy = if removed_entry.is_some() {
         "Removed the model registry entry and SceneWorks-owned local model files."
     } else {
@@ -1708,6 +1844,87 @@ pub(crate) async fn delete_model(
         "warnings": warnings,
         "policy": policy,
     })))
+}
+
+/// What the managed checkpoint teardown did after a model delete, when it did not simply succeed.
+struct ManagedTeardownReport {
+    /// The refusal that stopped the derivatives-first teardown. `None` when it succeeded outright,
+    /// which is the only case that produces no warning.
+    failure: Option<String>,
+    /// The derivative cache keys still present after that refusal — the entries the delete could
+    /// not reclaim, named so the user can find them.
+    orphaned_derivatives: Vec<String>,
+    /// The record-clearing fallback's OWN refusal. `Some` means the plan record really is stranded
+    /// and the install id may stay un-reimportable, which is a materially different warning.
+    fallback_failure: Option<String>,
+}
+
+/// Tear down a managed install after its bytes and its manifest entry are already gone.
+///
+/// Derivatives first (so a derivative in use is reclaimed cleanly when it can be), then — if that
+/// refuses — the plan record UNCONDITIONALLY, because leaving it behind is what poisons the install
+/// id forever. Blocking throughout; callers must run it off the async runtime.
+fn managed_checkpoint_teardown(
+    data_dir: &std::path::Path,
+    install_id: &str,
+    checkpoint_id: &str,
+) -> ManagedTeardownReport {
+    use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
+
+    let store = CheckpointDerivativeStore::open(data_dir);
+    let failure = match &store {
+        Ok(store) => match store.remove_managed_install(install_id) {
+            Ok(_) => {
+                return ManagedTeardownReport {
+                    failure: None,
+                    orphaned_derivatives: Vec::new(),
+                    fallback_failure: None,
+                }
+            }
+            Err(error) => error.to_string(),
+        },
+        Err(error) => error.to_string(),
+    };
+    let orphaned_derivatives = store
+        .as_ref()
+        .map(|store| surviving_derivatives(store, checkpoint_id))
+        .unwrap_or_default();
+    let fallback_failure =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
+            .remove_managed(install_id)
+            .err()
+            .map(|error| error.to_string());
+    ManagedTeardownReport {
+        failure: Some(failure),
+        orphaned_derivatives,
+        fallback_failure,
+    }
+}
+
+/// The derivative cache keys still recorded as produced from `checkpoint_id`.
+///
+/// Read AFTER a refused teardown, so it names exactly the entries that were not reclaimed. An
+/// enumeration failure yields an empty list rather than an error: this only enriches a warning that
+/// is already being raised, and losing the warning would be worse than losing the names.
+fn surviving_derivatives(
+    store: &sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore,
+    checkpoint_id: &str,
+) -> Vec<String> {
+    store
+        .cache()
+        .enumerate()
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|summary| {
+                    let metadata = summary.metadata?;
+                    (metadata.production.is_derived()
+                        && metadata.derived_from.as_deref() == Some(checkpoint_id))
+                    .then_some(metadata.cache_key)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The file scopes `model` OWNS inside `repo` — the union of its PRIMARY (non-co-requisite) download
@@ -2455,16 +2672,345 @@ pub(crate) async fn create_model_import_job(
         .map_err(IntoResponse::into_response)
 }
 
+/// The `(rootId, relativePath)` pair a linked checkpoint import names, if this request is one.
+///
+/// Both or neither: a request carrying only one half names no checkpoint, and silently treating it
+/// as a fetch import would queue a job with no source at all.
+fn linked_checkpoint_selection(
+    payload: &ModelImportRequest,
+) -> Result<Option<(String, String)>, ApiError> {
+    let root_id = payload
+        .linked_root_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let relative_path = payload
+        .linked_relative_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (root_id, relative_path) {
+        (Some(root_id), Some(relative_path)) => {
+            Ok(Some((root_id.to_owned(), relative_path.to_owned())))
+        }
+        (None, None) => Ok(None),
+        _ => Err(ApiError::bad_request(
+            "A linked checkpoint import requires both linkedRootId and linkedRelativePath",
+        )),
+    }
+}
+
+/// What a managed install records about where its bytes came from (sc-20636). Serialized onto the
+/// queued job as `importProvenance` and handed to the ingest, which puts it in the persisted plan.
+///
+/// It carries no secret: `credential_host` names the host whose stored credential the download will
+/// use, never the credential, and `url` is already stripped of userinfo and secret-bearing query
+/// parameters by `checkpoint_ingest::sanitize_provenance_url`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModelImportProvenance {
+    pub(crate) source: &'static str,
+    pub(crate) reference: Option<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) version_id: Option<String>,
+    pub(crate) file_id: Option<String>,
+    pub(crate) credential_host: Option<String>,
+}
+
+impl ModelImportProvenance {
+    fn to_json(&self) -> Value {
+        let mut object = serde_json::Map::new();
+        object.insert("source".to_owned(), Value::String(self.source.to_owned()));
+        for (key, value) in [
+            ("reference", &self.reference),
+            ("url", &self.url),
+            ("versionId", &self.version_id),
+            ("fileId", &self.file_id),
+            ("credentialHost", &self.credential_host),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.to_owned(), Value::String(value.clone()));
+            }
+        }
+        Value::Object(object)
+    }
+
+    /// The `source.provider` value the model manifest entry records for this import.
+    ///
+    /// Deliberately COARSER than [`Self::source`]: `upload` and `local-copy` both record the
+    /// historical `"local"`. That is the value every model entry written before epic 20398 carries
+    /// and every reader of this field was written against, so splitting it in two would be a silent
+    /// manifest-vocabulary change nothing asked for. The finer distinction is not lost — it is
+    /// recorded in `importProvenance.source`, a new field with no legacy readers. A REMOTE import
+    /// does widen the provider (`civitai` rather than the generic `url` its transfer shares),
+    /// because that names a genuinely new provider rather than re-spelling an existing one.
+    fn manifest_provider(&self) -> &'static str {
+        match self.source {
+            "upload" | "local-copy" => "local",
+            remote => remote,
+        }
+    }
+}
+
+/// Reconcile a discriminated source's `expectedSha256` with the flat `payload.expectedSha256`.
+///
+/// Both set and naming the SAME digest is honoured — a sha256 is hex, so case and surrounding
+/// whitespace are not a difference. Both set and naming DIFFERENT digests is refused, because
+/// resolving that by precedence would verify the transferred bytes against a digest the caller did
+/// not choose and report success. A blank flat field is not a value, so it is not a conflict.
+fn reconcile_expected_sha256(
+    from_source: Option<String>,
+    from_flat: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let blank_is_absent = |value: Option<String>| value.filter(|digest| !digest.trim().is_empty());
+    match (blank_is_absent(from_source), blank_is_absent(from_flat)) {
+        (Some(source_digest), Some(flat_digest)) => {
+            let normalize = |digest: &str| digest.trim().to_ascii_lowercase();
+            if normalize(&source_digest) != normalize(&flat_digest) {
+                return Err(ApiError::bad_request(format!(
+                    "Provide either the discriminated `source` or the legacy `expectedSha256` field, not both: they name different digests ({} and {})",
+                    source_digest.trim(),
+                    flat_digest.trim()
+                )));
+            }
+            Ok(Some(source_digest))
+        }
+        (Some(digest), None) | (None, Some(digest)) => Ok(Some(digest)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Collapse the discriminated `source` (when present) onto the flat `repo`/`sourceUrl`/`sourcePath`
+/// fields the rest of the import path already speaks, and describe what was chosen as provenance.
+///
+/// Both spellings converge HERE, before any validation, so there is one import pipeline rather than
+/// a new one beside the old: a legacy `{"repo": "..."}` body and a
+/// `{"source": {"kind": "huggingFace", "repo": "..."}}` body produce the identical job payload apart
+/// from the provenance detail the discriminated form additionally carries.
+///
+/// A request that sets both a discriminated source and a conflicting flat field is refused rather
+/// than resolved by precedence — silently honouring one and dropping the other is how an import
+/// fetches something the caller did not ask for.
+pub(crate) fn normalize_model_import_source(
+    payload: &mut ModelImportRequest,
+) -> Result<(ModelImportProvenance, Option<String>), ApiError> {
+    let Some(source) = payload.source.take() else {
+        // Legacy flat request. `uploadedSourcePath` is set only by the multipart handler, so it is
+        // what distinguishes an upload from a copy of a file the user already had.
+        let provenance = if let Some(repo) = payload.repo.as_deref() {
+            ModelImportProvenance {
+                source: "huggingface",
+                reference: Some(repo.to_owned()),
+                ..Default::default()
+            }
+        } else if let Some(url) = payload.source_url.as_deref() {
+            ModelImportProvenance {
+                source: "url",
+                url: sceneworks_core::checkpoint_ingest::sanitize_provenance_url(url),
+                credential_host: sceneworks_core::checkpoint_ingest::provenance_credential_host(
+                    url,
+                ),
+                ..Default::default()
+            }
+        } else if payload.uploaded_source_path {
+            ModelImportProvenance {
+                source: "upload",
+                reference: payload.files.first().cloned(),
+                ..Default::default()
+            }
+        } else {
+            ModelImportProvenance {
+                source: "local-copy",
+                reference: payload
+                    .source_path
+                    .as_deref()
+                    .and_then(|path| FsPath::new(path).file_name()?.to_str())
+                    .map(str::to_owned),
+                ..Default::default()
+            }
+        };
+        return Ok((provenance, None));
+    };
+
+    let conflict = |field: &str| {
+        Err(ApiError::bad_request(format!(
+            "Provide either the discriminated `source` or the legacy `{field}` field, not both"
+        )))
+    };
+    if !option_str_is_empty(payload.repo.as_deref()) {
+        return conflict("repo");
+    }
+    if !option_str_is_empty(payload.source_url.as_deref()) {
+        return conflict("sourceUrl");
+    }
+    // An upload fills `sourcePath` server-side from the multipart `file` part, which is not a
+    // caller-supplied conflict.
+    if !option_str_is_empty(payload.source_path.as_deref()) && !payload.uploaded_source_path {
+        return conflict("sourcePath");
+    }
+
+    let mut revision = None;
+    let provenance = match source {
+        ModelImportSourceV1::Upload { staged_path } => {
+            let staged_path = staged_path
+                .or_else(|| payload.source_path.clone())
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "An upload source requires the file to be sent in the same multipart request",
+                    )
+                })?;
+            payload.source_path = Some(staged_path);
+            payload.uploaded_source_path = true;
+            ModelImportProvenance {
+                source: "upload",
+                reference: payload.files.first().cloned(),
+                ..Default::default()
+            }
+        }
+        ModelImportSourceV1::LocalPath { path } => {
+            let reference = FsPath::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            payload.source_path = Some(path);
+            payload.uploaded_source_path = false;
+            ModelImportProvenance {
+                source: "local-copy",
+                reference,
+                ..Default::default()
+            }
+        }
+        ModelImportSourceV1::Url {
+            url,
+            expected_sha256,
+        } => {
+            let provenance = ModelImportProvenance {
+                source: "url",
+                url: sceneworks_core::checkpoint_ingest::sanitize_provenance_url(&url),
+                credential_host: sceneworks_core::checkpoint_ingest::provenance_credential_host(
+                    &url,
+                ),
+                ..Default::default()
+            };
+            payload.source_url = Some(url);
+            payload.expected_sha256 =
+                reconcile_expected_sha256(expected_sha256, payload.expected_sha256.take())?;
+            provenance
+        }
+        ModelImportSourceV1::HuggingFace {
+            repo,
+            revision: requested_revision,
+            files,
+        } => {
+            if !files.is_empty() {
+                payload.files = files;
+            }
+            revision = requested_revision.clone();
+            let reference = match requested_revision.as_deref() {
+                Some(revision) => format!("{repo}@{revision}"),
+                None => repo.clone(),
+            };
+            payload.repo = Some(repo);
+            ModelImportProvenance {
+                source: "huggingface",
+                reference: Some(reference),
+                version_id: requested_revision,
+                file_id: payload.files.first().cloned(),
+                ..Default::default()
+            }
+        }
+        ModelImportSourceV1::Civitai {
+            url,
+            model_version_id,
+            file_id,
+            expected_sha256,
+        } => {
+            let provenance = ModelImportProvenance {
+                source: "civitai",
+                reference: model_version_id
+                    .as_deref()
+                    .map(|version| format!("modelVersion/{version}")),
+                url: sceneworks_core::checkpoint_ingest::sanitize_provenance_url(&url),
+                version_id: model_version_id,
+                file_id,
+                credential_host: sceneworks_core::checkpoint_ingest::provenance_credential_host(
+                    &url,
+                ),
+            };
+            // Civitai downloads through the ordinary source-URL path: same transfer, same
+            // host-keyed credential attachment, same size limits. Only the recorded identity
+            // differs.
+            payload.source_url = Some(url);
+            payload.expected_sha256 =
+                reconcile_expected_sha256(expected_sha256, payload.expected_sha256.take())?;
+            provenance
+        }
+    };
+    Ok((provenance, revision))
+}
+
 pub(crate) async fn queue_model_import_job(
     state: AppState,
     mut payload: ModelImportRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    if option_str_is_empty(payload.repo.as_deref())
+    // Linked (in-place) ownership: an approved library root plus a confined relative path, and
+    // never an absolute path (epic 20398, sc-20635). It is an ALTERNATIVE ownership mode rather
+    // than another way to FETCH, so it is resolved before source normalisation and excludes it
+    // entirely — including sc-20636's discriminated `source`, which only ever names a transfer.
+    let linked = linked_checkpoint_selection(&payload)?;
+    if let Some((root_id, relative_path)) = linked.clone() {
+        if !option_str_is_empty(payload.repo.as_deref())
+            || !option_str_is_empty(payload.source_url.as_deref())
+            || !option_str_is_empty(payload.source_path.as_deref())
+            || payload.source.is_some()
+        {
+            return Err(ApiError::bad_request(
+                "A linked checkpoint import references a library in place; do not also provide a \
+                 repo, source URL, source path, or a discriminated source",
+            ));
+        }
+        // Fail fast on an unapproved or unavailable root, and on a path shape the plan store would
+        // refuse anyway, so a job is never queued for a source that cannot compile. The same
+        // validator `compile_linked` uses, not a second copy of its rules.
+        sceneworks_core::checkpoint_plan_store::validate_linked_relative_path(&relative_path)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let data_dir = state.settings.data_dir.clone();
+        let probed_root_id = root_id.clone();
+        tokio::task::spawn_blocking(move || {
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+                .resolve_root(&probed_root_id)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("Approved root lookup failed: {error}")))?
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        // The VALIDATED values are what the job carries. Without this the route validated the
+        // trimmed pair and then serialised the raw one, so `" root-abc "` passed the API and
+        // failed in the worker — and the queued `manifestEntry` (built from the trimmed pair
+        // below) and the job payload disagreed about which checkpoint was being imported.
+        payload.linked_root_id = Some(root_id);
+        payload.linked_relative_path = Some(relative_path);
+    }
+    // Source normalisation collapses sc-20636's discriminated `source` onto the flat
+    // repo/sourceUrl/sourcePath fields. A linked import has no transfer to normalise — it was
+    // refused above if it named one — so it names its own provenance and skips the fetch checks.
+    let (provenance, revision) = match &linked {
+        Some((root_id, relative_path)) => (
+            ModelImportProvenance {
+                source: "linked-library",
+                reference: Some(format!("{root_id}/{relative_path}")),
+                ..Default::default()
+            },
+            None,
+        ),
+        None => normalize_model_import_source(&mut payload)?,
+    };
+    if linked.is_none()
+        && option_str_is_empty(payload.repo.as_deref())
         && option_str_is_empty(payload.source_url.as_deref())
         && option_str_is_empty(payload.source_path.as_deref())
     {
         return Err(ApiError::bad_request(
-            "Provide a Hugging Face repo, source URL, or source path",
+            "Provide a Hugging Face repo, source URL, source path, or an approved library root id \
+             with a relative path",
         ));
     }
     if let Some(source_url) = payload.source_url.as_deref() {
@@ -2508,6 +3054,14 @@ pub(crate) async fn queue_model_import_job(
         .clone()
         .or_else(|| payload.repo.clone())
         .or_else(|| {
+            linked.as_ref().and_then(|(_, relative_path)| {
+                FsPath::new(relative_path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            })
+        })
+        .or_else(|| {
             payload
                 .source_url
                 .as_deref()
@@ -2537,6 +3091,17 @@ pub(crate) async fn queue_model_import_job(
         )));
     }
     let target_name = safe_download_dir(&model_id);
+    // The install id the WORKER will use is the SANITIZED `target_name`, not the raw model id, and
+    // it has to be a usable directory name before a job exists: the ingest resolves it through
+    // `CheckpointPlanStore::install_dir`, which validates. Without this a caller-supplied `modelId`
+    // that sanitizes to (say) a dot-leading name is answered 201 and then dies in the worker with
+    // an `InvalidInstallId` the caller never sees. Validated at the resolved value, because that is
+    // the string the worker will actually address a path with.
+    if let Err(error) = sceneworks_core::checkpoint_plan_store::validate_install_id(&target_name) {
+        return Err(ApiError::bad_request(format!(
+            "Model id '{model_id}' cannot be installed: {error}"
+        )));
+    }
     let target_dir = state
         .settings
         .data_dir
@@ -2576,22 +3141,44 @@ pub(crate) async fn queue_model_import_job(
         )?;
     }
     let timestamp = now_rfc3339();
-    let mut manifest_entry = json!({
-        "id": model_id,
-        "name": name,
-        "type": model_type,
-        "source": {
-            "provider": model_import_source_provider(&payload),
-            "repo": payload.repo.clone(),
-            "path": source_path_rel,
-        },
-        "files": payload.files.clone(),
-        "paths": {
-            "model": target_dir.display().to_string(),
-        },
-        "createdAt": timestamp,
-        "updatedAt": timestamp,
-    });
+    // A linked entry names its library by root id and relative path and carries NO install path:
+    // nothing is copied, and the plan-driven route reads the plan's own layers. The worker stamps
+    // `importPlan.checkpointId` onto this entry once the full-content compile succeeds — a
+    // candidate that never compiles never becomes selectable (E7).
+    let mut manifest_entry = match &linked {
+        Some((root_id, relative_path)) => json!({
+            "id": model_id,
+            "name": name,
+            "type": model_type,
+            "source": {
+                "provider": provenance.manifest_provider(),
+                "rootId": root_id,
+                "relativePath": relative_path,
+            },
+            "files": payload.files.clone(),
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+        }),
+        None => json!({
+            "id": model_id,
+            "name": name,
+            "type": model_type,
+            "source": {
+                // The provider the SOURCE normalisation resolved, so a Civitai import is recorded
+                // as "civitai" rather than as the generic "url" its transfer happens to share.
+                // Coarser than provenance for the two non-remote shapes — see `manifest_provider`.
+                "provider": provenance.manifest_provider(),
+                "repo": payload.repo.clone(),
+                "path": source_path_rel,
+            },
+            "files": payload.files.clone(),
+            "paths": {
+                "model": target_dir.display().to_string(),
+            },
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+        }),
+    };
     if let Some(source_url) = payload.source_url.clone() {
         if let Some(source) = manifest_entry
             .get_mut("source")
@@ -2608,13 +3195,30 @@ pub(crate) async fn queue_model_import_job(
     if let Some(object) = manifest_entry.as_object_mut() {
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
+    let ownership_mode = payload.ownership_mode;
     let mut payload = to_json_object(&payload)?;
+    // The ingest contract the worker executes: managed ownership, plus the provenance the install's
+    // persisted plan will carry. Written unconditionally so a legacy flat request is a managed
+    // import with recorded provenance too — not a second, unprovenanced code path (AC3).
+    payload.insert(
+        "ownershipMode".to_owned(),
+        serde_json::to_value(ownership_mode)
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+    );
+    payload.insert("importProvenance".to_owned(), provenance.to_json());
+    if let Some(revision) = revision {
+        payload.insert("revision".to_owned(), Value::String(revision));
+    }
     payload.insert("modelId".to_owned(), manifest_entry["id"].clone());
     payload.insert("modelName".to_owned(), manifest_entry["name"].clone());
-    payload.insert(
-        "targetDir".to_owned(),
-        Value::String(target_dir.display().to_string()),
-    );
+    // A linked import installs nothing, so it gets no install directory: handing one to the worker
+    // would name a path that must never be created for this ownership mode.
+    if linked.is_none() {
+        payload.insert(
+            "targetDir".to_owned(),
+            Value::String(target_dir.display().to_string()),
+        );
+    }
     payload.insert(
         "manifestPath".to_owned(),
         Value::String(manifest_path.display().to_string()),
@@ -2637,12 +3241,16 @@ pub(crate) async fn model_import_request_from_multipart(
     mut multipart: Multipart,
 ) -> Result<(ModelImportRequest, PathBuf), ApiError> {
     let mut payload = ModelImportRequest {
+        ownership_mode: OwnershipModeV1::default(),
+        source: None,
         model_id: None,
         name: None,
         model_type: None,
         repo: None,
         source_url: None,
         source_path: None,
+        linked_root_id: None,
+        linked_relative_path: None,
         files: Vec::new(),
         family: None,
         expected_sha256: None,
@@ -2694,6 +3302,20 @@ pub(crate) async fn model_import_request_from_multipart(
                 // — the assertion is affirmative or it is not made.
                 "licenseAcknowledged" => {
                     payload.license_acknowledged = value.eq_ignore_ascii_case("true")
+                }
+                // The multipart form takes the same two epic-20398 fields as the JSON body, decoded
+                // by the same serde impls, so an unknown ownership mode or malformed discriminated
+                // source is refused here exactly as it is there rather than being ignored (E7).
+                "ownershipMode" => {
+                    payload.ownership_mode = serde_json::from_value(Value::String(value.to_owned()))
+                        .map_err(|error| {
+                            ApiError::bad_request(format!("Invalid ownershipMode: {error}"))
+                        })?
+                }
+                "source" => {
+                    payload.source = Some(serde_json::from_str(value).map_err(|error| {
+                        ApiError::bad_request(format!("Invalid import source: {error}"))
+                    })?)
                 }
                 _ => {}
             }
@@ -2751,16 +3373,6 @@ pub(crate) async fn cleanup_staged_model_upload(path: &FsPath) {
     let _ = tokio::fs::remove_file(path).await;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::remove_dir(parent).await;
-    }
-}
-
-pub(crate) fn model_import_source_provider(payload: &ModelImportRequest) -> &'static str {
-    if payload.repo.is_some() {
-        "huggingface"
-    } else if payload.source_url.is_some() {
-        "url"
-    } else {
-        "local"
     }
 }
 
@@ -12074,5 +12686,302 @@ mod imported_lora_advertisement_tests {
             "an empty route set must abstain instead of manufacturing compatibility metadata"
         );
         assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
+    }
+}
+
+/// sc-20636 (epic 20398): the import API's ownership mode + discriminated source, and the
+/// normalisation that keeps every legacy flat request working and managed.
+#[cfg(test)]
+mod model_import_source_tests {
+    use super::*;
+
+    fn legacy() -> ModelImportRequest {
+        ModelImportRequest {
+            ownership_mode: OwnershipModeV1::default(),
+            source: None,
+            model_id: None,
+            name: None,
+            model_type: None,
+            repo: None,
+            source_url: None,
+            source_path: None,
+            // Linked (in-place) ownership is a different mode entirely (sc-20635); a legacy flat
+            // request never names one.
+            linked_root_id: None,
+            linked_relative_path: None,
+            files: Vec::new(),
+            family: None,
+            expected_sha256: None,
+            license_acknowledged: false,
+            uploaded_source_path: false,
+        }
+    }
+
+    fn parse(body: &str) -> ModelImportRequest {
+        serde_json::from_str(body).expect("body deserializes")
+    }
+
+    /// AC3: a body written before `ownershipMode` and `source` existed still deserializes, and it
+    /// normalises to MANAGED ownership with its source recorded — not to an unowned import.
+    #[test]
+    fn legacy_flat_bodies_still_deserialize_and_normalise_to_managed_ownership() {
+        for (body, expected_source, expected_reference) in [
+            (
+                r#"{"repo":"org/model","type":"image"}"#,
+                "huggingface",
+                Some("org/model"),
+            ),
+            (
+                r#"{"sourceUrl":"https://host.example/model.safetensors"}"#,
+                "url",
+                None,
+            ),
+            (
+                r#"{"sourcePath":"/data/models/imports/mine/model.safetensors"}"#,
+                "local-copy",
+                Some("model.safetensors"),
+            ),
+        ] {
+            let mut payload = parse(body);
+            assert_eq!(
+                payload.ownership_mode,
+                OwnershipModeV1::Managed,
+                "an absent ownershipMode is managed: {body}"
+            );
+            assert!(payload.source.is_none());
+            let (provenance, revision) =
+                normalize_model_import_source(&mut payload).expect("legacy body normalises");
+            assert_eq!(provenance.source, expected_source, "{body}");
+            assert_eq!(
+                provenance.reference.as_deref(),
+                expected_reference,
+                "{body}"
+            );
+            assert_eq!(revision, None);
+        }
+
+        // The flat fields survive normalisation untouched, so the rest of the import path — and the
+        // worker — see exactly what they saw before this field pair existed.
+        let mut payload = parse(r#"{"repo":"org/model","files":["model.safetensors"]}"#);
+        normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(payload.repo.as_deref(), Some("org/model"));
+        assert_eq!(payload.files, vec!["model.safetensors".to_owned()]);
+    }
+
+    #[test]
+    fn an_uploaded_legacy_body_is_recorded_as_an_upload_not_a_local_copy() {
+        let mut payload = legacy();
+        payload.source_path =
+            Some("/data/cache/model-uploads/upload-1/mine.safetensors".to_owned());
+        payload.files = vec!["mine.safetensors".to_owned()];
+        payload.uploaded_source_path = true;
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(provenance.source, "upload");
+        assert_eq!(provenance.reference.as_deref(), Some("mine.safetensors"));
+    }
+
+    /// Each discriminated variant collapses onto the flat field the existing transfer code reads,
+    /// so there is one pipeline rather than a second one beside it.
+    #[test]
+    fn every_discriminated_source_normalises_onto_the_existing_transfer_fields() {
+        let mut payload = parse(
+            r#"{"source":{"kind":"huggingFace","repo":"org/model","revision":"abc123","files":["model.safetensors"]}}"#,
+        );
+        let (provenance, revision) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(payload.repo.as_deref(), Some("org/model"));
+        assert_eq!(payload.files, vec!["model.safetensors".to_owned()]);
+        assert_eq!(revision.as_deref(), Some("abc123"));
+        assert_eq!(provenance.source, "huggingface");
+        assert_eq!(provenance.reference.as_deref(), Some("org/model@abc123"));
+        assert_eq!(provenance.version_id.as_deref(), Some("abc123"));
+        assert_eq!(provenance.file_id.as_deref(), Some("model.safetensors"));
+
+        let mut payload = parse(
+            r#"{"source":{"kind":"localPath","path":"/data/models/imports/x/model.safetensors"}}"#,
+        );
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(
+            payload.source_path.as_deref(),
+            Some("/data/models/imports/x/model.safetensors")
+        );
+        assert!(!payload.uploaded_source_path);
+        assert_eq!(provenance.source, "local-copy");
+
+        let mut payload = parse(
+            r#"{"source":{"kind":"url","url":"https://host.example/m.safetensors","expectedSha256":"ab"}}"#,
+        );
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(
+            payload.source_url.as_deref(),
+            Some("https://host.example/m.safetensors")
+        );
+        assert_eq!(payload.expected_sha256.as_deref(), Some("ab"));
+        assert_eq!(provenance.source, "url");
+        assert_eq!(provenance.credential_host.as_deref(), Some("host.example"));
+
+        let mut payload = legacy();
+        payload.source = Some(ModelImportSourceV1::Upload {
+            staged_path: Some("/data/cache/model-uploads/u/m.safetensors".to_owned()),
+        });
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+        assert_eq!(
+            payload.source_path.as_deref(),
+            Some("/data/cache/model-uploads/u/m.safetensors")
+        );
+        assert!(payload.uploaded_source_path);
+        assert_eq!(provenance.source, "upload");
+    }
+
+    /// AC1: Civitai's version/file identity, URL, and the host whose credential authorized the
+    /// download are recorded; no secret is.
+    #[test]
+    fn a_civitai_source_records_its_identity_and_never_a_secret() {
+        let mut payload = parse(
+            r#"{"source":{"kind":"civitai","url":"https://user:t0ken@civitai.com/api/download/models/9931?type=Model&token=s3cret","modelVersionId":"9931","fileId":"40277","expectedSha256":"abc"}}"#,
+        );
+        let (provenance, _) = normalize_model_import_source(&mut payload).unwrap();
+
+        // The transfer reuses the ordinary source-URL download, credential attachment included.
+        assert_eq!(
+            payload.source_url.as_deref(),
+            Some("https://user:t0ken@civitai.com/api/download/models/9931?type=Model&token=s3cret")
+        );
+        assert_eq!(payload.expected_sha256.as_deref(), Some("abc"));
+
+        assert_eq!(provenance.source, "civitai");
+        assert_eq!(provenance.version_id.as_deref(), Some("9931"));
+        assert_eq!(provenance.file_id.as_deref(), Some("40277"));
+        assert_eq!(provenance.reference.as_deref(), Some("modelVersion/9931"));
+        assert_eq!(provenance.credential_host.as_deref(), Some("civitai.com"));
+        assert_eq!(
+            provenance.url.as_deref(),
+            Some("https://civitai.com/api/download/models/9931?type=Model"),
+            "userinfo and the token parameter must be stripped before provenance is persisted"
+        );
+        let serialized = provenance.to_json().to_string();
+        assert!(
+            !serialized.contains("t0ken") && !serialized.contains("s3cret"),
+            "provenance must carry no credential: {serialized}"
+        );
+    }
+
+    /// A request that sets both spellings is refused rather than silently resolved by precedence:
+    /// honouring one and dropping the other would fetch something the caller did not ask for.
+    #[test]
+    fn a_request_that_sets_both_spellings_is_refused() {
+        for body in [
+            r#"{"repo":"org/a","source":{"kind":"huggingFace","repo":"org/b"}}"#,
+            r#"{"sourceUrl":"https://a.example/m","source":{"kind":"url","url":"https://b.example/m"}}"#,
+            r#"{"sourcePath":"/a/m","source":{"kind":"localPath","path":"/b/m"}}"#,
+        ] {
+            let mut payload = parse(body);
+            let error = normalize_model_import_source(&mut payload)
+                .expect_err("a conflicting body must refuse");
+            assert!(
+                format!("{error:?}").contains("not both"),
+                "{body} refused as {error:?}"
+            );
+        }
+    }
+
+    /// `expectedSha256` has the same two spellings as `repo`/`sourceUrl`/`sourcePath`, and it was
+    /// the only one resolved by PRECEDENCE (`expected_sha256.or(payload.expected_sha256)`). A caller
+    /// who sent two different digests got the transfer verified against whichever one won and a
+    /// success report — the exact silent resolution this function's contract refuses. Both set and
+    /// naming the same digest is fine: sha256 is hex, so case and surrounding whitespace are not a
+    /// difference.
+    #[test]
+    fn conflicting_expected_sha256_digests_are_refused_and_matching_ones_are_accepted() {
+        let alpha = "a".repeat(64);
+        let beta = "b".repeat(64);
+        for (label, body) in [
+            (
+                "url",
+                format!(
+                    r#"{{"expectedSha256":"{beta}","source":{{"kind":"url","url":"https://h.example/m","expectedSha256":"{alpha}"}}}}"#
+                ),
+            ),
+            (
+                "civitai",
+                format!(
+                    r#"{{"expectedSha256":"{beta}","source":{{"kind":"civitai","url":"https://civitai.com/api/download/models/1","expectedSha256":"{alpha}"}}}}"#
+                ),
+            ),
+        ] {
+            let mut payload = parse(&body);
+            let error = normalize_model_import_source(&mut payload)
+                .expect_err("two different digests must refuse");
+            let rendered = format!("{error:?}");
+            assert!(
+                rendered.contains("expectedSha256") && rendered.contains("not both"),
+                "{label} refusal must name the field: {rendered}"
+            );
+            assert!(
+                rendered.contains(&alpha) && rendered.contains(&beta),
+                "{label} refusal must show both digests: {rendered}"
+            );
+        }
+
+        // The SAME digest in both places, differing only in case and surrounding whitespace, is one
+        // digest spelled twice — accepted, and the value is preserved for the transfer to verify.
+        for (label, body) in [
+            (
+                "url",
+                format!(
+                    r#"{{"expectedSha256":"  {upper}  ","source":{{"kind":"url","url":"https://h.example/m","expectedSha256":"{alpha}"}}}}"#,
+                    upper = alpha.to_ascii_uppercase()
+                ),
+            ),
+            (
+                "civitai",
+                format!(
+                    r#"{{"expectedSha256":"  {upper}  ","source":{{"kind":"civitai","url":"https://civitai.com/api/download/models/1","expectedSha256":"{alpha}"}}}}"#,
+                    upper = alpha.to_ascii_uppercase()
+                ),
+            ),
+        ] {
+            let mut payload = parse(&body);
+            normalize_model_import_source(&mut payload).unwrap_or_else(|error| {
+                panic!("{label} must accept one digest spelled twice: {error:?}")
+            });
+            assert_eq!(
+                payload.expected_sha256.as_deref(),
+                Some(alpha.as_str()),
+                "{label} must keep the digest for the transfer to verify"
+            );
+        }
+
+        // Only one side set is not a conflict, in either direction.
+        let mut payload = parse(&format!(
+            r#"{{"expectedSha256":"{alpha}","source":{{"kind":"url","url":"https://h.example/m"}}}}"#
+        ));
+        normalize_model_import_source(&mut payload).expect("a flat-only digest is not a conflict");
+        assert_eq!(payload.expected_sha256.as_deref(), Some(alpha.as_str()));
+    }
+
+    /// E7: an ownership mode this route does not serve fails closed at deserialization rather than
+    /// defaulting to managed.
+    #[test]
+    fn an_unserved_ownership_mode_is_refused_instead_of_defaulted() {
+        for body in [
+            r#"{"repo":"org/model","ownershipMode":"linked"}"#,
+            r#"{"repo":"org/model","ownershipMode":"external"}"#,
+            r#"{"repo":"org/model","ownershipMode":""}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ModelImportRequest>(body).is_err(),
+                "{body} must be refused"
+            );
+        }
+        // And an unknown discriminated source kind, or an unknown field inside a known one.
+        for body in [
+            r#"{"source":{"kind":"ftp","url":"ftp://host/m"}}"#,
+            r#"{"source":{"kind":"url","url":"https://h/m","token":"s3cret"}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ModelImportRequest>(body).is_err(),
+                "{body} must be refused"
+            );
+        }
     }
 }

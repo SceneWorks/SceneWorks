@@ -1334,3 +1334,169 @@ mod decoder_selection_tests {
         assert!(error.contains("exactly one decoder"), "got: {error}");
     }
 }
+
+/// End-to-end enqueue coverage for an IMPORTED plan-backed Wan checkpoint (epic 20398, sc-20651).
+///
+/// The unit-level claim predicates live in `sceneworks-core`; this module asserts the thing the
+/// user actually experiences — that `POST /api/v1/video/jobs` answers `201` and the job is really
+/// on the queue, rather than the `400` the sc-19504 no-lane gate returned for every imported Wan
+/// checkpoint while the video claim predicates had no `importPlan` awareness.
+#[cfg(test)]
+mod plan_backed_video_enqueue_tests {
+    use crate::tests::support::*;
+
+    /// The manifest set `test_settings` reads, with `user.models.jsonc` supplied by the caller.
+    fn write_manifests(config_dir: &std::path::Path, user_models: &str) {
+        std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+        for (name, body) in [
+            (
+                "builtin.models.jsonc",
+                r#"{ "schemaVersion": 1, "models": [] }"#,
+            ),
+            ("user.models.jsonc", user_models),
+            (
+                "builtin.loras.jsonc",
+                r#"{ "schemaVersion": 1, "loras": [] }"#,
+            ),
+            ("user.loras.jsonc", r#"{ "schemaVersion": 1, "loras": [] }"#),
+            (
+                "builtin.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+            (
+                "user.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+        ] {
+            std::fs::write(config_dir.join(name), body).expect("manifest writes");
+        }
+    }
+
+    /// An app whose catalog holds ONE imported `wan-video` model. `import_plan` is spliced in
+    /// verbatim so the control case can drop it and change nothing else.
+    fn app_with_imported_wan(temp_dir: &tempfile::TempDir, import_plan: &str) -> axum::Router {
+        write_manifests(
+            &temp_dir.path().join("config/manifests"),
+            &format!(
+                r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "imported_wan_2_2_abc123",
+                    "name": "Imported Wan 2.2",
+                    "type": "video",
+                    "family": "wan-video"{import_plan}
+                  }}]
+                }}"#
+            ),
+        );
+        create_app(test_settings(temp_dir)).expect("app creates")
+    }
+
+    const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
+
+    async fn create_project(app: &axum::Router) {
+        let (status, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Imported Wan" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "project create: {project}");
+    }
+
+    #[tokio::test]
+    async fn a_plan_backed_wan_checkpoint_enqueues_a_text_to_video_job() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        create_project(&app).await;
+
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "imported_wan_2_2_abc123",
+                "mode": "text_to_video",
+                "prompt": "a fox in the rain"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "enqueue answered: {job}");
+        assert_eq!(job["type"], "video_generate");
+        // Not merely accepted — still QUEUED after `fail_job_if_platform_unreachable` has run, so
+        // the row is genuinely waiting for a worker rather than terminal-failed on the way out.
+        assert_eq!(job["status"], "queued", "{job}");
+        // The plan identity the worker's Wan lane resolves through is on the enqueued payload.
+        assert_eq!(
+            job["payload"]["modelManifestEntry"]["importPlan"]["checkpointId"],
+            "ckpt_wan_abc123"
+        );
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 1, "the job must be on the queue");
+    }
+
+    /// The control that makes the test above an assertion about the PLAN. The identical catalog
+    /// entry with no `importPlan` is claimed by no lane — its model id is in no static routed list
+    /// — so the no-lane gate 400s it, which is exactly what the plan-backed request used to get.
+    #[tokio::test]
+    async fn the_same_imported_wan_entry_without_a_plan_is_still_refused_by_the_no_lane_gate() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = app_with_imported_wan(&temp_dir, "");
+        create_project(&app).await;
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "imported_wan_2_2_abc123",
+                "mode": "text_to_video",
+                "prompt": "a fox in the rain"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "answered: {error}");
+        assert!(
+            error.to_string().contains("no backend implements it"),
+            "the no-lane gate must be what refused it: {error}"
+        );
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 0);
+    }
+
+    /// A mode the plan-backed Wan lane does not serve is refused at the gate that can still explain
+    /// why (a `400`), rather than enqueued and later refused by the worker — the claim predicate and
+    /// `resolve_candle_video_route`'s plan-backed arm agree on the served set.
+    #[tokio::test]
+    async fn a_plan_backed_wan_checkpoint_is_refused_on_a_mode_its_lane_does_not_serve() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        create_project(&app).await;
+
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "imported_wan_2_2_abc123",
+                "mode": "image_to_video",
+                "prompt": "a fox in the rain",
+                "sourceAssetId": "asset-1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "answered: {error}");
+
+        let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(queue["counts"]["queued"], 0);
+    }
+}

@@ -1431,6 +1431,10 @@ const WAN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["q8", "q4", "bf16"];
 /// reference-conditioning lane, so this slice serves only T2V experts.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const WAN_T2V_IN_CHANNELS: u64 = 16;
+/// The image-to-video expert's `patch_embedding.weight` in-channels — named so the plan route's
+/// T2V-only refusal can say what the checkpoint it declined actually is (sc-20644 review blocker 3).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_I2V_IN_CHANNELS: u64 = 36;
 
 /// The two in-place ComfyUI expert files + the resident snapshot tier, plus the optional in-place UMT5
 /// TE / VAE files (sc-10909). The snapshot tier always supplies the tokenizer (and the TE/VAE when their
@@ -1553,6 +1557,14 @@ fn resolve_wan_comfyui_paths(
     if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
         return Ok(None);
     }
+    // A plan-backed entry's bytes come from its compiled plan's own verified expert layers, never
+    // from a live `external_base_*` catalog scan — the only source a LINKED Wan tree has, and the
+    // only one the inspector hashed and the store re-checked (sc-20644 Wan row). Reached before the
+    // `usable` / `components[]` gates below, which are properties of a SCANNED catalog row that a
+    // linked checkpoint does not have and never will.
+    if let Some(paths) = resolve_plan_backed_wan_comfyui_paths(request, settings)? {
+        return Ok(Some(paths));
+    }
     if entry.get("usable").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
     }
@@ -1571,20 +1583,7 @@ fn resolve_wan_comfyui_paths(
     else {
         return Ok(None);
     };
-    let Some(snapshot_root) =
-        huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)
-    else {
-        return Ok(None);
-    };
-    let Some(snapshot_dir) = WAN_COMFYUI_SNAPSHOT_TIERS
-        .iter()
-        .map(|tier| snapshot_root.join(tier))
-        .find(|dir| {
-            dir.join("text_encoder").is_dir()
-                && dir.join("vae").is_dir()
-                && dir.join("tokenizer").join("tokenizer.json").is_file()
-        })
-    else {
+    let Some(snapshot_dir) = wan_comfyui_snapshot_dir(settings) else {
         return Ok(None);
     };
     let high = crate::paths::normalize_app_managed_model_path(
@@ -1622,14 +1621,189 @@ fn resolve_wan_comfyui_paths(
     }))
 }
 
+/// The PLAN-sourced counterpart of [`resolve_wan_comfyui_paths`] (epic 20398, sc-20644).
+///
+/// Wan is the family that needed the checkpoint plan to grow a vocabulary. Its ComfyUI checkpoint has
+/// TWO backbones — a high-noise and a low-noise expert, selected per denoise step and not
+/// interchangeable — so it has no single primary to derive, and until the inspector could tell the
+/// two apart a compiled Wan plan said only "two transformer layers" and was unusable. It now
+/// compiles to the named `transformer_high` / `transformer_low` roles this resolves by name.
+///
+/// The in-place UMT5 encoder and Wan VAE stay OPTIONAL, exactly as they are on the catalog path
+/// (sc-10909): a tree that carries them uses them, a tree that does not falls back to the resident
+/// snapshot tier's own. Anything the plan carries that is in NEITHER list refuses rather than going
+/// unloaded.
+///
+/// The T2V-only channel gate is applied here too, against the plan's own verified high expert, so a
+/// plan-backed I2V pair declines for the same reason a scanned one does rather than failing with a
+/// shape error at generate.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_plan_backed_wan_comfyui_paths(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiWanPaths>> {
+    let Some(plan) = crate::image_jobs::checkpoint_plan_bespoke_roles(
+        &request.model_manifest_entry,
+        settings,
+        "wan-video",
+        &[
+            sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE,
+            sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE,
+        ],
+        &["text_encoder", "vae"],
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot_dir) = wan_comfyui_snapshot_dir(settings) else {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:missing-component] a compiled Wan checkpoint needs the UMT5 encoder, \
+             VAE and tokenizer from a resident {WAN_COMFYUI_SNAPSHOT_REPO} tier, which a ComfyUI \
+             expert pair does not ship — install Wan 2.2 T2V from the Model Manager, then run this \
+             checkpoint again"
+        )));
+    };
+    let high = plan
+        .required(sceneworks_core::checkpoint_inspector::TRANSFORMER_HIGH_ROLE)
+        .loader_path()
+        .to_path_buf();
+    // T2V only. The CATALOG path answers `Ok(None)` here, which is right for a scanned row: some
+    // other lane may want it, and if none does the model was simply never claimed. A PLAN-BACKED
+    // entry is different — it has already been claimed, and the catalog gates below can never
+    // admit a linked checkpoint, so declining sends it to `CandleVideoRoute::Stub` and the job
+    // COMPLETES with procedural video. Refuse by name instead (review blocker 3).
+    let channels = wan_expert_in_channels(&high);
+    if channels != Some(WAN_T2V_IN_CHANNELS) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:unsupported-operation] this compiled Wan checkpoint's high-noise \
+             expert declares {} input channels; the candle ComfyUI Wan lane serves \
+             text-to-video only, which is the {WAN_T2V_IN_CHANNELS}-channel expert pair. An \
+             image-to-video ({WAN_I2V_IN_CHANNELS}-channel) pair would load into the wrong \
+             configuration.",
+            channels.map_or_else(|| "an unreadable number of".to_owned(), |c| c.to_string())
+        )));
+    }
+    Ok(Some(ComfyuiWanPaths {
+        low: plan
+            .required(sceneworks_core::checkpoint_inspector::TRANSFORMER_LOW_ROLE)
+            .loader_path()
+            .to_path_buf(),
+        te: plan
+            .optional("text_encoder")
+            .map(|pin| pin.loader_path().to_path_buf()),
+        vae: plan
+            .optional("vae")
+            .map(|pin| pin.loader_path().to_path_buf()),
+        high,
+        snapshot_dir,
+    }))
+}
+
+/// The first fully-present `SceneWorks/wan2.2-t2v-a14b-candle` tier, or `None`. One probe, both
+/// routes — the catalog scan answers `Ok(None)` ("not this lane's"), the plan route answers with a
+/// typed refusal, because a plan-backed checkpoint has already been claimed.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_comfyui_snapshot_dir(settings: &Settings) -> Option<PathBuf> {
+    let root = huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)?;
+    WAN_COMFYUI_SNAPSHOT_TIERS
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| {
+            dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+                && dir.join("tokenizer").join("tokenizer.json").is_file()
+        })
+}
+
 /// True when this is a candle-runnable in-place ComfyUI Wan2.2 T2V job: an `external_base_*` model whose
 /// forwarded row is a usable wan-video with both expert components + a resident snapshot. Mirrors the
 /// image comfyui availability predicates.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn wan_comfyui_available(request: &VideoRequest, settings: &Settings) -> bool {
-    request.model.starts_with("external_base_")
-        && matches!(resolve_wan_comfyui_paths(request, settings), Ok(Some(_)))
+/// Whether the ComfyUI Wan lane claims this request, PROPAGATING any refusal it raises.
+///
+/// The `?` is the whole point (sc-20644 review blocker 2). The terminal arm of the candle video
+/// ladder is `CandleVideoRoute::Stub`, which COMPLETES a job with procedural video — so a lane that
+/// answers a bare `bool` converts every refusal it had to give into "not mine", and a drifted plan,
+/// a missing snapshot tier, a missing or ambiguous expert role or an unconsumed layer all end as a
+/// SUCCESSFUL stub render. Each of those must reach the job as a typed error instead.
+///
+/// A PLAN-BACKED entry is claimable without an `external_base_` id: that prefix names a row the
+/// catalog assembled by scanning, and a linked checkpoint has no such row and never will. Gating
+/// the claim on it would have left every imported Wan checkpoint with no lane at all — which is the
+/// whole capability this row restores.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn wan_comfyui_claims(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<bool> {
+    let plan_backed =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+            .is_some();
+    if !plan_backed && !request.model.starts_with("external_base_") {
+        return Ok(false);
+    }
+    Ok(resolve_wan_comfyui_paths(request, settings)?.is_some())
 }
+
+/// The candle video verdict for a PLAN-BACKED entry (`importPlan.checkpointId`, epic 20398):
+/// `Ok(())` when this ComfyUI Wan T2V lane claims it, otherwise a typed refusal naming the
+/// checkpoint. Never "not mine" — a plan-backed entry that falls through the router lands on
+/// `CandleVideoRoute::Stub` and the job COMPLETES with procedural video (sc-20651).
+///
+/// `resolve_candle_video_route` consults this AHEAD of the backend gate and every mode arm, because
+/// each of those is wrong for a plan-backed entry in its own way:
+/// * all three `Stub` arms render procedural video — the video twin of the `generate_stub_stream`
+///   hole `CheckpointPlanSelection::into_unclaimed_refusal` closed on the image side, and the
+///   `!backend_candle_enabled` early-out reaches one before any plan check could run;
+/// * the `replace_person` / `extend_clip` / `video_bridge` arms are evaluated BEFORE
+///   [`wan_comfyui_claims`], so an imported checkpoint on those modes would be routed into a builtin
+///   Wan-VACE / SCAIL-2 lane that loads SceneWorks' own weights and never reads the plan's bytes.
+///
+/// The family/mode window mirrors `plan_backed_wan_video_candle_eligible` in core routing, which
+/// keeps the enqueue gate from admitting a shape this refuses. Both must move together.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn plan_backed_wan_video_route(
+    request: &VideoRequest,
+    settings: &Settings,
+    checkpoint_id: &str,
+) -> WorkerResult<()> {
+    let refuse = |reason: String| -> WorkerResult<()> {
+        Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:no-video-lane] checkpoint {checkpoint_id:?}: {reason}, and a \
+             plan-backed entry never renders procedural stub output"
+        )))
+    };
+    if !settings.backend_candle_enabled {
+        return refuse("the candle backend is disabled on this worker".to_owned());
+    }
+    let family = request
+        .model_manifest_entry
+        .get("family")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if family != "wan-video" {
+        return refuse(format!(
+            "no candle video lane loads a checkpoint plan for the {family:?} family"
+        ));
+    }
+    if request.mode != "text_to_video" {
+        return refuse(format!(
+            "the plan-backed Wan lane serves text_to_video only, not {:?}",
+            request.mode
+        ));
+    }
+    if !wan_comfyui_claims(request, settings)? {
+        return refuse(
+            "the plan-backed Wan lane could not resolve this checkpoint's expert layers".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+// There is deliberately NO boolean `wan_comfyui_available` probe any more. It existed only to be
+// called from the router, and answering `bool` is precisely how every refusal this lane raises
+// became a successful procedural-stub render (sc-20644 review blocker 2). Anything that needs the
+// claim asks [`wan_comfyui_claims`] and handles the refusal.
 
 /// Real candle in-place ComfyUI Wan2.2 T2V generation: resolve + confine the two expert paths and the
 /// snapshot tier, then drive the shared [`generate_video`] funnel with `input.comfyui` set (the bespoke
@@ -2583,6 +2757,353 @@ pub(super) async fn generate_candle_wan_vace_extend_bridge(
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, &request.advanced, input).await
+}
+
+/// sc-20644 review minor 10 — the behavioural test for `checkpoint_plan_bespoke_roles`, the
+/// roles-only plan source Wan is the only consumer of.
+///
+/// **First RUNS on the windows-candle CI lane.** The Wan comfyui lane and this helper are both
+/// `cfg(all(not(target_os = "macos"), feature = "backend-candle"))`, so `cargo test` on an Apple
+/// Silicon host only TYPECHECKS them; `check-candle-build.mjs` cross-compiles the test targets
+/// under `-D warnings` but does not execute them.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod plan_backed_wan_tests {
+    // Imports are named one by one rather than glob-imported from the parent:
+    // `video_jobs_remains_split_into_real_engine_modules` asserts each engine module reaches its
+    // parent through the explicit prelude, and that guard greps the whole file as source text —
+    // so even a comment quoting the glob form trips it.
+    use super::{resolve_plan_backed_wan_comfyui_paths, WAN_I2V_IN_CHANNELS, WAN_T2V_IN_CHANNELS};
+    use crate::settings::Settings;
+    use sceneworks_core::checkpoint_inspector::{TRANSFORMER_HIGH_ROLE, TRANSFORMER_LOW_ROLE};
+    use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+    use sceneworks_core::video_request::VideoRequest;
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+
+    /// A Wan expert's tensor surface, plus the `patch_embedding.weight` whose `shape[1]` is the
+    /// T2V/I2V discriminator the lane reads.
+    fn expert_entries(in_channels: u64) -> Vec<(String, String, Vec<u64>)> {
+        vec![
+            (
+                "blocks.0.self_attn.q.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4],
+            ),
+            (
+                "blocks.0.cross_attn.q.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4],
+            ),
+            (
+                "blocks.0.ffn.0.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4],
+            ),
+            ("blocks.0.modulation".to_owned(), "BF16".to_owned(), vec![4]),
+            (
+                "patch_embedding.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, in_channels],
+            ),
+        ]
+    }
+
+    /// A UMT5 text encoder's tensor surface — the T5 signature
+    /// `sceneworks_core::base_weights::has_text_encoder_signature` actually reads: the exact
+    /// `shared.weight` embedding key, an `encoder.block.` stack, and a `SelfAttention` projection.
+    ///
+    /// This exists because `write_expert` writes a TRANSFORMER surface whatever path it is given,
+    /// so a fixture that dropped an expert at `text_encoder/umt5.safetensors` produced a file whose
+    /// PATH says `text_encoder` and whose DESCRIPTOR says `transformer`. `reconcile_role` refuses
+    /// exactly that disagreement with `AmbiguousComponentRole`, so the tree never compiled and the
+    /// worker-level `[checkpoint-plan:unconsumed-layer]` refusal under test was never reached.
+    /// Production was right; the fixture was writing a contradiction.
+    ///
+    /// Deliberately carries NO transformer marker: none of `detect_transformer_family`'s families
+    /// match these keys (`encoder.block.0` contains `block.` but not `blocks.`, and `SelfAttention`
+    /// is not `.self_attn.`), so `detect_component_role` answers `TextEncoder` rather than the
+    /// `Checkpoint` it returns for a file carrying both.
+    fn text_encoder_entries() -> Vec<(String, String, Vec<u64>)> {
+        vec![
+            ("shared.weight".to_owned(), "BF16".to_owned(), vec![4, 4]),
+            (
+                "encoder.block.0.layer.0.SelfAttention.q.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, 4],
+            ),
+            (
+                "encoder.block.0.layer.1.DenseReluDense.wi.weight".to_owned(),
+                "BF16".to_owned(),
+                vec![4, 4],
+            ),
+        ]
+    }
+
+    fn write_expert(path: &Path, in_channels: u64) {
+        write_safetensors(path, expert_entries(in_channels));
+    }
+
+    fn write_safetensors(path: &Path, entries: Vec<(String, String, Vec<u64>)>) {
+        let mut header = serde_json::Map::new();
+        let mut offset = 0_u64;
+        for (name, dtype, shape) in entries {
+            let elems: u64 = shape.iter().product();
+            let bytes = elems * 2;
+            header.insert(
+                name,
+                serde_json::json!({
+                    "dtype": dtype,
+                    "shape": shape,
+                    "data_offsets": [offset, offset + bytes],
+                }),
+            );
+            offset += bytes;
+        }
+        let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.resize(bytes.len() + offset as usize, 0x5a);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// Plant a resident `SceneWorks/wan2.2-t2v-a14b-candle` tier inside `data_dir`'s Hugging Face
+    /// cache, and PIN the cache-location env vars at it until the returned guard drops.
+    ///
+    /// Both halves are required, and the second is the one the fixture was missing.
+    /// `huggingface_hub_cache_dir` consults `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`
+    /// **before** it ever looks at `data_dir` (`test_env`'s own docs say so), and the self-hosted
+    /// Windows candle runner sets a machine-level `HF_HOME` — so on that lane the probe resolved
+    /// against the box's real cache, found no Wan tier, and `resolve_plan_backed_wan_comfyui_paths`
+    /// refused with `[checkpoint-plan:missing-component]` before it could reach the channel gate
+    /// the test asserts on. On macOS, where nothing sets those vars, the same fixture silently took
+    /// the `data_dir` fallback and the missing tier went unnoticed for the same reason.
+    ///
+    /// Goes through [`crate::test_env::EnvVars`] rather than a bare `set_var`: this crate's tests
+    /// are threads in one process, so the crate-wide lock is what keeps the pin from being
+    /// clobbered by — or clobbering — another module's cache-dir test.
+    #[must_use = "the env pin lives only as long as the guard; bind it for the whole test body"]
+    fn resident_wan_snapshot(data_dir: &Path) -> crate::test_env::EnvVars {
+        let hub = data_dir.join("cache").join("huggingface").join("hub");
+        let repo = hub.join("models--SceneWorks--wan2.2-t2v-a14b-candle");
+        // A deliberately NON-hex snapshot name: `discover_installed_snapshot_path` resolves a
+        // mutable name by a direct `is_dir()`, while a 40-hex one re-enters the lease-aware
+        // `discover_snapshot` — a dependency this fixture has no reason to take on.
+        let snapshot = repo.join("snapshots").join("resident");
+        // `q8` is the first entry `WAN_COMFYUI_SNAPSHOT_TIERS` probes.
+        let tier = snapshot.join("q8");
+        for component in ["text_encoder", "vae", "tokenizer"] {
+            std::fs::create_dir_all(tier.join(component)).expect("tier component dir creates");
+        }
+        std::fs::write(tier.join("tokenizer").join("tokenizer.json"), b"{}")
+            .expect("tokenizer.json writes");
+        std::fs::create_dir_all(repo.join("refs")).expect("refs dir creates");
+        std::fs::write(repo.join("refs").join("main"), b"resident").expect("refs/main writes");
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().expect("hub path is utf-8")),
+            // Emptied, not set: `EnvVars` REMOVES a var given an empty value, and these two are
+            // consulted ahead of / alongside `HF_HUB_CACHE`.
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    struct Fixture {
+        _data: tempfile::TempDir,
+        _library: tempfile::TempDir,
+        settings: Settings,
+        library: PathBuf,
+        store: CheckpointPlanStore,
+        root_id: String,
+    }
+
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            let data = tempfile::Builder::new()
+                .prefix(&format!("wan-roles-{label}-{}-", std::process::id()))
+                .tempdir()
+                .unwrap();
+            let library = tempfile::Builder::new()
+                .prefix(&format!("wan-roles-lib-{label}-{}-", std::process::id()))
+                .tempdir()
+                .unwrap();
+            let mut settings = Settings::from_env();
+            settings.data_dir = data.path().to_path_buf();
+            settings.external_model_roots = Vec::new();
+            let library_dir = std::fs::canonicalize(library.path()).unwrap();
+            let store = CheckpointPlanStore::open(&settings.data_dir);
+            let root_id = store.approve_root(&library_dir).unwrap().root_id;
+            Self {
+                _data: data,
+                _library: library,
+                settings,
+                library: library_dir,
+                store,
+                root_id,
+            }
+        }
+
+        /// Compile a two-expert tree, optionally with extra in-place artifacts.
+        fn compile(&self, extras: &[(&str, &str)], in_channels: u64) -> String {
+            write_expert(
+                &self
+                    .library
+                    .join("tree/unet/wan2.2_t2v_high_noise_14B.safetensors"),
+                in_channels,
+            );
+            write_expert(
+                &self
+                    .library
+                    .join("tree/unet/wan2.2_t2v_low_noise_14B.safetensors"),
+                in_channels,
+            );
+            // Each extra is written with the tensor surface its ROLE implies, not with an expert's.
+            // The inspector reconciles the path-implied role against the descriptor-implied one and
+            // refuses a disagreement, so an artifact whose bytes contradict its directory is a
+            // fixture that never reaches the behaviour under test.
+            for (relative, role) in extras {
+                let path = self.library.join("tree").join(relative);
+                match *role {
+                    "text_encoder" => write_safetensors(&path, text_encoder_entries()),
+                    "transformer" => write_expert(&path, in_channels),
+                    other => panic!("fixture has no tensor surface for the {other:?} role"),
+                }
+            }
+            self.store
+                .compile_linked(&self.root_id, "tree")
+                .expect("a two-expert Wan tree compiles")
+                .checkpoint_id
+        }
+
+        fn entry(&self, checkpoint_id: &str) -> serde_json::Map<String, Value> {
+            serde_json::json!({
+                "id": "linked_wan",
+                "catalogScope": "user",
+                "family": "wan-video",
+                "importPlan": { "checkpointId": checkpoint_id },
+            })
+            .as_object()
+            .cloned()
+            .unwrap()
+        }
+    }
+
+    /// Both experts resolve BY NAME to their own verified pins, and the optional in-place artifacts
+    /// fall back to the resident snapshot when the plan does not carry them.
+    ///
+    /// Failing mutations: swap the two role constants at the call site (each pin resolves to the
+    /// other's file); drop `optional_roles` (a tree carrying a VAE refuses instead of consuming it).
+    #[test]
+    fn the_roles_source_resolves_both_experts_by_name_and_falls_back_for_absent_optionals() {
+        let fx = Fixture::new("both");
+        let checkpoint_id = fx.compile(&[], WAN_T2V_IN_CHANNELS);
+        let entry = fx.entry(&checkpoint_id);
+
+        let plan = crate::image_jobs::checkpoint_plan_bespoke_roles(
+            &entry,
+            &fx.settings,
+            "wan-video",
+            &[TRANSFORMER_HIGH_ROLE, TRANSFORMER_LOW_ROLE],
+            &["text_encoder", "vae"],
+        )
+        .unwrap_or_else(|error| panic!("a two-expert plan must resolve: {error}"));
+        let plan = match plan {
+            Some(plan) => plan,
+            None => panic!("the helper must claim a plan-backed wan-video entry"),
+        };
+
+        assert!(
+            plan.required(TRANSFORMER_HIGH_ROLE)
+                .loader_path()
+                .to_string_lossy()
+                .contains("high_noise"),
+            "the high role must resolve to the HIGH file"
+        );
+        assert!(
+            plan.required(TRANSFORMER_LOW_ROLE)
+                .loader_path()
+                .to_string_lossy()
+                .contains("low_noise"),
+            "the low role must resolve to the LOW file"
+        );
+        assert!(
+            plan.optional("text_encoder").is_none() && plan.optional("vae").is_none(),
+            "an absent optional role is None, which is the family's signal to use its resident tier"
+        );
+    }
+
+    /// A layer the lane declared NEITHER required nor optional refuses, rather than going unloaded.
+    ///
+    /// Failing mutation: drop the `checkpoint_plan_unconsumed_layers` call from
+    /// `checkpoint_plan_bespoke_roles`.
+    #[test]
+    fn the_roles_source_refuses_a_layer_the_lane_never_declared() {
+        let fx = Fixture::new("extra");
+        // A third artifact under a role the Wan lane does not consume at all.
+        let checkpoint_id = fx.compile(
+            &[("text_encoder/umt5.safetensors", "text_encoder")],
+            WAN_T2V_IN_CHANNELS,
+        );
+        let entry = fx.entry(&checkpoint_id);
+
+        let error = crate::image_jobs::checkpoint_plan_bespoke_roles(
+            &entry,
+            &fx.settings,
+            "wan-video",
+            &[TRANSFORMER_HIGH_ROLE, TRANSFORMER_LOW_ROLE],
+            &[],
+        );
+        let error = match error {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a layer neither list names must refuse, not be left unloaded"),
+        };
+        assert!(
+            error.contains("[checkpoint-plan:unconsumed-layer]"),
+            "the refusal must name the unconsumed layer: {error}"
+        );
+    }
+
+    /// A plan-backed I2V expert pair REFUSES by name rather than declining into `Stub`
+    /// (review blocker 3).
+    ///
+    /// The resident snapshot tier is part of the SETUP, not part of what is asserted: the
+    /// snapshot probe sits ahead of the channel gate on purpose (a plan-integrity refusal precedes
+    /// operation admission), so without a resident tier this test only ever observed
+    /// `[checkpoint-plan:missing-component]` and never exercised the channel-count refusal at all.
+    #[test]
+    fn a_plan_backed_i2v_expert_pair_refuses_by_name() {
+        let fx = Fixture::new("i2v");
+        let _cache = resident_wan_snapshot(&fx.settings.data_dir);
+        let checkpoint_id = fx.compile(&[], WAN_I2V_IN_CHANNELS);
+        let payload = serde_json::json!({
+            "projectId": "p",
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": "linked_wan",
+            "modelManifestEntry": fx.entry(&checkpoint_id),
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let request = VideoRequest::from_payload(&payload);
+
+        let error = match resolve_plan_backed_wan_comfyui_paths(&request, &fx.settings) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("an I2V expert pair must REFUSE, not decline into the catalog gates"),
+        };
+        assert!(
+            error.contains("[checkpoint-plan:unsupported-operation]")
+                && error.contains(&WAN_I2V_IN_CHANNELS.to_string()),
+            "the refusal must name the channel count it found: {error}"
+        );
+
+        // And it reaches the ROUTER as an error rather than falling through to Stub.
+        let routed = crate::video_jobs::resolve_candle_video_route_for_test(&request, &fx.settings);
+        assert!(
+            routed.is_err(),
+            "a plan-backed I2V pair must never reach CandleVideoRoute::Stub"
+        );
+    }
 }
 
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
