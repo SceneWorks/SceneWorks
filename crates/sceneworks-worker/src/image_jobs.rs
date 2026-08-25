@@ -1273,6 +1273,11 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::KolorsCompositeReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "Kolors Candle does not compose IP-Adapter identity with pose ControlNet or PiD; refusing the crossed request before model load".to_owned(),
+                    ));
+                }
                 // Z-Image strict-pose Fun-ControlNet (sc-5489).
                 CandleImageRoute::ZimageControl => {
                     generate_candle_zimage_control_stream(
@@ -3364,8 +3369,8 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor, admit_candle_base_floor_with_resident_overlay,
-    admit_candle_load_spec_floor, has_candle_tier_peak_row, prepare_cached_candle_base_floor,
+    admit_candle_base, admit_candle_base_floor_with_resident_overlay, admit_candle_load_spec_floor,
+    has_candle_tier_peak_row, prepare_cached_candle_base_floor,
     safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one

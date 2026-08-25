@@ -42,9 +42,9 @@ use gen_core::{
     MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
     MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
-    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
-    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
-    TransformerComponent, WeightsSource,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryReferenceShape,
+    MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision,
+    Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -62,7 +62,10 @@ use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
-const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+// Must remain identical to mlx-gen-mage's loaded provider contract. The prior generation-peak
+// token predated the shared ladder and caused every exact Mage request to fail the provider/gate
+// handshake before selection.
+const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-mlx-shared-ladder-2026-08-03-v1";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1311,6 +1314,15 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
         "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
+        // sc-20799 round 2: unlike the video lane's reference-shape `"other"`, this `"other"` is
+        // IDENTITY-BEARING and must stay. `mode_key` is matched against `binding.mode` when
+        // resolving packaged evidence and is round-tripped by `memory_mode_from_mode_key`, whose
+        // catch-all arm reconstructs `MemoryMode::Other("other")`. Renaming it (to "none" or
+        // anything else) would silently repoint every non-standard image mode at a different
+        // admission coordinate. The real asymmetry worth knowing about is that the typed value
+        // keeps the concrete mode while the key collapses to a single bucket, so two distinct
+        // non-standard modes share one evidence key; narrowing that is a calibration-corpus change,
+        // not a rename, and is out of scope for this pass.
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
     }
 }
@@ -1496,23 +1508,19 @@ fn resident_evidence(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
-            // No catalog family reaches this helper — `MlxRequestPlan` does not retain the one its
-            // manifest carries, so the route is the only identity here. Repeating it as the family
-            // is gen-core's own conservative legacy reading: it cannot widen this cell's identity
-            // to share evidence across routes.
             model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
-            reference_shape: crate::memory_strategy::reference_shape_for_count(
-                geometry.reference_count,
-            ),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
-            // This helper is reached only from the MLX IMAGE request path, whose geometry pins
-            // `frames: 1` — the non-temporal identity, not a nominal rate.
             frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
@@ -1899,11 +1907,7 @@ fn evidence_admission_route(
                 })?;
                 let memory_evidence = MemoryEvidence {
                     key: MemoryEvidenceKey {
-                        // The plan carries `model_id` and `engine_id` but no catalog family, and
-                        // the packaged record this cell is derived from has no family token
-                        // either. The route is the conservative stand-in — it cannot let this
-                        // cell share evidence with another route.
-                        model_family: plan.engine_id.to_owned(),
+                        model_family: plan.model_id.to_owned(),
                         resolved_route: plan.engine_id.to_owned(),
                         backend: gen_core::MemoryBackend::Mlx,
                         tier: plan.tier,
@@ -1911,13 +1915,13 @@ fn evidence_admission_route(
                             record.load_shape,
                         ),
                         mode: memory_mode_from_mode_key(mode_key),
-                        reference_shape: crate::memory_strategy::reference_shape_for_count(
-                            inputs.reference_count,
-                        ),
+                        reference_shape: if inputs.reference_count == 0 {
+                            MemoryReferenceShape::None
+                        } else {
+                            MemoryReferenceShape::Image
+                        },
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
-                        // MLX image lane: `request_geometry` pins `frames: 1`, so the
-                        // non-temporal identity is the only correct value.
                         frames_per_second: None,
                         strategy: evidence_strategy(binding.rung),
                         engaged_composition: record
@@ -2169,45 +2173,34 @@ fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase 
 /// `backend` is a parameter rather than a constant because sc-18814 routes the VIDEO lane through
 /// this same shape on both backends; every image caller here passes [`MemoryBackend::Mlx`], which
 /// is what the field was hardcoded to before.
-///
-/// `model_family` is the resolved CATALOG family, which is not the same axis as
-/// `contract.provider_id` — gen-core keys evidence on it precisely so two catalog families sharing
-/// one engine cannot share evidence. The video lane has a real family to pass
-/// ([`crate::video_admission::VideoRequestIdentity::model_family`]); image callers have none on
-/// this path and pass the route, the conservative reading that cannot widen a cell's identity.
-///
-/// `frames_per_second` must be `Some` exactly when the request has temporal output. Image callers
-/// pass `None` (their geometry pins `frames: 1`); the video caller passes the request's real rate,
-/// because two runs at the same frame COUNT and different rates are different memory cells and
-/// geometry alone cannot separate them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn estimate_evidence(
     contract: &MemoryProviderContract,
     backend: gen_core::MemoryBackend,
-    model_family: &str,
     tier: MemoryNumericTier,
     mode: &str,
     overlay: Option<&str>,
     geometry: MemoryGeometry,
-    frames_per_second: Option<u32>,
     selection: MemorySelection,
     predicted_peak_bytes: u64,
     calibration_fingerprint: Option<&str>,
 ) -> MemoryEvidence {
     MemoryEvidence {
         key: MemoryEvidenceKey {
-            model_family: model_family.to_owned(),
+            model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
-            reference_shape: crate::memory_strategy::reference_shape_for_count(
-                geometry.reference_count,
-            ),
+            reference_shape: if geometry.reference_count == 0 {
+                MemoryReferenceShape::None
+            } else {
+                MemoryReferenceShape::Image
+            },
             overlay: overlay.map(str::to_owned),
             geometry,
-            frames_per_second,
+            frames_per_second: None,
             strategy: selection.strategy,
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
@@ -2779,15 +2772,10 @@ fn synthesize_estimate_ladder(
                         evidence: estimate_evidence(
                             contract,
                             gen_core::MemoryBackend::Mlx,
-                            // MLX image lane: no catalog family on this path, and the geometry pins
-                            // `frames: 1`, so the route stands in for the family and the rate is the
-                            // non-temporal identity.
-                            &contract.provider_id,
                             plan.tier,
                             mode_key,
                             overlay,
                             geometry,
-                            None,
                             selection,
                             predicted_peak_bytes,
                             calibration_fingerprint,
@@ -2828,15 +2816,10 @@ fn synthesize_estimate_ladder(
                 evidence: estimate_evidence(
                     contract,
                     gen_core::MemoryBackend::Mlx,
-                    // MLX image lane: no catalog family on this path, and the geometry pins
-                    // `frames: 1`, so the route stands in for the family and the rate is the
-                    // non-temporal identity.
-                    &contract.provider_id,
                     plan.tier,
                     mode_key,
                     overlay,
                     geometry,
-                    None,
                     selection,
                     predicted_peak_bytes,
                     calibration_fingerprint,
@@ -4206,16 +4189,16 @@ pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumer
 /// Resolve the numeric tier that the loaded video checkpoint actually carries.
 ///
 /// Provider-owned resolution runs first for video loaders that carry their tier outside
-/// `LoadSpec.quantize` (currently Wan TI2V-5B). LTX then resolves its immutable `split_model.json`.
+/// `LoadSpec.quantize` (Wan TI2V-5B and Bernini). LTX then resolves its immutable `split_model.json`.
 /// An explicit assertion that disagrees with the checkpoint fails closed before selection.
 pub(crate) fn resolved_video_numeric_tier(
     engine_id: &str,
     spec: &LoadSpec,
 ) -> WorkerResult<MemoryNumericTier> {
-    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. MLX Wan
-    // TI2V-5B reads its immutable packed config/header surface and also carries the Q4 text-encoder
-    // Q8 floor; deriving from `LoadSpec.quantize` here would misprice the normal prepacked load,
-    // whose request-side quant hint is deliberately `None`.
+    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. Wan and
+    // Bernini read immutable packed config/header surfaces (Wan also carries the Q4 text-encoder Q8
+    // floor); deriving from `LoadSpec.quantize` would misprice their normal prepacked loads, whose
+    // request-side quant hint is deliberately `None`.
     #[cfg(target_os = "macos")]
     if let Some(tier) =
         runtime_macos::resolved_video_memory_numeric_tier(engine_id, spec).map_err(|error| {
@@ -5004,10 +4987,6 @@ fn generic_mlx_shared_observation(
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
-            // This whole cell is the synthetic pseudo-route, not a catalog entry — no manifest,
-            // engine id or family reaches this load-time gate (see `decide_residency_for_spec`).
-            // Repeating the route as the family is the conservative reading gen-core's own legacy
-            // records use: it cannot make this estimate share evidence with a real family.
             model_family: "generic_mlx_cold_load".into(),
             resolved_route: "generic_mlx_cold_load".into(),
             backend: gen_core::MemoryBackend::Mlx,
@@ -5016,9 +4995,7 @@ fn generic_mlx_shared_observation(
             // defers transformer materialization.
             load_shape: gen_core::LoadShape::EagerMaterialization,
             mode: memory_mode_from_mode_key("image_generation"),
-            // `geometry.reference_count` is the literal 0 above, and this gate is geometry-blind
-            // and resolution-blind, so both axes are the non-temporal, reference-free identity.
-            reference_shape: gen_core::MemoryReferenceShape::None,
+            reference_shape: MemoryReferenceShape::None,
             overlay: Some("resolved_load_spec".into()),
             geometry,
             frames_per_second: None,
@@ -13605,10 +13582,12 @@ mod tests {
             // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
             // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
             // those providers reachable rung-4 ladders, so they are no longer Resident-only and
-            // have no estimate band left to flip. The four that remain have no ladder yet, which is
-            // what keeps this list a live audit rather than a formality.
+            // have no estimate band left to flip. sc-20799 removed the fourth row the same way:
+            // retiring `flux2_dev`'s `exhaustive` reading gave its T2I route a declared
+            // `staged_residency` rung across bf16/q4/q8, so the bf16 cell is no longer
+            // Resident-only and has no band to flip. The three that remain have no ladder yet,
+            // which is what keeps this list a live audit rather than a formality.
             vec![
-                ("flux2_dev", "flux2_dev", "bf16", 128),
                 ("flux2_dev", "flux2_dev_control", "q4", 64),
                 ("ideogram_4", "ideogram_4", "q8", 48),
                 ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
@@ -15245,6 +15224,16 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
+        assert_eq!(
+            MAGE_CALIBRATION_FINGERPRINT,
+            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
+            "the worker's Mage peak estimator must fail at compile/test time when the linked provider identity moves",
+        );
+    }
+
     #[test]
     fn mage_adapter_requests_require_and_consume_declared_residency() {
         use gen_core::{
@@ -15445,13 +15434,10 @@ mod tests {
                 tier: plan.tier,
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: memory_mode_from_mode_key("edit"),
-                // The contract requires the shape to be `None` exactly when the count is zero, and
-                // this fixture varies the count — so it tracks it. `edit` consumes reference
-                // IMAGES, and it is not a temporal mode, so the frame rate is `None`.
                 reference_shape: if inputs.reference_count == 0 {
-                    gen_core::MemoryReferenceShape::None
+                    MemoryReferenceShape::None
                 } else {
-                    gen_core::MemoryReferenceShape::Image
+                    MemoryReferenceShape::Image
                 },
                 overlay: inputs.overlay.clone(),
                 geometry: MemoryGeometry {

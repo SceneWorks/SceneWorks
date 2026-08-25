@@ -1943,20 +1943,25 @@ async fn run_utility_job(
         let guard_job_type = job.job_type.clone();
         let guard_payload = job.payload.clone();
         let guard_settings = settings.clone();
-        let source_guard = tokio::task::spawn_blocking(move || {
+        let guard_task = tokio::task::spawn_blocking(move || {
             external_library_runtime::RuntimeSourceGuard::begin(
                 &guard_job_type,
                 &guard_payload,
                 &guard_settings,
             )
-        })
+        });
+        // The guard's admission pass can re-verify a multi-GB resolved bundle, which outlasts the
+        // API's stale-worker timeout — the sc-13856 hazard at a new call site. Awaiting the handle
+        // bare let the sweep mark a still-healthy worker offline mid-verification (the Krea bf16
+        // 90s lost-heartbeat incident), so the wait must pump heartbeats on the progress interval.
+        let source_guard = progress::heartbeat_while_blocking(
+            api,
+            settings,
+            &job.id,
+            "model source guard",
+            guard_task,
+        )
         .await
-        .map_err(|error| {
-            (
-                "Model source unavailable.",
-                WorkerError::Io(std::io::Error::other(error.to_string())),
-            )
-        })?
         .map_err(|error| ("Model source unavailable.", error))?;
         let dispatch_result = match job.job_type {
             JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)

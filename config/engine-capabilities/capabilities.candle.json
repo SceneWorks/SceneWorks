@@ -9923,6 +9923,741 @@
   ],
   "memoryRouteWitnesses": [
     {
+      "provider": "anima_aesthetic",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_aesthetic",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "anima_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_edit",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_edit",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_edit",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "boogu_image_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "candle_kolors_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control_pid"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "candle_kolors_ipadapter",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_base",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_flash",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "chroma1_hd",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
       "provider": "flux1_dev",
       "tier": "bf16",
       "mode": "character_image",
@@ -11877,6 +12612,853 @@
     },
     {
       "provider": "flux2_klein_9b",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "ideogram_4_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "instantid",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "identity"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "kolors",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "kolors",
       "tier": "q8",
       "mode": "text_to_image",
       "overlay": "none",
@@ -13454,99 +15036,36 @@
       "provider": "qwen_image_edit",
       "tier": "bf16",
       "mode": "character_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
       "tier": "bf16",
-      "mode": "edit_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
       "provider": "qwen_image_edit",
-      "tier": "nvfp4",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "bf16",
       "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
       "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "nvfp4",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
@@ -13559,43 +15078,22 @@
       "provider": "qwen_image_edit",
       "tier": "q4",
       "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_edit",
+      "tier": "q4",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
       "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "qwen_image_edit",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
@@ -13608,39 +15106,1761 @@
       "provider": "qwen_image_edit",
       "tier": "q8",
       "mode": "edit_image",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
       "provider": "qwen_image_edit",
       "tier": "q8",
-      "mode": "image_detail",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sana_1600m",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sana_1600m",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sana_sprint_1600m",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sana_sprint_1600m",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large",
       "tier": "q8",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sd3_5_large",
       "tier": "q8",
       "mode": "image_to_image",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sd3_5_large",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_large_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sd3_5_medium",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
       "tier": "q8",
       "mode": "style_variations",
       "overlay": "none",
       "loadProfile": "plain"
     },
     {
-      "provider": "qwen_image_edit",
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora_pid"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "sdxl",
       "tier": "q8",
       "mode": "text_to_image",
       "overlay": "none",

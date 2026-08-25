@@ -57,6 +57,11 @@ const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
 /// train has the components installed by construction.
 const MAGE_FINETUNED_COMPONENT_TIER: &str = "bf16";
 
+/// Stable request/evidence identity for the bespoke imported-transformer lane. The user model id
+/// remains asset provenance; it must not masquerade as one of the six pinned builtin providers.
+#[cfg(target_os = "macos")]
+const MAGE_FINETUNED_MEMORY_ROUTE: &str = "mage_finetuned";
+
 /// Denoise-steps / guidance fallbacks — the undistilled `mage_flow_base` regime a fine-tune
 /// inherits. The Studio normally supplies both from the catalog entry's `defaults`
 /// (`apply_family_studio_surface_defaults`); these apply only when it does not.
@@ -329,6 +334,45 @@ fn mage_finetuned_raw_settings(
     raw
 }
 
+/// Opt the imported transformer into deferred materialization only when the authoritative loaded
+/// provider proves the exact prepared source is reopenable. Dense bf16 fine-tunes can satisfy this;
+/// q4/q8 fine-tunes are load-time quantized and therefore retain Eager with Transformer Missing.
+/// Lower rungs remain provider-owned in both cases.
+#[cfg(target_os = "macos")]
+fn mage_finetuned_memory_load_shape(
+    provider: &str,
+    spec: LoadSpec,
+) -> LoadSpec {
+    mage_finetuned_memory_load_shape_with(spec, |candidate| {
+        crate::inference_runtime::media()
+            .memory_strategy_contract(provider, candidate)
+            .ok()
+            .flatten()
+            .is_some_and(|contract| {
+                contract
+                    .capability(gen_core::MemoryStrategy::BoundedTransformerResidency)
+                    .is_some_and(|capability| {
+                        capability.support == gen_core::MemoryStrategySupport::Implemented
+                    })
+            })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn mage_finetuned_memory_load_shape_with(
+    spec: LoadSpec,
+    source_proves_transformer: impl FnOnce(&LoadSpec) -> bool,
+) -> LoadSpec {
+    let candidate = spec
+        .clone()
+        .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+    if source_proves_transformer(&candidate) {
+        candidate.with_applied_load_shape_declaration()
+    } else {
+        spec
+    }
+}
+
 /// Build the per-image request for a generated Mage full fine-tune. The checkpoint inherits the
 /// undistilled Base descriptor, including true-CFG negative prompts; keeping this pure makes the
 /// accepted request surface independently testable without loading model weights.
@@ -425,7 +469,11 @@ async fn generate_mage_finetuned_stream(
         "Fine-tuned Mage-Flow source preparation failed",
     )?;
     #[cfg(target_os = "macos")]
-    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
+    let spec = {
+        let spec = spec.with_resolved_route(MAGE_FINETUNED_MEMORY_ROUTE);
+        let spec = mage_finetuned_memory_load_shape(descriptor.id, spec);
+        crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?
+    };
     // Candle's pre-load floor is the LoadSpec's own bytes (the trained DiT plus both staged shared
     // components) — the same seam the imported-SDXL lane admits on.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -435,18 +483,69 @@ async fn generate_mage_finetuned_stream(
     // The load itself runs through the registered imported-source descriptor (`descriptor.id`), so
     // each backend's registry entry supplies its own `load_finetuned` — the entrypoint that skips
     // the pinned-checkpoint identity guard a full fine-tune necessarily fails.
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    #[cfg(target_os = "macos")]
+    let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
+        descriptor.id,
+        MAGE_FINETUNED_MEMORY_ROUTE,
+        &spec,
+        None,
+        None,
+    )?;
+    #[cfg(target_os = "macos")]
+    let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: request.count,
+        mode: "text_to_image".to_owned(),
+        overlay: None,
+        adapter_count: 0,
+        has_reference: false,
+        reference_count: 0,
+        use_pid: false,
+        has_phases: false,
+    };
+
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         descriptor.id,
         0,
         spec,
         "Fine-tuned Mage-Flow checkpoint load failed".to_owned(),
-        move |model, tx, cancel| {
+        move |model,
+              cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            #[cfg(target_os = "macos")]
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (cache_state, loaded_policy, external_committed_bytes);
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+            }
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
-                let request = mage_finetuned_generation_request(
+                #[cfg(target_os = "macos")]
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    model,
+                    &mlx_request_plan,
+                    &mlx_request_inputs,
+                    cache_state,
+                    loaded_policy.offload_policy,
+                    warm_policy.take(),
+                    external_committed_bytes,
+                )?;
+                #[cfg(target_os = "macos")]
+                let _request_memory_limit = memory_evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                let mut request = mage_finetuned_generation_request(
                     prompt,
                     negative_prompt.clone(),
                     width,
@@ -457,7 +556,21 @@ async fn generate_mage_finetuned_stream(
                     preview,
                     &cancel,
                 );
-                let output = match model.generate(&request, &mut *on_progress) {
+                #[cfg(target_os = "macos")]
+                {
+                    request.memory = Some(memory_evaluation.memory);
+                }
+                let output = match crate::memory_strategy::generate_with_scope(
+                    model,
+                    &mut request,
+                    {
+                        #[cfg(target_os = "macos")]
+                        { Some(&memory_evaluation.context) }
+                        #[cfg(not(target_os = "macos"))]
+                        { None }
+                    },
+                    &mut *on_progress,
+                ) {
                     Ok(output) => output,
                     Err(_) if cancel.is_cancelled() => return Ok(None),
                     Err(error) => {

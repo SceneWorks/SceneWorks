@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  cp, lstat, mkdtemp, mkdir, readdir, readFile, realpath, rm, symlink, writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -23,6 +25,8 @@ import {
   expectedLoadSpecQuantBits,
   estimateJitDiskPlan,
   inferencePins,
+  INFERENCE_PIN_MANIFESTS,
+  liveInferencePin,
   hashedFiles,
   installSidecarObstructions,
   inspectDerivedSidecarRoot,
@@ -878,6 +882,65 @@ test("raw nvidia-smi and one exact inference pin fixtures parse deterministicall
   assert.deepEqual(inferencePins(`dep = { git = "https://github.com/SceneWorks/inference", rev = "${"a".repeat(40)}" }`), ["a".repeat(40)]);
 });
 
+async function writePinManifests(root, pins) {
+  for (const [index, manifest] of INFERENCE_PIN_MANIFESTS.entries()) {
+    const file = path.join(root, manifest);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      [
+        "[dependencies]",
+        `gen-core = { git = "https://github.com/SceneWorks/inference", rev = "${pins[index]}" }`,
+        // Same-shape pins on other repositories must not be mistaken for the inference revision.
+        'mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "bd8f0e3c757195b17b2c34fae3073ab826fb7bc1" }',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  }
+}
+
+test("the terminal inference revision is derived from the live manifests, never restated", async () => {
+  // The three manifests `scripts/bump-inference.mjs` rewrites are the only inference-pin source.
+  const bump = await readFile("scripts/bump-inference.mjs", "utf8");
+  for (const manifest of INFERENCE_PIN_MANIFESTS) {
+    assert.match(bump, new RegExp(manifest.replace(/[/.]/g, "\\$&")), `${manifest} is a bump-inference target`);
+  }
+
+  // The controller and the dispatch workflow must not carry a second copy of any inference pin.
+  const controller = await readFile("scripts/epic-20738-terminal-cuda-harness.mjs", "utf8");
+  assert.doesNotMatch(controller, /FROZEN_INFERENCE_PIN/);
+  const workflow = await readFile(".github/workflows/windows-candle.yml", "utf8");
+  assert.doesNotMatch(workflow, /inferenceSha = '[0-9a-f]{40}'/);
+  assert.match(workflow, /campaign-summary\.json[\s\S]*?\$summary\.repositories\.inference\.sha[\s\S]*?inferenceSha = \$inferenceSha/);
+
+  // The live checkout agrees with itself, and the derived value is what the manifests actually say.
+  const live = await liveInferencePin();
+  assert.match(live, /^[0-9a-f]{40}$/);
+  for (const manifest of INFERENCE_PIN_MANIFESTS) {
+    assert.deepEqual(inferencePins(await readFile(manifest, "utf8")), [live], manifest);
+  }
+
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-21393-live-pin-"));
+  try {
+    const agreed = path.join(temporary, "agreed");
+    const pin = "c".repeat(40);
+    await writePinManifests(agreed, [pin, pin, pin]);
+    assert.equal(await liveInferencePin(agreed), pin, "an arbitrary agreed revision parses, not a literal");
+
+    const drifted = path.join(temporary, "drifted");
+    await writePinManifests(drifted, [pin, pin, "d".repeat(40)]);
+    await assert.rejects(liveInferencePin(drifted), /manifests disagree on the inference revision/);
+
+    const missing = path.join(temporary, "missing");
+    await writePinManifests(missing, [pin, pin, pin]);
+    await writeFile(path.join(missing, INFERENCE_PIN_MANIFESTS[1]), "[dependencies]\n", "utf8");
+    await assert.rejects(liveInferencePin(missing), /must declare exactly one SceneWorks\/inference revision/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("Draft 2020-12 schemas validate the profile and close adversarial receipt drift", async () => {
   assert.doesNotThrow(() => validateDocumentWithSchema(PROFILE_SCHEMA_PATH, PROFILE_PATH));
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-schema-"));
@@ -1673,6 +1736,8 @@ async function writePass18RecoveryCandidate(root) {
   return { candidate, evidence, metadata, summary };
 }
 
+const OPENPOSE_FIXTURE_INFERENCE_SHA = "e7c1a9d0".repeat(5);
+
 async function writeOpenPoseRecoveryCandidate(root) {
   const pass18Root = path.join(path.dirname(root), `${path.basename(root)}-pass18-source`);
   await mkdir(pass18Root);
@@ -1692,7 +1757,10 @@ async function writeOpenPoseRecoveryCandidate(root) {
     runId: "32664618999",
     runAttempt: "1",
     headSha: "7d7a3efa3088204311e3be01330f35702774feb6",
-    inferenceSha: "31e02510ad6e9e1a3c3d205058576329d724c60d",
+    // Deliberately not the revision the real 9500244306 artifact was captured at: the controller
+    // must accept whatever exact revision the evidence itself records, so a fixture revision that
+    // matches no repository constant proves the frozen-pin comparison is gone for good.
+    inferenceSha: OPENPOSE_FIXTURE_INFERENCE_SHA,
     profile: PROFILE_NAME,
     cellSemanticsSha256: "2fcd20e4909f0bd0ba6c78c6a85247267c354735f77f4ed4912d47941a8512c1",
     artifactSemanticsSha256: "1e98392f71b1ad3d10d4bf18a6f23a497f5ffe588127ac59c54e53d392e6e255",
@@ -1799,7 +1867,7 @@ test("18-PASS recovery imports authentic PASS ordinals and keeps failed LTX cell
       ["historical-pin", async (candidate) => {
         const file = path.join(candidate, "artifact-metadata.json");
         const value = JSON.parse(await readFile(file));
-        value.inferenceSha = "31e02510ad6e9e1a3c3d205058576329d724c60d";
+        value.inferenceSha = "b".repeat(40);
         await writeFile(file, JSON.stringify(value));
       }, /artifact 9498929065/],
     ]) {
@@ -1831,6 +1899,37 @@ test("OpenPose recovery imports only 1 through 14 and replaces exactly the five 
     assert.equal(imported.outcomes.length, 14);
     assert.deepEqual(imported.lineage.executionOrdinals, [15, 16, 17, 18, 19]);
     assert.equal((await readdir(path.join(output, "_imported-prefix"))).includes("15-sdxl-openpose"), false);
+
+    // The capture revision is no longer compared against a harness constant, so it has to be bound
+    // by internal agreement instead: metadata, campaign summary, and per-cell receipt must all name
+    // the same exact 40-hex revision, and any one of them drifting has to reject the artifact.
+    for (const [label, mutate, pattern] of [
+      ["shapeless metadata revision", async (candidate) => {
+        const file = path.join(candidate, "artifact-metadata.json");
+        const value = JSON.parse(await readFile(file));
+        value.inferenceSha = "refs/heads/main";
+        await writeFile(file, JSON.stringify(value));
+      }, /artifact 9500244306/],
+      ["summary revision drift", async (candidate) => {
+        const file = path.join(candidate, "evidence", "campaign-summary.json");
+        const value = JSON.parse(await readFile(file));
+        value.repositories.inference.sha = "9".repeat(40);
+        await writeFile(file, JSON.stringify(value));
+      }, /19-PASS evidence|audited 19-PASS final run/],
+      ["receipt revision drift", async (candidate) => {
+        const file = path.join(candidate, "evidence", "14-ltx-2-3-q8", "receipt.json");
+        const value = JSON.parse(await readFile(file));
+        value.repositories.inference.sha = "9".repeat(40);
+        await writeFile(file, JSON.stringify(value));
+      }, /imported receipt 14-ltx-2-3-q8/],
+    ]) {
+      const root = path.join(temporary, label.replace(/\s+/g, "-"));
+      await mkdir(root);
+      await cp(fixture.candidate, path.join(root, "9500244306"), { recursive: true });
+      await mutate(path.join(root, "9500244306"));
+      await assert.rejects(selectOpenPoseRecovery(root, profile()), pattern, label);
+    }
+
     await writeFile(path.join(fixture.candidate, "artifact-metadata.json"), "{}\n");
     await assert.rejects(() => selectOpenPoseRecovery(validRoot, profile()), /metadata|artifact 9500244306/);
   } finally {
@@ -2380,7 +2479,7 @@ test("campaign paths are fresh non-nested RUNNER_TEMP descendants and cleanup re
     const guard = await validateCampaignPaths({
       runnerTemp, output, scratch, cacheRoot, repositories,
     });
-    assert.equal(guard.output, output);
+    assert.equal(guard.output, path.join(await realpath(runnerTemp), "output"));
     await mkdir(scratch);
     await safeRemoveTree(scratch, guard, "fixture scratch");
 
@@ -2424,6 +2523,67 @@ test("campaign paths are fresh non-nested RUNNER_TEMP descendants and cleanup re
       }
       throw error;
     }
+    const benignParentLink = path.join(temporary, "benign-cache-parent-link");
+    const repositoryParentLink = path.join(temporary, "repository-cache-parent-link");
+    const runnerParentLink = path.join(temporary, "runner-parent-link");
+    const benignCacheRoot = path.join(benignParentLink, "cache");
+    const repositoryCacheRoot = path.join(repositoryParentLink, "cache");
+    await Promise.all([
+      mkdir(path.join(outside, "cache")),
+      mkdir(path.join(sceneworks, "cache")),
+      symlink(outside, benignParentLink, process.platform === "win32" ? "junction" : "dir"),
+      symlink(sceneworks, repositoryParentLink, process.platform === "win32" ? "junction" : "dir"),
+      symlink(runnerTemp, runnerParentLink, process.platform === "win32" ? "junction" : "dir"),
+    ]);
+    const aliasedGuard = await validateCampaignPaths({
+      runnerTemp,
+      output: path.join(runnerTemp, "aliased-cache-output"),
+      scratch: path.join(runnerTemp, "aliased-cache-scratch"),
+      cacheRoot: benignCacheRoot,
+      repositories,
+    });
+    assert.equal(aliasedGuard.cacheRoot, await realpath(benignCacheRoot));
+    // Mutation check: removing the canonical repository confinement check must make this reject fail.
+    await assert.rejects(
+      validateCampaignPaths({
+        runnerTemp,
+        output: path.join(runnerTemp, "repository-cache-output"),
+        scratch: path.join(runnerTemp, "repository-cache-scratch"),
+        cacheRoot: repositoryCacheRoot,
+        repositories,
+      }),
+      /trusted cache root must be outside repository/,
+    );
+    await assert.rejects(
+      validateCampaignPaths({
+        runnerTemp,
+        output: path.join(runnerTemp, "canonical-collision"),
+        scratch: path.join(runnerParentLink, "canonical-collision"),
+        cacheRoot,
+        repositories,
+      }),
+      /output and scratch must be distinct, non-nested/,
+    );
+    const retargetableGuard = await validateCampaignPaths({
+      runnerTemp: runnerParentLink,
+      output: path.join(runnerParentLink, "retarget-output"),
+      scratch: path.join(runnerParentLink, "retarget-scratch"),
+      cacheRoot,
+      repositories,
+    });
+    assert.equal(retargetableGuard.output, path.join(await realpath(runnerTemp), "retarget-output"));
+    assert.equal(retargetableGuard.scratch, path.join(await realpath(runnerTemp), "retarget-scratch"));
+    await rm(runnerParentLink);
+    await symlink(outside, runnerParentLink, process.platform === "win32" ? "junction" : "dir");
+    await Promise.all([
+      mkdir(retargetableGuard.output),
+      mkdir(retargetableGuard.scratch),
+      mkdir(path.join(outside, "retarget-scratch")),
+    ]);
+    await writeFile(path.join(outside, "retarget-scratch", "keep.txt"), "keep", "utf8");
+    await safeRemoveTree(retargetableGuard.scratch, retargetableGuard, "retargeted scratch");
+    await assert.rejects(lstat(retargetableGuard.scratch), { code: "ENOENT" });
+    assert.equal(await readFile(path.join(outside, "retarget-scratch", "keep.txt"), "utf8"), "keep");
     await assert.rejects(
       validateCampaignPaths({
         runnerTemp,
@@ -3995,7 +4155,9 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.match(terminalBlock, /9500244306[\s\S]*?17134718[\s\S]*?9af191547befc7833f82f4d9057fff8abfe09b21eada2be2b4f252d73ae30818/);
   assert.match(terminalBlock, /\$artifact\.expired[\s\S]*?\$artifact\.size_in_bytes[\s\S]*?\$artifact\.digest/);
   assert.match(terminalBlock, /gh run download \$runId --name \$artifactName --dir \$evidence/);
-  assert.match(terminalBlock, /7d7a3efa3088204311e3be01330f35702774feb6[\s\S]*?31e02510ad6e9e1a3c3d205058576329d724c60d/);
+  assert.match(terminalBlock, /7d7a3efa3088204311e3be01330f35702774feb6[\s\S]*?inferenceSha = \$inferenceSha/);
+  assert.match(terminalBlock, /\$summary\.repositories\.inference\.sha[\s\S]*?\$inferenceSha -notmatch '\^\[0-9a-f\]\{40\}\$'/);
+  assert.doesNotMatch(terminalBlock, /inferenceSha = '[0-9a-f]{40}'/);
   assert.doesNotMatch(terminalBlock, /snapshot_download/);
   assert.match(terminalBlock, /python -m venv \$venv/);
   assert.match(terminalBlock, /pip install[^\n]*'huggingface_hub==0\.36\.0'/);

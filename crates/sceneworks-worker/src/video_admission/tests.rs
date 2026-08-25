@@ -2,9 +2,11 @@
 //! `sceneworks-core` transcribed from gen-core still match the pinned bundle.
 
 use gen_core::{
-    LoadShape, LoadSpec, MemoryBackendRealization, MemoryCalibrationIdentity,
-    MemoryLifecycleCapabilities, MemoryParameterRanges, MemoryPhase, MemoryStrategyCapability,
-    MemoryStrategySupport, MemoryWindowMaterialization, Precision, Quant, VaeTiling, WeightsSource,
+    Generator, LoadShape, LoadSpec, MemoryBackendRealization, MemoryCalibrationIdentity,
+    MemoryComponentKind, MemoryComponentResidency, MemoryFormulaKind, MemoryFormulaVariable,
+    MemoryLifecycleCapabilities, MemoryParameterRanges, MemoryPhase, MemoryResidentComponent,
+    MemoryStrategyCapability, MemoryStrategySupport, MemoryWindowMaterialization, Precision, Quant,
+    VaeTiling, WeightsSource,
 };
 use sceneworks_core::video_memory_curves::VideoCurveHullPoint;
 use sceneworks_core::video_request::{
@@ -433,7 +435,8 @@ fn select_once(
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
-            frames_per_second: 24,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -461,11 +464,23 @@ fn select_once(
 /// identity would correctly sever its immutable source-record handshake and make `evaluate` fail
 /// closed before these selector tests reached the coefficient under test.
 fn fixture_curve_bundle() -> VideoMemoryCurveBundle {
-    let bundle = sceneworks_core::video_memory_curves::packaged_video_memory_curves()
+    let mut bundle = sceneworks_core::video_memory_curves::packaged_video_memory_curves()
         .expect("packaged video curve")
         .clone();
-    assert_eq!(bundle.curves.len(), 1);
-    assert_eq!(bundle.curves[0].closure_digest, FITTED_CURVE_CLOSURE);
+    // Select the fixture BY its closure digest rather than asserting the packaged bundle happens to
+    // hold exactly one curve and taking `[0]` (sc-20799 round 2). The bundle grows a curve every
+    // time a new selector key is fitted; a positional read would then silently hand these tests a
+    // different model's coefficients, and the `len() == 1` guard would have failed for a reason
+    // that says nothing about what this fixture needs.
+    let fixture = bundle
+        .curves
+        .iter()
+        .find(|curve| curve.closure_digest == FITTED_CURVE_CLOSURE)
+        .unwrap_or_else(|| {
+            panic!("packaged video curves omit the sc-18810 fixture closure {FITTED_CURVE_CLOSURE}")
+        })
+        .clone();
+    bundle.curves = vec![fixture];
     bundle
 }
 
@@ -491,7 +506,8 @@ fn selector_with_curves<'a>(
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
-            frames_per_second: 24,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -631,6 +647,7 @@ fn inputs<'a>(
         route: "ltx_2_3",
         mode: "text_to_video",
         reference_count: 0,
+        reference_shape: "none",
         overlay: None,
         lane: VideoLane::Mlx,
         tier: tier(),
@@ -656,6 +673,21 @@ fn inputs<'a>(
     }
 }
 
+fn bernini_inputs<'a>(overlay: Option<&'a str>) -> VideoAdmissionInputs<'a> {
+    let mut request = inputs(45, budget(128.0), 0);
+    request.model_id = "bernini";
+    request.model_family = "bernini";
+    request.route = "bernini";
+    request.mode = "video_to_video";
+    request.reference_count = 1;
+    request.reference_shape = "video";
+    request.width = 848;
+    request.height = 480;
+    request.fps = 16;
+    request.overlay = overlay;
+    request
+}
+
 #[test]
 fn a_generator_with_no_contract_leaves_the_request_untouched() {
     let generator = fixture_generator(None);
@@ -664,6 +696,463 @@ fn a_generator_with_no_contract_leaves_the_request_untouched() {
         VideoAdmissionOutcome::default(),
         "no contract means no declared rungs; the gate must fail open"
     );
+}
+
+#[test]
+fn bernini_v2v_is_refused_for_missing_or_crossed_evidence() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[MemoryStrategy::Resident])));
+    let mut exact = inputs(45, budget(128.0), 0);
+    exact.model_id = "bernini";
+    exact.model_family = "bernini";
+    exact.route = "bernini";
+    exact.mode = "video_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "video";
+    exact.width = 848;
+    exact.height = 480;
+    exact.fps = 16;
+    exact.overlay = Some("provider_video_mode:no_audio");
+    let outcome = admit_video_generation(&generator, exact);
+    assert!(outcome
+        .refusal
+        .as_deref()
+        .is_some_and(|message| message.contains("exact surface")));
+
+    let mut exact = inputs(45, budget(128.0), 0);
+    exact.model_id = "bernini";
+    exact.model_family = "bernini";
+    exact.route = "bernini";
+    exact.mode = "video_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "video";
+    exact.width = 848;
+    exact.height = 480;
+    exact.fps = 16;
+    exact.overlay = Some("provider_video_mode:v2v");
+    let outcome = admit_video_generation(&generator, exact);
+    assert!(outcome
+        .refusal
+        .as_deref()
+        .is_some_and(|message| message.contains("no current calibrated evidence")));
+
+    let mut crossed = inputs(45, budget(128.0), 0);
+    crossed.model_id = "bernini";
+    crossed.model_family = "bernini";
+    crossed.route = "bernini";
+    crossed.mode = "video_to_video";
+    crossed.reference_count = 1;
+    crossed.reference_shape = "image";
+    crossed.width = 640;
+    crossed.height = 640;
+    crossed.fps = 24;
+    let outcome = admit_video_generation(&generator, crossed);
+    assert!(outcome
+        .refusal
+        .as_deref()
+        .is_some_and(|message| message.contains("exact surface")));
+}
+
+#[test]
+fn bernini_v2v_consumes_the_loaded_adapter_receipt_without_reconstructing_it() {
+    const RECEIPT: &str = "adapters:[artifact=safetensors;path_hex=2f746d702f612e7361666574656e736f7273;digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;kind=Lora;scale_bits=3f000001;pass_scale_bits=3e800000/3f400000;expert=Some(High);verified_bytes=12345;stable=true]";
+    let contract_with_receipt = |resident_bytes| {
+        let mut contract = fixture_contract(20, 4, &[MemoryStrategy::Resident]);
+        contract.asset_facts.overlay_bytes = resident_bytes;
+        contract.formula = MemoryFormulaKind::ComponentPhaseEnvelope {
+            phases: contract.lifecycle.phases.clone(),
+            variables: vec![MemoryFormulaVariable::OverlayBytes],
+            resident_components: vec![MemoryResidentComponent {
+                id: RECEIPT.to_owned(),
+                kind: MemoryComponentKind::AdapterStack,
+                resident_bytes,
+                bounded_by: None,
+                residency: MemoryComponentResidency::WholeRender,
+            }],
+        };
+        contract
+    };
+    let exact_axis = bernini_adapter_receipt_axis(RECEIPT);
+    let exact_overlay = format!("{exact_axis}+provider_video_mode:v2v");
+    let exact = bernini_inputs(Some(&exact_overlay));
+
+    for resident_bytes in [0, 12_345] {
+        let contract = contract_with_receipt(resident_bytes);
+        assert!(
+            bernini_surface_is_exact(&exact, Some(&contract)),
+            "dense-folded zero-byte and packed-additive receipts are both identity-bearing"
+        );
+    }
+
+    // These mutations cover every receipt axis the provider sealed. The worker does not parse or
+    // round any of them; it compares the complete typed provider receipt carried by the contract.
+    for crossed in [
+        RECEIPT.replace("scale_bits=3f000001", "scale_bits=3f000000"),
+        RECEIPT.replace("pass_scale_bits=3e800000/3f400000", "pass_scale_bits=none"),
+        RECEIPT.replace("kind=Lora", "kind=Lokr"),
+        RECEIPT.replace("expert=Some(High)", "expert=Some(Low)"),
+        RECEIPT.replace("verified_bytes=12345", "verified_bytes=12346"),
+        RECEIPT.replace("digest=sha256:aa", "digest=sha256:ba"),
+    ] {
+        let contract = contract_with_receipt(12_345);
+        let crossed_axis = bernini_adapter_receipt_axis(&crossed);
+        let crossed_overlay = format!("{crossed_axis}+provider_video_mode:v2v");
+        let crossed_request = bernini_inputs(Some(&crossed_overlay));
+        assert!(
+            !bernini_surface_is_exact(&crossed_request, Some(&contract)),
+            "crossed receipt was accepted: {crossed}"
+        );
+    }
+    assert!(!bernini_surface_is_exact(&exact, None));
+}
+
+fn r2v_conditioning() -> Vec<gen_core::Conditioning> {
+    vec![gen_core::Conditioning::MultiReference {
+        images: vec![
+            gen_core::Image {
+                width: 640,
+                height: 360,
+                pixels: vec![11; 640 * 360 * 3],
+            },
+            gen_core::Image {
+                width: 360,
+                height: 640,
+                pixels: vec![29; 360 * 640 * 3],
+            },
+        ],
+    }]
+}
+
+fn rv2v_conditioning() -> Vec<gen_core::Conditioning> {
+    let mut conditioning = r2v_conditioning();
+    let [gen_core::Conditioning::MultiReference { images }] = conditioning.as_mut_slice() else {
+        unreachable!()
+    };
+    let images = std::mem::take(images);
+    let frame = gen_core::Image {
+        width: 848,
+        height: 480,
+        pixels: vec![7; 848 * 480 * 3],
+    };
+    vec![
+        gen_core::Conditioning::VideoClip {
+            frames: vec![frame; 45],
+            frame_idx: 0,
+            strength: 1.0,
+        },
+        gen_core::Conditioning::MultiReference { images },
+    ]
+}
+
+fn mv2v_conditioning() -> Vec<gen_core::Conditioning> {
+    let first = gen_core::Image {
+        width: 848,
+        height: 480,
+        pixels: vec![7; 848 * 480 * 3],
+    };
+    let second = gen_core::Image {
+        width: 848,
+        height: 480,
+        pixels: vec![13; 848 * 480 * 3],
+    };
+    [first, second]
+        .into_iter()
+        .map(|frame| gen_core::Conditioning::VideoClip {
+            frames: vec![frame; 45],
+            frame_idx: 0,
+            strength: 1.0,
+        })
+        .collect()
+}
+
+#[test]
+fn bernini_r2v_worker_receipts_bind_backend_specific_effective_shapes() {
+    let conditioning = r2v_conditioning();
+    let mlx = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &conditioning).unwrap();
+    assert_eq!(mlx, "bernini-r2v-references-v2:backend-mlx:source-preprocess-full-vae624-v1:count-2:0:native-640x360;vit-280x168;vae-624x352|1:native-360x640;vit-168x280;vae-352x624+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
+    let candle = bernini_r2v_reference_receipt(VideoLane::Candle, 848, 480, &conditioning).unwrap();
+    assert_eq!(candle, "bernini-r2v-references-v2:backend-candle:source-preprocess-full-vae624-v1:count-2:0:native-640x360;vit-280x168;vae-624x352|1:native-360x640;vit-168x280;vae-352x624+bernini-r2v-request-seal-v1-cd11cf62ec83e85860e1790538062a88b39ae384d2956fd1dc54c0e45d6fa8f5");
+
+    let mut duplicate = r2v_conditioning();
+    let [gen_core::Conditioning::MultiReference { images }] = duplicate.as_mut_slice() else {
+        unreachable!()
+    };
+    images[1] = images[0].clone();
+    assert!(
+        bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &duplicate).is_ok(),
+        "distinct public asset ids may legitimately resolve to identical pixels"
+    );
+}
+
+#[test]
+fn bernini_r2v_curve_identity_reuses_shapes_while_request_seal_binds_pixels() {
+    let first = r2v_conditioning();
+    let mut second = first.clone();
+    let [gen_core::Conditioning::MultiReference { images }] = second.as_mut_slice() else {
+        unreachable!()
+    };
+    images[0].pixels[0] ^= 1;
+
+    let first_receipt = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &first).unwrap();
+    let second_receipt = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &second).unwrap();
+    assert_ne!(
+        first_receipt, second_receipt,
+        "the post-admission byte seal changes"
+    );
+
+    let first_overlay = format!("provider_video_mode:r2v+{first_receipt}");
+    let second_overlay = format!("provider_video_mode:r2v+{second_receipt}");
+    let first_curve = video_curve_overlay(Some(&first_overlay)).unwrap();
+    let second_curve = video_curve_overlay(Some(&second_overlay)).unwrap();
+    assert_eq!(
+        first_curve, second_curve,
+        "same ordered native/effective shapes must reuse one fitted curve"
+    );
+    assert!(!first_curve.contains("request-seal"));
+}
+
+#[test]
+fn bernini_mv2v_curve_identity_excludes_only_the_request_seal() {
+    let first = mv2v_conditioning();
+    let mut changed_bytes = first.clone();
+    let [gen_core::Conditioning::VideoClip { frames, .. }, ..] = changed_bytes.as_mut_slice()
+    else {
+        unreachable!()
+    };
+    frames[0].pixels[0] ^= 1;
+    let mut reordered = first.clone();
+    reordered.reverse();
+    let mut different_surface = first.clone();
+    different_surface.push(first[0].clone());
+
+    let receipt = bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &first).unwrap();
+    let changed_bytes_receipt =
+        bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &changed_bytes).unwrap();
+    let reordered_receipt =
+        bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &reordered).unwrap();
+    let different_surface_receipt =
+        bernini_mv2v_clip_receipt(VideoLane::Mlx, 848, 480, &different_surface).unwrap();
+    assert_ne!(
+        receipt, changed_bytes_receipt,
+        "full receipt binds clip bytes"
+    );
+    assert_ne!(
+        receipt, reordered_receipt,
+        "full receipt binds ordered clips"
+    );
+
+    let curve = video_curve_overlay(Some(&format!("provider_video_mode:mv2v+{receipt}"))).unwrap();
+    let changed_bytes_curve = video_curve_overlay(Some(&format!(
+        "provider_video_mode:mv2v+{changed_bytes_receipt}"
+    )))
+    .unwrap();
+    let reordered_curve = video_curve_overlay(Some(&format!(
+        "provider_video_mode:mv2v+{reordered_receipt}"
+    )))
+    .unwrap();
+    let different_surface_curve = video_curve_overlay(Some(&format!(
+        "provider_video_mode:mv2v+{different_surface_receipt}"
+    )))
+    .unwrap();
+    assert_eq!(
+        curve, changed_bytes_curve,
+        "request bytes are not a curve axis"
+    );
+    assert_eq!(
+        curve, reordered_curve,
+        "equal source surfaces reuse one curve"
+    );
+    assert_ne!(
+        curve, different_surface_curve,
+        "source count and source-ID schedule remain curve axes"
+    );
+    assert!(!curve.contains(BERNINI_MV2V_SEAL_DOMAIN));
+}
+
+#[test]
+fn bernini_ads2v_receipt_binds_distinct_clip_roles_images_and_three_to_four_source_boundary() {
+    let clip = |pixel| gen_core::Conditioning::VideoClip {
+        frames: vec![
+            gen_core::Image {
+                width: 848,
+                height: 480,
+                pixels: vec![pixel; 848 * 480 * 3]
+            };
+            45
+        ],
+        frame_idx: 0,
+        strength: 1.0,
+    };
+    let mut first = vec![
+        clip(7),
+        clip(13),
+        gen_core::Conditioning::MultiReference {
+            images: vec![gen_core::Image {
+                width: 640,
+                height: 360,
+                pixels: vec![29; 640 * 360 * 3],
+            }],
+        },
+    ];
+    let receipt = bernini_ads2v_source_receipt(VideoLane::Mlx, 848, 480, &first).unwrap();
+    assert!(receipt.contains("count-3:"));
+    assert!(receipt.contains("source-ids-1,2,3"));
+    assert!(
+        receipt.contains("source-video:")
+            && receipt.contains("reference-video:")
+            && receipt.contains("image-1:")
+    );
+    let curve = video_curve_overlay(Some(&format!("provider_video_mode:ads2v+{receipt}"))).unwrap();
+    assert!(!curve.contains(BERNINI_ADS2V_SEAL_DOMAIN));
+    let mut swapped = first.clone();
+    swapped.swap(0, 1);
+    assert_ne!(
+        receipt,
+        bernini_ads2v_source_receipt(VideoLane::Mlx, 848, 480, &swapped).unwrap()
+    );
+    let gen_core::Conditioning::MultiReference { images } = &mut first[2] else {
+        unreachable!()
+    };
+    images.push(gen_core::Image {
+        width: 360,
+        height: 640,
+        pixels: vec![31; 360 * 640 * 3],
+    });
+    let four = bernini_ads2v_source_receipt(VideoLane::Candle, 848, 480, &first).unwrap();
+    assert!(four.contains("count-4:") && four.contains("source-ids-1,1.666667,2.333333,3"));
+}
+
+#[test]
+fn bernini_full_vae_shape_matches_providers_two_stage_bankers_rounding() {
+    assert_eq!(bernini_full_vae_shape(24, 625), (32, 624));
+}
+
+#[test]
+fn bernini_r2v_exact_surface_reaches_the_shared_selector_with_flattened_count() {
+    let mut contract = fixture_contract(20, 4, &[MemoryStrategy::BoundedDecode]);
+    contract.provider_id = "bernini".to_owned();
+    let receipt =
+        bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &r2v_conditioning()).unwrap();
+    let overlay = format!("provider_video_mode:r2v+{receipt}");
+    let generator = fixture_generator(Some(contract));
+    for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+        let mut request = bernini_inputs(Some(&overlay));
+        request.mode = "reference_to_video";
+        request.reference_count = 2;
+        request.reference_shape = "multi_image";
+        request.runtime.as_mut().unwrap().cache_state = cache_state;
+        assert!(bernini_surface_is_exact(
+            &request,
+            generator.memory_strategy_contract()
+        ));
+
+        let outcome = admit_video_generation_with_curves(&generator, request, None);
+        assert!(
+            outcome.context.is_some(),
+            "shared selector context: {outcome:?}"
+        );
+        let context = outcome.context.unwrap();
+        assert_eq!(context.mode.as_key(), "reference_to_video");
+        assert_eq!(context.geometry.reference_count, 2);
+        assert_eq!(context.overlay.as_deref(), Some(overlay.as_str()));
+        assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+        assert_eq!(context.cache_state, cache_state);
+    }
+
+    for (count, shape, mode) in [
+        (1, "multi_image", "reference_to_video"),
+        (2, "video", "reference_to_video"),
+        (2, "multi_image", "video_to_video"),
+    ] {
+        let mut crossed = bernini_inputs(Some(&overlay));
+        crossed.mode = mode;
+        crossed.reference_count = count;
+        crossed.reference_shape = shape;
+        assert!(!bernini_surface_is_exact(
+            &crossed,
+            generator.memory_strategy_contract()
+        ));
+    }
+}
+
+#[test]
+fn bernini_rv2v_seals_the_combined_source_tokens_and_distinguishes_clip_plus_image() {
+    let contract = {
+        let mut contract = fixture_contract(20, 4, &[MemoryStrategy::BoundedDecode]);
+        contract.provider_id = "bernini".to_owned();
+        contract
+    };
+    let conditioning = rv2v_conditioning();
+    for (lane, packed_tokens, image_tokens) in [
+        (VideoLane::Mlx, 12_012_u64, 858_u64),
+        (VideoLane::Candle, 12_012_u64, 858_u64),
+    ] {
+        let receipt = bernini_r2v_reference_receipt(lane, 848, 480, &conditioning).unwrap();
+        assert!(receipt.contains(&format!("count-2:packed-source-tokens-{packed_tokens}:")));
+        assert!(receipt.contains("source-preprocess-full-vae624-v1"));
+        assert!(receipt.contains("video-1:frames-45;native-848x480;vae-12x78x44;tokens-10296"));
+        assert!(receipt.contains(&format!(";tokens-{image_tokens}")));
+
+        let overlay = format!("provider_video_mode:rv2v+{receipt}");
+        let exact = || {
+            let mut request = bernini_inputs(Some(&overlay));
+            request.lane = lane;
+            request.mode = "reference_video_to_video";
+            request.reference_count = 3;
+            request.reference_shape = "video+multi_image";
+            request
+        };
+        assert!(bernini_surface_is_exact(&exact(), Some(&contract)));
+
+        let mut crossed = exact();
+        crossed.reference_count = 2;
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        crossed.width = 1280;
+        crossed.height = 720;
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        crossed.reference_shape = "multi_image";
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        crossed.mode = "reference_to_video";
+        assert!(!bernini_surface_is_exact(&crossed, Some(&contract)));
+        crossed = exact();
+        let crossed_overlay = crossed.overlay.unwrap().replace(
+            "source-preprocess-full-vae624-v1",
+            "source-preprocess-renderer-output-v1",
+        );
+        crossed.overlay = Some(&crossed_overlay);
+        assert!(
+            !bernini_surface_is_exact(&crossed, Some(&contract)),
+            "full Bernini must reject renderer preprocessing evidence"
+        );
+    }
+
+    let r2v_receipt =
+        bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &r2v_conditioning()).unwrap();
+    assert!(!r2v_receipt.contains("video-1"));
+    assert!(!r2v_receipt.contains("packed-source-tokens"));
+
+    let receipt = bernini_r2v_reference_receipt(VideoLane::Mlx, 848, 480, &conditioning).unwrap();
+    let overlay = format!("provider_video_mode:rv2v+{receipt}");
+    let mut selector_contract = fixture_contract(20, 4, &[MemoryStrategy::BoundedDecode]);
+    selector_contract.provider_id = "bernini".to_owned();
+    let generator = fixture_generator(Some(selector_contract));
+    for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+        let mut request = bernini_inputs(Some(&overlay));
+        request.mode = "reference_video_to_video";
+        request.reference_count = 3;
+        request.reference_shape = "video+multi_image";
+        request.runtime.as_mut().unwrap().cache_state = cache_state;
+        let outcome = admit_video_generation_with_curves(&generator, request, None);
+        assert!(outcome.refusal.is_none(), "{outcome:?}");
+        let context = outcome.context.expect("exact RV2V selector context");
+        assert_eq!(context.mode.as_key(), "reference_video_to_video");
+        assert_eq!(context.geometry.reference_count, 3);
+        assert_eq!(context.overlay.as_deref(), Some(overlay.as_str()));
+        assert_eq!(context.selection.strategy, MemoryStrategy::Resident);
+        assert_eq!(context.cache_state, cache_state);
+    }
 }
 
 #[test]
@@ -726,6 +1215,7 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
         inputs(241, budget(host_gb), 18 * GIB),
         None,
         tiered_decode_profile,
+        false,
     );
     let memory = outcome
         .memory
@@ -756,6 +1246,7 @@ fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
         inputs(241, budget(39.0), 18 * GIB),
         None,
         tiered_decode_profile,
+        false,
     );
     let refusal = outcome
         .refusal
@@ -792,6 +1283,7 @@ fn provider_profile_composition_and_warm_residency_are_each_accounted_once() {
         request,
         None,
         decoder_substitution_profile,
+        false,
     );
     let context = outcome.context.expect("the 6 GiB incremental peak fits");
     // 20 GiB contract composition + (10 GiB decode profile - 4 GiB decoder already included)
@@ -917,6 +1409,12 @@ fn unsupported_video_surfaces_fail_open_before_contract_selection() {
     request.overlay = Some("enhancer");
     assert_open("enhancer", request);
 
+    let mut request = inputs(121, budget(128.0), 18 * GIB);
+    request.fps = 30;
+    request.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    request.overlay = Some("provider_video_mode:no_audio");
+    assert_open("provider no-audio mode", request);
+
     for fps in [0, 1, 23, 31, 60] {
         let mut request = inputs(121, budget(128.0), 18 * GIB);
         request.fps = fps;
@@ -926,6 +1424,99 @@ fn unsupported_video_surfaces_fail_open_before_contract_selection() {
     let mut request = inputs(121, budget(128.0), 18 * GIB);
     request.runtime = None;
     assert_open("missing canonical post-load budget", request);
+}
+
+#[test]
+fn request_scoped_selection_refuses_crossed_identity_stale_and_out_of_envelope_evidence() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    let curves = fixture_curve_bundle();
+    let admitted = |request| {
+        admit_video_generation_with_curves_and_profiles(
+            &generator,
+            request,
+            Some(&curves),
+            no_video_decode_profile,
+            true,
+        )
+    };
+    let mut exact = inputs(121, budget(128.0), 18 * GIB);
+    exact.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    exact.fps = 30;
+    assert!(
+        admitted(exact).context.is_some(),
+        "exact sealed cell is selectable"
+    );
+
+    let mut crossed_family = inputs(121, budget(128.0), 18 * GIB);
+    crossed_family.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    crossed_family.fps = 30;
+    crossed_family.model_family = "ltx-alias";
+
+    let mut crossed_route = inputs(121, budget(128.0), 18 * GIB);
+    crossed_route.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    crossed_route.fps = 30;
+    crossed_route.route = "ltx_2_3_alias";
+
+    let mut crossed_mode = inputs(121, budget(128.0), 18 * GIB);
+    crossed_mode.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    crossed_mode.fps = 30;
+    crossed_mode.mode = "image_to_video";
+    crossed_mode.reference_count = 1;
+    crossed_mode.reference_shape = "image";
+
+    let mut stale = inputs(121, budget(128.0), 18 * GIB);
+    stale.expected_closure_digest = "stale-closure";
+    stale.fps = 30;
+
+    let mut outside_fps = inputs(121, budget(128.0), 18 * GIB);
+    outside_fps.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    outside_fps.fps = 24;
+
+    for (label, request) in [
+        ("crossed family", crossed_family),
+        ("crossed route", crossed_route),
+        ("crossed mode/reference", crossed_mode),
+        ("stale closure", stale),
+        ("out-of-envelope FPS", outside_fps),
+    ] {
+        assert_eq!(
+            admitted(request),
+            VideoAdmissionOutcome::default(),
+            "{label} must not borrow a different request-scoped curve"
+        );
+    }
+}
+
+#[test]
+fn evidence_preflight_needs_no_runtime_and_skips_unsupported_requests() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::StagedResidency],
+    )));
+    let mut exact = inputs(121, None, 18 * GIB);
+    exact.expected_closure_digest = FITTED_CURVE_CLOSURE;
+    exact.fps = 30;
+    assert!(packaged_video_evidence_covers_request(&generator, &exact));
+
+    exact.overlay = Some("provider_video_mode:no_audio");
+    assert!(
+        !packaged_video_evidence_covers_request(&generator, &exact),
+        "no-audio must be rejected before a live runtime probe until separately evidenced"
+    );
+
+    exact.overlay = None;
+    exact.mode = "image_to_video";
+    exact.reference_count = 1;
+    exact.reference_shape = "image";
+    assert!(
+        !packaged_video_evidence_covers_request(&generator, &exact),
+        "unsupported requests must be rejected before a live runtime probe"
+    );
 }
 
 #[test]
@@ -1014,7 +1605,8 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
-            frames_per_second: 24,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
@@ -1199,7 +1791,6 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
     let evidence = crate::mlx_fit_gate::estimate_evidence(
         &contract,
         gen_core::MemoryBackend::Mlx,
-        "ltx-video",
         tier(),
         "text_to_image",
         None,
@@ -1210,26 +1801,18 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
             frames: 1,
             reference_count: 0,
         },
-        None,
         selection,
         1,
         None,
     );
     assert_eq!(evidence.key.backend, gen_core::MemoryBackend::Mlx);
     assert_eq!(evidence.key.geometry.frames, 1);
-    // A still cell carries the non-temporal identity, not a nominal rate.
-    assert_eq!(evidence.key.frames_per_second, None);
-    assert_eq!(
-        evidence.key.reference_shape,
-        gen_core::MemoryReferenceShape::None
-    );
 
     // ...and the video lane can key to Candle, so the parameter is genuinely load-bearing rather
     // than a constant with extra steps.
     let candle = crate::mlx_fit_gate::estimate_evidence(
         &contract,
         gen_core::MemoryBackend::Candle,
-        "ltx-video",
         tier(),
         "text_to_video",
         None,
@@ -1240,37 +1823,12 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
             frames: 241,
             reference_count: 0,
         },
-        Some(24),
         selection,
         1,
         None,
     );
     assert_eq!(candle.key.backend, gen_core::MemoryBackend::Candle);
     assert_eq!(candle.key.geometry.frames, 241);
-    assert_eq!(candle.key.frames_per_second, Some(24));
-    // The rate is a SEPARATE axis from the frame count: the same 241-frame request at another rate
-    // is a different memory cell, and a key that dropped the rate could not say so.
-    let faster = crate::mlx_fit_gate::estimate_evidence(
-        &contract,
-        gen_core::MemoryBackend::Candle,
-        "ltx-video",
-        tier(),
-        "text_to_video",
-        None,
-        MemoryGeometry {
-            width: 1280,
-            height: 704,
-            batch: 1,
-            frames: 241,
-            reference_count: 0,
-        },
-        Some(30),
-        selection,
-        1,
-        None,
-    );
-    assert_eq!(faster.key.geometry, candle.key.geometry);
-    assert_ne!(faster.key, candle.key);
 }
 
 /// End-to-end through core's gate with the real selector: an unrouted family never reaches it.
@@ -1284,7 +1842,8 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
-            frames_per_second: 24,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1402,7 +1961,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
-            frames_per_second: 24,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1438,7 +1998,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
                 route: "ltx_2_3",
                 mode: "text_to_video",
                 reference_count: 0,
-                frames_per_second: 24,
+                reference_shape: "none",
+                fps: 30,
                 overlay: None,
                 lane: VideoLane::Candle,
                 tier: tier(),
@@ -1465,7 +2026,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             route: "ltx_2_3",
             mode: "text_to_video",
             reference_count: 0,
-            frames_per_second: 24,
+            reference_shape: "none",
+            fps: 30,
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
@@ -1506,7 +2068,8 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
                 route: "ltx_2_3",
                 mode: "text_to_video",
                 reference_count: 0,
-                frames_per_second: 24,
+                reference_shape: "none",
+                fps: 30,
                 overlay: None,
                 lane,
                 tier: tier(),
@@ -1751,7 +2314,7 @@ fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
     assert_eq!(closure, FITTED_CURVE_CLOSURE);
     assert_eq!(
         curve_id,
-        Some("ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
+        Some("ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
     );
     assert_eq!(small_peaks.binding_phase(), VideoBindingPhase::Conditioning);
     assert_eq!(small_peaks.peak_bytes(), small_peaks.conditioning_bytes);
@@ -1855,6 +2418,7 @@ fn historical_q8_curve_fixture_is_tier_exact_while_q4_and_bf16_keep_an_honest_fl
     for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
         for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
             let mut request = inputs(121, budget(host_gb), 18 * GIB);
+            request.fps = 30;
             request.tier.quant = quant;
             request.expected_closure_digest = FITTED_CURVE_CLOSURE;
             request.runtime.as_mut().unwrap().cache_state = cache_state;
@@ -1916,6 +2480,7 @@ fn checkpoint_bound_ltx_tiers_drive_curve_or_floor_safety_on_cold_and_warm_reque
             // Same staged-rung window as the historical-q8 test: admits the q8 fitted f121 peak
             // and the q4/bf16 staged floor under MLX_ESTIMATE_MARGIN, refuses resident.
             let mut request = inputs(121, budget(mlx_widened_gb(38, -1.0)), 18 * GIB);
+            request.fps = 30;
             request.tier = resolved;
             request.expected_closure_digest = FITTED_CURVE_CLOSURE;
             request.runtime.as_mut().unwrap().cache_state = cache_state;
@@ -2208,6 +2773,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     );
 
     let mut request = inputs(305, budget(host_gb), 0);
+    request.fps = 30;
     request.expected_closure_digest = FITTED_CURVE_CLOSURE;
     let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
     let context = outcome
@@ -2226,7 +2792,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     assert_eq!(context.geometry.height, 704);
     assert_eq!(
         context.evidence_revision,
-        "ltx_2_3:ltx-video:ltx_2_3:mlx:q8:text_to_video:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+        "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
     );
     assert!(outcome.refusal.is_none());
 }

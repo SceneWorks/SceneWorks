@@ -630,6 +630,18 @@ fn lease_local_artifact(
     // and must leave the entry alone.
     store
         .acquire_complete(cache_key, &resolver, repository)
+        .map_err(|error| {
+            // sc-21534: the load boundary is now the ONE surface that detects a content-altered
+            // bundle (every listing and lookup judges on paths and sizes), and its refusal names
+            // the mismatched file. Falling back to the source tier is the right recovery, but
+            // swallowing the verdict would leave no trace of WHY the local bytes were refused.
+            tracing::warn!(
+                cache_key,
+                repository,
+                error = %error,
+                "resolved-cache entry refused at the load boundary; serving from the source tier"
+            );
+        })
         .ok()
         .flatten()
 }
