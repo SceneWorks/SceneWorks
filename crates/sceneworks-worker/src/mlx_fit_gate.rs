@@ -5423,24 +5423,39 @@ fn spec_component_bytes_with_provider_footprint_checked(
         .as_ref()
         .map(resolved_text_encoder_source)
         .transpose()?;
-    // Keep the provider's component layout/materialization facts, but replace every generic File
-    // slot it reports with the exact prepared target size. Compatibility-mode provider code may
-    // still stat a path while producing its fact; that stat never becomes prepared admission
-    // identity or overrides the caller's token.
+    // Fill a File slot the provider left EMPTY with the exact prepared target size — and only such a
+    // slot. A non-zero value in a File slot is a provider fact about the assembly it will actually
+    // materialize (the checkpoint-import lane prices the DECODED plan: an fp8/int8 single-file import
+    // is resident at its decode width, not at its on-disk width), so overwriting it with the raw file
+    // length under-prices the modeled side of the resident-attribution guard by exactly the decode
+    // delta and refuses imports that fit (sc-20651).
+    //
+    // The overwrite was introduced to stop compatibility-mode provider code from smuggling its own
+    // `stat` into prepared admission identity. It never bought that: `prepared_file_sizes` above runs
+    // `validate_prepared_file_pins` → `ensure_unchanged` on every configured File, so a prepared spec
+    // whose file no longer matches its token is a hard error before any byte is priced, and for a
+    // genuinely byte-preserving provider the substituted value is the value already there. What the
+    // overwrite did buy was silently discarding every plan-priced fact. The infallible sibling
+    // `spec_component_bytes_with_provider_footprint` never had it; the two seams now agree.
     let footprint = footprint.map(|mut footprint| {
+        let fill = |slot: &mut u64, source: &WeightsSource| {
+            if *slot == 0 {
+                *slot = prepared_source_bytes(source, &file_sizes);
+            }
+        };
         if matches!(spec.weights, WeightsSource::File(_)) {
-            footprint.dit = prepared_source_bytes(&spec.weights, &file_sizes);
+            fill(&mut footprint.dit, &spec.weights);
         }
         if let Some(source @ WeightsSource::File(_)) = spec
             .components
             .get(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT)
         {
-            footprint.text_encoder = prepared_source_bytes(source, &file_sizes);
+            fill(&mut footprint.text_encoder, source);
         }
         if let Some(source @ WeightsSource::File(_)) =
             spec.components.get(gen_core::COMFYUI_VAE_COMPONENT)
         {
-            footprint.vae = prepared_source_bytes(source, &file_sizes);
+            fill(&mut footprint.vae, source);
         }
         footprint
     });
@@ -5937,7 +5952,21 @@ mod tests {
         spec.prepare_with_file_pins([pin])
             .expect("prepared spec finalizes");
 
+        // An EMPTY File slot is filled from the caller's prepared token, not from a fresh stat.
         let (total, _, _) = spec_component_bytes_with_provider_footprint_checked(
+            "fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: 0,
+                dit: 0,
+                vae: 0,
+            }),
+        )
+        .expect("prepared accounting succeeds");
+        assert_eq!(total, 23, "primary File size comes from its prepared token");
+
+        // A provider that DID price the slot owns it: the prepared token never overwrites a fact.
+        let (planned, _, _) = spec_component_bytes_with_provider_footprint_checked(
             "fixture",
             &spec,
             Some(PerComponentBytes {
@@ -5947,11 +5976,63 @@ mod tests {
             }),
         )
         .expect("prepared accounting succeeds");
-        assert_eq!(total, 23, "primary File size comes from its prepared token");
+        assert_eq!(
+            planned, 9_999,
+            "a plan-priced dit survives prepared accounting for a File source"
+        );
 
         std::fs::write(&path, vec![1_u8; 31]).expect("weights replacement writes");
         spec_component_bytes_with_provider_footprint_checked("fixture", &spec, None)
             .expect_err("stale prepared source errors are propagated, not restatted or swallowed");
+    }
+
+    /// sc-20651. The checkpoint-import lane prices the DECODED plan for a quantized single-file
+    /// import: an fp8 checkpoint is resident at its decode width, well above its on-disk width. The
+    /// prepared accounting seam used to overwrite that provider fact with the raw file length, so the
+    /// modeled side of the resident-attribution guard came in short by exactly the decode delta and
+    /// the guard refused a real import that fits.
+    ///
+    /// The numbers are the measured kreamania_variant1_fp8 case scaled onto a synthetic plan: the
+    /// live resident total was 33_483_838_240 against a modeled 31_875_544_875 — a 1_608_293_365-byte
+    /// shortfall that is exactly the fp8→bf16 (`fpmm`) decode delta the provider had already priced.
+    ///
+    /// Mutation: restore `footprint.dit = prepared_source_bytes(&spec.weights, &file_sizes);` and this
+    /// goes RED reporting `PLAN_DIT - ON_DISK_DIT` too few bytes.
+    #[test]
+    fn a_plan_priced_dit_is_not_overwritten_by_the_on_disk_file_length() {
+        const ON_DISK_DIT: u64 = 64;
+        const PLAN_DIT: u64 = ON_DISK_DIT + 1_608_293_365;
+        const PLAN_TE: u64 = 5_000;
+        const PLAN_VAE: u64 = 700;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("checkpoint.safetensors");
+        std::fs::write(&path, vec![0_u8; ON_DISK_DIT as usize]).expect("weights write");
+        let pin = gen_core::PinnedWeightsFile::pin(&path).expect("weights pin");
+        let mut spec = LoadSpec::new(WeightsSource::File(path.clone()));
+        spec.prepare_with_file_pins([pin])
+            .expect("prepared spec finalizes");
+
+        let (total, te, _) = spec_component_bytes_with_provider_footprint_checked(
+            "fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: PLAN_TE,
+                dit: PLAN_DIT,
+                vae: PLAN_VAE,
+            }),
+        )
+        .expect("prepared accounting succeeds");
+
+        let expected = PLAN_TE + PLAN_DIT + PLAN_VAE;
+        assert_eq!(
+            total,
+            expected,
+            "the modeled total must carry the plan-priced dit; on-disk substitution under-prices it \
+             by {} bytes",
+            expected.saturating_sub(total)
+        );
+        assert_eq!(te, PLAN_TE, "the provider's encoder split is untouched");
     }
 
     #[test]
