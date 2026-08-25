@@ -1394,6 +1394,17 @@ pub fn checkpoint_plan_checkpoint_id(entry: &Map<String, Value>) -> Option<&str>
         .filter(|id| !id.is_empty())
 }
 
+/// [`checkpoint_plan_checkpoint_id`] reached through a request payload's forwarded
+/// `modelManifestEntry` — the shape the routing predicates hold (sc-20651).
+pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
+    payload: &Map<String, Value>,
+) -> Option<&str> {
+    payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .and_then(checkpoint_plan_checkpoint_id)
+}
+
 /// The path a bespoke imported lane actually LOADS from, in the order the entry may spell it.
 /// `None` when every spelling is absent or blank.
 ///

@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  REFUSAL_ACTION,
   CHECKPOINT_LIBRARY_NOT_PERMITTED_CODE,
   CHECKPOINT_LIBRARY_REJECTED_CODE,
   LINKED_NEEDS_RELINK,
@@ -320,5 +324,42 @@ describe("removal copy", () => {
     expect(copy.message).toContain("1 checkpoint");
     expect(copy.message).toMatch(/left exactly as they are/);
     expect(copy.confirmLabel).toBe("Forget library");
+  });
+});
+
+// BLOCKER 9 (sc-20651): the refusal-code -> corrective-action map is ONE contract across two
+// languages. The Rust store decides which refusals are repairable
+// (CheckpointPlanError::lifecycle_action) and this module decides which ones get a button; both
+// used to carry their own list, and they had already drifted — the client offered no action for
+// path-escapes-root, invalid-relative-path or unsupported-locator, all three of which the store
+// classifies as rescannable, leaving those users at a dead end.
+//
+// Both sides now assert EQUALITY against the same checked-in fixture (the Rust half is
+// `the_refusal_action_contract_matches_the_shared_fixture` in
+// crates/sceneworks-core/tests/checkpoint_import_contracts.rs), so a code added, removed or
+// reclassified on one side alone fails.
+describe("the refusal-action contract", () => {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const FIXTURE_PATH = resolve(HERE, "../../../packages/schemas/checkpoint-refusal-actions.json");
+  const fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
+
+  it("handles exactly the codes the shared fixture declares, with the same actions", () => {
+    expect(Object.keys(fixture.actions).length).toBeGreaterThan(0);
+    // Sorted plain objects so this is equality in BOTH directions: an extra key here, a missing
+    // key here, or a different action all fail.
+    const sorted = (source) =>
+      Object.fromEntries(Object.entries(source).sort(([left], [right]) => left.localeCompare(right)));
+    expect(sorted(REFUSAL_ACTION)).toEqual(sorted(fixture.actions));
+  });
+
+  it("routes every fixture code through the real refusal describer", () => {
+    for (const [reason, action] of Object.entries(fixture.actions)) {
+      const described = describeRefusal({
+        code: CHECKPOINT_LIBRARY_REJECTED_CODE,
+        message: `[checkpoint-plan:${reason}] the store said so`,
+        context: { reason },
+      });
+      expect(described.action, reason).toBe(action);
+    }
   });
 });

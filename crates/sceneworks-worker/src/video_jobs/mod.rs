@@ -449,6 +449,15 @@ fn resolve_candle_video_route(
     if request.model == "ltx_2_3_eros" {
         return Ok(CandleVideoRoute::UnsupportedEros);
     }
+    // A plan-backed entry is decided HERE, ahead of the backend gate and every mode arm — each of
+    // those is wrong for it in its own way, and exactly one candle video lane loads a plan. See
+    // [`candle::plan_backed_wan_video_route`], which claims that lane or refuses by name (sc-20651).
+    if let Some(checkpoint_id) =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+    {
+        candle::plan_backed_wan_video_route(request, settings, checkpoint_id)?;
+        return Ok(CandleVideoRoute::WanComfyui);
+    }
     if !settings.backend_candle_enabled {
         return Ok(CandleVideoRoute::Stub);
     }

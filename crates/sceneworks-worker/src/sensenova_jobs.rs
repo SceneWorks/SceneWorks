@@ -9,24 +9,23 @@
 //!   ordered text + generated images, persisted as image assets plus an
 //!   [`InterleavedDocument`](sceneworks_core::contracts::InterleavedDocument) `document` asset.
 //!
-//! Each backend assembles its own concrete `T2iModel` from the provider's public re-exports (the
-//! `Generator` crate has no public constructor): macOS drives `runtime_macos::providers::sensenova::T2iModel`; the
-//! candle (Windows/CUDA) lane drives `SenseNovaUnderstanding` (sc-5501), retiring the off-Mac
-//! Python torch VQA/interleave path. The handler shape, request parsing, and document assembly are
-//! shared and backend-neutral.
-//!
-//! The candle lane no longer receives the raw `T2iModel` (sc-21512). Its `load_understanding` entry
-//! became `load_understanding_for_diagnostics` behind a diagnostics feature, and the worker-facing
-//! seam is now `load_understanding_with_spec` returning a [`SenseNovaUnderstanding`] whose
-//! `run_vqa` / `run_interleave` take the operation's memory context and request, so route/geometry,
-//! request memory, lifecycle cleanup and checkpoint identity stay one operation. The macOS lane
-//! still drives `T2iModel` directly and has the same port ahead of it.
+//! NEITHER lane receives a raw `T2iModel` any more. The candle (Windows/CUDA) lane was ported
+//! first (sc-21512): its `load_understanding` entry became `load_understanding_for_diagnostics`
+//! behind a diagnostics feature, and the worker-facing seam is `load_understanding_with_spec`
+//! returning a [`SenseNovaUnderstanding`] whose `run_vqa` / `run_interleave` take the operation's
+//! memory context and request, so route/geometry, request memory, lifecycle cleanup and checkpoint
+//! identity stay one operation. The macOS (MLX) lane now mirrors that seam through
+//! `runtime_macos::providers::sensenova::{load_runtime, SenseNova}` — the registry loader's own
+//! typed entry, so the understanding routes share the registered provider's artifact pin,
+//! quantization and provider contract instead of assembling a second bespoke runtime beside it.
+//! The handler shape, request parsing, and document assembly are shared and backend-neutral, as
+//! are the operation-identity ([`UnderstandingOperation`]), load-spec and run-context builders.
 //!
 //! Parity: VQA mirrors the Python `SenseNovaU1Adapter.answer_question`; interleave mirrors
 //! `generate_interleaved` / `_write_interleaved_document` (request fields, the interleave resolution
 //! buckets + think/no-think system protocol, and the response/asset shapes). The understanding +
-//! generation model loads dense (no distill LoRA, no quantization) exactly as the torch adapter does
-//! (`_load_model(distill_lora=None)`) — the full base model.
+//! generation model loads with no distill LoRA, at whatever numeric tier the resolved weights
+//! directory declares (`bf16` dense unless the job resolved a `q4`/`q8` tier subdir).
 //!
 //! When neither the MLX nor the candle engine is linked (a non-macOS build with `backend-candle`
 //! off), the `image_vqa` / `image_interleave` capabilities are not advertised, jobs remain queued,
@@ -39,12 +38,13 @@ use super::*;
 use sceneworks_core::image_request::ImageRequest;
 
 // CARVE-OUT(epic 3720): backend-specific; absorbed by TextLlm in Phase 5.
-// VQA + Document-Studio interleave bypass the `Generator` registry and drive the concrete unified
-// `T2iModel` directly (text / text+images output the neutral `GenerationOutput` contract can't
-// express). macOS drives `runtime_macos::providers::sensenova::T2iModel`; off-Mac the candle (Windows/CUDA) lane drives
-// `runtime_cuda::providers::sensenova::T2iModel` (the sibling carve-outs, sc-5501) — retiring the off-Mac torch
-// VQA/interleave path. Each lane keeps its own engine-typed imports; the document-assembly +
-// request-parsing helpers below are backend-neutral and shared.
+// VQA + Document-Studio interleave bypass the `Generator` registry (text / text+images output the
+// neutral `GenerationOutput` contract can't express) and drive the provider's typed understanding
+// runtime directly: macOS drives `runtime_macos::providers::sensenova::SenseNova`; off-Mac the
+// candle (Windows/CUDA) lane drives `runtime_cuda::providers::sensenova::SenseNovaUnderstanding`
+// (the sibling carve-outs, sc-5501) — retiring the off-Mac torch VQA/interleave path. Each lane
+// keeps its own engine-typed imports; the document-assembly + request-parsing helpers below are
+// backend-neutral and shared.
 #[cfg(target_os = "macos")]
 use mlx_rs::ops::divide;
 #[cfg(target_os = "macos")]
@@ -52,13 +52,11 @@ use mlx_rs::Array;
 #[cfg(target_os = "macos")]
 use runtime_macos::media::image::{decoded_to_image, resize_bicubic_u8};
 #[cfg(target_os = "macos")]
-use runtime_macos::media::tokenizer::TextTokenizer;
-#[cfg(target_os = "macos")]
 use runtime_macos::media::Image;
 #[cfg(target_os = "macos")]
 use runtime_macos::providers::sensenova::{
-    load_raw, load_tokenizer, smart_resize, NeoChatConfig, Sampler, T2iModel, T2iOptions,
-    INTERLEAVE_RESOLUTIONS, INTERLEAVE_SYSTEM_MESSAGE,
+    load_runtime, smart_resize, Sampler, SenseNova, T2iOptions, INTERLEAVE_RESOLUTIONS,
+    INTERLEAVE_SYSTEM_MESSAGE,
 };
 
 // Candle (Windows/CUDA) understanding path (sc-5501). `Image` is the neutral `gen_core::Image`
@@ -284,10 +282,15 @@ pub(crate) async fn run_vqa_job(
     Ok(())
 }
 
-/// macOS (MLX) VQA seam: the blocking load → preprocess → `vqa` → think-strip body run inside the
-/// shared handler's `spawn_blocking`. Builds the dense `runtime_macos::providers::sensenova::T2iModel` via
-/// [`load_sensenova_model`] and calls `T2iModel::vqa`. The candle sibling below mirrors it exactly
+/// macOS (MLX) VQA seam: the blocking load → preprocess → `run_vqa` → think-strip body run inside
+/// the shared handler's `spawn_blocking`. Loads the understanding runtime through the provider's
+/// typed `load_runtime` and calls `SenseNova::run_vqa`. The candle sibling below mirrors it exactly
 /// bar the engine-typed load/preprocess (sc-8839).
+///
+/// The run carries an explicit memory context and request (the sc-21512 shape, mirrored onto this
+/// lane): nothing about the work changed — it is still one dense forward over one reference image —
+/// but the operation now declares its own identity, and the provider refuses the call if that
+/// declaration disagrees with the pixels it was handed.
 #[cfg(target_os = "macos")]
 fn vqa_generate(
     weights_dir: &Path,
@@ -299,18 +302,31 @@ fn vqa_generate(
     cancel: &gen_core::CancelFlag,
 ) -> WorkerResult<String> {
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let (model, tokenizer) = load_sensenova_model(weights_dir)?;
+    let spec = understanding_load_spec(weights_dir)?;
+    let runtime = load_runtime(&spec)
+        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
     // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
     // pixel budget (default 768², `load_image_native` min 256²).
     let pixel_values = image_to_chw01(source, 256 * 256, max_image_pixels)?;
-    let answer = model
-        .vqa(
-            &tokenizer,
+    let (width, height) = chw01_geometry(&pixel_values)?;
+    let operation = UnderstandingOperation::vqa(width, height);
+    let request = operation.vqa_request(question, source, cancel);
+    let context = understanding_run_context(
+        &runtime,
+        spec.quantize,
+        gen_core::MemoryMode::Other("vqa".to_owned()),
+        operation.geometry(),
+    );
+    let answer = runtime
+        .run_vqa(
+            &context,
+            request,
             question,
             std::slice::from_ref(&pixel_values),
             max_new_tokens,
             Sampler::Greedy,
+            T2iOptions::default(),
             Some(cancel),
         )
         .map_err(|error| {
@@ -348,21 +364,7 @@ fn vqa_generate(
     let pixel_values = image_to_chw01_candle(source, 256 * 256, max_image_pixels)?;
     let (width, height) = chw01_geometry(&pixel_values)?;
     let operation = UnderstandingOperation::vqa(width, height);
-    // The pixels travel as the tensor argument; this conditioning entry is what DECLARES the
-    // reference count the contract checks — `image_reference_count()` counts `Reference` entries,
-    // and `operation` fixes that count at the one the VQA route admits.
-    let request = gen_core::GenerationRequest {
-        prompt: question.to_owned(),
-        width: operation.width,
-        height: operation.height,
-        count: operation.batch,
-        conditioning: vec![gen_core::Conditioning::Reference {
-            image: source.clone(),
-            strength: None,
-        }],
-        cancel: cancel.clone(),
-        ..Default::default()
-    };
+    let request = operation.vqa_request(question, source, cancel);
     let context = understanding_run_context(
         &runtime,
         spec.quantize,
@@ -715,12 +717,15 @@ pub(crate) async fn run_interleave_job(
     Ok(())
 }
 
-/// macOS (MLX) interleave seam: the blocking load → preprocess → `interleave_gen` → decode body run
-/// inside the shared handler's `spawn_blocking`. Builds the dense `runtime_macos::providers::sensenova::T2iModel` via
-/// [`load_sensenova_model`] and calls `T2iModel::interleave_gen`, decoding each model-space image
-/// with `decoded_to_image`. The engine's `interleave_gen` takes `width`/`height` as `i32`, an
+/// macOS (MLX) interleave seam: the blocking load → preprocess → `run_interleave` → decode body run
+/// inside the shared handler's `spawn_blocking`. Loads the understanding runtime through the
+/// provider's typed `load_runtime` and calls `SenseNova::run_interleave`, decoding each model-space
+/// image with `decoded_to_image`. The MLX engine takes `width`/`height` as `i32`, an
 /// `init_noises: None`, and a no-op `on_progress` sink — arg shapes intrinsic to the MLX API, not
 /// shared with the candle sibling (sc-8839).
+///
+/// Interleave is the one mode whose batch is not 1 — the document's image budget IS the batch, and
+/// the provider requires `request.count == max_images` exactly.
 #[cfg(target_os = "macos")]
 fn interleave_generate(
     weights_dir: &Path,
@@ -731,7 +736,9 @@ fn interleave_generate(
     cancel: &gen_core::CancelFlag,
 ) -> WorkerResult<(String, Vec<Image>)> {
     emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
-    let (model, tokenizer) = load_sensenova_model(weights_dir)?;
+    let spec = understanding_load_spec(weights_dir)?;
+    let runtime = load_runtime(&spec)
+        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
     emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
 
     // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`
@@ -752,18 +759,45 @@ fn interleave_generate(
         think_mode: params.think_mode,
         ..Default::default()
     };
+    let width = u32::try_from(params.width).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave width must be positive".to_owned())
+    })?;
+    let height = u32::try_from(params.height).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave height must be positive".to_owned())
+    })?;
+    let max_images = u32::try_from(params.max_images).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave max_images overflows".to_owned())
+    })?;
+    let reference_count = u32::try_from(input_arrays.len()).map_err(|_| {
+        WorkerError::InvalidPayload("SenseNova interleave carries too many sources".to_owned())
+    })?;
+    let operation = UnderstandingOperation::interleave(width, height, max_images, reference_count);
+    let request = operation.interleave_request(
+        prompt,
+        input_images,
+        params.seed as u64,
+        params.steps as u32,
+        cancel,
+    );
+    let context = understanding_run_context(
+        &runtime,
+        spec.quantize,
+        gen_core::MemoryMode::Other("interleave".to_owned()),
+        operation.geometry(),
+    );
     // The engine checks the threaded flag per decoded text token and per denoise step (mlx-gen
     // #634), so the keepalive's cancel poll stops a multi-minute rollout cooperatively (sc-9123).
     // Progress stays a no-op sink: this seam reports liveness via the Busy heartbeat, not per-step
     // job progress.
-    let out = model
-        .interleave_gen(
-            &tokenizer,
+    let out = runtime
+        .run_interleave(
+            &context,
+            request,
             prompt,
             &input_arrays,
             params.width,
             params.height,
-            &opts,
+            opts,
             &params.system_message,
             params.max_new_tokens,
             params.max_images,
@@ -844,26 +878,13 @@ fn interleave_generate(
         WorkerError::InvalidPayload("SenseNova interleave carries too many sources".to_owned())
     })?;
     let operation = UnderstandingOperation::interleave(width, height, max_images, reference_count);
-    // `validate_interleave_count` requires `count == max_images` (the document's image budget IS
-    // the batch here, unlike every raster mode where batch is 1), and one conditioning entry per
-    // source image declares the reference count the engine re-derives.
-    let request = gen_core::GenerationRequest {
-        prompt: prompt.to_owned(),
-        width: operation.width,
-        height: operation.height,
-        count: operation.batch,
-        seed: Some(params.seed as u64),
-        steps: Some(params.steps as u32),
-        conditioning: input_images
-            .iter()
-            .map(|image| gen_core::Conditioning::Reference {
-                image: image.clone(),
-                strength: None,
-            })
-            .collect(),
-        cancel: cancel.clone(),
-        ..Default::default()
-    };
+    let request = operation.interleave_request(
+        prompt,
+        input_images,
+        params.seed as u64,
+        params.steps as u32,
+        cancel,
+    );
     let context = understanding_run_context(
         &runtime,
         spec.quantize,
@@ -1119,24 +1140,6 @@ fn vqa_result_json(
     .expect("json! object literal")
 }
 
-/// Assemble the concrete unified `T2iModel` + tokenizer for a SenseNova-U1 snapshot, replicating the
-/// engine's private `load_inner` from public re-exports. Loads dense bf16 with NO distill LoRA and
-/// NO quantization — the understanding (VQA) + interleave paths use the full base model, exactly as
-/// the torch adapter's `_load_model(distill_lora=None)`, keeping the VQA decode bit-identical.
-#[cfg(target_os = "macos")]
-fn load_sensenova_model(weights_dir: &Path) -> WorkerResult<(T2iModel, TextTokenizer)> {
-    let cfg = NeoChatConfig::from_dir(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 config: {error}")))?;
-    let weights = load_raw(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 weights: {error}")))?;
-    let model = T2iModel::from_weights(&weights, &cfg).map_err(|error| {
-        WorkerError::InvalidPayload(format!("SenseNova-U1 model build: {error}"))
-    })?;
-    let tokenizer = load_tokenizer(weights_dir)
-        .map_err(|error| WorkerError::InvalidPayload(format!("SenseNova-U1 tokenizer: {error}")))?;
-    Ok((model, tokenizer))
-}
-
 /// Decode an [`Image`] (RGB8 HWC) to a `[3,H,W]` f32 tensor in `[0,1]`, smart-resized to a
 /// 32-aligned bucket within `[min_pixels, max_pixels]`. Replicates the engine's private
 /// `image_to_chw01` (its `preprocess_image` ImageNet-normalizes internally, so this stays in
@@ -1160,6 +1163,27 @@ fn image_to_chw01(img: &Image, min_pixels: i64, max_pixels: i64) -> WorkerResult
         .map_err(|error| WorkerError::InvalidPayload(format!("image transpose: {error}")))?;
     divide(&chw, Array::from_f32(255.0))
         .map_err(|error| WorkerError::InvalidPayload(format!("image normalize: {error}")))
+}
+
+/// macOS (MLX) sibling of [`chw01_geometry`]: the `[3,H,W]` `Array`'s `(width, height)`, which is
+/// the geometry the engine actually consumes — `image_to_chw01` smart-resizes to a 32-aligned
+/// bucket, so this is NOT the source image's size. Read from the array rather than recomputed so
+/// the geometry declared to the memory contract cannot drift from the pixels handed to the engine.
+#[cfg(target_os = "macos")]
+fn chw01_geometry(pixels: &Array) -> WorkerResult<(u32, u32)> {
+    match pixels.shape() {
+        [_, height, width] => Ok((
+            u32::try_from(*width).map_err(|_| {
+                WorkerError::InvalidPayload("SenseNova-U1 reference width overflows".to_owned())
+            })?,
+            u32::try_from(*height).map_err(|_| {
+                WorkerError::InvalidPayload("SenseNova-U1 reference height overflows".to_owned())
+            })?,
+        )),
+        dims => Err(WorkerError::InvalidPayload(format!(
+            "SenseNova-U1 reference tensor must be [3,H,W], got {dims:?}"
+        ))),
+    }
 }
 
 /// The `[3,H,W]` tensor's `(width, height)`, which is the geometry the engine actually consumes —
@@ -1202,9 +1226,9 @@ fn chw01_geometry(pixels: &Tensor) -> WorkerResult<(u32, u32)> {
 /// * both — `frames == 1`.
 ///
 /// This is deliberately backend-neutral and free of engine types (the sc-8839 shape
-/// [`resolve_interleave_params`] already uses): the candle seams consume it, and it is unit-tested
-/// on the macOS lane, which is the lane whose tests actually execute.
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+/// [`resolve_interleave_params`] already uses): BOTH the MLX and the candle seams consume it, and
+/// it is unit-tested on the macOS lane, which is the lane whose tests actually execute.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct UnderstandingOperation {
     width: u32,
@@ -1213,7 +1237,7 @@ struct UnderstandingOperation {
     reference_count: u32,
 }
 
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 impl UnderstandingOperation {
     /// VQA reads exactly one image and answers in text. The provider admits no other shape.
     fn vqa(width: u32, height: u32) -> Self {
@@ -1235,8 +1259,8 @@ impl UnderstandingOperation {
         }
     }
 
-    /// The geometry the memory context declares, and — because the request below is built from the
-    /// same value — the geometry the provider re-derives.
+    /// The geometry the memory context declares, and — because the requests below are built from
+    /// the same value — the geometry the provider re-derives.
     fn geometry(self) -> gen_core::MemoryGeometry {
         gen_core::MemoryGeometry {
             width: self.width,
@@ -1246,23 +1270,83 @@ impl UnderstandingOperation {
             reference_count: self.reference_count,
         }
     }
+
+    /// The VQA [`gen_core::GenerationRequest`] for this operation.
+    ///
+    /// The pixels travel as the engine's tensor argument; the conditioning entry built here is what
+    /// DECLARES the reference count the contract checks — `image_reference_count()` counts
+    /// `Reference` entries, and this fixes that count at the one the VQA route admits. Shared by
+    /// both lanes so neither can declare a geometry the other would not.
+    fn vqa_request(
+        self,
+        question: &str,
+        source: &gen_core::Image,
+        cancel: &gen_core::CancelFlag,
+    ) -> gen_core::GenerationRequest {
+        gen_core::GenerationRequest {
+            prompt: question.to_owned(),
+            width: self.width,
+            height: self.height,
+            count: self.batch,
+            conditioning: vec![gen_core::Conditioning::Reference {
+                image: source.clone(),
+                strength: None,
+            }],
+            cancel: cancel.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// The interleave [`gen_core::GenerationRequest`] for this operation.
+    ///
+    /// `validate_interleave_count` requires `count == max_images` (the document's image budget IS
+    /// the batch here, unlike every raster mode where batch is 1), and one conditioning entry per
+    /// source image declares the reference count the engine re-derives.
+    fn interleave_request(
+        self,
+        prompt: &str,
+        sources: &[gen_core::Image],
+        seed: u64,
+        steps: u32,
+        cancel: &gen_core::CancelFlag,
+    ) -> gen_core::GenerationRequest {
+        gen_core::GenerationRequest {
+            prompt: prompt.to_owned(),
+            width: self.width,
+            height: self.height,
+            count: self.batch,
+            seed: Some(seed),
+            steps: Some(steps),
+            conditioning: sources
+                .iter()
+                .map(|image| gen_core::Conditioning::Reference {
+                    image: image.clone(),
+                    strength: None,
+                })
+                .collect(),
+            cancel: cancel.clone(),
+            ..Default::default()
+        }
+    }
 }
 
-/// The [`gen_core::LoadSpec`] for the understanding runtime (sc-21512).
+/// The [`gen_core::LoadSpec`] for the understanding runtime (sc-21512), shared by both lanes.
 ///
-/// `load_understanding_with_spec` validates this spec before it loads anything, and the one field
-/// that can fail closed here is the numeric tier: `CheckpointInventory::validate_numeric_tier`
-/// compares `spec.quantize` against the tensors ACTUALLY packed in the directory, so a q4/q8 tier
-/// subdir loaded with no declared quant is refused. `resolve_weights_dir` hands these jobs a
-/// standard tier subdir (`bf16/`, `q8/`, `q4/`), so the tier is read back off that basename — the
-/// same token `image_jobs::base::tier_key_from_resolved_dir` reads, mirrored here rather than
-/// imported because `base` is module-private and its siblings mirror it too.
+/// The loader validates this spec before it loads anything, and the one field that can fail closed
+/// here is the numeric tier: candle's `CheckpointInventory::validate_numeric_tier` compares
+/// `spec.quantize` against the tensors ACTUALLY packed in the directory, and MLX's
+/// `validate_artifact_tier` compares it against the snapshot `config.json`'s `quantization`
+/// provenance — so on either lane a q4/q8 tier subdir loaded with no declared quant is refused.
+/// `resolve_weights_dir` hands these jobs a standard tier subdir (`bf16/`, `q8/`, `q4/`), so the
+/// tier is read back off that basename — the same token `image_jobs::base::tier_key_from_resolved_dir`
+/// reads, mirrored here rather than imported because `base` is module-private and its siblings
+/// mirror it too.
 ///
 /// `resolved_route` is deliberately NOT set. It is optional, and setting it would additionally
 /// require the weights path to carry the `sensenova-u1-8b-mlx` repo component
-/// (`validate_resolved_artifact_binding`) — a constraint app-managed and receipt-resolved dirs do
-/// not have to satisfy, and one the pre-sc-21512 path never imposed.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// (`validate_resolved_artifact_binding`, present on BOTH lanes) — a constraint app-managed and
+/// receipt-resolved dirs do not have to satisfy, and one the pre-sc-21512 path never imposed.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 fn understanding_load_spec(weights_dir: &Path) -> WorkerResult<gen_core::LoadSpec> {
     let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(weights_dir.to_path_buf()));
     let tier = weights_dir
@@ -1298,7 +1382,22 @@ fn understanding_load_spec(weights_dir: &Path) -> WorkerResult<gen_core::LoadSpe
 /// What this context is really for is identity: `validate_route` enforces the per-mode reference
 /// rules (`vqa` needs exactly one, `interleave` at most ten, `frames == 1`), and
 /// `validate_direct_operation_identity` compares `mode` and the whole `MemoryGeometry` against the
-/// geometry re-derived from the `GenerationRequest` by exact equality.
+/// geometry re-derived from the `GenerationRequest` by exact equality. Both lanes run the same
+/// checks, so both lanes build this context from the same body
+/// ([`understanding_run_context_for`]) — only the accessor that reaches the provider contract is
+/// engine-typed (`SenseNova::memory_contract` on MLX, `SenseNovaUnderstanding::memory_strategy_contract`
+/// on candle).
+#[cfg(target_os = "macos")]
+fn understanding_run_context(
+    runtime: &SenseNova,
+    quant: Option<gen_core::Quant>,
+    mode: gen_core::MemoryMode,
+    geometry: gen_core::MemoryGeometry,
+) -> gen_core::MemoryRunContext {
+    understanding_run_context_for(runtime.memory_contract(), quant, mode, geometry)
+}
+
+/// Candle sibling of [`understanding_run_context`] — same body, engine-typed accessor.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn understanding_run_context(
     runtime: &SenseNovaUnderstanding,
@@ -1306,7 +1405,17 @@ fn understanding_run_context(
     mode: gen_core::MemoryMode,
     geometry: gen_core::MemoryGeometry,
 ) -> gen_core::MemoryRunContext {
-    let contract = runtime.memory_strategy_contract();
+    understanding_run_context_for(runtime.memory_strategy_contract(), quant, mode, geometry)
+}
+
+/// The backend-neutral body both lanes' [`understanding_run_context`] wrappers share.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn understanding_run_context_for(
+    contract: &gen_core::MemoryProviderContract,
+    quant: Option<gen_core::Quant>,
+    mode: gen_core::MemoryMode,
+    geometry: gen_core::MemoryGeometry,
+) -> gen_core::MemoryRunContext {
     // Production `provider_contract` carries no calibration identity; the weights-free registry
     // fixture is the only seam that injects one. Read it when present rather than assuming either.
     let (calibration_abi, calibration_fingerprint) = contract.calibration.as_ref().map_or_else(
@@ -1484,6 +1593,13 @@ fn json_to_i64(value: &Value) -> Option<i64> {
 mod tests {
     use super::*;
 
+    // Raw-engine imports used ONLY by the real-weight checkpoint smokes below (production drives
+    // the provider's typed understanding runtime instead).
+    #[cfg(target_os = "macos")]
+    use runtime_macos::media::tokenizer::TextTokenizer;
+    #[cfg(target_os = "macos")]
+    use runtime_macos::providers::sensenova::{load_raw, load_tokenizer, NeoChatConfig, T2iModel};
+
     /// sc-9123: the engine's per-token/per-step cancel check surfaces the TYPED `Canceled`, and the
     /// worker mapping must preserve it as `WorkerError::Canceled` (with the shared terminal message)
     /// so `run_blocking_with_heartbeat` posts the terminal `Canceled` instead of failing the job.
@@ -1543,24 +1659,19 @@ mod tests {
     /// compares whole `MemoryGeometry` structs), and separately requires the VQA route to carry
     /// exactly one reference with batch 1 (`validate_route`).
     ///
-    /// Mutation-checked: changing either constant in [`UnderstandingOperation::vqa`] reds this.
+    /// Mutation-checked: changing either constant in [`UnderstandingOperation::vqa`], or any of the
+    /// geometry fields [`UnderstandingOperation::vqa_request`] copies out of the operation, reds
+    /// this. Both lanes build their request through that one builder, so this covers both.
     #[test]
     fn the_vqa_operation_declares_the_geometry_the_provider_rederives() {
         let operation = UnderstandingOperation::vqa(768, 512);
         let source = fixture_image(1024, 683);
-        let request = gen_core::GenerationRequest {
-            prompt: "what is in this image?".to_owned(),
-            width: operation.width,
-            height: operation.height,
-            count: operation.batch,
-            conditioning: vec![gen_core::Conditioning::Reference {
-                image: source,
-                strength: None,
-            }],
-            ..Default::default()
-        };
+        let question = "what is in this image?";
+        let cancel = gen_core::CancelFlag::new();
+        let request = operation.vqa_request(question, &source, &cancel);
         let declared = operation.geometry();
 
+        assert_eq!(request.prompt, question);
         // One tensor is handed to `run_vqa`, and the request must declare that same count.
         assert_eq!(request.image_reference_count(), 1);
         assert_eq!(
@@ -1585,26 +1696,24 @@ mod tests {
     /// is the batch, and `validate_interleave_count` requires `request.count == max_images`. The
     /// source count is independent of it and may be zero.
     ///
-    /// Mutation-checked: swapping `batch` for `1`, or `reference_count` for `max_images`, reds this.
+    /// Mutation-checked: swapping `batch` for `1`, or `reference_count` for `max_images`, reds
+    /// this, as does dropping the per-source conditioning entry, the seed or the step count from
+    /// [`UnderstandingOperation::interleave_request`] — the builder both lanes now use.
     #[test]
     fn the_interleave_operation_carries_the_image_budget_as_its_batch() {
         for (max_images, sources) in [(1_u32, 0_u32), (4, 2), (10, 10)] {
             let operation = UnderstandingOperation::interleave(1024, 1024, max_images, sources);
-            let request = gen_core::GenerationRequest {
-                prompt: "a document".to_owned(),
-                width: operation.width,
-                height: operation.height,
-                count: operation.batch,
-                conditioning: (0..sources)
-                    .map(|_| gen_core::Conditioning::Reference {
-                        image: fixture_image(64, 64),
-                        strength: None,
-                    })
-                    .collect(),
-                ..Default::default()
-            };
+            let source_images: Vec<gen_core::Image> =
+                (0..sources).map(|_| fixture_image(64, 64)).collect();
+            let cancel = gen_core::CancelFlag::new();
+            let request =
+                operation.interleave_request("a document", &source_images, 4242, 8, &cancel);
             let declared = operation.geometry();
 
+            // The sampler axes the job resolved must reach the engine's admitted request, not the
+            // engine defaults.
+            assert_eq!(request.seed, Some(4242));
+            assert_eq!(request.steps, Some(8));
             assert_eq!(request.image_reference_count(), sources);
             assert_eq!(
                 declared,
@@ -1625,6 +1734,44 @@ mod tests {
             // The provider caps both axes at ten.
             assert!((1..=10).contains(&declared.batch));
             assert!(declared.reference_count <= 10);
+        }
+    }
+
+    /// The load spec BOTH lanes hand their loader (`load_runtime` on MLX,
+    /// `load_understanding_with_spec` on candle). The numeric tier is not a free choice: MLX's
+    /// `validate_artifact_tier` compares `spec.quantize` against the snapshot `config.json`'s
+    /// `quantization` provenance and candle's `validate_numeric_tier` against the packed tensors,
+    /// so declaring the wrong tier for a resolved tier subdir is a refusal on either lane. The
+    /// only thing the worker gets to decide is which tier the resolved directory means.
+    ///
+    /// `resolved_route` must stay unset: both lanes' `validate_resolved_artifact_binding` would
+    /// then additionally require the weights path to carry the repo component, which app-managed
+    /// and receipt-resolved directories do not have to.
+    #[test]
+    fn the_load_spec_reads_the_numeric_tier_off_the_resolved_tier_subdir() {
+        for (dir, expected) in [
+            ("q4", Some(gen_core::Quant::Q4)),
+            ("q8", Some(gen_core::Quant::Q8)),
+            ("bf16", None),
+            // A plain HF snapshot dir (a content hash) is dense, and so is any unrecognized token.
+            ("9f1c2ad3e4b5", None),
+            ("sensenova-u1-8b-mlx", None),
+        ] {
+            let root = PathBuf::from("/models/SceneWorks__sensenova-u1-8b-mlx").join(dir);
+            let spec = understanding_load_spec(&root).expect("spec");
+            assert_eq!(
+                spec.quantize, expected,
+                "tier subdir {dir:?} must declare {expected:?}"
+            );
+            assert!(
+                matches!(&spec.weights, gen_core::WeightsSource::Dir(path) if path == &root),
+                "the spec must point at the resolved directory itself, got {:?}",
+                spec.weights
+            );
+            assert_eq!(
+                spec.resolved_route, None,
+                "setting resolved_route would impose a repo-component constraint on the path"
+            );
         }
     }
 
@@ -1846,6 +1993,30 @@ mod tests {
         assert_eq!(segments[4], json!({ "type": "text", "text": "end" }));
     }
 
+    /// Assemble the concrete unified `T2iModel` + tokenizer for a SenseNova-U1 snapshot, replicating
+    /// the engine's private `load_inner` from public re-exports.
+    ///
+    /// TEST-ONLY. Production drives `load_runtime` + `SenseNova::{run_vqa, run_interleave}` (the
+    /// understanding seam). The three checkpoint smokes below still need the raw `T2iModel` because
+    /// they exercise the **generation** path (`T2iModel::generate`), which is not on the
+    /// understanding seam at all — it is the registry `Generator`'s.
+    #[cfg(target_os = "macos")]
+    fn load_sensenova_model(weights_dir: &Path) -> WorkerResult<(T2iModel, TextTokenizer)> {
+        let cfg = NeoChatConfig::from_dir(weights_dir).map_err(|error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 config: {error}"))
+        })?;
+        let weights = load_raw(weights_dir).map_err(|error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 weights: {error}"))
+        })?;
+        let model = T2iModel::from_weights(&weights, &cfg).map_err(|error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 model build: {error}"))
+        })?;
+        let tokenizer = load_tokenizer(weights_dir).map_err(|error| {
+            WorkerError::InvalidPayload(format!("SenseNova-U1 tokenizer: {error}"))
+        })?;
+        Ok((model, tokenizer))
+    }
+
     /// The HF-cache snapshot dir for a cached repo (test helper).
     #[cfg(target_os = "macos")]
     fn hf_snapshot(model_dir: &str) -> PathBuf {
@@ -1918,28 +2089,43 @@ mod tests {
         }
     }
 
-    /// Real-weights smoke: SenseNova-U1 VQA. Loads the dense base `T2iModel` (~35GB
-    /// `sensenova/SenseNova-U1-8B-MoT`), preprocesses a synthetic image, and asserts the answer
-    /// text is non-empty (post think-strip). Needs the HF cache + a Metal device; run on demand:
+    /// Real-weights smoke: SenseNova-U1 VQA through the SHIPPED understanding seam (~35GB
+    /// `sensenova/SenseNova-U1-8B-MoT`) — `load_runtime` + `SenseNova::run_vqa` under the same
+    /// operation identity, load spec and run context production builds. Preprocesses a synthetic
+    /// image and asserts the answer text is non-empty (post think-strip). A geometry the provider
+    /// refuses would surface here as an `Unsupported` load/run error, not as an empty answer.
+    /// Needs the HF cache + a Metal device; run on demand:
     /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_vqa_real_weights`.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "needs real SenseNova-U1-8B-MoT weights (~35GB) + Metal device"]
     fn sensenova_vqa_real_weights_answers_non_empty() {
         let snapshot = hf_snapshot("models--sensenova--SenseNova-U1-8B-MoT");
-        let (model, tokenizer) = load_sensenova_model(&snapshot).expect("load model");
+        let spec = understanding_load_spec(&snapshot).expect("load spec");
+        let runtime = load_runtime(&spec).expect("load understanding runtime");
         let image = gradient_image(512, 512);
         let pixel_values = image_to_chw01(&image, 256 * 256, 768 * 768).expect("preprocess");
-        let answer = model
-            .vqa(
-                &tokenizer,
-                "What colors appear in this image?",
+        let (width, height) = chw01_geometry(&pixel_values).expect("geometry");
+        let operation = UnderstandingOperation::vqa(width, height);
+        let cancel = gen_core::CancelFlag::new();
+        let question = "What colors appear in this image?";
+        let answer = runtime
+            .run_vqa(
+                &understanding_run_context(
+                    &runtime,
+                    spec.quantize,
+                    gen_core::MemoryMode::Other("vqa".to_owned()),
+                    operation.geometry(),
+                ),
+                operation.vqa_request(question, &image, &cancel),
+                question,
                 std::slice::from_ref(&pixel_values),
                 64,
                 Sampler::Greedy,
+                T2iOptions::default(),
                 None,
             )
-            .expect("vqa");
+            .expect("run_vqa");
         let answer = strip_reasoning(&answer);
         assert!(
             !answer.is_empty(),
@@ -1947,18 +2133,20 @@ mod tests {
         );
     }
 
-    /// Real-weights smoke: SenseNova-U1 interleave. Loads the dense base `T2iModel`, runs a short
-    /// think-mode interleave rollout (mirroring the engine's own real-weight test, which reliably
-    /// emits an image), decodes the generated image(s), and asserts ≥1 image + a valid segment set
-    /// with at least one image segment. Small 512² + 8 steps for speed (production buckets are
-    /// 1536²+ / 50 steps). Run on demand:
+    /// Real-weights smoke: SenseNova-U1 interleave through the SHIPPED understanding seam —
+    /// `load_runtime` + `SenseNova::run_interleave` under the same operation identity production
+    /// builds. Runs a short think-mode interleave rollout (mirroring the engine's own real-weight
+    /// test, which reliably emits an image), decodes the generated image(s), and asserts ≥1 image +
+    /// a valid segment set with at least one image segment. Small 512² + 8 steps for speed
+    /// (production buckets are 1536²+ / 50 steps). Run on demand:
     /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_interleave_real_weights`.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "needs real SenseNova-U1-8B-MoT weights (~35GB) + Metal device"]
     fn sensenova_interleave_real_weights_produces_document() {
         let snapshot = hf_snapshot("models--sensenova--SenseNova-U1-8B-MoT");
-        let (model, tokenizer) = load_sensenova_model(&snapshot).expect("load model");
+        let spec = understanding_load_spec(&snapshot).expect("load spec");
+        let runtime = load_runtime(&spec).expect("load understanding runtime");
         let opts = T2iOptions {
             cfg_scale: 4.0,
             img_cfg_scale: 1.0,
@@ -1968,24 +2156,34 @@ mod tests {
             think_mode: true,
             ..Default::default()
         };
+        // `max_images` IS the admitted batch for interleave, so the operation carries 4 here.
+        let operation = UnderstandingOperation::interleave(512, 512, 4, 0);
+        let cancel = gen_core::CancelFlag::new();
+        let prompt = "Generate an illustration of a single red circle on a white background, then briefly describe it.";
         // Budget mirrors the engine's own passing interleave real-weight test (512 new tokens,
         // generous max_images) so the think-mode rollout reliably reaches an `<img>`.
-        let out = model
-            .interleave_gen(
-                &tokenizer,
-                "Generate an illustration of a single red circle on a white background, then briefly describe it.",
+        let out = runtime
+            .run_interleave(
+                &understanding_run_context(
+                    &runtime,
+                    spec.quantize,
+                    gen_core::MemoryMode::Other("interleave".to_owned()),
+                    operation.geometry(),
+                ),
+                operation.interleave_request(prompt, &[], 42, 8, &cancel),
+                prompt,
                 &[],
                 512,
                 512,
-                &opts,
+                opts,
                 INTERLEAVE_SYSTEM_MESSAGE,
                 512,
                 4,
                 None,
-                &gen_core::CancelFlag::new(),
+                &cancel,
                 &mut |_| {},
             )
-            .expect("interleave_gen");
+            .expect("run_interleave");
         assert!(!out.images.is_empty(), "expected >= 1 generated image");
         let mut image_writes = Vec::new();
         for (index, image) in out.images.iter().enumerate() {

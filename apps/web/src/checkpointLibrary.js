@@ -190,13 +190,20 @@ export function managedSourceProblem(input = {}) {
 // Which lifecycle action clears a given store refusal, keyed on the store's own `code()`. Anything
 // absent here has no one-click corrective action — which is different from having no explanation,
 // and is why `describeRefusal` still surfaces the server's sentence for those.
-const REFUSAL_ACTION = Object.freeze({
+//
+// This map and `CheckpointPlanError::lifecycle_action` on the Rust side are ONE contract, pinned by
+// `packages/schemas/checkpoint-refusal-actions.json`, which both sides are tested against for
+// equality. It is exported so that test can read it; nothing in the UI should need it directly.
+export const REFUSAL_ACTION = Object.freeze({
   "root-unavailable": "relink",
   "unknown-root": "relink",
   "source-missing": "rescan",
   "source-drifted": "rescan",
+  "path-escapes-root": "rescan",
   "plan-tampered": "rescan",
   "missing-plan": "rescan",
+  "invalid-relative-path": "rescan",
+  "unsupported-locator": "rescan",
 });
 
 export const REFUSAL_ACTION_LABEL = Object.freeze({

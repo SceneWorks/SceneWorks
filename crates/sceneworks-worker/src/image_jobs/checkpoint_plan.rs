@@ -1419,6 +1419,17 @@ pub(crate) fn checkpoint_plan_bespoke_roles(
     let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(entry) else {
         return Ok(None);
     };
+    // Same first question as [`checkpoint_plan_bespoke_primary`] and [`checkpoint_plan_bespoke_tree`],
+    // and for the same reason (sc-20644 review blocker 1): this helper is offered every plan-backed
+    // entry whose shape the plan route declined, other families' included. Without the gate an
+    // entry DECLARING another family reached the store and then tripped the family-mismatch refusal
+    // below — which is FATAL and propagated with `?`, so a perfectly good checkpoint killed the job
+    // the moment the Wan lane was offered it. Declining is the right answer; the refusal below is
+    // reserved for the case it was written for, an entry whose declared family routes HERE but
+    // whose compiled plan says otherwise.
+    if !checkpoint_plan_entry_routes_to(entry, family) {
+        return Ok(None);
+    }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
     let resolved = store

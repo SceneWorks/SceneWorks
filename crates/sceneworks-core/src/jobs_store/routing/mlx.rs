@@ -785,6 +785,20 @@ pub(crate) fn video_request_is_mlx_eligible(
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
+    // **A DELIBERATE, TESTED NEGATIVE (sc-20651).** SceneWorks ships NO MLX video lane that reads a
+    // checkpoint plan: `resolve_video_route` on macOS has no plan-backed arm, and every MLX Wan/LTX
+    // engine loads the builtin snapshot for its model id. So a plan-backed entry
+    // (`importPlan.checkpointId`, epic 20398) that reached an MLX lane would render BUILTIN weights
+    // under the user's imported checkpoint id — a silent substitution, not a capability.
+    //
+    // The `VIDEO_MLX_ROUTED_MODELS` guard below already excludes every imported id, so this is not
+    // the common path; it is the guard for a plan-backed entry forwarded under a BUILTIN model id,
+    // which that list would happily admit. Its candle twin is
+    // [`super::candle::plan_backed_wan_video_candle_eligible`], the only lane that exists — never
+    // add an MLX arm here without a worker route that actually loads the plan's bytes.
+    if super::catalog::checkpoint_plan_checkpoint_id_of_payload_entry(payload).is_some() {
+        return false;
+    }
     if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
         return false;
     }

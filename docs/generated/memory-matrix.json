@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c6a4c3773944801a339240ae4aa48df511c60e612c6c995efd384b714a1e3e90",
+    "sceneWorksRevision": "source-tree:058d661dcb419a9fa96e544de2388ea8fb078a278d354a53c9b03c9694deb832",
     "inferenceRevision": "725c6bc59c61e940859fd925037184294cd2cafb",
     "sources": {
       "manifest": {
@@ -10,15 +10,15 @@
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "6d9f22ab12c2ce87f7c9bf14e10182ff91b3706b609994a799903451624717f7"
+        "sha256": "73507693fe92bc45f13f607c9485dcfa7e40489f095c77026a3dbc6b47b4e7a4"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "101cb53761c8f6a8cf32e59bfdc33ba638c10fbcddf9df3cceb57edc07b21327"
+        "sha256": "83b35b7e8bed144b654b67bbba28b86d8e78f2f04bcf2baae57e61aeec201e7d"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "cbf57eff74a7dafa18f943887299c48c241003d35c1ef38b0d2586a7379e990b"
+        "sha256": "cd7262ed886ec411c5ad1136d8cb79d958710110d12fc80f6c9553408e43b251"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "18c01af0d6bc8bf4cec3c18f460b16e0d5b9d26cb8028dbb025d03011f99bff8"
+        "sha256": "1c96b13612abe008c9a9673295161926d090afc9d39d60c972e85fd1c04e1940"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -54,7 +54,7 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "896cdbc4ad6791c70c0fa7d61a0eec891eba27d2d90decf952ab17381f79695f"
+        "sha256": "55fb9e356a68da1274943c4995f20a8261f053c7cab302faa9134ed8e688694e"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",

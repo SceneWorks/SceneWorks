@@ -47,7 +47,6 @@ fn resolve_imported_sdxl_pin(
         .get("family")
         .and_then(Value::as_str)
         != Some("sdxl")
-        || mlx_model(&request.model).is_some()
     {
         return Ok(None);
     }
@@ -58,6 +57,13 @@ fn resolve_imported_sdxl_pin(
     // (sc-20644 SDXL row).
     if let Some(pin) = checkpoint_plan_bespoke_primary_pin(request, settings, "sdxl")? {
         return Ok(Some(pin));
+    }
+    // A builtin SDXL engine id (in `MODEL_TABLE`) loads from its snapshot turnkey via the normal MLX
+    // lane — never through the single-file entrypoint. Checked AFTER the plan pin, mirroring
+    // `resolve_imported_krea_dit_pin`: a plan-backed entry must be offered its verified layer before
+    // a builtin-id test can send it down the turnkey path (feature-end round 1, ordering minor).
+    if mlx_model(&request.model).is_some() {
+        return Ok(None);
     }
     let Some(raw_path) = request
         .advanced

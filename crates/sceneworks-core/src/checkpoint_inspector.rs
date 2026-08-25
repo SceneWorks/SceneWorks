@@ -24,6 +24,7 @@ use crate::checkpoint_import::{
     CheckpointCatalogRecordV1, CheckpointInventoryV1, ImportLayerV1, ImportPlanV1,
     ManagedProvenanceV1, SourceLocatorV1,
 };
+use crate::checkpoint_plan_store::portable_relative_path_parts;
 
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 const MAX_DISCOVERY_DEPTH: usize = 8;
@@ -127,6 +128,15 @@ pub struct CheckpointDiscoveryV1 {
     pub layout: Option<CheckpointLayoutV1>,
     pub candidates: Vec<CheckpointCandidateV1>,
     pub descriptor_paths: Vec<String>,
+    /// Every discovered file's ROOT-relative path mapped to its CHECKPOINT-relative one.
+    ///
+    /// Two names for the same file, and the seam depends on keeping them apart: the root-relative
+    /// key is where the bytes are and is what a source locator records; the value is where the file
+    /// sits inside the checkpoint and is what the plan's semantic identity is built from. They
+    /// differ by the checkpoint's own depth under the root, and additionally whenever the
+    /// checkpoint reaches a file through a symlink to somewhere else under the same root.
+    #[serde(default)]
+    pub internal_paths: BTreeMap<String, String>,
     pub diagnostics: Vec<CheckpointDiagnosticV1>,
 }
 
@@ -273,10 +283,24 @@ struct ResolvedInput {
     canonical_target: PathBuf,
 }
 
+/// One discovered file, in BOTH of the two names it has.
+///
+/// `canonical` is where the bytes actually are, which is what a source locator records and what a
+/// confinement check is applied to. `internal` is where the file sits INSIDE the checkpoint — the
+/// path the walk took to reach it, before any symlink was resolved — which is what the checkpoint's
+/// semantic identity is built from. They differ whenever the checkpoint links to a file kept
+/// elsewhere under the same root, and conflating them is what used to make the semantic digest
+/// depend on where in the library the checkpoint was kept.
+#[derive(Clone, Debug)]
+struct DiscoveredFile {
+    canonical: PathBuf,
+    internal: String,
+}
+
 #[derive(Default)]
 struct DiscoveryFiles {
-    weights: Vec<PathBuf>,
-    descriptors: Vec<PathBuf>,
+    weights: Vec<DiscoveredFile>,
+    descriptors: Vec<DiscoveredFile>,
     diagnostics: Vec<CheckpointDiagnosticV1>,
 }
 
@@ -286,6 +310,7 @@ pub fn discover_checkpoint(request: &CheckpointInspectionRequestV1) -> Checkpoin
             layout: None,
             candidates: Vec::new(),
             descriptor_paths: Vec::new(),
+            internal_paths: BTreeMap::new(),
             diagnostics: vec![CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::SourceNotFound,
                 path_to_portable_string(&request.relative_path),
@@ -305,6 +330,7 @@ pub fn discover_checkpoint(request: &CheckpointInspectionRequestV1) -> Checkpoin
             layout: None,
             candidates: Vec::new(),
             descriptor_paths: Vec::new(),
+            internal_paths: BTreeMap::new(),
             diagnostics: vec![CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::PathEscapesRoot,
                 path_to_portable_string(&request.relative_path),
@@ -330,19 +356,26 @@ pub fn discover_checkpoint(request: &CheckpointInspectionRequestV1) -> Checkpoin
     };
 
     let mut diagnostics = files.diagnostics;
+    let mut internal_paths = BTreeMap::new();
     let mut candidates = Vec::new();
-    for path in files.weights {
-        match discover_weight(&resolved, &path) {
-            Ok(candidate) => candidates.push(candidate),
+    for file in files.weights {
+        match discover_weight(&resolved, &file) {
+            Ok(candidate) => {
+                internal_paths.insert(candidate.relative_path.clone(), file.internal.clone());
+                candidates.push(candidate);
+            }
             Err(diagnostic) => diagnostics.push(diagnostic),
         }
     }
     candidates.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    let mut descriptor_paths = files
-        .descriptors
-        .iter()
-        .filter_map(|path| relative_to_root(&resolved, path))
-        .collect::<Vec<_>>();
+    let mut descriptor_paths = Vec::new();
+    for file in &files.descriptors {
+        let Some(relative) = relative_to_root(&resolved, &file.canonical) else {
+            continue;
+        };
+        internal_paths.insert(relative.clone(), file.internal.clone());
+        descriptor_paths.push(relative);
+    }
     descriptor_paths.sort();
     descriptor_paths.dedup();
 
@@ -370,6 +403,7 @@ pub fn discover_checkpoint(request: &CheckpointInspectionRequestV1) -> Checkpoin
         layout,
         candidates,
         descriptor_paths,
+        internal_paths,
         diagnostics,
     }
 }
@@ -398,6 +432,7 @@ pub fn discover_library_root(root_path: &Path) -> CheckpointDiscoveryV1 {
                 layout: None,
                 candidates: Vec::new(),
                 descriptor_paths: Vec::new(),
+                internal_paths: BTreeMap::new(),
                 diagnostics: vec![CheckpointDiagnosticV1::error(
                     CheckpointDiagnosticCodeV1::SourceNotFound,
                     None,
@@ -414,6 +449,7 @@ pub fn discover_library_root(root_path: &Path) -> CheckpointDiscoveryV1 {
             layout: None,
             candidates: Vec::new(),
             descriptor_paths: Vec::new(),
+            internal_paths: BTreeMap::new(),
             diagnostics: vec![CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::UnsupportedContainer,
                 None,
@@ -427,19 +463,26 @@ pub fn discover_library_root(root_path: &Path) -> CheckpointDiscoveryV1 {
     };
     let files = discover_directory(&resolved);
     diagnostics.extend(files.diagnostics);
+    let mut internal_paths = BTreeMap::new();
     let mut candidates = Vec::new();
-    for path in files.weights {
-        match discover_weight(&resolved, &path) {
-            Ok(candidate) => candidates.push(candidate),
+    for file in files.weights {
+        match discover_weight(&resolved, &file) {
+            Ok(candidate) => {
+                internal_paths.insert(candidate.relative_path.clone(), file.internal.clone());
+                candidates.push(candidate);
+            }
             Err(diagnostic) => diagnostics.push(diagnostic),
         }
     }
     candidates.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    let mut descriptor_paths = files
-        .descriptors
-        .iter()
-        .filter_map(|path| relative_to_root(&resolved, path))
-        .collect::<Vec<_>>();
+    let mut descriptor_paths = Vec::new();
+    for file in &files.descriptors {
+        let Some(relative) = relative_to_root(&resolved, &file.canonical) else {
+            continue;
+        };
+        internal_paths.insert(relative.clone(), file.internal.clone());
+        descriptor_paths.push(relative);
+    }
     descriptor_paths.sort();
     descriptor_paths.dedup();
     sort_diagnostics(&mut diagnostics);
@@ -448,6 +491,7 @@ pub fn discover_library_root(root_path: &Path) -> CheckpointDiscoveryV1 {
         layout: None,
         candidates,
         descriptor_paths,
+        internal_paths,
         diagnostics,
     }
 }
@@ -564,7 +608,13 @@ pub fn inspect_checkpoint_with_hook(
         .into_iter()
         .next()
         .expect("family was validated above");
-    match compile_inventory(request, &family, &fingerprint, &result.evidence) {
+    match compile_inventory(
+        request,
+        &discovery.internal_paths,
+        &family,
+        &fingerprint,
+        &result.evidence,
+    ) {
         Ok((inventory, plan)) => {
             result.inventory = inventory;
             result.plans.push(plan);
@@ -835,6 +885,7 @@ fn inspect_discovered_pass(
     }
 
     validate_safetensors_indices(
+        &discovery.internal_paths,
         &indices,
         &candidate_by_path,
         &tensor_tables,
@@ -849,11 +900,24 @@ fn inspect_discovered_pass(
 }
 
 fn validate_safetensors_indices(
+    internal_paths: &BTreeMap<String, String>,
     indices: &[SafetensorsIndexDeclaration],
     candidates: &BTreeMap<String, &CheckpointCandidateV1>,
     tensor_tables: &BTreeMap<String, BTreeSet<String>>,
     diagnostics: &mut Vec<CheckpointDiagnosticV1>,
 ) {
+    // These messages describe the checkpoint's INTERNAL structure — which shard an index claims,
+    // which shard a tensor is in — so they name shards the way the checkpoint does, not the way the
+    // library root happens to. The lookup keys stay root-relative because that is what the
+    // candidate and tensor tables are keyed on; only what the user reads is re-expressed. A shard
+    // discovery never recorded keeps its root-relative name rather than losing its identity: this
+    // is a rendering, and it must never turn a refusal into a blank.
+    let shown = |shard: &str| {
+        internal_paths
+            .get(shard)
+            .cloned()
+            .unwrap_or_else(|| shard.to_owned())
+    };
     let mut all_references = BTreeSet::new();
     let mut shard_owner = BTreeMap::<String, String>::new();
     for index in indices {
@@ -866,7 +930,8 @@ fn validate_safetensors_indices(
                     CheckpointDiagnosticCodeV1::IndexTensorMismatch,
                     Some(index.descriptor_path.clone()),
                     format!(
-                        "safetensors shard '{shard}' is claimed by both '{previous}' and '{}'",
+                        "safetensors shard '{}' is claimed by both '{previous}' and '{}'",
+                        shown(shard),
                         index.descriptor_path
                     ),
                 ));
@@ -879,14 +944,16 @@ fn validate_safetensors_indices(
                     CheckpointDiagnosticCodeV1::IndexTensorMismatch,
                     Some(index.descriptor_path.clone()),
                     format!(
-                        "safetensors index shard '{shard}' did not yield a valid safetensors tensor table"
+                        "safetensors index shard '{}' did not yield a valid safetensors tensor table",
+                        shown(shard)
                     ),
                 )),
                 None => diagnostics.push(CheckpointDiagnosticV1::error(
                     CheckpointDiagnosticCodeV1::MissingSidecar,
                     Some(index.descriptor_path.clone()),
                     format!(
-                        "safetensors index shard '{shard}' was not discovered as an importable weight artifact"
+                        "safetensors index shard '{}' was not discovered as an importable weight artifact",
+                        shown(shard)
                     ),
                 )),
             }
@@ -910,7 +977,11 @@ fn validate_safetensors_indices(
                     Some(index.descriptor_path.clone()),
                     format!(
                         "tensor '{tensor}' exists in multiple indexed shards: {}",
-                        locations.join(", ")
+                        locations
+                            .iter()
+                            .map(|shard| shown(shard))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 ));
             }
@@ -925,7 +996,8 @@ fn validate_safetensors_indices(
                     CheckpointDiagnosticCodeV1::IndexTensorMismatch,
                     Some(index.descriptor_path.clone()),
                     format!(
-                        "weight_map tensor '{tensor}' does not exist in its declared shard '{shard}'"
+                        "weight_map tensor '{tensor}' does not exist in its declared shard '{}'",
+                        shown(shard)
                     ),
                 ));
             }
@@ -942,14 +1014,20 @@ fn validate_safetensors_indices(
                     diagnostics.push(CheckpointDiagnosticV1::error(
                         CheckpointDiagnosticCodeV1::IndexTensorMismatch,
                         Some(index.descriptor_path.clone()),
-                        format!("shard '{shard}' tensor '{tensor}' is missing from weight_map"),
+                        format!(
+                            "shard '{}' tensor '{tensor}' is missing from weight_map",
+                            shown(shard)
+                        ),
                     ));
                 }
                 for tensor in expected.difference(actual) {
                     diagnostics.push(CheckpointDiagnosticV1::error(
                         CheckpointDiagnosticCodeV1::IndexTensorMismatch,
                         Some(index.descriptor_path.clone()),
-                        format!("weight_map contains extra tensor '{tensor}' for shard '{shard}'"),
+                        format!(
+                            "weight_map contains extra tensor '{tensor}' for shard '{}'",
+                            shown(shard)
+                        ),
                     ));
                 }
             }
@@ -1038,12 +1116,26 @@ fn revalidate_artifact_observations(
 
 fn compile_inventory(
     request: &CheckpointInspectionRequestV1,
+    internal_paths: &BTreeMap<String, String>,
     family: &str,
     fingerprint: &str,
     evidence: &[CheckpointArtifactEvidenceV1],
 ) -> Result<(CheckpointInventoryV1, ImportPlanV1), String> {
     let mut layers = Vec::with_capacity(evidence.len());
     for artifact in evidence {
+        // SEMANTIC identity is checkpoint-relative; the LOCATOR below stays root-relative. The
+        // internal path is the one discovery walked to, so a checkpoint that reaches a file through
+        // a symlink still names it by where it sits INSIDE the checkpoint. No fallback: an artifact
+        // discovery never saw is a contract violation, not a path to guess at.
+        let internal_path = internal_paths
+            .get(&artifact.relative_path)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "artifact {:?} has no discovered checkpoint-relative path",
+                    artifact.relative_path
+                )
+            })?;
         let source = match &request.ownership {
             CheckpointOwnershipV1::Linked { root_id } => SourceLocatorV1::linked(
                 root_id.clone(),
@@ -1062,12 +1154,12 @@ fn compile_inventory(
         }
         .map_err(|error| error.to_string())?;
         layers.push(ImportLayerV1 {
-            layer_id: format!("artifact:{}", artifact.relative_path),
+            layer_id: format!("artifact:{internal_path}"),
             role: artifact
                 .role
                 .clone()
                 .unwrap_or_else(|| "artifact".to_owned()),
-            target_path: artifact.relative_path.clone(),
+            target_path: internal_path,
             source,
         });
     }
@@ -1126,14 +1218,25 @@ fn resolve_confined_artifact(
 
 fn discover_direct_file(resolved: &ResolvedInput) -> DiscoveryFiles {
     let path = resolved.canonical_target.clone();
+    // A single-file checkpoint's internal path is its own name: the directory it happens to sit in
+    // is where the user keeps it, not part of what it is.
+    let internal = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let file = DiscoveredFile {
+        canonical: path.clone(),
+        internal,
+    };
     if is_json_descriptor(&path) {
         DiscoveryFiles {
-            descriptors: vec![path],
+            descriptors: vec![file],
             ..DiscoveryFiles::default()
         }
     } else {
         DiscoveryFiles {
-            weights: vec![path],
+            weights: vec![file],
             ..DiscoveryFiles::default()
         }
     }
@@ -1141,11 +1244,14 @@ fn discover_direct_file(resolved: &ResolvedInput) -> DiscoveryFiles {
 
 fn discover_directory(resolved: &ResolvedInput) -> DiscoveryFiles {
     let mut result = DiscoveryFiles::default();
-    let mut stack = vec![(resolved.canonical_target.clone(), 0_usize)];
+    // The third element is the walk's own path INSIDE the checkpoint, carried down rather than
+    // recomputed from the canonical path: a directory reached through a symlink canonicalizes to
+    // wherever the link led, and its name inside the checkpoint is not recoverable from there.
+    let mut stack = vec![(resolved.canonical_target.clone(), String::new(), 0_usize)];
     let mut seen_dirs = HashSet::new();
     let mut visited_entries = 0_usize;
 
-    while let Some((directory, depth)) = stack.pop() {
+    while let Some((directory, internal_prefix, depth)) = stack.pop() {
         let Ok(canonical_directory) = std::fs::canonicalize(&directory) else {
             continue;
         };
@@ -1186,6 +1292,19 @@ fn discover_directory(resolved: &ResolvedInput) -> DiscoveryFiles {
             if is_hidden_path(&path) {
                 continue;
             }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                result.diagnostics.push(CheckpointDiagnosticV1::error(
+                    CheckpointDiagnosticCodeV1::PathEscapesRoot,
+                    relative_to_root(resolved, &path),
+                    "checkpoint entry name is not valid UTF-8 and has no portable internal path",
+                ));
+                continue;
+            };
+            let internal = if internal_prefix.is_empty() {
+                name
+            } else {
+                format!("{internal_prefix}/{name}")
+            };
             let Ok(canonical) = std::fs::canonicalize(&path) else {
                 continue;
             };
@@ -1199,7 +1318,7 @@ fn discover_directory(resolved: &ResolvedInput) -> DiscoveryFiles {
             }
             if canonical.is_dir() {
                 if depth < MAX_DISCOVERY_DEPTH {
-                    stack.push((canonical, depth + 1));
+                    stack.push((canonical, internal, depth + 1));
                 } else {
                     result.diagnostics.push(CheckpointDiagnosticV1::error(
                         CheckpointDiagnosticCodeV1::DiscoveryLimitExceeded,
@@ -1212,21 +1331,32 @@ fn discover_directory(resolved: &ResolvedInput) -> DiscoveryFiles {
                 continue;
             }
             if is_weight_extension(&canonical) {
-                result.weights.push(canonical);
+                result.weights.push(DiscoveredFile {
+                    canonical,
+                    internal,
+                });
             } else if is_json_descriptor(&canonical) {
-                result.descriptors.push(canonical);
+                result.descriptors.push(DiscoveredFile {
+                    canonical,
+                    internal,
+                });
             }
         }
     }
-    result.weights.sort();
-    result.descriptors.sort();
+    result.weights.sort_by(|left, right| {
+        (&left.canonical, &left.internal).cmp(&(&right.canonical, &right.internal))
+    });
+    result.descriptors.sort_by(|left, right| {
+        (&left.canonical, &left.internal).cmp(&(&right.canonical, &right.internal))
+    });
     result
 }
 
 fn discover_weight(
     resolved: &ResolvedInput,
-    path: &Path,
+    file: &DiscoveredFile,
 ) -> Result<CheckpointCandidateV1, CheckpointDiagnosticV1> {
+    let path = file.canonical.as_path();
     let relative_path = relative_to_root(resolved, path).ok_or_else(|| {
         CheckpointDiagnosticV1::error(
             CheckpointDiagnosticCodeV1::PathEscapesRoot,
@@ -2113,26 +2243,12 @@ fn empty_inventory() -> CheckpointInventoryV1 {
     CheckpointInventoryV1::new(Vec::new()).expect("empty v1 inventory is valid")
 }
 
+/// One rule set, defined once in the plan store, for every confined relative path in this seam.
+///
+/// The path is rendered to its portable `/`-separated form first so this is platform-correct on
+/// Windows, where a native `PathBuf` separates with `\`.
 fn safe_relative_path(path: &Path) -> bool {
-    let mut saw_component = false;
-    for component in path.components() {
-        match component {
-            Component::Normal(value) => {
-                let Some(value) = value.to_str() else {
-                    return false;
-                };
-                if value.is_empty()
-                    || value.contains(['/', '\\', ':'])
-                    || value.chars().any(char::is_control)
-                {
-                    return false;
-                }
-                saw_component = true;
-            }
-            _ => return false,
-        }
-    }
-    saw_component
+    path_to_portable_string(path).is_some_and(|value| portable_relative_path_parts(&value).is_ok())
 }
 
 fn is_hidden_path(path: &Path) -> bool {
@@ -2662,8 +2778,20 @@ fn validate_gguf(
             )])
         }
     };
-    let family =
-        normalize_family(&architecture).unwrap_or_else(|| architecture.to_ascii_lowercase());
+    // Fail CLOSED on an architecture nothing maps, exactly the way the safetensors/JSON path does:
+    // there, `normalize_family` returning `None` leaves the checkpoint with no backbone family and
+    // the inspection refuses with `MissingFamilyEvidence`. Falling back to the raw architecture
+    // string instead invented a family name no adapter has ever heard of, so the checkpoint
+    // inspected as Ready, was offered as selectable, and only failed at render time.
+    let Some(family) = normalize_family(&architecture) else {
+        return Err(vec![CheckpointDiagnosticV1::error(
+            CheckpointDiagnosticCodeV1::MissingFamilyEvidence,
+            relative_path,
+            format!(
+                "GGUF general.architecture '{architecture}' is not a model family this build can load"
+            ),
+        )]);
+    };
     Ok(ValidatedArtifact {
         role: None,
         family: Some(family),

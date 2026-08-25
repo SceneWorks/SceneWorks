@@ -50,7 +50,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -58,8 +58,8 @@ use sha2::{Digest, Sha256};
 
 use crate::checkpoint_import::SourceLocatorV1;
 use crate::checkpoint_plan_store::{
-    parse_linked_checkpoint_id, CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1,
-    RootRemovalV1,
+    managed_install_id, parse_linked_checkpoint_id, portable_relative_path_parts,
+    CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1, RootRemovalV1,
 };
 use crate::model_artifacts::resolved_cache::{
     DerivedArtifactPlan, ManualRemovalOutcome, ReservationOutcome, ResolvedCacheError,
@@ -76,9 +76,12 @@ pub const CHECKPOINT_DERIVATIVE_FORMAT_VERSION: u32 = 1;
 /// The synthetic repository every checkpoint derivative is filed under. It is deliberately a
 /// CONSTANT: the repository is cache-key material, so putting anything locational in it (a library
 /// root id, a path) would make one checkpoint's derivative key differently depending on where the
-/// user keeps their library. Real Hugging Face repositories cannot collide with it — the owner is
-/// not a namespace this app ever downloads from, and this string is only ever produced here.
-const DERIVATIVE_REPOSITORY: &str = "sceneworks-checkpoint-derivative/linked";
+/// user keeps their library. It is equally deliberately OWNERSHIP-NEUTRAL: a managed install's
+/// derivative is the same kind of thing as a linked one and belongs under the same name, and the
+/// old `/linked` suffix asserted otherwise. Real Hugging Face repositories cannot collide with it —
+/// the owner is not a namespace this app ever downloads from, and this string is only ever produced
+/// here.
+const DERIVATIVE_REPOSITORY: &str = "sceneworks-checkpoint-derivative/checkpoint";
 
 /// The most files one derivative may declare.
 const MAX_DERIVATIVE_OUTPUTS: usize = 4096;
@@ -181,28 +184,11 @@ fn validate_key_token(label: &str, token: &str) -> Result<(), CheckpointDerivati
 
 /// A declared output path: portable, relative, confined, and never a link-bearing component.
 fn validate_output_path(output: &str) -> Result<PathBuf, CheckpointDerivativeError> {
-    let invalid = |reason: &str| CheckpointDerivativeError::InvalidRequest {
-        reason: format!("derivative output {output:?} is invalid: {reason}"),
-    };
-    if output.trim().is_empty() {
-        return Err(invalid("empty"));
-    }
-    if output.contains('\\') {
-        return Err(invalid("must use '/' separators"));
-    }
-    let mut path = PathBuf::new();
-    for component in Path::new(output).components() {
-        match component {
-            Component::Normal(part) => path.push(part),
-            Component::CurDir => return Err(invalid("contains '.'")),
-            Component::ParentDir => return Err(invalid("contains '..'")),
-            Component::RootDir | Component::Prefix(_) => return Err(invalid("must be relative")),
+    portable_relative_path_parts(output).map_err(|reason| {
+        CheckpointDerivativeError::InvalidRequest {
+            reason: format!("derivative output {output:?} is invalid: {reason}"),
         }
-    }
-    if path.as_os_str().is_empty() {
-        return Err(invalid("empty"));
-    }
-    Ok(path)
+    })
 }
 
 /// What `ensure` did.
@@ -442,18 +428,13 @@ impl CheckpointDerivativeStore {
             )));
         }
         // The input this derivative is derived from. Recording it is what lets source-lifecycle
-        // reconciliation reach the derivative when the library goes away.
-        let (root_id, _) = parse_linked_checkpoint_id(checkpoint_id).ok_or_else(|| {
-            CheckpointDerivativeError::InvalidRequest {
-                reason: format!("checkpoint {checkpoint_id:?} is not a linked checkpoint"),
-            }
-        })?;
-        let root_path = self.plans.resolve_root(root_id)?;
+        // reconciliation reach the derivative when the source goes away.
+        let source_path = self.derivative_source_dir(checkpoint_id)?;
         let owner = derivative_owner(checkpoint_id);
         let reservation =
             match self
                 .cache
-                .reserve_derived(&plan, &root_path, checkpoint_id, &owner)?
+                .reserve_derived(&plan, &source_path, checkpoint_id, &owner)?
             {
                 ReservationOutcome::AlreadyComplete(metadata) => {
                     return Ok(CheckpointDerivativeOutcomeV1::AlreadyPresent(metadata));
@@ -487,6 +468,30 @@ impl CheckpointDerivativeStore {
             Ok(metadata) => Ok(CheckpointDerivativeOutcomeV1::Produced(Box::new(metadata))),
             Err(error) => Err(CheckpointDerivativeError::Cache(error)),
         }
+    }
+
+    /// The live directory the checkpoint's source bytes sit under: an approved library root for a
+    /// linked checkpoint, the install directory for a managed one.
+    ///
+    /// Both ownerships get derivatives. Parsing only the LINKED id here meant every managed
+    /// install — every checkpoint the user brought in through "Add to SceneWorks" — refused with
+    /// "is not a linked checkpoint" before a producer ever ran, so the entire managed half of the
+    /// library silently had no derived index, no normalized layout and no backend repack.
+    fn derivative_source_dir(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<PathBuf, CheckpointDerivativeError> {
+        if let Some((root_id, _)) = parse_linked_checkpoint_id(checkpoint_id) {
+            return Ok(self.plans.resolve_root(root_id)?);
+        }
+        if let Some(install_id) = managed_install_id(checkpoint_id) {
+            return Ok(self.plans.resolve_install(install_id)?);
+        }
+        Err(CheckpointDerivativeError::InvalidRequest {
+            reason: format!(
+                "checkpoint {checkpoint_id:?} is neither a linked nor a managed checkpoint"
+            ),
+        })
     }
 
     /// Remove every derivative produced for one checkpoint.
