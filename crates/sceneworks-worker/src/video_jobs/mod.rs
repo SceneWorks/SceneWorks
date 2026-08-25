@@ -61,12 +61,18 @@ mod prelude {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[allow(unused_imports)]
+    pub(super) use super::scail2::scail2_segment_blocking;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
     pub(super) use super::{
         advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
-        resolve_dense_adapters, resolve_lora_file, scail2_segment_blocking, video_frame_count,
-        wan_frame_count, AdapterSpec, CancelFlag, CharacterStore, Conditioning, GenerationMetrics,
-        GenerationOutput, GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy,
-        Precision, Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
+        resolve_dense_adapters, resolve_lora_file, video_frame_count, wan_frame_count, AdapterSpec,
+        CancelFlag, CharacterStore, Conditioning, GenerationMetrics, GenerationOutput,
+        GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision,
+        Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
     };
     #[allow(unused_imports)]
     pub(super) use super::{
@@ -2418,50 +2424,6 @@ fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
     }
 }
 
-/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
-
-/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
-/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
-/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
-/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
-/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
-/// `person_segment_sam3` vs candle `person_segment_sam3_candle`) plus the paint background, so the
-/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-async fn scail2_segment_blocking<R, F>(
-    api: &ApiClient,
-    settings: &Settings,
-    job_id: &str,
-    task_label: &'static str,
-    segment: F,
-) -> WorkerResult<R>
-where
-    R: Send + 'static,
-    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
-{
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    run_blocking_with_heartbeat(
-        api,
-        settings,
-        job_id,
-        Some(cancel),
-        SCAIL2_SEGMENT_CANCEL_MESSAGE,
-        task_label,
-        crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || segment(flag)),
-    )
-    .await
-}
-
 /// Assemble SCAIL-2 `animate_character` conditioning from already-loaded character images +
 /// driving frames. Each reference is independently segmented into its paired color mask; the
 /// backend-specific SAM3 module and background convention stay at the call site while this
@@ -2481,7 +2443,7 @@ where
     FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<(Image, Image)>> + Send + 'static,
     FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Vec<Image>, Vec<Image>)> + Send + 'static,
 {
-    let reference_pairs = scail2_segment_blocking(
+    let reference_pairs = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -2489,7 +2451,7 @@ where
         segment_reference,
     )
     .await?;
-    let (driving, driving_mask) = scail2_segment_blocking(
+    let (driving, driving_mask) = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,
