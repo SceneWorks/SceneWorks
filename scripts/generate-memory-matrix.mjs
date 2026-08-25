@@ -1787,7 +1787,7 @@ export const OUT_OF_MATRIX_CELL_STATES = Object.freeze([
  *
  * Rung 4's only shared prerequisite is `LoadShape::DeferredMaterialization`
  * (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, inference
- * `crates/contracts/gen-core/src/memory_strategy.rs:310-313` at the permanent pin
+ * `crates/contracts/gen-core/src/memory_strategy.rs:317-320` at the permanent pin
  * 28f0563baa03640ade1635356d2d54fe8a477f1a). SC-15998
  * removed the rung-1 edge the
  * survey's notes asserted, because it had encoded one provider's coupled loader shape as universal
@@ -2716,7 +2716,7 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
  * is the right question for the edge it now serves, because gen-core's `validate_selection` accepts
  * a `Rung { .. EngagedInSameRequest }` prerequisite when `MemoryProviderContract::engages` holds,
  * and for an edge the realization itself appended, `engages` reduces to that rung being declared
- * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1346-1362` at the
+ * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1544-1558` at the
  * pinned rev `28f0563baa03640ade1635356d2d54fe8a477f1a`: `required_by_realization` is true by construction, so the conjunction is
  * the `matches!(self.support(rung), Some(Implemented))` term).
  *
@@ -2841,8 +2841,8 @@ export function stagedResidencyIsAvailable({
  * gen-core's `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, mirrored (sc-19542).
  *
  * `&[MemoryStrategyPrerequisite::LoadShape(LoadShape::DeferredMaterialization)]` at the pinned rev
- * `28f0563baa03640ade1635356d2d54fe8a477f1a` — inference `crates/contracts/gen-core/src/memory_strategy.rs:310-313`, the identifier
- * on line 312. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
+ * `28f0563baa03640ade1635356d2d54fe8a477f1a` — inference `crates/contracts/gen-core/src/memory_strategy.rs:317-320`, the identifier
+ * on line 319. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
  * a provider demands of rung 4 it appends itself, which is what
  * `config/rung4-contract-prerequisites.json` records per (family, backend).
  *
@@ -2876,7 +2876,7 @@ const RUNG4_PREREQUISITE_EVALUATORS = Object.freeze({
   "load-shape": () => true,
   /**
    * gen-core's `EngagedInSameRequest` arm has TWO ways to be satisfied, and this mirrors both —
-   * inference `crates/contracts/gen-core/src/memory_strategy.rs:1862-1873` at the pinned
+   * inference `crates/contracts/gen-core/src/memory_strategy.rs:2059-2070` at the pinned
    * `28f0563baa03640ade1635356d2d54fe8a477f1a`.
    *
    * 1. `if self.engages(selection.strategy, rung) { continue }`. For an edge the realization itself
@@ -3927,8 +3927,8 @@ export function plannedCellIds(calibrationPlan, cells) {
  * universe, so those entries resolve to no cell BY CONSTRUCTION. Requiring a plan row for one of
  * them to match a coordinate is therefore a category error, not a missing-coordinate report: such a
  * family is validated by its `outOfMatrixFamilies` record — every stack, both claims, on every
- * generation — instead of by a published cell, and epic 17137's terminal campaign has to be able to
- * plan captures against MiniMax-H3 before the matrix can carry a verdict for it.
+ * generation — instead of by a published cell, and the checked-in plan captures the MiniMax-H3
+ * evidence structure before the matrix can carry a verdict for it.
  *
  * The exemption reads the SAME set the universe subtraction reads (`survey.outOfMatrixCatalogEntries`,
  * computed once in `parseRung4Survey`), so the two cannot drift into exempting rows the matrix does
@@ -4032,12 +4032,13 @@ function minimaxPlanRank(entries) {
 }
 
 /**
- * Validate the terminal MiniMax-H3 video grid while that family remains out of matrix.
+ * Validate the checked-in MiniMax-H3 video grid while that family remains out of matrix.
  *
  * The checked-in plan has 72 rows: one exact 2-area x 3-frame spanning grid per implemented
  * (tier, rung) family. It deliberately replaces the superseded 14-duration cross-product: frames
- * are regressors (`pixels * frames`), not a per-duration matrix identity. The plan is evidence
- * structure only; zero accepted SceneWorks calibration receipts exist until the terminal campaign.
+ * are regressors (`pixels * frames`), not a per-duration matrix identity. The plan remains planned
+ * evidence structure; zero accepted SceneWorks calibration receipts is the closed/terminal evidence state
+ * for this epic, and no further campaign is scheduled.
  */
 export function assertMinimaxH3CalibrationPlan(calibrationPlan) {
   const rows = calibrationPlan.providers.filter((entry) => entry.target?.modelId === "minimax_h3");
