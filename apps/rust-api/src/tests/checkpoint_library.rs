@@ -561,3 +561,146 @@ async fn library_root_refusals_are_typed_and_status_mapped() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert_eq!(body["context"]["reason"], json!("invalid-relative-path"));
 }
+
+// ---- managed NVFP4 variants at the wire (sc-11043, epic 11037) ---------------------------------
+
+/// The registered variant ids. Written literally here rather than read from the registry so a
+/// silent edit to either is red at the HTTP boundary too.
+const KREA_VARIANT_ID: &str = "nvfp4-krea-2-turbo";
+const KLEIN_VARIANT_ID: &str = "nvfp4-flux2-klein-9b-true-v2";
+
+/// `GET /api/v1/models/managed-variants` answers 200 with the whole registered cohort.
+///
+/// The route is static and takes no state, but it is still a ROUTE: without an HTTP-level test
+/// nothing proves it is mounted under that path, ahead of `/api/v1/models/:model_id`, and serving
+/// the typed view rather than 404ing or being swallowed by the id-parameterized route.
+///
+/// Failing mutation: remove the `/api/v1/models/managed-variants` route from `create_app`.
+#[tokio::test]
+async fn the_managed_variants_route_lists_both_registered_variants() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    seed_manifests(&temp_dir.path().join("config"));
+    let settings = test_settings(&temp_dir);
+    std::fs::create_dir_all(&settings.data_dir).expect("data dir creates");
+    let app = create_app(settings).expect("app creates");
+
+    let (status, body) = request(app, "GET", "/api/v1/models/managed-variants", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let rows = body["variants"].as_array().expect("variants array");
+    assert_eq!(rows.len(), 2, "{body:?}");
+    assert_eq!(rows[0]["variantId"], json!(KREA_VARIANT_ID));
+    assert_eq!(rows[1]["variantId"], json!(KLEIN_VARIANT_ID));
+    for row in rows {
+        // A listing, never a chooser: each row names its tier explicitly and carries the pin in
+        // the body that installs it.
+        assert_eq!(row["quantTier"], json!("nvfp4"));
+        assert_eq!(row["sourceCodec"], json!("nvfp4-v1"));
+        assert_eq!(row["importRequest"]["ownershipMode"], json!("managed"));
+        assert_eq!(row["importRequest"]["modelId"], row["variantId"]);
+        assert_eq!(
+            row["importRequest"]["expectedSha256"],
+            row["pinnedArtifact"]["sha256"]
+        );
+        assert!(row["sizeBytes"].as_u64().expect("a size") > 0);
+    }
+}
+
+/// The advertised import body is a CONVENIENCE; the pin is enforced server-side.
+///
+/// A client that posts a managed variant's `modelId` with a hostile repo/revision/file, or with a
+/// wrong `expectedSha256`, is refused — and one that simply OMITS the checksum (which the worker's
+/// `if let Some(..)` verification treats as "nothing to verify") still gets the registration's
+/// digest, repo, revision and file written onto the queued job. Either way, unverified bytes
+/// cannot be recorded under a curated variant's identity, and there is still only one import
+/// pipeline.
+///
+/// Failing mutation: delete the `resolve_managed_variant_pin(&mut payload)?` call at the top of
+/// `queue_model_import_job` — the omitted-checksum case then queues a job with no `expectedSha256`
+/// and every substituted-source case is accepted.
+#[tokio::test]
+async fn a_managed_variant_import_cannot_be_talked_out_of_its_pin() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    seed_manifests(&temp_dir.path().join("config"));
+    let settings = test_settings(&temp_dir);
+    std::fs::create_dir_all(&settings.data_dir).expect("data dir creates");
+    let app = create_app(settings).expect("app creates");
+
+    let (_, listed) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/models/managed-variants",
+        Value::Null,
+    )
+    .await;
+    let pinned = listed["variants"][0]["pinnedArtifact"].clone();
+    let repo = pinned["repo"].as_str().expect("repo").to_owned();
+    let revision = pinned["revision"].as_str().expect("revision").to_owned();
+    let file = pinned["file"].as_str().expect("file").to_owned();
+    let sha256 = pinned["sha256"].as_str().expect("sha256").to_owned();
+
+    // 1. The checksum is OMITTED entirely — the client-cooperative bypass. The job still carries
+    //    the pin, so the worker has something to verify against.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": KREA_VARIANT_ID,
+            "source": {"kind": "huggingFace", "repo": repo, "revision": revision},
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(
+        job["payload"]["expectedSha256"],
+        json!(sha256),
+        "an omitted checksum must be filled in from the registration: {job:?}"
+    );
+    assert_eq!(job["payload"]["repo"], json!(repo));
+    assert_eq!(job["payload"]["revision"], json!(revision));
+    assert_eq!(job["payload"]["files"], json!([file]));
+
+    // 2. A DIFFERENT checksum under the variant's identity is refused, not silently rewritten.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": KLEIN_VARIANT_ID,
+            "source": {"kind": "huggingFace", "repo": repo, "revision": revision},
+            "expectedSha256": "0".repeat(64),
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+
+    // 3. So is a substituted repo, revision, or file — and any ownership mode that does not fetch
+    //    the pinned bytes at all.
+    for hostile in [
+        json!({"kind": "huggingFace", "repo": "attacker/lookalike"}),
+        json!({"kind": "huggingFace", "repo": repo, "revision": "a".repeat(40)}),
+        json!({"kind": "huggingFace", "repo": repo, "files": ["other.safetensors"]}),
+        json!({"kind": "url", "url": "https://example.com/model.safetensors"}),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "modelId": KLEIN_VARIANT_ID,
+                "source": hostile.clone(),
+                "type": "image"
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{hostile} must not install under a managed variant's identity: {body:?}"
+        );
+    }
+}

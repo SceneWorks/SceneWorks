@@ -563,6 +563,15 @@ fn an_installed_variant_is_reachable_only_by_naming_nvfp4() {
 ///
 /// Asserted under BOTH pins, so the terminal re-pin flips it without touching a line here: with no
 /// row the gate must fail closed rather than half-admit, and with one it must be NVFP4-only.
+///
+/// **The two states are written out as branches on purpose.** A single
+/// `assert_eq!(eligible, route_registered)` is satisfied by `false == false` at today's pin, which
+/// makes it a tautology that proves nothing about either state; each arm below asserts something
+/// the other cannot. At today's pin (inference `1caa686`, whose `flux2` provider rows are
+/// `comfy_ui_tree` only) the closed arm runs. When the epic's terminal re-pin lands sc-21485's
+/// `flux2` + `transformer_file` registration, the checked-in engine dump this reads changes and
+/// the open arm runs instead — no edit here, but this test IS re-run against the new dump, and it
+/// is the assertion that catches a Klein row that admits more than NVFP4.
 #[test]
 fn klein_admission_follows_the_engine_facts_and_never_aliases_q4() {
     let variant = registered(KLEIN_VARIANT);
@@ -570,12 +579,40 @@ fn klein_admission_follows_the_engine_facts_and_never_aliases_q4() {
     let named = generate_request(variant, json!({"quantTier": "nvfp4"}));
     let route_registered = imported_provider_routes("candle", &variant.family)
         .any(|route| route.source == MANAGED_VARIANT_SOURCE_SHAPE);
+    let admits_named = imported_image_request_provider_eligible(model, &named, "candle");
 
-    assert_eq!(
-        imported_image_request_provider_eligible(model, &named, "candle"),
-        route_registered,
-        "Klein is admitted exactly when the engine registers a transformer_file route for it"
-    );
+    if route_registered {
+        // Open state: the engine serves single-file Klein, so an explicitly NVFP4 request is
+        // admitted, and a request naming no tier at all is admitted too (the bytes are NVFP4 and
+        // there is no other tier of this checkpoint to pick between).
+        assert!(
+            admits_named,
+            "a registered transformer_file route must admit the explicitly NVFP4 request"
+        );
+        assert!(
+            imported_image_request_provider_eligible(
+                model,
+                &generate_request(variant, json!({})),
+                "candle"
+            ),
+            "an untiered request against NVFP4-only bytes is not auto-selection"
+        );
+    } else {
+        // Closed state: no route, so the gate fails CLOSED — not half-admitted, and not admitted
+        // on the strength of the manifest entry's own `importQuantFormat`.
+        assert!(
+            !admits_named,
+            "with no transformer_file route the gate must refuse rather than half-admit"
+        );
+        assert!(
+            !imported_image_request_provider_eligible(
+                model,
+                &generate_request(variant, json!({})),
+                "candle"
+            ),
+            "an untiered request must not slip past a gate that has no route to serve it"
+        );
+    }
     for refused in [json!({"quantTier": "q4"}), json!({"mlxQuantize": 4})] {
         assert!(
             !imported_image_request_provider_eligible(
@@ -662,6 +699,26 @@ fn changing_the_pinned_provenance_is_refused() {
         .confirm_installed(&install)
         .expect_err("a re-pinned variant must not claim bytes it did not pin");
     assert!(error.reason().contains("not the pinned"), "{error}");
+
+    // `size_bytes` is CHECKED, not decorative: it is the download estimate a client renders, so a
+    // registration whose size does not describe the artifact is a defect, not a rounding.
+    //
+    // Failing mutation: delete the `observed != self.size_bytes` branch in `confirm_installed`.
+    let mut resized = variant.clone();
+    resized.size_bytes = variant.size_bytes + 1;
+    resized
+        .validate()
+        .expect("a non-zero size is still a well-formed registration");
+    let error = resized
+        .confirm_installed(&install)
+        .expect_err("a variant that mis-states its download size must not confirm");
+    assert!(
+        error.reason().contains("not the pinned"),
+        "unexpected size-mismatch reason: {error}"
+    );
+    // ...and the honest registration still confirms, so the check is a comparison and not a
+    // blanket refusal.
+    variant.confirm_installed(&install).unwrap();
 }
 
 /// The linked locator is derived from the pin, so a mutated pin cannot be laundered through the

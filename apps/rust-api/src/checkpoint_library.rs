@@ -32,7 +32,7 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -147,50 +147,106 @@ pub(crate) async fn list_managed_variants() -> Json<ManagedVariantsResponse> {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ManagedVariantsResponse {
-    variants: Vec<Value>,
+    variants: Vec<ManagedVariantView>,
 }
 
 /// One registered variant as the wire sees it.
 ///
-/// `importRequest` is assembled here rather than left to the client so the pin cannot drift
-/// between what is advertised and what is fetched: the repo, revision, file and `expectedSha256`
-/// in the body are the registration's own.
-fn managed_variant_view(variant: &ManagedCheckpointVariantV1) -> Value {
-    json!({
-        "variantId": variant.variant_id,
-        "displayName": variant.display_name,
-        "provider": variant.provider,
-        "family": variant.family,
-        "modelId": variant.imported_model_id(),
-        "checkpointId": variant.checkpoint_id(),
-        // The tier's own name and the engine's codec id, carried separately and never merged:
-        // one is what the user picked, the other is what the bytes are stored in.
-        "quantTier": variant.quant_tier,
-        "sourceCodec": variant.source_codec,
-        "sourceShape": MANAGED_VARIANT_SOURCE_SHAPE,
-        "sizeBytes": variant.size_bytes,
-        "pinnedArtifact": {
-            "repo": variant.repo,
-            "revision": variant.revision,
-            "file": variant.repo_file,
-            "sha256": variant.sha256,
-            "url": variant.source_url(),
+/// A typed struct rather than an ad-hoc `json!` blob so the response shape is checked by the
+/// compiler and a renamed registration field cannot silently drop a key a client renders.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedVariantView {
+    variant_id: String,
+    display_name: String,
+    provider: String,
+    family: String,
+    model_id: String,
+    checkpoint_id: String,
+    /// The tier's own name and the engine's codec id, carried separately and never merged: one is
+    /// what the user picked, the other is what the bytes are stored in.
+    quant_tier: String,
+    source_codec: String,
+    source_shape: &'static str,
+    /// A download estimate — the pinned file's served size. Never a memory figure.
+    size_bytes: u64,
+    pinned_artifact: PinnedArtifactView,
+    import_request: ManagedImportRequestView,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PinnedArtifactView {
+    repo: String,
+    revision: String,
+    file: String,
+    sha256: String,
+    url: String,
+}
+
+/// The exact `POST /api/v1/models/import` body that installs this variant.
+///
+/// Assembled here rather than left to the client so the pin cannot drift between what is
+/// advertised and what is fetched. It is a CONVENIENCE, not the enforcement: the import route
+/// re-resolves the registration server-side from `modelId`, so a client that hand-writes a
+/// different repo, revision, file or `expectedSha256` — or omits the checksum entirely — cannot
+/// record unverified bytes under a managed variant's identity.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedImportRequestView {
+    ownership_mode: &'static str,
+    model_id: String,
+    name: String,
+    #[serde(rename = "type")]
+    model_type: &'static str,
+    family: String,
+    source: ManagedImportSourceView,
+    expected_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedImportSourceView {
+    kind: &'static str,
+    repo: String,
+    revision: String,
+    files: Vec<String>,
+}
+
+fn managed_variant_view(variant: &ManagedCheckpointVariantV1) -> ManagedVariantView {
+    ManagedVariantView {
+        variant_id: variant.variant_id.clone(),
+        display_name: variant.display_name.clone(),
+        provider: variant.provider.clone(),
+        family: variant.family.clone(),
+        model_id: variant.imported_model_id().to_owned(),
+        checkpoint_id: variant.checkpoint_id(),
+        quant_tier: variant.quant_tier.clone(),
+        source_codec: variant.source_codec.clone(),
+        source_shape: MANAGED_VARIANT_SOURCE_SHAPE,
+        size_bytes: variant.size_bytes,
+        pinned_artifact: PinnedArtifactView {
+            repo: variant.repo.clone(),
+            revision: variant.revision.clone(),
+            file: variant.repo_file.clone(),
+            sha256: variant.sha256.clone(),
+            url: variant.source_url(),
         },
-        "importRequest": {
-            "ownershipMode": "managed",
-            "modelId": variant.imported_model_id(),
-            "name": variant.display_name,
-            "type": "image",
-            "family": variant.family,
-            "source": {
-                "kind": "huggingFace",
-                "repo": variant.repo,
-                "revision": variant.revision,
-                "files": [variant.repo_file],
+        import_request: ManagedImportRequestView {
+            ownership_mode: "managed",
+            model_id: variant.imported_model_id().to_owned(),
+            name: variant.display_name.clone(),
+            model_type: "image",
+            family: variant.family.clone(),
+            source: ManagedImportSourceView {
+                kind: "huggingFace",
+                repo: variant.repo.clone(),
+                revision: variant.revision.clone(),
+                files: vec![variant.repo_file.clone()],
             },
-            "expectedSha256": variant.sha256,
+            expected_sha256: variant.sha256.clone(),
         },
-    })
+    }
 }
 
 /// `GET /api/v1/models/library-roots` — every approved linked-library root.
@@ -466,7 +522,9 @@ mod managed_variant_tests {
     fn every_advertised_variant_names_nvfp4_and_carries_its_own_pin() {
         let rows = managed_nvfp4_variants()
             .iter()
-            .map(managed_variant_view)
+            .map(|variant| {
+                serde_json::to_value(managed_variant_view(variant)).expect("a row serializes")
+            })
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 2);
 

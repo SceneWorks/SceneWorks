@@ -2948,10 +2948,146 @@ pub(crate) fn normalize_model_import_source(
     Ok((provenance, revision))
 }
 
+/// Re-resolve a managed NVFP4 variant's pin SERVER-SIDE (sc-11043, epic 11037).
+///
+/// `GET /api/v1/models/managed-variants` advertises, for each registered variant, the exact import
+/// body that installs it. That body is a convenience for the client, and a convenience is not a
+/// guarantee: without this, a client could `POST` `modelId: "nvfp4-krea-2-turbo"` with any repo,
+/// revision or file it liked — or omit `expectedSha256` entirely, which the worker's
+/// `if let Some(..)` check treats as "nothing to verify" — and SceneWorks would record unverified
+/// bytes under the curated variant's identity, its checkpoint id, and its provenance. AC3's
+/// "verified file checksum" has to be enforced by the server or it is only client-cooperative.
+///
+/// So the registration wins. The registry is keyed on the very id the request claims, so when the
+/// id names a variant, the repo, revision, file list and `expectedSha256` are taken from the
+/// registration rather than from the body. A request that explicitly names a DIFFERENT pin is
+/// refused rather than silently rewritten — that is a client bug or an attempt, and both deserve a
+/// diagnostic. There is still exactly ONE import pipeline: this only fills in the fetch, and
+/// everything after it (normalisation, licence gate, install-id validation, the ingest) is the
+/// generic path every other import walks.
+///
+/// A managed variant is a pinned FETCH of specific upstream bytes, so the ownership modes that do
+/// not fetch — a linked library reference, a local copy, an upload, a bare URL — cannot claim one.
+fn resolve_managed_variant_pin(payload: &mut ModelImportRequest) -> Result<(), ApiError> {
+    let Some(variant) = payload
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .and_then(sceneworks_core::managed_checkpoint_variants::managed_nvfp4_variant)
+    else {
+        return Ok(());
+    };
+    let claim = |detail: &str| {
+        Err(ApiError::bad_request(format!(
+            "Model id '{}' is a managed NVFP4 variant pinned to {}@{} {}; {detail}",
+            variant.variant_id, variant.repo, variant.revision, variant.repo_file
+        )))
+    };
+
+    if payload.linked_root_id.is_some() || payload.linked_relative_path.is_some() {
+        return claim(
+            "it is installed by fetching those pinned bytes, so it cannot be claimed by a linked \
+             library reference. Import your own copy under a different model id.",
+        );
+    }
+    if !option_str_is_empty(payload.source_url.as_deref())
+        || !option_str_is_empty(payload.source_path.as_deref())
+    {
+        return claim(
+            "it cannot be installed from a source URL or a local path. Import your own copy under \
+             a different model id.",
+        );
+    }
+    match payload.source.as_ref() {
+        None | Some(ModelImportSourceV1::HuggingFace { .. }) => {}
+        Some(_) => {
+            return claim(
+                "it is a Hugging Face repo import. Import your own copy under a different model \
+                 id.",
+            )
+        }
+    }
+    if let Some(repo) = payload.repo.as_deref().map(str::trim) {
+        if !repo.is_empty() && repo != variant.repo {
+            return claim(&format!("this request names repo '{repo}'"));
+        }
+    }
+    if let Some(ModelImportSourceV1::HuggingFace {
+        repo,
+        revision,
+        files,
+    }) = payload.source.as_ref()
+    {
+        if repo.trim() != variant.repo {
+            return claim(&format!("this request names repo '{}'", repo.trim()));
+        }
+        if let Some(revision) = revision.as_deref().map(str::trim) {
+            if !revision.is_empty() && revision != variant.revision {
+                return claim(&format!("this request names revision '{revision}'"));
+            }
+        }
+        if !files.is_empty() && files.iter().any(|file| file.trim() != variant.repo_file) {
+            return claim("this request names a different file in the repo");
+        }
+    }
+    if !payload.files.is_empty()
+        && payload
+            .files
+            .iter()
+            .any(|file| file.trim() != variant.repo_file)
+    {
+        return claim("this request names a different file in the repo");
+    }
+    if let Some(expected) = payload.expected_sha256.as_deref().map(str::trim) {
+        if !expected.is_empty() && !expected.eq_ignore_ascii_case(&variant.sha256) {
+            return claim(&format!(
+                "this request asserts checksum '{expected}', not the pinned '{}'",
+                variant.sha256
+            ));
+        }
+    }
+    if let Some(family) = payload.family.as_deref().map(str::trim) {
+        if !family.is_empty()
+            && sceneworks_core::lora_family::canonical_lora_family(family) != variant.family
+        {
+            return claim(&format!("this request names family '{family}'"));
+        }
+    }
+
+    // The registration is now the source of truth for every fetch fact, including the ones the
+    // request left out. `expectedSha256` in particular is filled in rather than defaulted to
+    // "unverified", which is the whole point.
+    payload.repo = None;
+    payload.source_url = None;
+    payload.source_path = None;
+    payload.files = Vec::new();
+    payload.source = Some(ModelImportSourceV1::HuggingFace {
+        repo: variant.repo.clone(),
+        revision: Some(variant.revision.clone()),
+        files: vec![variant.repo_file.clone()],
+    });
+    payload.expected_sha256 = Some(variant.sha256.clone());
+    payload.family = Some(variant.family.clone());
+    if payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        payload.name = Some(variant.display_name.clone());
+    }
+    Ok(())
+}
+
 pub(crate) async fn queue_model_import_job(
     state: AppState,
     mut payload: ModelImportRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    // A curated managed NVFP4 variant is identified by its `modelId`, and its pin is re-resolved
+    // from the registry before anything else reads the body — so no client-supplied repo,
+    // revision, file or (absent) checksum can record unverified bytes under that identity.
+    resolve_managed_variant_pin(&mut payload)?;
     // Linked (in-place) ownership: an approved library root plus a confined relative path, and
     // never an absolute path (epic 20398, sc-20635). It is an ALTERNATIVE ownership mode rather
     // than another way to FETCH, so it is resolved before source normalisation and excludes it

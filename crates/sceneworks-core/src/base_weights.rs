@@ -267,8 +267,9 @@ pub enum BaseWeightDetection {
 /// detector recognizes by its `txtfusion.` marker, whose builtins already route to the Krea MLX
 /// engine. Grows one entry per landed loader; keep it aligned with [`import_supported`]'s arms and
 /// with `MLX_ROUTED_FAMILIES` (routing).
-/// `mage-flow` (sc-15036, epic 14034 F6) is the DIRECTORY-shaped member: unlike the two single-file
-/// families, a loadable Mage-Flow backbone is a diffusers **transformer component directory**
+/// `mage-flow` (sc-15036, epic 14034 F6) is the DIRECTORY-shaped member: unlike the other three —
+/// the single-file families `flux2`, `krea_2` and `sdxl` — a loadable Mage-Flow backbone is a
+/// diffusers **transformer component directory**
 /// ([`is_mage_flow_transformer_dir`]) — `config.json` plus its weight file — because the loader
 /// reads its architecture from that config rather than inferring it from a base tier. A bare
 /// `.safetensors` with no config sibling is therefore refused, which is what the arm below says.
@@ -365,7 +366,10 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// quant (the S0c assembly slice and the epic's later families) is a single added arm, not a
 /// rewrite. Today a Krea 2 transformer is loadable as dense `bf16`, descriptor-gated
 /// [`QuantFormat::Int8TensorwisePerRow`], or Kitchen [`QuantFormat::Nvfp4`]; all three reuse the
-/// existing Krea engine via the family-routing path. Everything else — an unrecognized/absent family, a
+/// existing Krea engine via the family-routing path. A FLUX.2 transformer (sc-11043, epic 11037)
+/// is loadable as [`QuantFormat::Nvfp4`] and nothing else — the single-file Klein BFL export
+/// through the shared `nvfp4-v1` codec — an SDXL all-in-one checkpoint as `f16`/`bf16`/`f32`, and a
+/// Mage-Flow transformer DIRECTORY as dense `bf16`. Everything else — an unrecognized/absent family, a
 /// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
 /// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF) — is refused with a specific reason.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
@@ -1351,18 +1355,26 @@ mod tests {
     /// A `_quantization_metadata`-declaring NVFP4 export, the spelling BOTH artifacts epic 11037
     /// pins actually use. `descriptors` reproduces the FLUX.2 Klein `nvfp4mixed` shape, which
     /// carries a `.comfy_quant` blob beside every packed projection.
+    ///
+    /// `layer_formats` is declared PER LAYER (layer `i` takes `layer_formats[i % len]`), so a
+    /// fixture can build the case that matters most here: a file that is *mostly* nvfp4 with a
+    /// single foreign layer. A one-element slice declares the same format for every layer.
     fn quantization_metadata_nvfp4_header(
         marker: &str,
         layers: usize,
         descriptors: bool,
-        layer_format: &str,
+        layer_formats: &[&str],
     ) -> Value {
+        assert!(
+            !layer_formats.is_empty(),
+            "a declared layer needs a format to declare"
+        );
         let mut map = serde_json::Map::new();
         let mut declared = serde_json::Map::new();
         for index in 0..layers {
             declared.insert(
                 format!("blocks.{index}.attn.wq"),
-                json!({"format": layer_format, "group_size": 16}),
+                json!({"format": layer_formats[index % layer_formats.len()], "group_size": 16}),
             );
         }
         map.insert(
@@ -1413,7 +1425,7 @@ mod tests {
             "model.diffusion_model.txtfusion.projector.weight",
             6,
             false,
-            "nvfp4",
+            &["nvfp4"],
         );
         let verdict = recognized(classify_base_header(&header));
         assert_eq!(verdict.family.as_deref(), Some("krea_2"));
@@ -1431,7 +1443,7 @@ mod tests {
             "double_stream_modulation_lin.weight",
             6,
             true,
-            "nvfp4",
+            &["nvfp4"],
         );
         let verdict = recognized(classify_base_header(&header));
         assert_eq!(verdict.family.as_deref(), Some("flux2"));
@@ -1449,11 +1461,40 @@ mod tests {
             "model.diffusion_model.txtfusion.projector.weight",
             6,
             false,
-            "mxfp4",
+            &["mxfp4"],
         );
         let verdict = recognized(classify_base_header(&header));
         assert_ne!(verdict.quant, QuantFormat::Nvfp4);
         assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
+    }
+
+    /// The predicate is **every declared layer**, not "some layer". A file whose `layers` map is
+    /// nvfp4 for five of six projections and `mxfp4` for the sixth — complete, valid triplets
+    /// under all of them, so the tensor-surface proof passes — is still a multi-codec export the
+    /// single `nvfp4-v1` codec cannot decode, and must NOT classify as NVFP4.
+    ///
+    /// This is the case the all-`mxfp4` fixture above cannot see: with no nvfp4 layer at all, a
+    /// `.all` → `.any` mutation in [`metadata_declares_nvfp4`] leaves it green. Here `.any` finds
+    /// the five nvfp4 layers, declares the whole file NVFP4, and both assertions below go red.
+    ///
+    /// Failing mutation: `layers.values().all(...)` -> `layers.values().any(...)`.
+    #[test]
+    fn a_mostly_nvfp4_declaration_with_one_foreign_layer_is_not_nvfp4() {
+        let header = quantization_metadata_nvfp4_header(
+            "model.diffusion_model.txtfusion.projector.weight",
+            6,
+            false,
+            &["nvfp4", "mxfp4", "nvfp4", "nvfp4", "nvfp4", "nvfp4"],
+        );
+        let verdict = recognized(classify_base_header(&header));
+        assert_ne!(
+            verdict.quant,
+            QuantFormat::Nvfp4,
+            "a mostly-nvfp4 export with one foreign layer must not be handed to the nvfp4-v1 codec"
+        );
+        assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
+        // And the import gate must not admit it under the krea_2 NVFP4 arm either.
+        assert!(import_supported(&verdict).is_err());
     }
 
     /// A descriptor that annotates something with no proven triplet under it keeps the WHOLE file
@@ -1465,7 +1506,7 @@ mod tests {
             "model.diffusion_model.txtfusion.projector.weight",
             6,
             true,
-            "nvfp4",
+            &["nvfp4"],
         ) else {
             unreachable!("the fixture builds an object")
         };
@@ -2310,17 +2351,53 @@ mod tests {
         // advertised set and the `match` arms can never drift (add the family here + its arm
         // together).
         //
-        // The probe sweeps the whole quant surface rather than asserting bf16 specifically. A
-        // family does not have to be dense-loadable to be import-supported: `flux2` (sc-11043)
-        // reaches a loader ONLY as NVFP4, through the shared codec and the Klein dialect, and a
-        // bf16-shaped guardrail would have forced either a dense arm nothing serves or leaving the
-        // family unadvertised. What must never drift is "advertised ⇒ some arm accepts it".
-        for family in IMPORT_SUPPORTED_FAMILIES {
-            let component = if *family == "sdxl" {
-                ComponentRole::Checkpoint
-            } else {
-                ComponentRole::Transformer
-            };
+        // The probe sweeps the whole quant surface and asserts the accepted set BY VALUE, per
+        // family. A family does not have to be dense-loadable to be import-supported: `flux2`
+        // (sc-11043) reaches a loader ONLY as NVFP4, through the shared codec and the Klein
+        // dialect, so a bf16-shaped guardrail would have forced either a dense arm nothing serves
+        // or leaving the family unadvertised. But an existence check ("some arm accepts it") is
+        // too weak in the other direction: narrowing krea_2 to NVFP4 alone, or widening flux2 to
+        // dense, would both stay green under it. Naming the exact set makes each such change red,
+        // and makes adding a family an explicit row here rather than a silent pass.
+        //
+        // Failing mutations: drop `QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow` from the
+        // krea_2 arm; add a dense arm for flux2; add a family to IMPORT_SUPPORTED_FAMILIES without
+        // a row below.
+        let expected: &[(&str, ComponentRole, &[QuantFormat])] = &[
+            (
+                "krea_2",
+                ComponentRole::Transformer,
+                &[
+                    QuantFormat::Bf16,
+                    QuantFormat::Int8TensorwisePerRow,
+                    QuantFormat::Nvfp4,
+                ],
+            ),
+            (
+                "sdxl",
+                ComponentRole::Checkpoint,
+                &[QuantFormat::Bf16, QuantFormat::F16, QuantFormat::F32],
+            ),
+            (
+                "mage-flow",
+                ComponentRole::Transformer,
+                &[QuantFormat::Bf16],
+            ),
+            ("flux2", ComponentRole::Transformer, &[QuantFormat::Nvfp4]),
+        ];
+        let mut rows = expected
+            .iter()
+            .map(|(family, _, _)| *family)
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        let mut advertised = IMPORT_SUPPORTED_FAMILIES.to_vec();
+        advertised.sort_unstable();
+        assert_eq!(
+            rows, advertised,
+            "every advertised family needs an explicit expected-encoding row here"
+        );
+
+        for (family, component, expected_quants) in expected {
             let accepted = [
                 QuantFormat::Bf16,
                 QuantFormat::F16,
@@ -2329,11 +2406,11 @@ mod tests {
                 QuantFormat::Nvfp4,
             ]
             .into_iter()
-            .filter(|quant| import_supported(&verdict(Some(family), component, *quant)).is_ok())
+            .filter(|quant| import_supported(&verdict(Some(family), *component, *quant)).is_ok())
             .collect::<Vec<_>>();
-            assert!(
-                !accepted.is_empty(),
-                "IMPORT_SUPPORTED_FAMILIES lists {family} but no Ok arm accepts any encoding of it"
+            assert_eq!(
+                accepted, *expected_quants,
+                "{family}: the Ok arms accept a different encoding set than this guardrail declares"
             );
         }
     }

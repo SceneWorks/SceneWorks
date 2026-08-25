@@ -114,7 +114,10 @@ pub struct ManagedCheckpointVariantV1 {
     /// The pinned SHA-256 of the upstream file. Verified against the staged bytes at finalize; a
     /// mismatch produces no install at all.
     pub sha256: String,
-    /// The pinned file's exact served size, for a download estimate. Not a memory figure.
+    /// The pinned file's exact served size. It drives the download estimate a client shows, and it
+    /// is CHECKED: [`Self::confirm_installed`] compares it against the committed file on disk, so
+    /// a stale or invented size is a registration defect that surfaces at install rather than a
+    /// decorative number nothing reads. Never a memory figure.
     pub size_bytes: u64,
 }
 
@@ -377,7 +380,12 @@ impl ManagedCheckpointVariantV1 {
     }
 
     /// Confirm a finalized install really is THIS variant: the ownership SceneWorks recorded, the
-    /// path it installed, and the digest it was pinned to.
+    /// path it installed, the digest it was pinned to, and the SIZE it advertised.
+    ///
+    /// The size check is what keeps [`Self::size_bytes`] honest. It is the number a client renders
+    /// as "how much will this download", and without a consumer it could drift arbitrarily far
+    /// from the pinned artifact with nothing red. Checked here rather than at finalize because
+    /// this is the one verb that compares a committed install against the registration as a whole.
     pub fn confirm_installed(&self, install: &ManagedInstallV1) -> Result<(), ManagedVariantError> {
         self.validate()?;
         if install.install_id != self.variant_id {
@@ -404,6 +412,23 @@ impl ManagedCheckpointVariantV1 {
             return Err(ManagedVariantError::new(format!(
                 "install {:?} committed bytes digesting {:?}, not the pinned {:?}",
                 install.install_id, install.primary_sha256, self.sha256
+            )));
+        }
+        let committed = install.install_path.join(&self.relative_path);
+        let observed = std::fs::metadata(&committed)
+            .map_err(|error| {
+                ManagedVariantError::new(format!(
+                    "install {:?} committed {}, which cannot be measured: {error}",
+                    install.install_id,
+                    committed.display()
+                ))
+            })?
+            .len();
+        if observed != self.size_bytes {
+            return Err(ManagedVariantError::new(format!(
+                "install {:?} committed {observed} bytes, not the pinned {} — the registered size \
+                 is what a client is told it will download",
+                install.install_id, self.size_bytes
             )));
         }
         Ok(())
