@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:b3f81b88e64c90fca617ef861c8d1d23d001a6a6075a532c1fa75819b30af883",
+    "sceneWorksRevision": "source-tree:8ca16b8d7e179c0545c775c2fb26bcc7bce04a2ecdb6d8e3308caab3a3f7756e",
     "inferenceRevision": "28f0563baa03640ade1635356d2d54fe8a477f1a",
     "sources": {
       "manifest": {
@@ -66,7 +66,7 @@
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
-        "sha256": "3e20441cab965a68f30f0f790744d76d858e21841409b8eaad6dbeab278cd31f"
+        "sha256": "b097e6e6d41f63e98c62f4ad8211064f834669a59b29a7247f983598327e22c1"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
