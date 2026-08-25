@@ -763,6 +763,17 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   );
 });
 
+test("prebuilt MLX publishes the exact metallib path to GitHub env", async () => {
+  const script = await source("scripts/fetch-prebuilt-mlx.sh");
+  assert.match(script, /metallib_path="\$dest\/mlx\.metallib"/);
+  assert.match(script, /^  echo "PMETAL_METALLIB_PATH=\$metallib_path"$/m);
+  assert.match(script, /echo "PMETAL_METALLIB_PATH=\$metallib_path" >> "\$GITHUB_ENV"/);
+  assert.match(
+    script,
+    /\[ -f "\$metallib_path" \] \|\| \{ echo "fetch-prebuilt-mlx: \$asset did not contain mlx\.metallib at \$metallib_path"/,
+  );
+});
+
 // The third `--bin` guard (sc-18808 review), and the one that actually runs on a feature-targeted
 // PR. The two above pin CI workflows that do NOT: windows-candle.yml has no `pull_request` trigger
 // for these branches, so `check.yml`'s hosted `candle` job — which is just
