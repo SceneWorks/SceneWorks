@@ -24,6 +24,7 @@
 // owns each REQUEST. A plan-backed request no lane claims at all is a typed refusal, never the
 // procedural stub (see `CheckpointPlanSelection::into_unclaimed_refusal`).
 
+use sceneworks_core::checkpoint_import::CheckpointContainerV1;
 use sceneworks_core::checkpoint_plan_store::{
     CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1, ResolvedLayerV1,
 };
@@ -336,8 +337,15 @@ fn checkpoint_plan_request_shape_refusal(
 /// a bespoke lane for a LINKED checkpoint (it sources the plan's verified layer); a family not in it
 /// has one only for a MANAGED install, which still has `paths.model` for the lane to scan.
 ///
-/// sc-20651 deletes this table together with the lanes it names; the row's conformance test pins it
-/// by name so that deletion is mechanical.
+/// sc-20651 **retains** this table, and the sc-20644 note that said it would be deleted "together
+/// with the lanes it names" was wrong: the deletion step proved the table must OUTLIVE the lanes.
+/// Its sole reader is [`checkpoint_plan_shape_has_other_lane`], so removing it collapses
+/// [`checkpoint_plan_unservable_shape`] into [`checkpoint_plan_unservable`] — and every LINKED
+/// checkpoint (no loadable path, so [`checkpoint_plan_entry_has_bespoke_lane`] is false) whose shape
+/// this route does not serve, which is LoRA / reference-guided / Hires.fix per
+/// [`checkpoint_plan_serves_request_shape`], flips from a DECLINE that its family lane picks up to a
+/// hard refusal. That is a capability regression, not a cleanup. What the table names is precisely
+/// the set of families whose plan-sourced lanes are must-outlive, so the table is must-outlive too.
 const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &[
     "krea_2",
     "sdxl",
@@ -651,9 +659,18 @@ fn checkpoint_plan_primary(
     let selection = checkpoint_plan_primary_selection(resolved, source)?;
     let mut consumed = std::collections::BTreeSet::new();
     let mut pins = Vec::with_capacity(selection.layers.len());
-    for layer in &selection.layers {
+    for (index, layer) in selection.layers.iter().enumerate() {
         consumed.insert(layer.layer.layer_id.clone());
-        pins.push(checkpoint_plan_pin(layer)?);
+        // The backbone is always `layers[0]` (see `checkpoint_plan_primary_selection`), and it is
+        // the artifact the weights loader itself opens, so it is held to the weights containers
+        // alone. The rest exist only for the component-directory shape — the sharded siblings and
+        // the `config.json` sidecar that live beside the backbone — so they may also be JSON.
+        let allowed = if index == 0 {
+            CHECKPOINT_PLAN_WEIGHTS_CONTAINERS
+        } else {
+            CHECKPOINT_PLAN_DIRECTORY_CONTAINERS
+        };
+        pins.push(checkpoint_plan_pin(resolved, layer, allowed)?);
     }
     let weights = match selection.directory {
         Some(directory) => WeightsSource::Dir(directory),
@@ -671,14 +688,55 @@ fn checkpoint_plan_primary(
     })
 }
 
+/// The containers a layer a WEIGHTS loader opens may be packed in.
+///
+/// Safetensors and nothing else, and stated as an ALLOW-list rather than as "not GGUF" on purpose:
+/// every dialect registered on either backend today — `ldm`, `diffusers`, the ComfyUI trees —
+/// opens safetensors, so a container that is not on this list is one no registered loader can read.
+/// A denylist would admit the next container the inspector learns to recognize by default, which is
+/// exactly the failure this gate exists to prevent.
+const CHECKPOINT_PLAN_WEIGHTS_CONTAINERS: &[CheckpointContainerV1] =
+    &[CheckpointContainerV1::Safetensors];
+
+/// The containers a NON-backbone layer of a component directory may be packed in.
+///
+/// The component-directory shape hands the loader the whole directory, so the plan's sharded weight
+/// files and the `config.json` sidecar beside them are pinned too. The sidecar is legitimately a
+/// JSON descriptor; nothing in the directory may be GGUF.
+const CHECKPOINT_PLAN_DIRECTORY_CONTAINERS: &[CheckpointContainerV1] = &[
+    CheckpointContainerV1::Safetensors,
+    CheckpointContainerV1::JsonDescriptor,
+];
+
 /// Pin one resolved plan layer's bytes for the life of the request.
 ///
 /// The plan store already proved these bytes are the bytes the plan compiled from; the pin is what
 /// keeps the async job preamble from being able to retarget the path between selection and load
 /// (sc-18306), exactly as every bespoke imported lane pins its payload-selected files.
+///
+/// This is also the ONE place a plan layer becomes a loadable artifact — `checkpoint_plan_primary`
+/// (every source shape, and through it the plan route and all three bespoke helpers) and
+/// `checkpoint_plan_component_from_layers` (declared components, and the roles-only candle seam)
+/// are its only callers — so it is where the CONTAINER is checked, before `pin` so much as opens
+/// the file (sc-20651). Components resolved from a resident tier rather than from a plan layer
+/// never reach here and are not plan bytes.
 fn checkpoint_plan_pin(
+    resolved: &ResolvedCheckpointV1,
     layer: &ResolvedLayerV1,
+    allowed: &[CheckpointContainerV1],
 ) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    if !allowed.contains(&layer.layer.container) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:unsupported-container] checkpoint {:?} ({} family) layer {:?} is a \
+             {:?} container ({}), and this route loads {allowed:?}; a plan is never handed to a \
+             loader that cannot read its container",
+            resolved.checkpoint_id,
+            resolved.family(),
+            layer.layer.role,
+            layer.layer.container,
+            layer.layer.target_path,
+        )));
+    }
     gen_core::PinnedWeightsFile::pin(&layer.path).map_err(|error| {
         crate::classify_engine_error("Checkpoint plan source preparation failed", error)
     })
@@ -754,7 +812,8 @@ fn checkpoint_plan_component_from_layers(
     let layers: Vec<_> = resolved.layers_with_role(role).collect();
     match layers.as_slice() {
         [layer] => {
-            let pin = checkpoint_plan_pin(layer)?;
+            // A declared component is bytes a loader opens, exactly like the backbone.
+            let pin = checkpoint_plan_pin(resolved, layer, CHECKPOINT_PLAN_WEIGHTS_CONTAINERS)?;
             Ok((
                 WeightsSource::File(pin.loader_path().to_path_buf()),
                 layer.layer.layer_id.clone(),

@@ -539,6 +539,73 @@ fn missing_index_shards_and_ambiguous_component_roles_are_diagnostics() {
         .diagnostics
         .iter()
         .any(|item| { item.message.contains("vae") && item.message.contains("transformer") }));
+    // And an unresolved role compiles NOTHING (sc-20651 feature-end review). This is the upstream
+    // invariant that makes `compile_inventory`'s role `ok_or_else` a defense-in-depth refusal rather
+    // than a live branch: a role the inspector could not reconcile is an ERROR diagnostic, and
+    // `inspect_checkpoint` returns before compilation when any error diagnostic is present. Without
+    // it, the layer used to be minted with an invented `"artifact"` role — a role no adapter binds,
+    // carried into a plan as if it had been resolved.
+    assert!(
+        ambiguous.plans.is_empty() && ambiguous.inventory.records.is_empty(),
+        "a component whose role could not be reconciled must compile no plan and no inventory \
+         record, got plans={:?}",
+        ambiguous.plans.len()
+    );
+}
+
+/// A checkpoint file whose BASENAME is not valid UTF-8 has no portable internal path, so the
+/// single-file discovery refuses it exactly as the directory walk already refused such an entry.
+///
+/// The internal path is what the checkpoint's SEMANTIC identity is built from. The previous
+/// `unwrap_or_default()` substituted an EMPTY string for the name — so every non-UTF-8-named
+/// checkpoint, whatever it was actually called, discovered under the same empty internal path and
+/// digested identically (sc-20651 feature-end review).
+///
+/// Reached through a SYMLINK, which is the only way a request whose own `relative_path` is a UTF-8
+/// string can land on a non-UTF-8 target: `resolve_input` canonicalizes, so the direct-file
+/// discovery sees the LINK TARGET's basename, not the link's.
+///
+/// Linux-only by necessity, not by preference: macOS rejects a non-UTF-8 filename at the syscall
+/// layer, so the fixture cannot be constructed there. This runs on the hosted-ubuntu parity lane.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_non_utf8_checkpoint_basename_refuses_rather_than_discovering_an_empty_internal_path() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().unwrap();
+    let target = temp
+        .path()
+        .join(OsStr::from_bytes(b"krea\xffmania.safetensors"));
+    write_safetensors(
+        &target,
+        &qwen_transformer_entries(),
+        Some(json!({"format": "pt"})),
+    );
+    std::os::unix::fs::symlink(&target, temp.path().join("checkpoint.safetensors")).unwrap();
+
+    let discovery = discover_checkpoint(&linked_request(temp.path(), "checkpoint.safetensors"));
+    assert!(
+        discovery.candidates.is_empty(),
+        "a non-UTF-8 basename must produce no selectable candidate, got {:?}",
+        discovery.candidates
+    );
+    assert!(
+        discovery
+            .internal_paths
+            .values()
+            .all(|internal| !internal.is_empty()),
+        "no discovered artifact may carry an EMPTY internal path: {:?}",
+        discovery.internal_paths
+    );
+    assert!(
+        discovery.diagnostics.iter().any(|item| {
+            item.code == CheckpointDiagnosticCodeV1::PathEscapesRoot
+                && item.message.contains("not valid UTF-8")
+        }),
+        "the refusal must name the non-portable name explicitly, got: {:?}",
+        discovery.diagnostics
+    );
 }
 
 #[test]

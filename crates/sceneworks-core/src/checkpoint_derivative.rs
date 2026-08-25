@@ -556,6 +556,30 @@ impl CheckpointDerivativeStore {
         Ok((removed, derivatives))
     }
 
+    /// Tear down one MANAGED install: every derivative of it, then its record, plan, bindings and
+    /// the install tree SceneWorks owns.
+    ///
+    /// The managed counterpart of [`Self::invalidate_checkpoint`], and it exists for the same
+    /// ordering reason (sc-20651 feature-end review): the API's model-delete route used to call
+    /// [`CheckpointPlanStore::remove_managed`] DIRECTLY, which removes the plan documents and then
+    /// `remove_dir_all`s the install bytes with no derivative pass in front of it. A derivative that
+    /// is leased, pinned or being produced makes `remove_derivatives_for_checkpoint` refuse — but
+    /// the direct call never asked, so the plan and the source bytes went away underneath the lease
+    /// holder and its derivative was left in the cache keyed to a checkpoint that no longer exists,
+    /// unreachable by any later invalidation because the id was the only handle on it.
+    ///
+    /// Derivatives first, and the plan/bytes removal is only reached when they all came out, so a
+    /// refusal leaves the install exactly as it was rather than half-removed.
+    pub fn remove_managed_install(
+        &self,
+        install_id: &str,
+    ) -> Result<(bool, Vec<ManualRemovalOutcome>), CheckpointDerivativeError> {
+        let checkpoint_id = crate::checkpoint_plan_store::managed_checkpoint_id(install_id);
+        let derivatives = self.remove_derivatives_for_checkpoint(&checkpoint_id)?;
+        let removed = self.plans.remove_managed(install_id)?;
+        Ok((removed, derivatives))
+    }
+
     /// Forget an approved root: its plans and every derivative produced from it.
     pub fn remove_root(
         &self,

@@ -828,6 +828,20 @@ impl SourceLocatorV1 {
     }
 }
 
+/// The on-disk container a checkpoint artifact's bytes are packed in, as decided by the inspector
+/// reading the file's own header.
+///
+/// Lives here rather than in `checkpoint_inspector` because [`ImportLayerV1`] carries it: this
+/// module is the leaf contract module and must not depend on the inspector. `checkpoint_inspector`
+/// re-exports it, so the paths every existing caller uses are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointContainerV1 {
+    Safetensors,
+    Gguf,
+    JsonDescriptor,
+}
+
 /// One logical layer of an import plan. The source remains separate from its
 /// logical shape, so linked and managed copies can compile to the same plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -835,16 +849,35 @@ pub struct ImportLayerV1 {
     pub layer_id: String,
     pub role: String,
     pub target_path: String,
+    /// The container the layer's bytes are packed in, as the INSPECTOR decided it by reading the
+    /// header — never re-derived downstream from the file extension, and never re-read from disk.
+    ///
+    /// A loader is bound to a container as much as it is bound to a role: the `ldm` dialect that
+    /// serves a fused SDXL `checkpoint` layer opens safetensors, and handing it GGUF bytes is a
+    /// silent substitution. Before this field existed the plan carried no container at all, so the
+    /// worker's plan route selected a GGUF backbone by role alone and served it to the safetensors
+    /// loader with no refusal anywhere in the chain (sc-20651 feature-end review).
+    ///
+    /// REQUIRED on the wire, deliberately. An absent `container` is a hard deserialization failure
+    /// rather than an assumed `Safetensors`, because the population that would benefit from such a
+    /// default — plans compiled earlier in epic 20398, on dev machines — is exactly the population
+    /// most likely to contain a GGUF experiment, and defaulting would silently re-open the hole
+    /// this field closes. The contract is unreleased and every persisted plan is re-compilable
+    /// (`CheckpointPlanStore::compile_linked` / `compile_managed`, and the sc-20651 catalog
+    /// migration pass compiles fresh), so there is no plan that needs the shim and no migration to
+    /// write; a stale plan document refuses loudly and is re-imported.
+    pub container: CheckpointContainerV1,
     pub source: SourceLocatorV1,
 }
 
 impl Serialize for ImportLayerV1 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct("ImportLayerV1", 4)?;
+        let mut state = serializer.serialize_struct("ImportLayerV1", 5)?;
         state.serialize_field("layerId", &self.layer_id)?;
         state.serialize_field("role", &self.role)?;
         state.serialize_field("targetPath", &self.target_path)?;
+        state.serialize_field("container", &self.container)?;
         state.serialize_field("source", &self.source)?;
         state.end()
     }
@@ -856,6 +889,7 @@ struct ImportLayerV1Wire {
     layer_id: String,
     role: String,
     target_path: String,
+    container: CheckpointContainerV1,
     source: SourceLocatorV1,
 }
 
@@ -865,6 +899,7 @@ impl From<ImportLayerV1Wire> for ImportLayerV1 {
             layer_id: value.layer_id,
             role: value.role,
             target_path: value.target_path,
+            container: value.container,
             source: value.source,
         }
     }
@@ -895,6 +930,20 @@ impl ImportLayerV1 {
         self.source.validate()
     }
 
+    /// `container` is deliberately NOT part of the semantic form (sc-20651).
+    ///
+    /// The semantic digest already binds `source_semantic_identity`, which is the SHA-256 of the
+    /// layer's bytes. A container is a property of those bytes, so two layers with equal semantic
+    /// identity necessarily have equal containers — including it would add no discrimination and
+    /// would only churn every stored digest. The BINDING identity does cover it, because that
+    /// hashes the canonical plan document, and the container is a field of that document.
+    ///
+    /// Do NOT "fix" this by folding the container in. It would rotate every semantic identity in
+    /// existence while adding no discrimination, and the semantic digest is what makes a linked
+    /// checkpoint and a managed copy of the identical bytes compare equal — the E1 ownership parity
+    /// that duplicate detection is built on. The goldens encode the split deliberately: the
+    /// sc-20651 container field moved the `source_binding_identity` values and deliberately left
+    /// the `semantic_digest` value untouched.
     fn semantic_form(&self) -> Result<SemanticLayerV1<'_>, CheckpointImportContractError> {
         self.validate()?;
         Ok(SemanticLayerV1 {

@@ -24,6 +24,11 @@ use crate::checkpoint_import::{
     CheckpointCatalogRecordV1, CheckpointInventoryV1, ImportLayerV1, ImportPlanV1,
     ManagedProvenanceV1, SourceLocatorV1,
 };
+// Re-exported rather than defined here (sc-20651): the container verdict is now a FIELD of
+// `ImportLayerV1`, so its type has to live in the contract module, which is a leaf and must not
+// depend on this one. Every existing `checkpoint_inspector::CheckpointContainerV1` path keeps
+// resolving through this re-export.
+pub use crate::checkpoint_import::CheckpointContainerV1;
 use crate::checkpoint_plan_store::portable_relative_path_parts;
 
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
@@ -45,14 +50,6 @@ pub enum CheckpointLayoutV1 {
     SingleFile,
     FusedCheckpoint,
     ComponentDirectory,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointContainerV1 {
-    Safetensors,
-    Gguf,
-    JsonDescriptor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1165,13 +1162,34 @@ fn compile_inventory(
             ),
         }
         .map_err(|error| error.to_string())?;
+        // Same rule as the internal path above, for the same reason: a role is what every
+        // downstream consumer selects a layer BY (`transformer`, `text_encoder`, `vae`,
+        // `transformer_high`/`_low`, `descriptor`), so inventing an `"artifact"` role would mint a
+        // layer no adapter can bind and hand it to the plan as if it were resolved.
+        //
+        // Unreachable by construction today — `reconcile_role` records an
+        // `AmbiguousComponentRole` ERROR for both of its `None` outcomes, and `inspect_checkpoint`
+        // returns before compilation when any error diagnostic is present
+        // (`a_role_conflict_refuses_and_compiles_no_plan` pins that). This is the local refusal for
+        // the day a new evidence producer forgets the diagnostic: a contract violation, not a role
+        // to guess at.
+        let role = artifact.role.clone().ok_or_else(|| {
+            format!(
+                "artifact {:?} reached plan compilation without a resolved component role",
+                artifact.relative_path
+            )
+        })?;
         layers.push(ImportLayerV1 {
             layer_id: format!("artifact:{internal_path}"),
-            role: artifact
-                .role
-                .clone()
-                .unwrap_or_else(|| "artifact".to_owned()),
+            role,
             target_path: internal_path,
+            // The container this evidence row was VALIDATED as, carried straight through. This is
+            // the only place the verdict is available without re-reading the file: discovery
+            // classified the header, `validate_safetensors` / `validate_gguf` parsed it, and the
+            // result landed on the evidence. Downstream consumers must never re-derive it from the
+            // extension — a `.safetensors` name on GGUF bytes is precisely what the header check
+            // exists to catch.
+            container: artifact.container,
             source,
         });
     }
@@ -1232,11 +1250,26 @@ fn discover_direct_file(resolved: &ResolvedInput) -> DiscoveryFiles {
     let path = resolved.canonical_target.clone();
     // A single-file checkpoint's internal path is its own name: the directory it happens to sit in
     // is where the user keeps it, not part of what it is.
-    let internal = path
+    //
+    // A name that is not valid UTF-8 has no portable internal path, so it REFUSES here exactly as
+    // the directory walk does for its entries. The previous `unwrap_or_default()` produced an EMPTY
+    // internal path instead — which is not a name, is not what discovery walked to, and feeds the
+    // checkpoint's semantic identity, so two differently-named non-UTF-8 checkpoints digested
+    // identically.
+    let Some(internal) = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_owned();
+        .map(str::to_owned)
+    else {
+        return DiscoveryFiles {
+            diagnostics: vec![CheckpointDiagnosticV1::error(
+                CheckpointDiagnosticCodeV1::PathEscapesRoot,
+                relative_to_root(resolved, &path),
+                "checkpoint entry name is not valid UTF-8 and has no portable internal path",
+            )],
+            ..DiscoveryFiles::default()
+        };
+    };
     let file = DiscoveredFile {
         canonical: path.clone(),
         internal,

@@ -49,10 +49,12 @@
       ]
     },
     "layer": {
-      "type": "object", "required": ["layerId", "role", "targetPath", "source"], "additionalProperties": false,
+      "type": "object", "required": ["layerId", "role", "targetPath", "container", "source"], "additionalProperties": false,
       "properties": {
         "layerId": { "$ref": "#/$defs/nonBlankText" }, "role": { "$ref": "#/$defs/nonBlankText" },
-        "targetPath": { "$ref": "#/$defs/relativePath" }, "source": { "$ref": "#/$defs/sourceLocator" }
+        "targetPath": { "$ref": "#/$defs/relativePath" },
+        "container": { "enum": ["safetensors", "gguf", "json_descriptor"] },
+        "source": { "$ref": "#/$defs/sourceLocator" }
       }
     },
     "importPlan": {

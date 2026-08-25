@@ -17521,6 +17521,69 @@ fn a_plain_minimax_h3_lora_loads_without_changing_the_schedule() {
 
 // ---- Plan-backed video routing refusals (epic 20398, sc-20651) ----
 
+/// The MLX-lane twin of the candle refusals below (sc-20651 feature-end review minor).
+///
+/// Every arm of the macOS `resolve_video_route` ladder is matched off a BUILTIN engine model id, and
+/// a plan-backed imported entry carries none of them — so it reaches `VideoRoute::Stub`, whose
+/// handler calls `ensure_video_engine_weights` and, finding no engine family in the id either, used
+/// to pass straight through to `generate_stub_video`. The job then COMPLETED with a procedural
+/// clip at the requested geometry, which is indistinguishable from a real render until watched.
+/// There is no macOS video lane that loads a checkpoint plan, so the honest answer is a refusal —
+/// the same `[checkpoint-plan:no-video-lane]` verdict `plan_backed_wan_video_route` gives on candle.
+///
+/// The control at the end is what makes this an assertion about the PLAN and not about the model
+/// id: the identical request without `importPlan` still passes the gate and keeps its stub.
+///
+/// Failing mutation: delete the `checkpoint_plan_checkpoint_id` arm at the top of
+/// `wan::ensure_video_engine_weights` — the plan-backed request passes the gate and stubs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_backed_video_request_refuses_on_macos_instead_of_reaching_the_stub() {
+    let settings = crate::test_env::offline_settings();
+    let payload = |entry: Value| {
+        request(json!({
+            "projectId": "project-1",
+            "model": "imported_wan_2_2_abc123",
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "modelManifestEntry": entry
+        }))
+    };
+
+    let plan_backed = payload(json!({
+        "id": "imported_wan_2_2_abc123",
+        "family": "wan-video",
+        "importPlan": { "checkpointId": "ckpt_wan_abc123" }
+    }));
+    assert_eq!(
+        resolve_video_route(&plan_backed, &settings),
+        VideoRoute::Stub,
+        "fixture check: no macOS ladder arm claims a plan-backed entry — the Stub arm is exactly \
+         where this request lands, which is why the gate has to be the thing that refuses"
+    );
+    let message = match wan::ensure_video_engine_weights(&plan_backed, &settings) {
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        Ok(()) => panic!("a plan-backed entry must never pass the gate that guards stub output"),
+    };
+    assert!(
+        message.contains("[checkpoint-plan:no-video-lane]")
+            && message.contains("\"ckpt_wan_abc123\""),
+        "the refusal must carry the shared tag and name the checkpoint: {message}"
+    );
+
+    // Control: without the plan the same id keeps its pre-epic behaviour — through the gate, to the
+    // stub — so the refusal is keyed on the plan and nothing else.
+    let unplanned = payload(json!({
+        "id": "imported_wan_2_2_abc123",
+        "family": "wan-video"
+    }));
+    assert!(
+        wan::ensure_video_engine_weights(&unplanned, &settings).is_ok(),
+        "an entry with no plan must be untouched by this gate"
+    );
+}
+
 /// A `VideoRequest` for an imported plan-backed checkpoint: `family` + `importPlan.checkpointId` on
 /// the forwarded `modelManifestEntry`, no installed component paths.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

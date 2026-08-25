@@ -1761,28 +1761,64 @@ pub(crate) async fn delete_model(
         Some((checkpoint_id, Some(install_id))) => {
             let data_dir = state.settings.data_dir.clone();
             let owned_install_id = install_id.to_owned();
+            let owned_checkpoint_id = checkpoint_id.to_owned();
+            // Through the DERIVATIVE store, not `CheckpointPlanStore::remove_managed` directly:
+            // the plan store's own removal drops the record and `remove_dir_all`s the install tree
+            // with nothing asking about derivatives first, so a leased or pinned derivative was
+            // orphaned — its source bytes and plan gone, and its `derivedFrom` checkpoint id (the
+            // only handle any later invalidation has) no longer resolving to anything. The
+            // derivative store removes derivatives FIRST and refuses the whole teardown if one is
+            // still in use, which is the same ordering the linked path above already had
+            // (sc-20651 feature-end review).
+            //
+            // But a REFUSAL cannot be honoured HERE, and only here: by this point
+            // `remove_whole_model_artifacts` has already deleted the install bytes and the manifest
+            // entry is already gone. Holding the plan record back for the derivative's sake would
+            // therefore strand the record with no bytes under it, and `ManagedIngest::begin` would
+            // refuse this install id FOREVER with `InstallIdTaken` naming a path that no longer
+            // exists — the model becomes permanently un-reimportable. So the record is cleared
+            // regardless, and the derivative that could not be reclaimed is NAMED in a warning:
+            // it is orphaned either way once the bytes are gone, and a named orphan is one the user
+            // can find and evict, while a silent one is not. Every other caller of
+            // `remove_managed_install` still gets the refuse-first behaviour, which is correct for
+            // them: their bytes are still there to hold.
             let outcome = tokio::task::spawn_blocking(move || {
-                sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
-                    .remove_managed(&owned_install_id)
+                managed_checkpoint_teardown(&data_dir, &owned_install_id, &owned_checkpoint_id)
             })
             .await;
-            let failure = match outcome {
-                Ok(Ok(_)) => None,
-                Ok(Err(error)) => Some(error.to_string()),
-                Err(error) => Some(error.to_string()),
+            let report = match outcome {
+                Ok(report) => report,
+                Err(error) => ManagedTeardownReport {
+                    failure: Some(error.to_string()),
+                    orphaned_derivatives: Vec::new(),
+                    fallback_failure: Some(error.to_string()),
+                },
             };
             // The files are already gone; a failure here cannot un-delete the model, so it is
             // surfaced rather than raised. The warning names the checkpoint because that id is the
             // only handle on the stranded record.
-            if let Some(failure) = failure {
+            if let Some(failure) = report.failure {
                 tracing::warn!(
                     checkpoint_id = %checkpoint_id,
                     error = %failure,
+                    orphaned_derivatives = report.orphaned_derivatives.len(),
+                    cleared = report.fallback_failure.is_none(),
                     "managed checkpoint teardown failed after a model delete"
                 );
-                warnings.push(format!(
-                    "The managed checkpoint {checkpoint_id} could not be removed ({failure}); re-importing this model id may be refused until it is cleared."
-                ));
+                if let Some(fallback_failure) = report.fallback_failure {
+                    warnings.push(format!(
+                        "The managed checkpoint {checkpoint_id} could not be removed ({fallback_failure}); re-importing this model id may be refused until it is cleared."
+                    ));
+                } else {
+                    let orphans = if report.orphaned_derivatives.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        report.orphaned_derivatives.join(", ")
+                    };
+                    warnings.push(format!(
+                        "The managed checkpoint {checkpoint_id} was removed, but its cached derivatives could not be reclaimed ({failure}); orphaned resolved-cache entries: {orphans}. Unpin or release them to free that space."
+                    ));
+                }
             }
         }
         // LINKED (or any non-managed checkpoint id): the bytes are the user's own library copy,
@@ -1808,6 +1844,87 @@ pub(crate) async fn delete_model(
         "warnings": warnings,
         "policy": policy,
     })))
+}
+
+/// What the managed checkpoint teardown did after a model delete, when it did not simply succeed.
+struct ManagedTeardownReport {
+    /// The refusal that stopped the derivatives-first teardown. `None` when it succeeded outright,
+    /// which is the only case that produces no warning.
+    failure: Option<String>,
+    /// The derivative cache keys still present after that refusal — the entries the delete could
+    /// not reclaim, named so the user can find them.
+    orphaned_derivatives: Vec<String>,
+    /// The record-clearing fallback's OWN refusal. `Some` means the plan record really is stranded
+    /// and the install id may stay un-reimportable, which is a materially different warning.
+    fallback_failure: Option<String>,
+}
+
+/// Tear down a managed install after its bytes and its manifest entry are already gone.
+///
+/// Derivatives first (so a derivative in use is reclaimed cleanly when it can be), then — if that
+/// refuses — the plan record UNCONDITIONALLY, because leaving it behind is what poisons the install
+/// id forever. Blocking throughout; callers must run it off the async runtime.
+fn managed_checkpoint_teardown(
+    data_dir: &std::path::Path,
+    install_id: &str,
+    checkpoint_id: &str,
+) -> ManagedTeardownReport {
+    use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
+
+    let store = CheckpointDerivativeStore::open(data_dir);
+    let failure = match &store {
+        Ok(store) => match store.remove_managed_install(install_id) {
+            Ok(_) => {
+                return ManagedTeardownReport {
+                    failure: None,
+                    orphaned_derivatives: Vec::new(),
+                    fallback_failure: None,
+                }
+            }
+            Err(error) => error.to_string(),
+        },
+        Err(error) => error.to_string(),
+    };
+    let orphaned_derivatives = store
+        .as_ref()
+        .map(|store| surviving_derivatives(store, checkpoint_id))
+        .unwrap_or_default();
+    let fallback_failure =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
+            .remove_managed(install_id)
+            .err()
+            .map(|error| error.to_string());
+    ManagedTeardownReport {
+        failure: Some(failure),
+        orphaned_derivatives,
+        fallback_failure,
+    }
+}
+
+/// The derivative cache keys still recorded as produced from `checkpoint_id`.
+///
+/// Read AFTER a refused teardown, so it names exactly the entries that were not reclaimed. An
+/// enumeration failure yields an empty list rather than an error: this only enriches a warning that
+/// is already being raised, and losing the warning would be worse than losing the names.
+fn surviving_derivatives(
+    store: &sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore,
+    checkpoint_id: &str,
+) -> Vec<String> {
+    store
+        .cache()
+        .enumerate()
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|summary| {
+                    let metadata = summary.metadata?;
+                    (metadata.production.is_derived()
+                        && metadata.derived_from.as_deref() == Some(checkpoint_id))
+                    .then_some(metadata.cache_key)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The file scopes `model` OWNS inside `repo` — the union of its PRIMARY (non-co-requisite) download
