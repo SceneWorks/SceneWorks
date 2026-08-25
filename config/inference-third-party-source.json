@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin b646a6f8 advances inference main through the merged epic-20738 feature train. Relative to the prior c6abde8f audit, the exact scanner finds 650 provenance candidates (up one) and the same 96 production-Rust crate prefixes. The one added candidate is crates/media/candle-gen/candle-gen-sdxl/src/control_provider.rs, covered by the existing SDXL architecture disposition; no path was removed. The normalized marker changed only for the adjacent candle-gen-sdxl/src/lib.rs registration and documentation in the same source area, 15 other existing rows differ only in git_blob_sha1, and no source-area assignment changed. The pre-existing two unclassified MiniMax-H3 crate prefixes and eighteen ported-source candidates remain the same 20 report-only compliance worklist items under sc-19751. No LICENSE file or production include_str!/include_bytes! inventory changed.",
-  "inferenceRevision": "725c6bc59c61e940859fd925037184294cd2cafb",
-  "auditDigest": "e6541ae850a2ee18961bef3f29b540c47f8062492b707ffb55f56a77f99e868d",
+  "inferenceRevision": "6d8be650d34d53b7539cb55c8dee862bd0863960",
+  "auditDigest": "6d4ac6e7ab5a9fe2e216d68f30b0ec8cf946e758a0b9391538316d44a8dad801",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "725c6bc59c61e940859fd925037184294cd2cafb",
+    "revision": "6d8be650d34d53b7539cb55c8dee862bd0863960",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 650,
-    "populationSha256": "ad10fc854907876c9729c690ee78e02517e4f98c8c36d64c69f62bc301748f52"
+    "matchedFiles": 651,
+    "populationSha256": "705bef10de0999aade5d7cdcdb6e087ddfe03c93b37b07f10ed3241f74bad135"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "725c6bc59c61e940859fd925037184294cd2cafb",
+    "revision": "6d8be650d34d53b7539cb55c8dee862bd0863960",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 96,
     "cratePopulationSha256": "ab6f0f6f4c71a93339973ba3054d40b651b8db7f96ed219d5d152c3c624c49fc"
