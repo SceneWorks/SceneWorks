@@ -1,8 +1,9 @@
 # SC-18663 MiniMax-H3 terminal capture
 
-Run this only after the terminal inference pin bump: the current pinned loaded generator does not
-publish its memory-strategy contract, so this command must fail closed rather than manufacture a
-receipt. It selects the 72 checked-in MiniMax-H3 rows (three tiers, four implemented rungs, two
+Run this against the permanent inference pin `28f0563baa03640ade1635356d2d54fe8a477f1a` and require
+the loaded generator to publish the exact memory-strategy contract for every selected case. The
+harness must fail closed only when that publication is actually missing or mismatched; never
+manufacture a receipt. It selects the 72 checked-in MiniMax-H3 rows (three tiers, four implemented rungs, two
 areas, three legal `17n+5` frame counts) and writes every mutable artifact outside either checkout.
 
 ```bash

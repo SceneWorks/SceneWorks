@@ -22218,8 +22218,8 @@
         "maxReferenceAssets": 0,
         "maxSourceClipAssets": 0,
         "maxReferenceAudioAssets": 0,
-        // Default-only. sc-19721's pin bump (`75d66db5`) DID make the descriptor reachable, so the
-        // engines.rs drift guard can now compare a curated menu against MiniMax-H3's real
+        // Default-only. The permanent inference pin (`28f0563b`) makes the descriptor reachable, so
+        // the engines.rs drift guard can compare a curated menu against MiniMax-H3's real
         // capabilities — but the provider advertises `samplers: ["default"]` and no scheduler menu
         // of its own, so there is nothing to curate INTO. This stays `["default"]` because that is
         // what the engine offers, not because the descriptor is invisible; a curated menu is
@@ -22240,7 +22240,7 @@
         // peak (sc-17150 activity 19121) — a stage the DEFAULT tier no longer runs. sc-19120's
         // packed q4 conditioning stage measures 14.68 GB end to end (inference
         // `mlx-gen-minimax-h3/src/memory_strategy.rs` + `tests/te_tier_generate_stages.rs`, read
-        // at the pinned `75d66db5`), so 96 over-gated the default tier by ~38 GB at the derivation
+        // at permanent inference pin `28f0563b`), so 96 over-gated the default tier by ~38 GB at the derivation
         // geometry and locked the family off every sub-96 GB Mac for no measured reason.
         //
         // THE DERIVATION — max over the shipped q4 pipeline's stages at the LARGEST geometry this
@@ -22332,11 +22332,11 @@
         //      BELOW this entry's advertised 21:9 pair. So `1536x672` / `672x1536` are ADVERTISED
         //      BUT NOT YET RENDERABLE: the area check passes and the edge check refuses.
         //
-        //      ✅ DISCHARGED BY sc-19721's PIN BUMP. `Cargo.toml` now pins `75d66db5`, which
-        //      carries inference PR #640 (`story/sc-17152-h3-max-size-1536`) — the per-edge ceiling
-        //      is `MAX_CANVAS_EDGE = 2016` on both lanes, comfortably above 1536, so the pinned
-        //      engine accepts the pair and the paragraph above is HISTORY, kept only because it
-        //      explains why the area budget alone never settled the question.
+        //      ✅ DISCHARGED BY THE PERMANENT INFERENCE PIN. `Cargo.toml` pins
+        //      `28f0563baa03640ade1635356d2d54fe8a477f1a`; the pinned provider's per-edge ceiling
+        //      is `MAX_CANVAS_EDGE = 2016` on both lanes, comfortably above 1536, so the engine
+        //      accepts the pair and the paragraph above is HISTORY, kept only because it explains
+        //      why the area budget alone never settled the question.
         //
         //      The tie is enforced, not asserted in prose: `pinned_engine_geometry.rs` reads the
         //      PINNED provider's own `capabilities.max_size` and refuses any advertised resolution

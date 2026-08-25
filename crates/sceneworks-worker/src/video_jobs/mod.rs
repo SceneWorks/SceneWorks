@@ -260,12 +260,10 @@ enum VideoRoute {
 /// ladder for every other mode.
 #[cfg(target_os = "macos")]
 fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
-    // MiniMax-H3 readiness is the ONE ladder input that cannot be reached from a test today: it
-    // requires the engine to be REGISTERED in the linked inference bundle, which is false at the
-    // pinned revision (sc-18650 owns the bump). Left inline, the tail arm below would be dead code
-    // no test can distinguish from a deleted one — declaration without reachability, the exact trap
-    // this epic keeps hitting. Threaded in instead, so `resolve_video_route_with` can be driven
-    // with the readiness the pin bump will supply and the arm is covered NOW.
+    // MiniMax-H3 readiness remains the ONE ladder input that needs an injectable seam in tests:
+    // it requires the engine to be REGISTERED in the linked inference bundle. The permanent pin
+    // `28f0563baa03640ade1635356d2d54fe8a477f1a` carries that descriptor; threading readiness in
+    // keeps `resolve_video_route_with` able to distinguish the live tail arm from a deleted one.
     //
     // Evaluated here rather than in the ladder, but NOT eagerly: `minimax_h3_engine_id` is a pure
     // string check, so every other model short-circuits before any filesystem touch and routing
@@ -350,11 +348,11 @@ fn resolve_video_route_with(
         // id, so routing for every pre-existing model stays byte-identical.
         //
         // `minimax_h3_available` folds in three gates that all have to hold before an arm may run:
-        // the engine is actually REGISTERED in the linked inference bundle (false at the current
-        // pin, and the reason this arm is dormant rather than broken), the conditioning shape
-        // agrees with the entry's DiT partition, and both the tier and its shared components
-        // resolve. Any of them failing drops to `Stub`, where `ensure_video_engine_weights` re-runs
-        // the same checks and surfaces the precise reason instead of a procedural fake clip.
+        // the engine is registered in the linked inference bundle (as it is at permanent pin
+        // `28f0563baa03640ade1635356d2d54fe8a477f1a`), the conditioning shape agrees with the
+        // entry's DiT partition, and both the tier and its shared components resolve. Any of them
+        // failing drops to `Stub`, where `ensure_video_engine_weights` re-runs the same checks and
+        // surfaces the precise reason instead of a procedural fake clip.
         VideoRoute::MiniMaxH3(engine_id)
     } else {
         VideoRoute::Stub
@@ -392,9 +390,9 @@ enum CandleVideoRoute {
     Bernini(&'static str),
     /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
     CandleVideo,
-    /// MiniMax-H3's joint audio/video Candle provider. This remains unreachable through the
-    /// scheduler until the separately-owned `candle_video_routed` capability flip, but direct or
-    /// replayed off-Mac jobs must use the real provider rather than procedural stub output.
+    /// MiniMax-H3's joint audio/video Candle provider. Current Candle capabilities route the base
+    /// t2va/fl2va and Ref2VA partitions through this live provider at the permanent inference pin;
+    /// direct or replayed off-Mac jobs therefore use the real provider rather than stub output.
     MiniMaxH3(&'static str),
     /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
     /// (epic 10451 Phase 2c, sc-10671). Not an `is_candle_video_engine` id — routed off the forwarded row.

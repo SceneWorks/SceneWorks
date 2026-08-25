@@ -13,8 +13,9 @@ use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict
 
 // ---------------------------------------------------------------------------
 // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-19508): a joint audio+video family that emits video AND
-// synchronized stereo audio in ONE denoise pass. MLX runs on macOS; off-Mac Candle dispatch is
-// available for direct/replay execution while user routing remains deliberately disabled.
+// synchronized stereo audio in ONE denoise pass. At the permanent inference pin
+// `28f0563baa03640ade1635356d2d54fe8a477f1a`, MLX and off-Mac Candle both dispatch the live family:
+// Candle user routing covers the base t2va/fl2va partition and the Ref2VA partition.
 //
 // Four facts shape this whole block, and every one of them DEVIATES from the Mochi/Krea template it
 // otherwise mirrors:
@@ -74,9 +75,8 @@ use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict
 /// Adapter id recorded on a real MLX MiniMax-H3 asset.
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_ADAPTER: &str = "mlx_minimax_h3";
-/// Adapter id recorded on a real off-Mac Candle MiniMax-H3 asset. It lives with the deliberately
-/// non-user-routed executor rather than the generic Candle route table, so capability-fact parsing
-/// continues to represent only user-reachable Candle lanes.
+/// Adapter id recorded by the live off-Mac Candle MiniMax-H3 provider. The base and Ref2VA Candle
+/// routes are user-routed for their supported native modes; this id names the adapter on those jobs.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_MINIMAX_H3_ADAPTER: &str = "candle_minimax_h3";
 
@@ -143,16 +143,14 @@ pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
 /// Whether the linked inference bundle actually REGISTERS the MiniMax-H3 engine.
 ///
 /// This is the sc-19508 replacement for sc-17159's hard-coded "not in the pinned inference
-/// revision" string, and the reason the whole arm below can be written before sc-18650 moves the
-/// pin. The engine is reached through `media().load(id, spec)` — a **runtime lookup keyed on a
-/// string** — so nothing in this module needs the provider to be importable at compile time. What
-/// it does need is for the id to be PRESENT in the registry, which is exactly what this reads.
+/// revision" string. The engine is reached through `media().load(id, spec)` — a **runtime lookup
+/// keyed on a string** — so nothing in this module needs the provider to be importable at compile
+/// time. What it does need is for the id to be PRESENT in the registry, which is exactly what this
+/// reads; the permanent pin `28f0563baa03640ade1635356d2d54fe8a477f1a` carries that descriptor.
 ///
-/// Deriving it beat asserting it, and sc-19721 is the proof: at `014134e3` the descriptor was
-/// absent and this refusal fired, and when the pin moved to `75d66db5` the descriptor appeared and
-/// the arm went live with **no code change here**. A hard-coded revision string would have gone
-/// stale instead — which is exactly what happened to every prose citation of the old pin around
-/// it.
+/// Deriving it beats asserting it: a mismatched or incomplete linked provider still fails closed,
+/// while the current permanent pin carries the descriptor and reaches the live arm without a
+/// code-side revision switch. A hard-coded revision string would go stale instead.
 ///
 /// The same `media_descriptor(...).is_none()` idiom already gates the not-in-this-bundle branches
 /// of `mlx_fit_gate`, so this is the established way to ask the question.
@@ -504,16 +502,14 @@ pub(super) fn minimax_h3_available(request: &VideoRequest, settings: &Settings) 
 /// say anything else, because at that commit there was no arm to fall through to. Now there is, so
 /// the refusal is derived in three layers, each naming its own cause:
 ///
-/// 1. the engine is not in the linked bundle (today's pin) — READ from the registry, not asserted;
+/// 1. the engine is not in the linked bundle — READ from the registry, not asserted;
 /// 2. the conditioning shape does not match the entry's DiT partition;
 /// 3. the weights are unprovisioned or torn.
 ///
-/// The order is deliberate. Before sc-19721's pin bump every MiniMax-H3 job stopped at (1) with
-/// the same honest reason a user got before; at the current pin (`75d66db5`, the first revision
-/// that registers `mlx_gen_minimax_h3` — see `jobs_store/routing/mlx.rs`) the descriptor is
-/// present, (1) passes with no code change here, and an unprovisioned install stops at (3) with
-/// the resolver's precise error — which is exactly the substitution sc-19508 asked for
-/// ("an unprovisioned install must still fail loudly").
+/// The order is deliberate. At the permanent pin
+/// (`28f0563baa03640ade1635356d2d54fe8a477f1a`) the descriptor is present, so a normal request
+/// reaches the conditioning and load checks; a mismatched provider or unprovisioned install still
+/// stops with the precise fail-loud error required by sc-19508.
 #[cfg(target_os = "macos")]
 pub(super) fn ensure_minimax_h3_renderable(
     request: &VideoRequest,
@@ -1403,9 +1399,8 @@ pub(super) async fn generate_minimax_h3(
 /// With the loader threaded in, a test drives this whole arm against a stub `Generator` and asserts
 /// on the `GenerationRequest` that actually reached the engine — the conditioning, the coerced
 /// frame count, the fps, the seed, and the ABSENCE of the guidance/negative-prompt fields the
-/// checkpoint rejects — with no weights, no GPU, and no registered MiniMax-H3 engine. That last
-/// part is why this seam matters more here than anywhere else: it is the only way any of this arm
-/// is covered before sc-18650 moves the pin.
+/// checkpoint rejects — with no weights or GPU. The seam remains valuable for request-shape
+/// coverage even though the permanent pin registers the MiniMax-H3 provider.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_minimax_h3_using(
