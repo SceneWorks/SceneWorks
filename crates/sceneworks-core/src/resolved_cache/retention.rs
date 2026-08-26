@@ -615,19 +615,20 @@ impl ResolvedCacheStore {
         let mut digests = Vec::new();
         for item in std::fs::read_dir(self.inner.root.join("entries"))? {
             let item = item?;
-            if !item.file_type()?.is_dir() {
-                return Err(ResolvedCacheError::new(format!(
-                    "unmanaged resolved-cache entry {}",
-                    item.path().display()
-                )));
-            }
-            let digest = item
+            let Some(digest) = item
                 .file_name()
                 .to_str()
                 .filter(|value| is_lower_hex_64(value))
-                .ok_or_else(|| ResolvedCacheError::new("invalid resolved-cache entry name"))?
-                .to_owned();
-            digests.push(digest);
+                .map(str::to_owned)
+            else {
+                tracing::debug!(entry = %item.path().display(), "ignoring foreign resolved-cache entry");
+                continue;
+            };
+            if item.file_type()?.is_dir() {
+                digests.push(digest);
+            } else {
+                tracing::debug!(entry = %item.path().display(), "ignoring foreign resolved-cache entry");
+            }
         }
         digests.sort();
         Ok(digests)
