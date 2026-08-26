@@ -1235,9 +1235,20 @@ fn imported_model_quant(
             .or_else(|| value.as_str()?.trim().parse().ok())
     });
     let selected = if krea_imported_native_nvfp4(request) {
+        // Whether NVFP4 rides the LoadSpec at all is the PROVIDER's vocabulary, not the entry's:
+        // a provider advertising `Quant::Nvfp4` (the Krea single-file lane) takes the explicit
+        // instruction, while one that does not (the FLUX.2 Klein single-file lane, sc-21485)
+        // derives the packing from the file's compiled plan and takes no quant on its spec — its
+        // `supported_quants` lists only the quantize-on-load tiers q4/q8. Either way the request
+        // tier is vetted here: anything other than "nvfp4" or nothing must never reach the
+        // NVFP4-stored bytes.
+        let advertises_nvfp4 = descriptor
+            .capabilities
+            .supported_quants
+            .contains(&Quant::Nvfp4);
         match named.as_deref() {
-            None if bits.is_none() => Some(Quant::Nvfp4),
-            Some("nvfp4") if bits.is_none() => Some(Quant::Nvfp4),
+            None if bits.is_none() => advertises_nvfp4.then_some(Quant::Nvfp4),
+            Some("nvfp4") if bits.is_none() => advertises_nvfp4.then_some(Quant::Nvfp4),
             Some(other) => {
                 return Err(WorkerError::InvalidPayload(format!(
                     "{label} is stored as native NVFP4 and cannot be loaded as '{other}'."
@@ -1312,7 +1323,7 @@ fn krea_imported_raw_settings(
         crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
             &request.model_manifest_entry,
             dit,
-            crate::checkpoint_weight_facts_host::materialization_from_runtime(),
+            crate::checkpoint_weight_facts_host::materialization_from_runtime(None),
         )
         .as_ref(),
     );
@@ -1932,6 +1943,14 @@ async fn generate_krea_imported_stream(
         .then(|| request.negative_prompt.clone());
 
     let engine_id = descriptor.id;
+    // Captured for the post-load facts rebuild (sc-11045): the engine's receipt only exists once
+    // the load materializes, on the blocking thread, so the drive closure re-assembles the three
+    // facts there and streams the finished receipt object back over the event channel. `dit` is
+    // about to move into the LoadSpec.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let dit_for_facts = dit.clone();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(base_dir.clone()),
@@ -2040,6 +2059,7 @@ async fn generate_krea_imported_stream(
             },
         ),
         move |model, tx, cancel| {
+            let facts_tx = tx.clone();
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
@@ -2081,6 +2101,21 @@ async fn generate_krea_imported_stream(
                     Err(_) if cancel.is_cancelled() => return Ok(None),
                     Err(error) => return Err(error),
                 };
+                // The engine's receipt exists only after the load materialized, so the three facts
+                // are re-assembled HERE — on the blocking thread with the handle in hand — and
+                // streamed to the consumer, which stamps them onto every subsequent asset in place
+                // of the pre-load `no-runtime-receipt` version (sc-11045). Sent after every image
+                // on purpose: publication is last-write-wins engine-side, so the latest event
+                // always describes the most recent materialization.
+                if let Some(facts) = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+                    &manifest_entry_for_facts,
+                    Some(dit_for_facts.as_path()),
+                    model.checkpoint_weight_facts(),
+                ) {
+                    let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
+                        facts: crate::checkpoint_weight_facts_host::facts_receipt_object(&facts),
+                    });
+                }
                 Ok(Some((seed, out_width, out_height, pixels)))
             })
         },
