@@ -11031,6 +11031,48 @@
       "loadProfile": "lora"
     },
     {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "bernini",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
       "provider": "chroma1_base",
       "tier": "bf16",
       "mode": "text_to_image",
@@ -14952,10 +14994,108 @@
     },
     {
       "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
+    },
+    {
+      "provider": "sdxl",
       "tier": "q4",
       "mode": "text_to_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
     },
     {
       "provider": "sdxl",
@@ -14966,10 +15106,52 @@
     },
     {
       "provider": "sdxl",
-      "tier": "nvfp4",
+      "tier": "q8",
       "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "lora_single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "image_detail",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "lora_ip_adapter"
+    },
+    {
+      "provider": "sdxl",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "identity",
+      "loadProfile": "ip_adapter"
     },
     {
       "provider": "z_image",
@@ -15084,6 +15266,27 @@
       "loadProfile": "lora"
     },
     {
+      "provider": "z_image_control",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "z_image_control",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
+      "provider": "z_image_control",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "control",
+      "loadProfile": "single_control"
+    },
+    {
       "provider": "z_image_turbo",
       "tier": "bf16",
       "mode": "text_to_image",
@@ -15103,34 +15306,6 @@
       "mode": "text_to_image",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15156,34 +15331,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
       "mode": "edit_image",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15201,34 +15348,6 @@
       "mode": "edit_image",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15254,34 +15373,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "bf16",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
       "mode": "image_inpaint",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15299,34 +15390,6 @@
       "mode": "image_inpaint",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15352,34 +15415,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "bf16",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15397,34 +15432,6 @@
       "mode": "character_image",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "bf16",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15450,34 +15457,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
       "mode": "style_variations",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15495,34 +15474,6 @@
       "mode": "style_variations",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15548,34 +15499,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q4",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
       "mode": "image_to_image",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15593,34 +15516,6 @@
       "mode": "image_to_image",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15646,34 +15541,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q4",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
       "mode": "image_detail",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15695,34 +15562,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q4",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15740,34 +15579,6 @@
       "mode": "character_image",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q4",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15793,34 +15604,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
       "mode": "style_variations",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15838,34 +15621,6 @@
       "mode": "style_variations",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15891,34 +15646,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q8",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
       "mode": "image_to_image",
       "overlay": "none",
       "loadProfile": "plain"
@@ -15936,34 +15663,6 @@
       "mode": "image_to_image",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -15989,34 +15688,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q8",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
       "mode": "image_detail",
       "overlay": "none",
       "loadProfile": "plain"
@@ -16038,34 +15709,6 @@
     {
       "provider": "z_image_turbo",
       "tier": "q8",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
       "mode": "character_image",
       "overlay": "none",
       "loadProfile": "plain"
@@ -16083,34 +15726,6 @@
       "mode": "character_image",
       "overlay": "lora",
       "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "q8",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     },
     {
       "provider": "z_image_turbo",
@@ -16136,324 +15751,149 @@
     {
       "provider": "z_image_turbo",
       "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "style_variations",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_inpaint",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "image_detail",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "pid"
+    },
+    {
+      "provider": "z_image_turbo",
+      "tier": "nvfp4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "z_image_turbo_control",
+      "tier": "bf16",
       "mode": "text_to_image",
       "overlay": "control",
       "loadProfile": "single_control"
     },
     {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
+      "provider": "z_image_turbo_control",
+      "tier": "q4",
       "mode": "text_to_image",
       "overlay": "control",
-      "loadProfile": "multi_control"
+      "loadProfile": "single_control"
     },
     {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
+      "provider": "z_image_turbo_control",
+      "tier": "q8",
       "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "text_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "none",
-      "loadProfile": "pid"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "lora",
-      "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "style_variations",
       "overlay": "control",
       "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "style_variations",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "edit_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "edit_image",
-      "overlay": "none",
-      "loadProfile": "pid"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "edit_image",
-      "overlay": "lora",
-      "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "edit_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "edit_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "none",
-      "loadProfile": "pid"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "lora",
-      "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_to_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "none",
-      "loadProfile": "pid"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "lora",
-      "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_inpaint",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "none",
-      "loadProfile": "pid"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "lora",
-      "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "image_detail",
-      "overlay": "identity",
-      "loadProfile": "identity"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "character_image",
-      "overlay": "none",
-      "loadProfile": "plain"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "character_image",
-      "overlay": "none",
-      "loadProfile": "pid"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "character_image",
-      "overlay": "lora",
-      "loadProfile": "lora"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "single_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "character_image",
-      "overlay": "control",
-      "loadProfile": "multi_control"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "ip_adapter"
-    },
-    {
-      "provider": "z_image_turbo",
-      "tier": "nvfp4",
-      "mode": "character_image",
-      "overlay": "identity",
-      "loadProfile": "identity"
     }
   ]
 }

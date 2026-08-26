@@ -5988,26 +5988,43 @@ mod measured_mlx_load_shape_tests {
 
         let root = tempfile::tempdir().unwrap();
         let base = sdxl_spec(root.path(), Some(4), Some(Quant::Q4));
+        // sc-21609: edit-routed requests now share the deferred production shape — the Mlx sdxl
+        // registry row covers edit_image, matching the advanced lane the worker actually routes.
         assert_eq!(
             apply_measured_mlx_load_shape_for_request("sdxl", base.clone(), false).load_shape,
-            gen_core::LoadShape::EagerMaterialization,
-            "SDXL edit/reference/Hires.fix requests are outside the base T2I apparatus"
+            gen_core::LoadShape::DeferredMaterialization,
+            "SDXL edit requests share the production deferred load shape"
         );
         let adapter = AdapterSpec::new(
             root.path().join("adapter.safetensors"),
             1.0,
             AdapterKind::Lora,
         );
-        for spec in [
-            base.clone().with_adapters(vec![adapter]),
-            base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
-        ] {
-            assert_eq!(
-                apply_measured_mlx_load_shape_for_request("sdxl", spec, true).load_shape,
-                gen_core::LoadShape::EagerMaterialization,
-                "SDXL adapter/control surfaces must not borrow the base calibration identity"
-            );
-        }
+        // sc-21609: a LoRA load defers — the widened row covers the lora profile the worker routes
+        // (and the measured rung-4 evidence was taken with LoRA armed) — while a bare control
+        // component at text_to_image still finds no row: the tile-ControlNet profile is scoped to
+        // the image_detail lane, so this coordinate stays eager rather than borrowing a shape no
+        // production request carries.
+        assert_eq!(
+            apply_measured_mlx_load_shape_for_request(
+                "sdxl",
+                base.clone().with_adapters(vec![adapter]),
+                true
+            )
+            .load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+            "SDXL LoRA loads share the production deferred load shape"
+        );
+        assert_eq!(
+            apply_measured_mlx_load_shape_for_request(
+                "sdxl",
+                base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
+                true
+            )
+            .load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "a control load at text_to_image matches no routed lane and must stay eager"
+        );
     }
 }
 

@@ -530,7 +530,7 @@
             "Component scope and streamability are two different levers and must not be conflated. Making the encoder streamable at all under Sequential is what let bf16 fit 8 GB (conditioning 8.489 -> 2.718 GiB); the tunable TextEncoder scope cuts conditioning a further 46.5% and moves the request peak 0.0%, which is why the published default is Dit — see gen-core's memory_strategy prerequisite note.",
             "Overlays are compatible here, in contrast to Krea/Candle: adapters are installed as forward-time residuals and `BlockAdapters` replays the captured list onto each materialized block, so a LoRA-carrying request can still stream.",
             "The declaration is per LOAD, and the matrix has no load-source axis. Rung 4 is Missing for a single-file / ComfyUI load, because streaming rebuilds blocks from the snapshot per window and an in-memory `Weights` has no re-openable source. Every catalog route here is a `WeightsSource::Dir` registry load, so the cells are right for the routes the matrix covers — but a consumer must not read them as covering a user-imported single-file checkpoint.",
-            "sc-21510: the 6 standing control-lane route findings (z_image_control and z_image_turbo_control rung-4 rows, all tiers) are real and deliberately left. MLX control loads consult the route registry under the `_control` engine ids (image_jobs/zimage.rs), which have NO Mlx rows, so `apply_registered_load_shape` misses, the spec stays eager, and rung 4 is unreachable on the control lanes today — while the base `z_image_turbo` row's control/identity witness profiles are unreachable the other way (control loads never pass the base id). Settled by Mlx `z_image_control`/`z_image_turbo_control` RULES rows with `legacy_shaping: true` (a production load-shape change) plus a control-lane measurement, or by narrowing the manifest control rows and the memory_route_registry axes golden that pins them — an owner decision."
+            "sc-21609 (Michael's coverage decision): the Mlx `z_image_control`/`z_image_turbo_control` RULES rows now exist with `legacy_shaping: true`, so control loads — which consult the registry under the `_control` engine ids (image_jobs/zimage.rs) — are shaped to DeferredMaterialization and the engines' rung-4 control surfaces are reachable. The base `z_image_turbo` row's control/identity/multi-control profiles were removed in the same change: control loads never pass the base id and the entry has no identity route, so those witnesses named routes production could not take."
           ]
         },
         "candle": {
@@ -2425,7 +2425,7 @@
             "The rung needs a plan PER Transformer2D, not one per model, and that is what shipped: eleven `BlockPlan`s at a shared cadence. `BlockPlan::new` clamps a window to its stack's depth, so a cadence wider than 2 degrades the five 2-deep sub-stacks to fully resident rather than erroring — which is why the domain is stated once and not per depth, and why 10 is the widest cadence that means anything here.",
             "Rungs 2 and 3 are `Missing` WITH measurements rather than unattempted. Rung 2's tiled decode works and is the family's biggest lever — 19.0032 → 15.8660 GiB (−16.51%) of request peak for ~7% wall clock, isolated decode 14.360 → 11.237 GiB (−21.7%) at edge 896 — but it is withheld on QUALITY: the inherited sibling drift bar is 48/255, and on the production latent the same 1024²/edge-896/overlap-192 geometry drifts 84/255 (the synthetic-latent sweep read 38, which is why the withholding argument had to be measured on production latents). It fails the bar outright at 1280²/1536²/2048², and `decode_tile_edges` has no geometry axis to vary the edge with output size. Rung 3's `sdpa_budgeted_bhsd` reaches every attention site including the IP-Adapter branch, but moves the peak 0.00% at BOTH measured scopes — the request (19.0032 → 19.0032 GiB) and the U-Net seam (6.5868 → 6.5868 GiB) — and is not bit-exact on its query-row axis (max|Δeps| 5.25e-3 at one step; 57/255 of image movement at one step, a different image by six). An earlier revision published the seam as +5.1% from an un-warmed control; warmed, both U-Nets read +0.00%.",
             "illustrious_xl_v1 and illustrious_xl_v2 are `Missing` at rung 4 outright, because q8 is their only advertised tier. The cause is the SNAPSHOT, not the architecture: their `unet/` weights are genuinely packed (u32 codes with .scales/.biases, 3.46 GiB, byte-for-byte realvisxl q8's shape) but their `unet/config.json` ships without the `quantization` marker, so `packed_quant_bits` reads nothing, `needs_load_time_quant` returns true, `load_leaves_blocks_lazy` is false and `streamable` refuses. The rung fails closed, which is correct; the repair is a republished snapshot, tracked as sc-17522.",
-            "sc-21510: the standing reconciliation overclaims for this family are real and deliberately left, in two parts. (1) realvisxl q4/q8 and realvisxl_lightning q4 at text_to_image/none: the committed capability dump under-reports — `streamable` is tier-agnostic on a packed snapshot, but the dump enumerates surfaces with a synthetic weights-free LoadSpec, so `load_leaves_blocks_lazy` fails closed at q4/q8 (mlx-gen-sdxl registers no MemoryContractSurfaceResolverRegistration). Settled by the inference-side surface-resolver fix and the dump regenerated at the next pin bump. (2) the lora-overlay coordinates and the bf16 edit_image/image_inpaint/image_detail/character_image rows: production DOES route them on MLX (sdxl advanced/detail/ip lanes, with adapters), but the Mlx `sdxl` memory_route_registry row is text_to_image+plain only and `legacy_shaping: true`, so widening it changes production load shaping and flips the `lens_q4_only_and_text_only_rules_fail_closed` golden — an owner decision, not a survey or manifest edit."
+            "sc-21609 (Michael's coverage decision): the Mlx sdxl registry rows now cover every lane production routes — text_to_image/edit_image at plain+lora, image_detail at the tile-ControlNet profiles, character_image at the ip-adapter profiles — so those loads share the deferred production shape and their witnesses are real. The remaining q4/q8 reconciliation overclaims are the committed capability dump under-reporting: `streamable` is tier-agnostic on a packed snapshot, but the dump enumerates surfaces with a synthetic weights-free LoadSpec, so `load_leaves_blocks_lazy` fails closed at q4/q8. Settled by the inference-side surface-resolver fix (SceneWorks/inference#818) and the dump regenerated at the next pin bump. `image_inpaint` and clean-base character/detail coordinates were withdrawn from the declarations as non-production shapes (inpaint canonicalizes to edit_image; character always carries an IP adapter; detail always carries a control)."
           ],
           "implementationScopes": [
             {
@@ -2434,6 +2434,47 @@
               ],
               "tiers": [
                 "bf16"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "sdxl"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "modes": [
+                "character_image"
+              ],
+              "overlays": [
+                "identity"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "realvisxl"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image"
               ],
               "overlays": [
                 "none"
@@ -2448,10 +2489,15 @@
                 "realvisxl"
               ],
               "tiers": [
-                "bf16"
+                "bf16",
+                "q4",
+                "q8"
+              ],
+              "modes": [
+                "character_image"
               ],
               "overlays": [
-                "none"
+                "identity"
               ],
               "strategyParameters": {
                 "transformerWindowSize": 10,
@@ -2465,6 +2511,10 @@
               "tiers": [
                 "q4",
                 "q8"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image"
               ],
               "overlays": [
                 "none",
@@ -2481,6 +2531,10 @@
               ],
               "tiers": [
                 "q4"
+              ],
+              "modes": [
+                "text_to_image",
+                "edit_image"
               ],
               "overlays": [
                 "none",
@@ -2857,7 +2911,7 @@
             "Rung 2 is a real request-selected spatial tile edge over `[768, 640, 512, 384, 320, 256]` with overlap 64; rung 3 is a request-selected attention budget over both experts; rung 4 is a request-selected global 80-block deferred stream with windows `[1, 2, 4, 5, 8, 10, 20]` and default 10. The block stream is unavailable for an in-memory/single-file load and refuses adapters, so only the catalog's directory-backed, no-overlay routes are claimed.",
             "The same phase and trunk mechanisms serve every video mode (`t2v`, `v2v`, `r2v`, `rv2v`, `mv2v`, `ads2v`) and the one-frame image entry. Modes change conditioning inputs and guidance pass count, not the stage order or decoder. Guided modes re-walk a window several times per denoise step, which is a latency cost rather than a different applicability verdict.",
             "No image cell is assigned a modality-specific value by this reconciliation: `bernini_image` and `bernini` intentionally share this one provider verdict. The generated-artifact review must still diff image cells after the final inference pin; a pin-derived state change is not to be hidden by falsifying the shared survey.",
-            "sc-21510: the reconciliation's 24 bernini overclaim findings are real and deliberately left standing. The engine implements rung 4 at every tier, but SceneWorks' memory_route_registry RULES table has no Mlx bernini row, so apply_registered_load_shape returns every bernini spec eager and structurally_streamable can never hold — rung 4 is genuinely unreachable on MLX today, by SceneWorks-side omission rather than engine incapacity. What settles it: an Mlx RULES row with legacy_shaping:true (a production load-shape change) plus a bernini request-peak measurement — an owner decision, not a survey edit, since narrowing this verdict would misstate the engine and enrolling witness-only would claim a route production does not take."
+            "sc-21609 (Michael's coverage decision): the Mlx bernini RULES row now exists with legacy_shaping:true, so MLX bernini loads are shaped to DeferredMaterialization and the engine's rung 4 is reachable — plain loads stream, adapted (Wan-adapter) loads stay off the stream at the engine's own `structurally_streamable` gate. Two residues stay recorded rather than resolved: the route registry's mode vocabulary is image-only, so the video-mode coordinates (t2v/v2v/r2v/rv2v/mv2v/ads2v) can never carry a witness even though the shaping fires for them (the MLX consult site passes text_to_image for every cold load) — the reconciliation reads them as wildcard-expanded, not as drift; and the request-peak measurement for this family remains absent, so implementation is still not evidence of a measured request-level saving."
           ]
         },
         "candle": {
