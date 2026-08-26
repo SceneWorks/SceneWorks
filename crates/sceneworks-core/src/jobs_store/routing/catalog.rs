@@ -1647,6 +1647,14 @@ pub fn imported_image_request_provider_eligible(
         }
     }
     match imported_requested_quant(payload, ignore_quant_tier) {
+        // `supported_quants` advertises the provider's quantize-on-LOAD tiers. For a native NVFP4
+        // checkpoint the tier is not a load-time instruction at all — the stored codec is a
+        // property of the file and the engine's compiled plan owns which projections execute
+        // packed (sc-21485: the klein single-file provider advertises only q4/q8 here and takes
+        // no quant on its LoadSpec). The `native_nvfp4` block above has already vetted that the
+        // request names nvfp4 or nothing, so requiring the label in `supported_quants` too would
+        // close the exact route the engine registers.
+        Ok(Some("nvfp4")) if native_nvfp4 => {}
         Ok(Some(quant)) if !route.supported_quants.iter().any(|value| value == quant) => {
             return false;
         }

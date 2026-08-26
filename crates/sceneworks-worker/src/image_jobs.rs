@@ -2500,7 +2500,7 @@ pub(crate) fn write_image_asset(
             crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
                 &request.model_manifest_entry,
                 None,
-                crate::checkpoint_weight_facts_host::materialization_from_runtime(),
+                crate::checkpoint_weight_facts_host::materialization_from_runtime(None),
             )
             .as_ref(),
         );

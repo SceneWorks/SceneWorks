@@ -59,6 +59,8 @@ const WORKER_IMAGE_MAGE_FINETUNED: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/mage_finetuned.rs");
 const WORKER_IMAGE_SDXL_IMPORTED: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/sdxl_imported.rs");
+const WORKER_IMAGE_CHECKPOINT_PLAN: &str =
+    include_str!("../../../../sceneworks-worker/src/image_jobs/checkpoint_plan.rs");
 const WORKER_ENGINE_TABLE: &str = include_str!("../../../../sceneworks-worker/src/engines.rs");
 const WORKER_GPU_CAPABILITIES: &str = include_str!("../../../../sceneworks-worker/src/gpu.rs");
 const WORKER_VIDEO_DISPATCH: &str =
@@ -744,6 +746,24 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
                 "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
             ],
         ),
+        // The flux2 single-file import generates through the PLAN-DRIVEN route (epic 20398), whose
+        // shared `generate_one` builds the one production request literal both platform drivers
+        // call. The chain proves the literal carries `preview` (anchored between the literal open
+        // and its `cancel:` field so a comment cannot preserve the claim), that it generates
+        // through the memory-scoped seam, and that BOTH per-item drivers supply the live sink.
+        "flux2" => source_has_ordered_fragments(
+            source,
+            &[
+                "let mut generation = GenerationRequest {",
+                "preview,",
+                "cancel: cancel.clone(),",
+                "crate::memory_strategy::generate_with_scope(",
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+                "preview,",
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+                "preview,",
+            ],
+        ),
         _ => false,
     }
 }
@@ -895,6 +915,7 @@ fn imported_family_rows(
             "krea_2" => WORKER_IMAGE_KREA_IMPORTED,
             "mage-flow" => WORKER_IMAGE_MAGE_FINETUNED,
             "sdxl" => WORKER_IMAGE_SDXL_IMPORTED,
+            "flux2" => WORKER_IMAGE_CHECKPOINT_PLAN,
             _ => "",
         };
         let preview_sink = imported_preview_sink(family, preview_source);
@@ -4002,12 +4023,13 @@ mod tests {
                     // a parity obligation records.
                     "mage-flow" => (&["text_to_image"][..], &["text_to_image"][..], true, false),
                     // FLUX.2 (sc-11043, epic 11037). The import GATE admits the Klein NVFP4
-                    // single file, but the provider row that serves it is engine DATA that
-                    // arrives with the inference pin carrying sc-21485's registration — the pin
-                    // in place today declares only `flux2` + `comfy_ui_tree`. So at this pin the
-                    // family is admitted and routes NOWHERE, on either backend, and the matrix
-                    // records exactly that rather than a capability nothing backs. MLX stays
-                    // false permanently: it has no consumer for packed E2M1 weights.
+                    // single file, and the provider row that serves it is engine DATA that
+                    // arrives with the inference pin carrying sc-21485's `flux2` +
+                    // `transformer_file` registration — present since the epic's terminal pin
+                    // (sc-11045). Both cells therefore read the live facts: with the row the
+                    // candle cells are true, without it the family is admitted and routes
+                    // nowhere. MLX stays false permanently: it has no consumer for packed E2M1
+                    // weights.
                     //
                     // The generator's own two-sided rule is what keeps this honest across the
                     // bump — "declared and routable" or "undeclared and unroutable", never one
@@ -4068,9 +4090,18 @@ mod tests {
                 .all(|cell| { (cell.mlx, cell.candle) == (Some(true), Some(true)) }));
             let adapters_should_route = matches!(row.family.as_str(), "krea_2" | "sdxl");
             for adapter in &row.user_adapters {
+                // flux2 adapter truth moves with the pin like its serving cells (sc-11043 /
+                // sc-11045): the klein single-file registration arrives declaring LoRA/LoKr
+                // support, so once the route exists the candle adapter cell is live engine data —
+                // per backend, since MLX has no packed-E2M1 consumer and never gains the route.
+                let expected = if row.family == "flux2" {
+                    (Some(mlx_serves), Some(candle_serves))
+                } else {
+                    (Some(adapters_should_route), Some(adapters_should_route))
+                };
                 assert_eq!(
                     (adapter.mlx, adapter.candle),
-                    (Some(adapters_should_route), Some(adapters_should_route)),
+                    expected,
                     "imported {}/{} adapter truth must come from the live family gate",
                     row.family,
                     adapter.capability
@@ -4162,6 +4193,36 @@ mod tests {
         assert!(
             !imported_preview_sink("mage-flow", &crossed_mage_request),
             "Mage preview support must not borrow a scope that generates another request",
+        );
+
+        // flux2 rides the plan-driven route (sc-11045): one shared request literal, two drivers.
+        // Dropping `preview,` from the literal — anchored on its `cancel:` neighbour at the
+        // literal's 12-space indent — must fail the claim; a comment or the drivers' own closure
+        // parameters must not preserve it.
+        assert!(imported_preview_sink("flux2", WORKER_IMAGE_CHECKPOINT_PLAN));
+        let normalized_plan = WORKER_IMAGE_CHECKPOINT_PLAN.replace("\r\n", "\n");
+        let without_plan_sink = normalized_plan.replacen(
+            "            preview,\n            cancel: cancel.clone(),",
+            "            cancel: cancel.clone(),",
+            1,
+        );
+        assert_ne!(
+            without_plan_sink, normalized_plan,
+            "flux2 mutation must apply"
+        );
+        assert!(
+            !imported_preview_sink("flux2", &without_plan_sink),
+            "flux2 must not inherit preview from the drivers' closure parameters"
+        );
+        let without_plan_scope = normalized_plan.replacen(
+            "crate::memory_strategy::generate_with_scope(",
+            "removed_memory_scope(",
+            1,
+        );
+        assert_ne!(without_plan_scope, normalized_plan);
+        assert!(
+            !imported_preview_sink("flux2", &without_plan_scope),
+            "flux2 preview support must remain bound to the request-scoped production generator",
         );
     }
 

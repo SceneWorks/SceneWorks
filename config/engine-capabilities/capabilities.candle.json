@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "28f0563baa03640ade1635356d2d54fe8a477f1a",
+    "inferenceRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -1106,6 +1106,22 @@
       "source": "comfy_ui_tree",
       "operation": "generate",
       "providerId": "flux2_dev",
+      "conditioning": [],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "flux2",
+      "source": "transformer_file",
+      "operation": "generate",
+      "providerId": "flux2_klein_9b",
       "conditioning": [],
       "supportsLora": true,
       "supportsLokr": true,

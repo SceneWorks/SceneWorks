@@ -41,8 +41,9 @@ use std::path::Path;
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 use sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID;
 use sceneworks_core::checkpoint_weight_facts::{
-    CheckpointWeightFactsV1, MaterializationFact, MaterializationUnavailable,
-    NativeExecutionCapabilityFact, SourceBindingFact, SourceCodecFact,
+    CheckpointWeightFactsV1, ExecutionRepresentation, MaterializationFact,
+    MaterializationUnavailable, MaterializedCodecFact, NativeExecutionCapabilityFact,
+    SourceBindingFact, SourceCodecFact,
 };
 use serde_json::{Map, Value};
 
@@ -63,37 +64,162 @@ pub(crate) fn host_native_execution_capability() -> NativeExecutionCapabilityFac
     NativeExecutionCapabilityFact::dense_only()
 }
 
-/// What this host materialized the load as — or the explicit statement that nothing measured it.
+/// What this host materialized the load as — the engine's receipt on the runtime handle translated
+/// row-for-row into the SceneWorks wire vocabulary — or the explicit statement that nothing
+/// measured the load.
 ///
-/// # Why this currently answers `Unavailable`
+/// # The translation this seam was designed for
 ///
-/// The measurement exists and is merged inference-side (PR #806): a loaded checkpoint answers
-/// `checkpoint_weight_facts()` on `candle_gen_krea::loader::Weights` and on any
-/// `LogicalWeightReader`, returning a receipt split per `ExecutionRepresentation` and validated
-/// against the host capability that licenses it.
+/// The measurement is merged inference-side (PR #806) and, since the runtime-handle surface landed
+/// (inference PR #813/#821), exposed on the object a worker actually holds:
+/// `gen_core::Generator::checkpoint_weight_facts()` answers with the validated
+/// `CheckpointWeightFacts` of the most recent materialization. A caller with a loaded generator
+/// passes `model.checkpoint_weight_facts()` here; a caller with no handle passes `None` and gets
+/// the same honest [`MaterializationUnavailable::NoRuntimeReceipt`] this function always returned.
 ///
-/// **SceneWorks does not hold either type.** The imported lanes hand the registry a `LoadSpec` and
-/// receive a loaded *generator* back (`start_cached_gen_stream_after_cold_admission`); the loader
-/// structs that own the plan and the receipt never cross the crate boundary, and no accessor on
-/// `gen_core::Generator`, `ModelDescriptor` or the registry re-exposes them. So there is no call
-/// this module could make at any pin — the gap is a missing accessor on the *runtime handle*, not a
-/// missing pin.
+/// Rows translate faithfully, one [`MaterializedCodecFact`] per measured `(codec,
+/// representation)` row — including the genuine `dense-fallback` rows the engine reports for
+/// `Packed`-priced projections it demoted to dense W4A16 at construction time. The representation
+/// is matched exhaustively rather than round-tripped through labels, so a new engine
+/// representation is a compile error here, never a silently dropped row. `complete` is the
+/// engine's own whole-tensor-surface judgement (`CheckpointWeightFacts::is_complete`).
 ///
-/// That is why the arm is [`MaterializationUnavailable::NoRuntimeReceipt`] rather than a `cfg` or a
-/// feature gate: the honest statement is "nothing measured this load", and it is honest on every
-/// pin and every platform. When the runtime grows a facts accessor on the loaded handle, this
-/// function is where the receipt is translated — the whole call graph above it already carries the
-/// three facts separately and needs no further change.
-///
-/// **What it must never do** is fill the gap in. Returning a `Reported` row derived from
+/// **What it must never do** is fill a `None` in. Returning a `Reported` row derived from
 /// [`host_native_execution_capability`] would assert a native run nobody observed on exactly the
 /// hosts where the claim is most tempting and least checkable; returning a `DenseFallback` row
-/// would assert a dense run nobody observed either. `None` is the true answer and the consumers are
-/// built to render it as "not measured".
-pub(crate) fn materialization_from_runtime() -> MaterializationFact {
-    MaterializationFact::Unavailable {
-        reason: MaterializationUnavailable::NoRuntimeReceipt,
+/// would assert a dense run nobody observed either. `None` from the handle means "nothing measured
+/// this load" — a directory-sourced import, a packed-tier variant resolved to a folder, a provider
+/// that has not adopted the seam, or a lazy provider before its first materialization — and the
+/// consumers are built to render it as "not measured".
+pub(crate) fn materialization_from_runtime(
+    facts: Option<gen_core::CheckpointWeightFacts>,
+) -> MaterializationFact {
+    let Some(facts) = facts else {
+        return MaterializationFact::Unavailable {
+            reason: MaterializationUnavailable::NoRuntimeReceipt,
+        };
+    };
+    MaterializationFact::Reported {
+        rows: facts
+            .materialized()
+            .iter()
+            .map(|row| MaterializedCodecFact {
+                codec_id: row.codec_id.to_owned(),
+                representation: match row.representation {
+                    gen_core::ExecutionRepresentation::NativePacked => {
+                        ExecutionRepresentation::NativePacked
+                    }
+                    gen_core::ExecutionRepresentation::DenseFallback => {
+                        ExecutionRepresentation::DenseFallback
+                    }
+                },
+                tensor_count: row.tensor_count,
+                source_bytes: row.source_bytes,
+                resident_bytes: row.resident_bytes,
+            })
+            .collect(),
+        complete: facts.is_complete(),
     }
+}
+
+/// The whole fact set for one imported checkpoint request **with the runtime handle in hand** —
+/// the post-load sibling of [`imported_checkpoint_facts`] (sc-11045).
+///
+/// With engine facts, all three facts upgrade together, not just the materialization:
+///
+/// * The **source inventory** becomes the engine's compiled per-codec topology
+///   ([`SourceCodecFact::counted`] rows), which is what lets the receipt's dense rows validate —
+///   a real NVFP4 checkpoint also stores dense tensors (norms, embeddings), and a source list
+///   holding only the header-classified codec would make every such receipt row read as aliasing.
+/// * The **binding** prefers the engine's verified one (re-checked against the pin at read time)
+///   over a fresh stat of the same path.
+/// * The **materialization** is the translated receipt ([`materialization_from_runtime`]).
+///
+/// The one thing the engine cannot vouch for is *correlation with this entry*: an engine source
+/// inventory that does not declare the codec admission resolved for the entry would mean the
+/// receipt describes some other artifact (or the classification lies), so this refuses the receipt
+/// and falls back to the honest header-declared, `no-runtime-receipt` fact set rather than pairing
+/// facts about two different things. `None` engine facts (a lazy provider before its first read, a
+/// non-adopting provider) take the same fallback.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn runtime_checkpoint_facts(
+    entry: &Map<String, Value>,
+    checkpoint_path: Option<&Path>,
+    engine_facts: Option<gen_core::CheckpointWeightFacts>,
+) -> Option<CheckpointWeightFactsV1> {
+    let no_receipt =
+        || imported_checkpoint_facts(entry, checkpoint_path, materialization_from_runtime(None));
+    let codec_id = sceneworks_core::jobs_store::imported_entry_source_codec(entry)?;
+    let facts = match engine_facts {
+        Some(facts) if facts.source().declares(codec_id) => facts,
+        Some(facts) => {
+            tracing::warn!(
+                codec_id,
+                engine_codecs = ?facts
+                    .source()
+                    .entries
+                    .iter()
+                    .map(|row| row.codec_id)
+                    .collect::<Vec<_>>(),
+                "engine receipt does not declare the entry's verified source codec; \
+                 keeping the no-receipt fact set rather than correlating mismatched artifacts"
+            );
+            return no_receipt();
+        }
+        None => return no_receipt(),
+    };
+    let binding = facts
+        .source_binding()
+        .map(|binding| {
+            SourceBindingFact::new(
+                binding
+                    .canonical_path()
+                    .file_name()
+                    .and_then(|name| name.to_str()),
+                binding.size_bytes(),
+            )
+        })
+        .or_else(|| checkpoint_path.and_then(source_binding_for));
+    let source = facts
+        .source()
+        .entries
+        .iter()
+        .map(|row| SourceCodecFact::counted(row.codec_id, row.tensor_count, row.source_bytes))
+        .collect();
+    // The capability that rides a MEASURED fact set is the engine's own — the one that actually
+    // licensed (or forbade) every native row in this receipt, validated against it at load time.
+    // The worker probe and the engine floor agree by construction (`the_sm_120_floor_excludes_
+    // sm_100`), but the probe is process-startup state; pairing the receipt with anything other
+    // than the capability that judged it would let the two drift in exactly the tests and startup
+    // windows where the probe has not run.
+    let capability = if facts.capability().is_dense_only() {
+        NativeExecutionCapabilityFact::dense_only()
+    } else {
+        match NativeExecutionCapabilityFact::new(facts.capability().native_codec_ids()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    codec_id,
+                    "engine capability failed to translate; keeping the no-receipt fact set"
+                );
+                return no_receipt();
+            }
+        }
+    };
+    let materialization = materialization_from_runtime(Some(facts));
+    CheckpointWeightFactsV1::try_new(binding, capability, source, materialization)
+        .map_err(|error| {
+            // Refusal keeps the run honest, not silent: fall back to the header-declared,
+            // no-receipt fact set so the asset still states its source and this host's capability.
+            tracing::warn!(
+                error = %error,
+                codec_id,
+                "runtime checkpoint weight facts refused; keeping the no-receipt fact set"
+            );
+        })
+        .ok()
+        .or_else(no_receipt)
 }
 
 /// The host-independent binding token for a resolved checkpoint file, matching the engine's
@@ -219,7 +345,7 @@ pub(crate) fn manifest_entry_metrics_pair(
     entry: &Map<String, Value>,
 ) -> (Option<String>, Option<String>) {
     facts_metrics_pair(
-        imported_checkpoint_facts(entry, None, materialization_from_runtime()).as_ref(),
+        imported_checkpoint_facts(entry, None, materialization_from_runtime(None)).as_ref(),
     )
 }
 
@@ -338,7 +464,7 @@ mod tests {
 
     #[test]
     fn the_runtime_receipt_is_unavailable_and_never_a_synthesized_native_row() {
-        let materialization = materialization_from_runtime();
+        let materialization = materialization_from_runtime(None);
         assert!(
             matches!(
                 materialization,
@@ -368,21 +494,25 @@ mod tests {
     #[test]
     fn an_entry_without_a_classification_carries_no_facts() {
         assert!(
-            imported_checkpoint_facts(&entry(None), None, materialization_from_runtime()).is_none()
+            imported_checkpoint_facts(&entry(None), None, materialization_from_runtime(None))
+                .is_none()
         );
         assert!(imported_checkpoint_facts(
             &entry(Some("q4")),
             None,
-            materialization_from_runtime()
+            materialization_from_runtime(None)
         )
         .is_none());
     }
 
     #[test]
     fn the_receipt_object_keeps_the_three_facts_apart() {
-        let facts =
-            imported_checkpoint_facts(&entry(Some("nvfp4")), None, materialization_from_runtime())
-                .expect("facts");
+        let facts = imported_checkpoint_facts(
+            &entry(Some("nvfp4")),
+            None,
+            materialization_from_runtime(None),
+        )
+        .expect("facts");
         let object = facts_receipt_object(&facts);
 
         assert_eq!(object["source"][0]["codecId"], json!(NVFP4_CODEC_ID));
@@ -404,9 +534,12 @@ mod tests {
 
     #[test]
     fn the_metrics_pair_reports_the_source_and_leaves_the_representation_absent() {
-        let facts =
-            imported_checkpoint_facts(&entry(Some("nvfp4")), None, materialization_from_runtime())
-                .expect("facts");
+        let facts = imported_checkpoint_facts(
+            &entry(Some("nvfp4")),
+            None,
+            materialization_from_runtime(None),
+        )
+        .expect("facts");
         let (source_codec, representation) = facts_metrics_pair(Some(&facts));
         assert_eq!(source_codec.as_deref(), Some(NVFP4_CODEC_ID));
         assert_eq!(representation, None);
@@ -467,6 +600,228 @@ mod tests {
             Some("dense-fallback"),
             "the source stays NVFP4 while the execution says dense — the two facts, separately"
         );
+    }
+
+    /// A validated engine fact set for a **mixed-policy NVFP4 load**: one projection executed the
+    /// packed W4A4 operand, one was demoted to dense W4A16 (a genuine dense-fallback row, not a
+    /// synthesized one), and a dense-BF16 row rode along — the exact shape the pinned engine
+    /// documents for this leg. Built through `gen_core::CheckpointWeightFacts::new`, so everything
+    /// downstream consumes a receipt the engine itself would have validated.
+    fn engine_mixed_facts() -> gen_core::CheckpointWeightFacts {
+        use gen_core::checkpoint_codec::{
+            CodecResidencyReport, CompanionRole, CompanionTensorPlan, LogicalReadMaterialization,
+            LogicalTensorPlan, LogicalWeightPlan, LogicalWeightReceipt, PlannedResidency,
+            ResidencyMode, TensorCodecSpec, WeightEncoding, DENSE_BF16_CODEC, NVFP4_CODEC,
+        };
+        use gen_core::checkpoint_facts::NativeExecutionCapability;
+
+        let nvfp4_tensor = |key: &str, mode: ResidencyMode, resident: u64| LogicalTensorPlan {
+            logical_key: key.to_owned(),
+            physical_key: key.to_owned(),
+            encoding: WeightEncoding::UInt8,
+            shape: vec![64, 64],
+            source_bytes: 2048,
+            codec_id: NVFP4_CODEC.codec_id,
+            resident_encoding: WeightEncoding::DenseBf16,
+            codec: TensorCodecSpec::Nvfp4 {
+                block_scale: format!("{key}_scale"),
+                global_scale: format!("{key}_scale_2"),
+                input_scale: None,
+                stored_shape: [64, 64],
+                logical_shape: [64, 64],
+                logical_shape_declared: true,
+                full_precision_matrix_mult: false,
+            },
+            residency: PlannedResidency {
+                mode,
+                resident_bytes: resident,
+            },
+            transform: None,
+        };
+        let scale_companion = |owner: &str, resident: u64| CompanionTensorPlan {
+            physical_key: format!("{owner}_scale"),
+            role: CompanionRole::WeightScale,
+            owner_physical_key: owner.to_owned(),
+            source_bytes: 256,
+            resident_bytes: resident,
+        };
+        let plan = LogicalWeightPlan {
+            mapping_id: "sc-11045-host-translation-test-v1",
+            tensors: vec![
+                nvfp4_tensor("packed", ResidencyMode::Packed, 2048),
+                nvfp4_tensor("fallback", ResidencyMode::Dense, 8192),
+                LogicalTensorPlan {
+                    logical_key: "plain".to_owned(),
+                    physical_key: "plain".to_owned(),
+                    encoding: WeightEncoding::DenseBf16,
+                    shape: vec![8, 8],
+                    source_bytes: 128,
+                    codec_id: DENSE_BF16_CODEC.codec_id,
+                    resident_encoding: WeightEncoding::DenseBf16,
+                    codec: TensorCodecSpec::Dense,
+                    residency: PlannedResidency {
+                        mode: ResidencyMode::Dense,
+                        resident_bytes: 128,
+                    },
+                    transform: None,
+                },
+            ],
+            companions: vec![
+                scale_companion("packed", 256),
+                scale_companion("fallback", 0),
+            ],
+            source_bytes: 2048 + 2048 + 128 + 256 + 256,
+        };
+        let row = |codec_id: &'static str,
+                   representation: gen_core::ExecutionRepresentation,
+                   source_bytes: u64,
+                   resident_bytes: u64| CodecResidencyReport {
+            codec_id,
+            representation,
+            tensor_count: 1,
+            source_bytes,
+            resident_bytes,
+        };
+        let receipt = LogicalWeightReceipt {
+            mapping_id: "sc-11045-host-translation-test-v1",
+            tensor_count: 3,
+            source_bytes: 2048 + 2048 + 128 + 256 + 256,
+            materialization: LogicalReadMaterialization::Materialized,
+            demotions: Vec::new(),
+            residency: vec![
+                row(
+                    DENSE_BF16_CODEC.codec_id,
+                    gen_core::ExecutionRepresentation::DenseFallback,
+                    128,
+                    128,
+                ),
+                row(
+                    NVFP4_CODEC.codec_id,
+                    gen_core::ExecutionRepresentation::DenseFallback,
+                    2048 + 256,
+                    8192,
+                ),
+                row(
+                    NVFP4_CODEC.codec_id,
+                    gen_core::ExecutionRepresentation::NativePacked,
+                    2048 + 256,
+                    2048 + 256,
+                ),
+            ],
+        };
+        gen_core::CheckpointWeightFacts::new(
+            &plan,
+            NativeExecutionCapability::new([NVFP4_CODEC.codec_id]),
+            receipt,
+        )
+        .expect("the fixture receipt is the honest receipt of its own plan")
+    }
+
+    /// **The translation, row for row (sc-11045).** Every measured engine row — the packed one,
+    /// the genuine demoted-dense one, and the dense-BF16 one — becomes exactly one wire row with
+    /// the same codec, representation, counts and bytes, and `complete` carries the engine's own
+    /// whole-surface judgement. This is the facts-present test the seam's docs anticipated:
+    /// dropping the translation (reverting to the unconditional `Unavailable`) turns the expected
+    /// `Reported` into `Unavailable` and this test reds.
+    #[test]
+    fn the_runtime_receipt_translates_row_for_row() {
+        let translated = materialization_from_runtime(Some(engine_mixed_facts()));
+        let expected_row = |codec_id: &str,
+                            representation: ExecutionRepresentation,
+                            source_bytes: u64,
+                            resident_bytes: u64| MaterializedCodecFact {
+            codec_id: codec_id.to_owned(),
+            representation,
+            tensor_count: 1,
+            source_bytes,
+            resident_bytes,
+        };
+        assert_eq!(
+            translated,
+            MaterializationFact::Reported {
+                rows: vec![
+                    expected_row(
+                        "dense-bf16-v1",
+                        ExecutionRepresentation::DenseFallback,
+                        128,
+                        128
+                    ),
+                    expected_row(
+                        NVFP4_CODEC_ID,
+                        ExecutionRepresentation::DenseFallback,
+                        2304,
+                        8192
+                    ),
+                    expected_row(
+                        NVFP4_CODEC_ID,
+                        ExecutionRepresentation::NativePacked,
+                        2304,
+                        2304
+                    ),
+                ],
+                complete: true,
+            },
+        );
+    }
+
+    /// The whole runtime fact set for a mixed-policy load: the source inventory is the engine's
+    /// counted topology (which is what lets the dense-BF16 receipt row validate at all), the
+    /// capability is the one that licensed the receipt, and the rendered representation is the
+    /// distinct `mixed:<packed>/<dense>` value — never either pure label.
+    #[test]
+    fn a_mixed_policy_load_lights_the_mixed_rendering() {
+        let facts =
+            runtime_checkpoint_facts(&entry(Some("nvfp4")), None, Some(engine_mixed_facts()))
+                .expect("a receipt declaring the entry's codec produces facts");
+
+        assert_eq!(
+            facts.representation_label(NVFP4_CODEC_ID).as_deref(),
+            Some("mixed:1/1"),
+            "one packed + one demoted-dense NVFP4 tensor must render as the counted mixed label"
+        );
+        assert_eq!(facts.executes_natively(NVFP4_CODEC_ID), Some(true));
+        assert_eq!(
+            facts.representation_label("dense-bf16-v1").as_deref(),
+            Some("dense-fallback"),
+            "the dense rows keep the engine's own pure label"
+        );
+        // The engine's inventory is carried with its counts, not collapsed to the header codec.
+        let declared: Vec<&str> = facts
+            .source()
+            .iter()
+            .map(|row| row.codec_id.as_str())
+            .collect();
+        assert_eq!(declared, ["dense-bf16-v1", NVFP4_CODEC_ID]);
+        assert_eq!(facts.resident_bytes(), Some(128 + 8192 + 2304));
+    }
+
+    /// No engine facts (a lazy provider before its first read, a non-adopting provider, a
+    /// directory-sourced load) keeps the exact pre-existing no-receipt behaviour, and an engine
+    /// receipt for a DIFFERENT artifact — one whose inventory does not declare the entry's
+    /// verified codec — is refused rather than correlated.
+    #[test]
+    fn a_missing_or_mismatched_receipt_falls_back_to_no_runtime_receipt() {
+        for facts in [
+            runtime_checkpoint_facts(&entry(Some("nvfp4")), None, None),
+            runtime_checkpoint_facts(&entry(Some("int8_tensorwise_per_row")), None, {
+                // The mixed fixture declares nvfp4-v1 + dense-bf16-v1 — not int8-per-row-v1.
+                Some(engine_mixed_facts())
+            }),
+        ] {
+            let facts = facts.expect("the fallback still carries the header-declared facts");
+            assert!(
+                matches!(
+                    facts.materialization(),
+                    MaterializationFact::Unavailable {
+                        reason: MaterializationUnavailable::NoRuntimeReceipt
+                    }
+                ),
+                "no correlated receipt means no materialization claim: {:?}",
+                facts.materialization()
+            );
+        }
+        // And an entry with no verified classification still produces nothing at all.
+        assert!(runtime_checkpoint_facts(&entry(None), None, Some(engine_mixed_facts())).is_none());
     }
 
     #[test]
