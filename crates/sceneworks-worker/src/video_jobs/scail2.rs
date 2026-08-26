@@ -4,6 +4,11 @@ use super::prelude::*;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+use super::run_blocking_with_heartbeat;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use super::wan::scail2_sampling;
 #[cfg(target_os = "macos")]
 use super::wan::{
@@ -20,6 +25,50 @@ use super::{
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS;
+
+/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
+
+/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
+/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
+/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
+/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
+/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
+/// `person_segment_sam3` vs `person_segment_sam3_candle`) plus the paint background, so the
+/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) async fn scail2_segment_blocking<R, F>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    task_label: &'static str,
+    segment: F,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
+{
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel),
+        SCAIL2_SEGMENT_CANCEL_MESSAGE,
+        task_label,
+        crate::no_cancel_ack(),
+        tokio::task::spawn_blocking(move || segment(flag)),
+    )
+    .await
+}
 
 // ---------------------------------------------------------------------------
 // Real MLX SCAIL-2 generation (macOS, via mlx-gen-scail2, epic 5439 / sc-5448): end-to-end character

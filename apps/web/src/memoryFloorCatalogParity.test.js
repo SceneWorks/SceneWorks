@@ -1367,9 +1367,10 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "wan_2_2_vace_fun_14b",
       ].sort(),
     );
-    // And exactly one declares the lane with NO number of any kind (sc-17156, above).
+    // MiniMax-H3 is no longer part of the unmeasured population: SC-20754 supplies its measured
+    // Candle rows at the shipped 1344x768 geometry, and the feature branch must retain that evidence.
     const unmeasured = rest.filter((model) => !Number.isFinite(model.candle?.minMemoryGb));
-    expect(unmeasured.map((model) => model.id)).toEqual(["minimax_h3"]);
+    expect(unmeasured).toEqual([]);
 
     // The three shapes are exhaustive over the lane: `withPerTier ∪ blanketOnly ∪ unmeasured` is
     // exactly `uncalibratedLane`. With each subset pinned by id above, this closes the population
@@ -1378,6 +1379,15 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect(uncalibratedLane.map((model) => model.id).sort()).toEqual(
       [...withPerTier, ...blanketOnly, ...unmeasured].map((model) => model.id).sort(),
     );
+
+    for (const id of ["minimax_h3", "minimax_h3_ref"]) {
+      expect(manifestModels.find((model) => model.id === id)?.candle).toMatchObject({
+        minMemoryGb: 43,
+        vramGbByTier: { q4: 40.068, q8: 74.696, bf16: 67.012 },
+        vramMeasuredPixels: 1344 * 768,
+        measured: true,
+      });
+    }
   });
 
   it("pins the shipped shapes the SimpleModelManager fixtures claim", () => {

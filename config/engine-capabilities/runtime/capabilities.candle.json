@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6d8be650d34d53b7539cb55c8dee862bd0863960",
+    "inferenceRevision": "28f0563baa03640ade1635356d2d54fe8a477f1a",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -142,6 +142,34 @@
       "mode": "video_bridge",
       "engineIds": [
         "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "first_last_frame",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "image_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3",
+      "mode": "text_to_video",
+      "engineIds": [
+        "minimax_h3"
+      ]
+    },
+    {
+      "modelId": "minimax_h3_ref",
+      "mode": "reference_to_video",
+      "engineIds": [
+        "minimax_h3"
       ]
     },
     {
@@ -1417,7 +1445,7 @@
           "referenceAudio"
         ],
         "supports_lora": true,
-        "supports_lokr": false,
+        "supports_lokr": true,
         "supported_quants": [
           "q4",
           "q8"
