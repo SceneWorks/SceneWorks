@@ -16051,6 +16051,11 @@ fn candle_minimax_h3_tier_selection_defaults_q4_and_preserves_explicit_precision
 fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
     use crate::video_jobs::minimax_h3::resolve_candle_minimax_h3_load;
 
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
     const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
     const REHOST: &str = "SceneWorks/minimax-h3-mlx";
     const REVISION: &str = "1111111111111111111111111111111111111111";
@@ -16160,6 +16165,11 @@ fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
 fn candle_minimax_h3_ref_resolves_hosted_partition_and_rejects_torn_tiers() {
     use crate::video_jobs::minimax_h3::resolve_candle_minimax_h3_load;
 
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
     const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
     const REHOST: &str = "SceneWorks/minimax-h3-mlx";
     const REVISION: &str = "2222222222222222222222222222222222222222";
