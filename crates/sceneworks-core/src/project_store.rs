@@ -65,6 +65,7 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/renders",
     "assets/documents",
     "assets/poses",
+    "assets/keypoints",
     "characters",
     "generation-sets",
     "loras",
@@ -12276,6 +12277,103 @@ mod tests {
         assert_eq!(user["name"], "My Front");
         assert_eq!(user["builtin"], false);
         assert!(user["sourceImageRef"].as_str().is_some());
+    }
+
+    #[test]
+    fn keypoint_presets_survive_schema_version_and_dirty_reindex() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let keypoints_project = store
+            .ensure_global_keypoints_project()
+            .expect("keypoint project provisions");
+        let project_path = std::path::PathBuf::from(&keypoints_project.path);
+        assert!(
+            project_path.join("assets/keypoints").is_dir(),
+            "provisioning creates the authoritative keypoint sidecar folder"
+        );
+
+        let upload = stage_kps_upload(&data_dir, "upload-reindex.png");
+        let preset = store
+            .create_keypoint_asset(&json!({
+                "name": "Reindex Angle",
+                "kps": front_kps(),
+                "sourceUploadPath": upload,
+            }))
+            .expect("preset persists");
+        let preset_id = preset["id"].as_str().expect("preset id").to_owned();
+        let collection = store
+            .upsert_keypoint_collection(&json!({
+                "name": "Reindex collection",
+                "orderedPresetIds": [preset_id],
+                "isDefault": true,
+            }))
+            .expect("collection persists");
+        let collection_id = collection["id"].as_str().expect("collection id").to_owned();
+
+        let assert_preset_lists_and_resolves = || {
+            let presets = store.list_keypoint_presets().expect("preset listing");
+            assert!(
+                presets
+                    .iter()
+                    .any(|preset| preset["id"] == json!(preset_id)),
+                "the recovered sidecar is visible through the Key Point Library"
+            );
+            let (resolved_collection_id, resolved) = store
+                .resolve_angle_collection(Some(&collection_id))
+                .expect("collection resolution");
+            assert_eq!(resolved_collection_id, collection_id);
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].preset_id, preset_id);
+            assert_eq!(resolved[0].name, "Reindex Angle");
+        };
+
+        // Simulate a schema-version rebuild: the persisted index was cleared and its version
+        // stamp is stale, while the user-owned keypoint sidecar remains authoritative on disk.
+        {
+            let connection = connect_project_db(&project_path).expect("open index");
+            connection
+                .execute("delete from assets", [])
+                .expect("clear index");
+            connection
+                .execute(
+                    "update project_metadata set value = ?1 where key = ?2",
+                    params![
+                        (PROJECT_SCHEMA_VERSION - 1).to_string(),
+                        ASSET_INDEX_VERSION_KEY
+                    ],
+                )
+                .expect("stale index version");
+            connection
+                .execute_batch(&format!(
+                    "pragma user_version = {}",
+                    PROJECT_SCHEMA_VERSION - 1
+                ))
+                .expect("stale schema version");
+        }
+        assert!(
+            project_path
+                .join(format!("assets/keypoints/{preset_id}.sceneworks.json"))
+                .exists(),
+            "precondition: keypoint sidecar survives the cleared index"
+        );
+        assert_preset_lists_and_resolves();
+
+        // Simulate a crashed index mutation: dirty-marker repair clears the rows again and must
+        // discover the same sidecar before it removes the marker.
+        {
+            let connection = connect_project_db(&project_path).expect("open index");
+            connection
+                .execute("delete from assets", [])
+                .expect("clear index for dirty repair");
+        }
+        std::fs::write(project_path.join(ASSET_INDEX_DIRTY_MARKER), b"repair")
+            .expect("write dirty marker");
+        assert_preset_lists_and_resolves();
+        assert!(
+            !project_path.join(ASSET_INDEX_DIRTY_MARKER).exists(),
+            "successful keypoint reindex clears the dirty marker"
+        );
     }
 
     #[test]

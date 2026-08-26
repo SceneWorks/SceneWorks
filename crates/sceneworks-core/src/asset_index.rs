@@ -32,6 +32,7 @@ pub(crate) const ASSET_FOLDERS: &[&str] = &[
     "assets/renders",
     "assets/documents",
     "assets/poses",
+    "assets/keypoints",
     "trash",
 ];
 
