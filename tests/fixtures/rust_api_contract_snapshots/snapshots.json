@@ -2864,10 +2864,7 @@
                       "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
                       "modes": [
                         "text_to_image",
-                        "edit_image",
-                        "image_inpaint",
-                        "image_detail",
-                        "character_image"
+                        "edit_image"
                       ],
                       "overlays": [
                         "none"
@@ -2900,16 +2897,90 @@
                         "bounded_transformer_residency"
                       ],
                       "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+                      "loadProfiles": [
+                        "ip_adapter",
+                        "lora_ip_adapter"
+                      ],
+                      "modes": [
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "identity"
+                      ],
+                      "parameterRanges": {
+                        "transformerWindowComponents": [
+                          "Dit"
+                        ],
+                        "transformerWindowSizes": [
+                          1,
+                          2,
+                          5,
+                          10
+                        ]
+                      },
+                      "parameters": {
+                        "transformerWindowComponent": "Dit",
+                        "transformerWindowSize": 10
+                      },
+                      "rung": "bounded_transformer_residency",
+                      "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+                      "tiers": [
+                        "bf16"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "staged_residency",
+                        "bounded_transformer_residency"
+                      ],
+                      "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
                       "modes": [
                         "text_to_image",
-                        "edit_image",
-                        "image_inpaint",
-                        "image_detail",
-                        "character_image"
+                        "edit_image"
                       ],
                       "overlays": [
                         "none",
                         "lora"
+                      ],
+                      "parameterRanges": {
+                        "transformerWindowComponents": [
+                          "Dit"
+                        ],
+                        "transformerWindowSizes": [
+                          1,
+                          2,
+                          5,
+                          10
+                        ]
+                      },
+                      "parameters": {
+                        "transformerWindowComponent": "Dit",
+                        "transformerWindowSize": 10
+                      },
+                      "rung": "bounded_transformer_residency",
+                      "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+                      "tiers": [
+                        "q4",
+                        "q8"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "staged_residency",
+                        "bounded_transformer_residency"
+                      ],
+                      "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+                      "loadProfiles": [
+                        "ip_adapter",
+                        "lora_ip_adapter"
+                      ],
+                      "modes": [
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "identity"
                       ],
                       "parameterRanges": {
                         "transformerWindowComponents": [
