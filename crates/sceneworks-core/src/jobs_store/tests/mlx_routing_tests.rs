@@ -1836,9 +1836,7 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
     );
 
     // ── The MiniMax-H3 pair: the precondition sc-19558 satisfied, DEMONSTRATED rather than asserted
-    // in prose. `minimax_h3`'s candle columns are still false (no measured ceiling, and
-    // `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is `#[cfg(target_os = "macos")]` end
-    // to end, so there is no dispatch arm), but the WEIGHTS half no longer blocks the flip.
+    // in prose. Both partitions are now routed, so both must keep a complete off-Mac install shape.
     let h3 = entry("minimax_h3").expect("minimax_h3 is in the builtin catalog");
     for os in ["windows", "linux"] {
         assert!(
@@ -1850,22 +1848,60 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
         );
     }
 
-    // The reference partition is the deliberate opposite. NOT because the candle engine refuses
-    // ref2va — sc-17157's candle port is an ancestor of the pinned revision and the pinned engine
-    // admits it (the manifest entry's sc-20267 correction is the authoritative record) — but
-    // because this repository has no candle lane for it: every `transformer_ref` download row is
-    // macOS-only (the off-Mac tier/route split is sc-19573's concern), there is no candle
-    // dispatch arm (`video_jobs/minimax_h3.rs` is `#[cfg(target_os = "macos")]` end to end), and
-    // the entry has no measured off-Mac ceiling. Advertising off-Mac weights for a mode no
-    // off-Mac lane dispatches is the same defect pointing the other way.
+    // SC-20756 closes the reference twin in the same transaction: all three hosted
+    // `transformer_ref` tiers are installable off-Mac and the Candle catalog column is live.
     let h3_ref = entry("minimax_h3_ref").expect("minimax_h3_ref is in the builtin catalog");
     for os in ["windows", "linux"] {
         assert_eq!(
             primary_rows_on(h3_ref, os),
-            0,
-            "minimax_h3_ref must have NO {os} download row while it has no candle dispatch arm, \
-             no off-Mac `transformer_ref` route and no measured off-Mac ceiling. Add the rows AND \
-             the routing column in the same change, and update this assertion deliberately"
+            3,
+            "minimax_h3_ref must carry exactly q4/q8/bf16 hosted transformer_ref primaries on {os}"
         );
+        let downloads = h3_ref["downloads"].as_array().expect("downloads");
+        let hosted: std::collections::BTreeSet<_> = downloads
+            .iter()
+            .filter(|download| download["coRequisite"].as_bool() != Some(true))
+            .filter(|download| {
+                download["platforms"]
+                    .as_array()
+                    .is_some_and(|platforms| platforms.iter().any(|value| value == os))
+            })
+            .map(|download| {
+                (
+                    download["variant"].as_str().expect("tier"),
+                    download["repo"].as_str().expect("repo"),
+                    download["files"][0].as_str().expect("file pattern"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hosted,
+            std::collections::BTreeSet::from([
+                (
+                    "bf16",
+                    "SceneWorks/minimax-h3-mlx",
+                    "bf16/transformer_ref/*"
+                ),
+                ("q4", "SceneWorks/minimax-h3-mlx", "q4/transformer_ref/*"),
+                ("q8", "SceneWorks/minimax-h3-mlx", "q8/transformer_ref/*"),
+            ])
+        );
+        for component in [
+            "text_encoder",
+            "video_vae",
+            "audio_vae",
+            "fl2va_audio_vae_config",
+        ] {
+            assert!(
+                downloads.iter().any(|download| {
+                    download["coRequisite"].as_bool() == Some(true)
+                        && download["componentId"].as_str() == Some(component)
+                        && download["platforms"]
+                            .as_array()
+                            .is_some_and(|platforms| platforms.iter().any(|value| value == os))
+                }),
+                "minimax_h3_ref is missing its {component} Candle co-requisite on {os}"
+            );
+        }
     }
 }

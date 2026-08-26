@@ -11772,25 +11772,24 @@ async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
 /// the wrong outcome entirely and would leave a guard below passing for a reason that has nothing
 /// to do with platform.
 ///
-/// The three mac-only-download families (`krea_realtime_14b`, `minimax_h3`, `minimax_h3_ref`) ride
+/// The two remaining mac-only-download families (`krea_realtime_14b`, `minimax_h3_ref`) ride
 /// the same route as everything else, because "install state is not a reachability gate" is only an
 /// argument until the REST leg actually exercises it.
 ///
 /// It listed ALL TWENTY when sc-19570 measured it. Syncing `main` into this epic branch gave
-/// thirteen of them a candle lane, so seven remain — and they are exactly the three mac-only
-/// families, which is why the paragraph above is now the whole rationale for the table rather than
-/// a footnote to it.
+/// thirteen of them a candle lane, and sc-20755 gave the three MiniMax-H3 base modes a Candle lane,
+/// so four remain — exactly the two mac-only families above.
 fn mlx_only_stranded_pairs() -> Vec<(&'static str, Value)> {
     vec![
-        // THIRTEEN PAIRS WERE REMOVED HERE when `main` was synced into the epic branch: the
+        // SIXTEEN PAIRS WERE REMOVED HERE: thirteen when `main` was synced into the epic branch
+        // and MiniMax-H3 base's three modes when sc-20755 added its measured Candle lane. The
         // `ltx_2_3` / `ltx_2_3_eros` five apiece, `wan_2_2`'s two keyframe shapes, and
-        // `wan_2_2_vace_fun_14b`'s `replace_person`. They were genuinely stranded on the epic
-        // branch; `main` ships the candle lanes that serve them, so they now belong to
-        // `candle_served_pairs` (two of them are asserted there) rather than here. Keeping them
-        // would have asserted that a served pair must TERMINATE off-Mac — the exact inversion of
-        // this guard. The same thirteen left `MLX_ONLY_ADVERTISED_PAIRS` in
+        // `wan_2_2_vace_fun_14b`'s `replace_person`, plus MiniMax-H3 t2va and both fl2va shapes.
+        // They now belong to `candle_served_pairs` rather than here. Keeping them would assert that
+        // a served pair must TERMINATE off-Mac — the exact inversion of this guard. The same rows
+        // left `MLX_ONLY_ADVERTISED_PAIRS` in
         // `routing/catalog.rs`, which is this table's core-side twin; the two must agree.
-        // The seven pairs the story's measurement did NOT list, because those three families ship
+        // The four pairs the story's measurement did NOT list, because these two families ship
         // `platforms: ["macos"]` downloads and it scoped itself to Windows/Linux-installable
         // models. They belong on the REST leg specifically: the whole argument for having an
         // enqueue gate at all is that it must refuse a raw REST call REGARDLESS of install state,
@@ -11805,24 +11804,6 @@ fn mlx_only_stranded_pairs() -> Vec<(&'static str, Value)> {
         (
             "krea_realtime_14b",
             json!({ "mode": "video_to_video", "sourceClipAssetId": "clip-1" }),
-        ),
-        ("minimax_h3", json!({ "mode": "text_to_video" })),
-        (
-            "minimax_h3",
-            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
-        ),
-        (
-            "minimax_h3",
-            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
-        ),
-        // The seventh row, back since sc-18650 restored the MLX Ref2VA route (it left this table
-        // while the declaration was withheld and NO lane claimed the pair, so sc-19504's enqueue
-        // gate 400'd it instead of admitting it for a platform verdict). It enqueues again, and
-        // off-Mac it strands exactly like its six neighbours: mac-only downloads, no candle
-        // dispatch arm, no off-Mac ceiling.
-        (
-            "minimax_h3_ref",
-            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
         ),
     ]
 }
@@ -11861,6 +11842,20 @@ fn candle_served_pairs() -> Vec<(&'static str, Value)> {
             "wan_2_2_i2v_14b",
             json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
         ),
+        // MiniMax-H3 base moved here in sc-20755; SC-20756 adds the Ref2VA twin.
+        ("minimax_h3", json!({ "mode": "text_to_video" })),
+        (
+            "minimax_h3",
+            json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
+        ),
+        (
+            "minimax_h3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
+        ),
+        (
+            "minimax_h3_ref",
+            json!({ "mode": "reference_to_video", "referenceAssetIds": ["img-1"] }),
+        ),
         (
             "svd",
             json!({ "mode": "image_to_video", "sourceAssetId": "img-1" }),
@@ -11883,7 +11878,7 @@ fn video_job_body(project_id: &str, model: &str, case: &Value) -> Value {
 }
 
 /// **THE HTTP CONTRACT GUARD (sc-19570).** `POST /api/v1/video/jobs` answers `201 Created` for
-/// byte-identical bodies on macOS, Windows and Linux alike — for the twenty MLX-only pairs AND for
+/// byte-identical bodies on macOS, Windows and Linux alike — for the MLX-only pairs AND for
 /// the candle-served ones.
 ///
 /// This is the property Michael ruled on: *"http contracts are not platform dependant and never
@@ -11902,14 +11897,13 @@ async fn the_video_enqueue_contract_is_identical_on_every_platform() {
     let stranded = mlx_only_stranded_pairs();
     let served = candle_served_pairs();
     // Was 20 when sc-19570 measured it. Syncing `main` into this epic branch gave thirteen of those
-    // pairs a real candle lane, so the stranded set is the seven mac-only-download pairs and the
-    // thirteen moved to `candle_served_pairs`. The guard is KEPT, not deleted, and kept EXACT: its
-    // job is to notice the table silently shrinking, which is still worth noticing — a drop below
-    // seven means a genuinely stranded pair stopped being covered.
+    // pairs a real Candle lane; sc-20755 moved the three MiniMax-H3 base modes, and sc-20756 moved
+    // Ref2VA. The guard is KEPT, not deleted, and kept EXACT: a drop below three means a genuinely
+    // stranded pair stopped being covered without its replacement lane being recorded here.
     assert_eq!(
         stranded.len(),
-        7,
-        "the stranded set is the seven mac-only-download pairs that enqueue — a shrunken table \
+        3,
+        "the stranded set is the three remaining mac-only-download pairs that enqueue — a shrunken table \
          would narrow every guard that reads it"
     );
 
@@ -11998,7 +11992,7 @@ async fn the_parity_replace_person_fixture_is_platform_independent() {
 /// candle worker exists (the job is unclaimable, not unserved), its `mlx` twin is inert off-Mac,
 /// and both `fail_unsupported_*` sweeps default to warn.
 ///
-/// The whole twenty-pair table drives it, on BOTH off-Mac platforms, so coverage did not shrink
+/// The current stranded-pair table drives it, on BOTH off-Mac platforms, so coverage does not shrink
 /// when the refusal moved off the HTTP boundary. Three further arms keep it honest:
 ///   * the terminal state is asserted on the enqueue RESPONSE, proving it does not wait for a
 ///     worker poll — the deployments that need this most are the ones where no worker ever polls;
