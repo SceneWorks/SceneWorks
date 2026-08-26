@@ -10920,6 +10920,64 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
+/// sc-21689: the plan route's cache-only mirror is a restart path too. A corrupt
+/// pre-existing SDXL component must be compared with the exact pinned HF-cache
+/// source and atomically replaced, never accepted merely because it is a file.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn cache_only_sdxl_mirror_replaces_a_corrupt_existing_destination() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let source =
+        sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), SDXL_CLIP_L_REPO)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(SDXL_CLIP_L_REVISION)
+            .join("vocab.json");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source parent");
+    let expected = b"pinned tokenizer vocabulary";
+    std::fs::write(&source, expected).expect("pinned source");
+
+    let destination_dir = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components")
+        .join("tokenizer");
+    std::fs::create_dir_all(&destination_dir).expect("destination dir");
+    let destination = destination_dir.join("vocab.json");
+    std::fs::write(&destination, vec![b'x'; expected.len()])
+        .expect("same-length corrupt destination");
+
+    mirror_cached_sdxl_component_file(
+        &settings,
+        "checkpoint-sc-21689",
+        SDXL_CLIP_L_REPO,
+        SDXL_CLIP_L_REVISION,
+        "vocab.json",
+        &destination_dir,
+    )
+    .expect("corrupt destination is replaced from the pinned source");
+
+    assert_eq!(
+        std::fs::read(&destination).expect("mirrored component"),
+        expected
+    );
+    assert!(
+        !destination_dir
+            .join(format!("vocab.json.{}.partial", std::process::id()))
+            .exists(),
+        "a successful cache-only promotion leaves no staging artifact"
+    );
+}
+
 /// sc-16453: strict-pose routing must preserve the selected ConvRot DiT identity even before the
 /// shared bf16 tokenizer / text-encoder / VAE surface has been fetched. The immutable ConvRot file
 /// alone is enough to claim the bespoke control route; generation fetches the shared surface and the
