@@ -212,6 +212,23 @@ pub enum JobsStoreError {
     NotJobOwner {
         job_id: String,
     },
+    /// A queued row was written without refreshing its versioned compact claim
+    /// projection. Failing the claim visibly is safer than silently skipping or
+    /// routing from stale payload-derived policy.
+    StaleClaimRoutingFacts {
+        job_id: String,
+        stored_version: i64,
+        expected_version: i64,
+        payload_revision: i64,
+        facts_payload_revision: i64,
+    },
+    /// The persisted projection advertises the current version but no longer
+    /// matches the selected row's payload, indicating an out-of-band SQL edit
+    /// or storage corruption. The row must not be claimed.
+    ClaimRoutingFactsMismatch {
+        job_id: String,
+        version: i64,
+    },
     /// `create_job` was asked to create a job in a status other than the two
     /// legal pre-worker statuses (`queued` / `pending_caption`), e.g. a
     /// mid-lifecycle or terminal status. A programmer error, not user input.
@@ -246,6 +263,20 @@ impl std::fmt::Display for JobsStoreError {
                     "Progress rejected: the reporting worker no longer owns job {job_id}."
                 )
             }
+            Self::StaleClaimRoutingFacts {
+                job_id,
+                stored_version,
+                expected_version,
+                payload_revision,
+                facts_payload_revision,
+            } => write!(
+                formatter,
+                "Job {job_id} has stale claim routing facts (version {stored_version}, expected {expected_version}; payload revision {payload_revision}, projected revision {facts_payload_revision}). Reinitialize the jobs store before claiming work."
+            ),
+            Self::ClaimRoutingFactsMismatch { job_id, version } => write!(
+                formatter,
+                "Job {job_id} claim routing facts at version {version} do not match its payload. Reinitialize the jobs store before claiming work."
+            ),
             Self::InvalidInitialStatus(status) => write!(
                 formatter,
                 "A job can only be created in 'queued' or 'pending_caption' status, not '{status}'."
@@ -325,6 +356,31 @@ pub struct ClaimHydrationStats {
     pub candidate_rows_scanned: usize,
     pub routing_snapshots_hydrated: usize,
     pub claimed_snapshot_hydrated: usize,
+}
+
+/// Version of the compact claim-routing projection persisted beside each job.
+///
+/// Bump this whenever [`ClaimRoutingFacts::from_job`] changes meaning. Startup
+/// backfills every older row before workers can claim it, keeping policy changes
+/// out of the latency-sensitive claim transaction.
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 1;
+
+/// Payload-derived facts needed by worker compatibility and affinity scoring.
+///
+/// These are deliberately scalar and bounded. The source of truth remains the
+/// existing routing predicates used by [`worker_supports_job`]; persistence only
+/// prevents claim selection from decoding an unbounded number of payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaimRoutingFacts {
+    job_type: JobType,
+    mlx_eligible: bool,
+    candle_eligible: bool,
+    candle_pose_reject: bool,
+    training_mlx_only: bool,
+    seedvr2_upscale: bool,
+    required_capability: String,
+    real_training: bool,
+    model_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -568,6 +624,29 @@ impl JobsStore {
               on jobs(status, queue_rank desc, created_at);
             ",
         )?;
+        // sc-21620 review repair: keep payload-derived claim compatibility and
+        // warm-model affinity in bounded scalar columns. The claim transaction
+        // may scan any number of these lightweight headers, but it never has to
+        // decode a same-type incompatible prefix or every compatible peer in a
+        // rank. Versioning makes routing-policy changes an initialize-time
+        // backfill instead of a hidden claim-time migration.
+        for (column, definition) in [
+            ("claim_facts_version", "integer not null default 0"),
+            ("claim_payload_revision", "integer not null default 0"),
+            ("claim_mlx_eligible", "integer not null default 0"),
+            ("claim_candle_eligible", "integer not null default 0"),
+            ("claim_candle_pose_reject", "integer not null default 0"),
+            ("claim_training_mlx_only", "integer not null default 0"),
+            ("claim_seedvr2_upscale", "integer not null default 0"),
+            ("claim_required_capability", "text not null default ''"),
+            ("claim_real_training", "integer not null default 0"),
+            ("claim_model_key_1", "text"),
+            ("claim_model_key_2", "text"),
+            ("claim_model_key_3", "text"),
+            ("claim_model_key_4", "text"),
+        ] {
+            ensure_column(&transaction, "jobs", column, definition)?;
+        }
         // sc-16260: why an `unhealthy` worker withdrew its capabilities — the host-side remedy,
         // so the Queue screen can explain a stalled queue instead of leaving an operator to read
         // container logs. Nullable and absent on every healthy worker.
@@ -590,14 +669,27 @@ impl JobsStore {
             "revision",
             "integer not null default 0",
         )?;
+        // Separate payload revisioning makes out-of-band payload SQL visible to
+        // the header path without reading or hashing payload_json during claim.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "payload_revision",
+            "integer not null default 0",
+        )?;
         transaction.execute_batch(
             "
-            create trigger if not exists jobs_revision_after_update
+            drop trigger if exists jobs_revision_after_update;
+            create trigger jobs_revision_after_update
             after update on jobs
             when new.revision = old.revision
             begin
               update jobs
-                 set revision = old.revision + 1
+                 set revision = old.revision + 1,
+                     payload_revision =
+                       case when new.payload_json != old.payload_json
+                            then old.payload_revision + 1
+                            else new.payload_revision end
                where id = new.id;
             end;
             ",
@@ -705,6 +797,7 @@ impl JobsStore {
               on generation_metrics_history(j_created_at);
             ",
         )?;
+        backfill_claim_routing_facts(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -896,18 +989,59 @@ impl JobsStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = utc_now();
         let affected = match new_payload {
-            Some(payload) => transaction.execute(
-                "
+            Some(payload) => {
+                let job_type = transaction
+                    .query_row(
+                        "select type from jobs where id = ?1",
+                        params![job_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .map(|value| parse_string_enum(&value))
+                    .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+                let facts = ClaimRoutingFacts::from_parts(&job_type, &payload);
+                transaction.execute(
+                    "
                 update jobs
                    set payload_json = ?1,
                        status = 'queued',
                        stage = 'queued',
                        message = 'Waiting for an available worker.',
-                       updated_at = ?2
+                       updated_at = ?2,
+                       claim_facts_version = ?4,
+                       claim_payload_revision = payload_revision + 1,
+                       claim_mlx_eligible = ?5,
+                       claim_candle_eligible = ?6,
+                       claim_candle_pose_reject = ?7,
+                       claim_training_mlx_only = ?8,
+                       claim_seedvr2_upscale = ?9,
+                       claim_required_capability = ?10,
+                       claim_real_training = ?11,
+                       claim_model_key_1 = ?12,
+                       claim_model_key_2 = ?13,
+                       claim_model_key_3 = ?14,
+                       claim_model_key_4 = ?15
                  where id = ?3 and status = 'pending_caption'
                 ",
-                params![dumps(&payload)?, now, job_id],
-            )?,
+                    params![
+                        dumps(&payload)?,
+                        now,
+                        job_id,
+                        CLAIM_ROUTING_FACTS_VERSION,
+                        i64::from(facts.mlx_eligible),
+                        i64::from(facts.candle_eligible),
+                        i64::from(facts.candle_pose_reject),
+                        i64::from(facts.training_mlx_only),
+                        i64::from(facts.seedvr2_upscale),
+                        facts.required_capability.as_str(),
+                        i64::from(facts.real_training),
+                        facts.model_key(0),
+                        facts.model_key(1),
+                        facts.model_key(2),
+                        facts.model_key(3),
+                    ],
+                )?
+            }
             None => transaction.execute(
                 "
                 update jobs
@@ -2328,19 +2462,67 @@ impl JobsStore {
         let has_active_gpu_job = active_gpu_job_exists(&transaction, &worker.gpu_id)?;
         let mut hydration = ClaimHydrationStats::default();
 
+        // Initialization backfills every production row. A later mismatch can
+        // therefore only come from an out-of-band writer or corruption; surface
+        // it instead of silently hiding a claimable job behind the version filter.
+        if let Some((job_id, stored_version, payload_revision, facts_payload_revision)) =
+            transaction
+                .query_row(
+                    "select id, claim_facts_version, payload_revision, claim_payload_revision
+                   from jobs
+                  where status = 'queued'
+                    and (claim_facts_version != ?1
+                         or claim_payload_revision != payload_revision)
+                  order by queue_rank desc, created_at asc, rowid asc
+                  limit 1",
+                    params![CLAIM_ROUTING_FACTS_VERSION],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()?
+        {
+            *self.last_claim_hydration.lock() = hydration;
+            return Err(JobsStoreError::StaleClaimRoutingFacts {
+                job_id,
+                stored_version,
+                expected_version: CLAIM_ROUTING_FACTS_VERSION,
+                payload_revision,
+                facts_payload_revision,
+            });
+        }
+
+        // Durable rank and enqueue age define scheduling. `rowid asc` preserves
+        // insertion order when two queued rows share the same timestamp.
         let mut statement = transaction.prepare(&format!(
             "
-            select id, type, queue_rank
+            select id, type, queue_rank, requested_gpu,
+                   claim_mlx_eligible, claim_candle_eligible,
+                   claim_candle_pose_reject, claim_training_mlx_only,
+                   claim_seedvr2_upscale, claim_required_capability,
+                   claim_real_training, claim_model_key_1, claim_model_key_2,
+                   claim_model_key_3, claim_model_key_4
               from jobs
              where status = 'queued'
                and (type in ({list}) or requested_gpu = 'auto' or requested_gpu = ?1)
                and (?2 = 0 or type in ({list}))
-             order by queue_rank desc, created_at asc
+               and claim_facts_version = ?3
+               and claim_payload_revision = payload_revision
+             order by queue_rank desc, created_at asc, rowid asc
             ",
             list = non_gpu_job_types_sql()
         ))?;
         let queued_rows = collect_claim_candidates(statement.query_map(
-            params![worker.gpu_id, i64::from(has_active_gpu_job)],
+            params![
+                worker.gpu_id,
+                i64::from(has_active_gpu_job),
+                CLAIM_ROUTING_FACTS_VERSION
+            ],
             row_to_claim_candidate,
         )?)?;
         // No row cap (sc-1630): a compatible job must remain visible behind any number of
@@ -2348,12 +2530,18 @@ impl JobsStore {
         // full snapshot + JSON hydration happens only after that header says the worker could
         // plausibly run the row. This preserves capability routing and FIFO/priority selection
         // without turning a large incompatible prefix into unbounded JSON work.
-        let queued = choose_claimable_job_from_candidates(
+        let queued = match choose_claimable_job_from_candidates(
             &transaction,
             queued_rows,
             &worker,
             &mut hydration,
-        )?;
+        ) {
+            Ok(queued) => queued,
+            Err(error) => {
+                *self.last_claim_hydration.lock() = hydration;
+                return Err(error);
+            }
+        };
         let Some(queued) = queued else {
             *self.last_claim_hydration.lock() = hydration;
             return Ok((None, None));
@@ -2945,18 +3133,25 @@ impl JobsStore {
             _ => "Waiting for an available worker.",
         };
         let automatically_prioritized = job_type_automatically_jumps_queue(&request.job_type);
+        let claim_facts = ClaimRoutingFacts::from_parts(&request.job_type, &request.payload);
         connection.execute(
             "
             insert into jobs (
               id, type, status, queue_rank, project_id, project_name, payload_json, result_json,
-              requested_gpu, progress, stage, message, attempts, source_job_id,
-              duplicate_of_job_id, created_at, updated_at
+              requested_gpu, claim_facts_version, claim_mlx_eligible, claim_candle_eligible,
+              claim_candle_pose_reject, claim_training_mlx_only, claim_seedvr2_upscale,
+              claim_required_capability, claim_real_training, claim_model_key_1,
+              claim_model_key_2, claim_model_key_3, claim_model_key_4,
+              progress, stage, message, attempts, source_job_id, duplicate_of_job_id,
+              created_at, updated_at
             ) values (
               ?1, ?2, ?12,
               case when ?13 != 0
                    then (select coalesce(max(queue_rank), 0) + 1 from jobs)
                    else 0 end,
-              ?3, ?4, ?5, '{}', ?6, 0, ?12, ?7, ?8, ?9, ?10, ?11, ?11
+              ?3, ?4, ?5, '{}', ?6,
+              ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
+              0, ?12, ?7, ?8, ?9, ?10, ?11, ?11
             )
             ",
             params![
@@ -2973,6 +3168,18 @@ impl JobsStore {
                 now,
                 initial_status,
                 i64::from(automatically_prioritized),
+                CLAIM_ROUTING_FACTS_VERSION,
+                i64::from(claim_facts.mlx_eligible),
+                i64::from(claim_facts.candle_eligible),
+                i64::from(claim_facts.candle_pose_reject),
+                i64::from(claim_facts.training_mlx_only),
+                i64::from(claim_facts.seedvr2_upscale),
+                claim_facts.required_capability.as_str(),
+                i64::from(claim_facts.real_training),
+                claim_facts.model_key(0),
+                claim_facts.model_key(1),
+                claim_facts.model_key(2),
+                claim_facts.model_key(3),
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)
@@ -3172,18 +3379,42 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
 /// possibly claim. Keeping this separate from [`JobSnapshot`] is the claim
 /// path's scale boundary: queued rows that fail this header check never decode
 /// either `payload_json` or `result_json`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ClaimCandidate {
     id: String,
     job_type: JobType,
     queue_rank: i64,
+    requested_gpu: String,
+    facts: ClaimRoutingFacts,
 }
 
 fn row_to_claim_candidate(row: &Row<'_>) -> rusqlite::Result<ClaimCandidate> {
+    let job_type: JobType = parse_string_enum(&row.get::<_, String>("type")?);
+    let model_keys = [
+        row.get::<_, Option<String>>("claim_model_key_1")?,
+        row.get::<_, Option<String>>("claim_model_key_2")?,
+        row.get::<_, Option<String>>("claim_model_key_3")?,
+        row.get::<_, Option<String>>("claim_model_key_4")?,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Ok(ClaimCandidate {
         id: row.get("id")?,
-        job_type: parse_string_enum(&row.get::<_, String>("type")?),
+        job_type: job_type.clone(),
         queue_rank: row.get::<_, i64>("queue_rank")?.max(0),
+        requested_gpu: row.get("requested_gpu")?,
+        facts: ClaimRoutingFacts {
+            job_type,
+            mlx_eligible: row.get::<_, i64>("claim_mlx_eligible")? != 0,
+            candle_eligible: row.get::<_, i64>("claim_candle_eligible")? != 0,
+            candle_pose_reject: row.get::<_, i64>("claim_candle_pose_reject")? != 0,
+            training_mlx_only: row.get::<_, i64>("claim_training_mlx_only")? != 0,
+            seedvr2_upscale: row.get::<_, i64>("claim_seedvr2_upscale")? != 0,
+            required_capability: row.get("claim_required_capability")?,
+            real_training: row.get::<_, i64>("claim_real_training")? != 0,
+            model_keys,
+        },
     })
 }
 
@@ -3469,6 +3700,74 @@ fn loads_object(value: Option<&str>) -> Map<String, Value> {
     value
         .and_then(|text| serde_json::from_str::<Map<String, Value>>(text).ok())
         .unwrap_or_default()
+}
+
+/// Recompute compact claim facts for rows written under an older projection.
+/// This runs only during [`JobsStore::initialize`], never inside a claim.
+fn backfill_claim_routing_facts(connection: &Connection) -> JobsStoreResult<()> {
+    let pending = {
+        let mut statement = connection.prepare(
+            "select id, type, payload_json
+               from jobs
+              where claim_facts_version != ?1
+                 or claim_payload_revision != payload_revision
+              order by created_at asc, rowid asc",
+        )?;
+        let rows = statement
+            .query_map(params![CLAIM_ROUTING_FACTS_VERSION], |row| {
+                let id: String = row.get("id")?;
+                let job_type: JobType = parse_string_enum(&row.get::<_, String>("type")?);
+                let payload =
+                    loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
+                Ok((id, ClaimRoutingFacts::from_parts(&job_type, &payload)))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (id, facts) in pending {
+        persist_claim_routing_facts(connection, &id, &facts)?;
+    }
+    Ok(())
+}
+
+fn persist_claim_routing_facts(
+    connection: &Connection,
+    job_id: &str,
+    facts: &ClaimRoutingFacts,
+) -> JobsStoreResult<()> {
+    connection.execute(
+        "update jobs
+            set claim_facts_version = ?1,
+                claim_payload_revision = payload_revision,
+                claim_mlx_eligible = ?2,
+                claim_candle_eligible = ?3,
+                claim_candle_pose_reject = ?4,
+                claim_training_mlx_only = ?5,
+                claim_seedvr2_upscale = ?6,
+                claim_required_capability = ?7,
+                claim_real_training = ?8,
+                claim_model_key_1 = ?9,
+                claim_model_key_2 = ?10,
+                claim_model_key_3 = ?11,
+                claim_model_key_4 = ?12
+          where id = ?13",
+        params![
+            CLAIM_ROUTING_FACTS_VERSION,
+            i64::from(facts.mlx_eligible),
+            i64::from(facts.candle_eligible),
+            i64::from(facts.candle_pose_reject),
+            i64::from(facts.training_mlx_only),
+            i64::from(facts.seedvr2_upscale),
+            facts.required_capability.as_str(),
+            i64::from(facts.real_training),
+            facts.model_key(0),
+            facts.model_key(1),
+            facts.model_key(2),
+            facts.model_key(3),
+            job_id,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Merge accumulated `trainingSamples` history into an incoming progress
@@ -3962,7 +4261,99 @@ fn is_apple_unified_gpu_id(gpu_id: &str) -> bool {
     gpu_id.eq_ignore_ascii_case("mlx") || gpu_id.eq_ignore_ascii_case("mps")
 }
 
+impl ClaimRoutingFacts {
+    fn from_job(job: &JobSnapshot) -> Self {
+        let mlx_eligible = match job.job_type {
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
+                job_is_mlx_eligible(job)
+            }
+            JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace => video_job_is_mlx_eligible(job),
+            JobType::LoraTrain | JobType::ControlTraining => training_job_is_mlx_eligible(job),
+            JobType::TrainingCaption => caption_job_is_mlx_eligible(job),
+            JobType::ImageUpscale => upscale_job_is_mlx_eligible(job),
+            JobType::VideoUpscale => video_upscale_job_is_mlx_eligible(job),
+            JobType::ImageVqa | JobType::ImageInterleave => understanding_job_is_mlx_eligible(job),
+            _ => true,
+        };
+        let candle_eligible = match job.job_type {
+            JobType::ImageGenerate | JobType::ImageEdit => image_job_is_candle_eligible(job),
+            JobType::ImageDetail => image_detail_native_eligible(job),
+            JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace => video_job_is_candle_eligible(job),
+            JobType::LoraTrain | JobType::ControlTraining => training_job_is_candle_eligible(job),
+            JobType::TrainingCaption => caption_job_is_mlx_eligible(job),
+            JobType::ImageVqa | JobType::ImageInterleave => understanding_job_is_mlx_eligible(job),
+            JobType::ImageUpscale => upscale_job_is_candle_eligible(job),
+            JobType::VideoUpscale => video_upscale_job_is_candle_eligible(job),
+            _ => true,
+        };
+        Self {
+            job_type: job.job_type.clone(),
+            mlx_eligible,
+            candle_eligible,
+            candle_pose_reject: image_job_candle_pose_reject(job),
+            training_mlx_only: training_kernel_is_mlx_only(job),
+            seedvr2_upscale: upscale_job_requests_seedvr2(job),
+            required_capability: required_capability(job).to_owned(),
+            real_training: is_real_training_job(job),
+            model_keys: desired_model_keys(&job.payload),
+        }
+    }
+
+    fn from_parts(job_type: &JobType, payload: &Map<String, Value>) -> Self {
+        Self::from_job(&JobSnapshot {
+            id: String::new(),
+            job_type: job_type.clone(),
+            status: JobStatus::Queued,
+            project_id: None,
+            project_name: None,
+            payload: payload.clone(),
+            result: Map::new(),
+            requested_gpu: "auto".to_owned(),
+            assigned_gpu: None,
+            worker_id: None,
+            progress: number_from_f64(0.0),
+            stage: ProgressStage::Queued,
+            message: String::new(),
+            error: None,
+            eta_seconds: None,
+            elapsed_seconds: None,
+            attempts: 1,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            cancel_requested: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+            started_at: None,
+            completed_at: None,
+            canceled_at: None,
+            last_heartbeat_at: None,
+            peak_gpu_memory_pct: None,
+            peak_gpu_load_pct: None,
+            backend: None,
+            title: None,
+            extra: Default::default(),
+        })
+    }
+
+    fn model_key(&self, index: usize) -> Option<&str> {
+        self.model_keys.get(index).map(String::as_str)
+    }
+}
+
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
+    worker_supports_claim_routing_facts(worker, &ClaimRoutingFacts::from_job(job))
+}
+
+/// The single worker-compatibility policy used by both full snapshots and the
+/// persisted claim header. Keep all worker-dependent logic here; the projection
+/// above only invokes the established payload predicates once per mutation.
+fn worker_supports_claim_routing_facts(worker: &WorkerSnapshot, job: &ClaimRoutingFacts) -> bool {
     // sc-16260: a worker that has declared itself unhealthy — its accelerator is unusable, so
     // every job it claims is one it is certain to fail — is handed nothing at all. This is the
     // BACKSTOP, not the primary gate: the worker also withholds the capabilities it can no
@@ -3985,8 +4376,8 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // candle worker it is candle-eligible for must NOT be refused here (the candle training
     // gate below admits it); any non-candle, non-mlx worker still defers.
     if !worker.gpu_id.eq_ignore_ascii_case("mlx")
-        && training_kernel_is_mlx_only(job)
-        && !(worker_is_candle(worker) && training_job_is_candle_eligible(job))
+        && job.training_mlx_only
+        && !(worker_is_candle(worker) && job.candle_eligible)
     {
         return false;
     }
@@ -4004,7 +4395,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         if matches!(
             job.job_type,
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
-        ) && !job_is_mlx_eligible(job)
+        ) && !job.mlx_eligible
         {
             return false;
         }
@@ -4022,7 +4413,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
                 | JobType::VideoExtend
                 | JobType::VideoBridge
                 | JobType::PersonReplace
-        ) && !video_job_is_mlx_eligible(job)
+        ) && !job.mlx_eligible
         {
             return false;
         }
@@ -4031,7 +4422,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // (sidecar, no mlx-gen crate) and LoKr-on-Wan are refused by this worker.
         // Applies to both dry-run and real runs.
         if matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)
-            && !training_job_is_mlx_eligible(job)
+            && !job.mlx_eligible
         {
             // ControlNet studio jobs (epic 10159) are candle-only today (no MLX control trainer — that
             // is B5/sc-10177), so `training_job_is_mlx_eligible` returns false for them and the mlx
@@ -4041,28 +4432,26 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // Dataset captioning (sc-3556): the mlx worker claims only JoyCaption jobs
         // backed by the mlx-gen provider. Any future non-JoyCaption captioner stays
         // on the worker that advertises that capability.
-        if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
+        if matches!(job.job_type, JobType::TrainingCaption) && !job.mlx_eligible {
             return false;
         }
         // Image upscale (sc-3489): the mlx worker runs Real-ESRGAN (the default engine) via
         // `ort`/CoreML and SeedVR2 via in-process `mlx-gen-seedvr2` (sc-4815). `aura-sr` has no
         // Rust path, so the mlx worker refuses it and it remains queued.
-        if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_mlx_eligible(job) {
+        if matches!(job.job_type, JobType::ImageUpscale) && !job.mlx_eligible {
             return false;
         }
         // Video upscale (epic 4811 / sc-4816): the MLX worker runs the native SeedVR2 engine
         // (`mlx-gen-seedvr2`). Any non-SeedVR2 engine is refused; Candle owns the same SeedVR2-only
         // contract off-Mac.
-        if matches!(job.job_type, JobType::VideoUpscale) && !video_upscale_job_is_mlx_eligible(job)
-        {
+        if matches!(job.job_type, JobType::VideoUpscale) && !job.mlx_eligible {
             return false;
         }
         // SenseNova-U1 understanding (sc-3905): the mlx worker serves `image_vqa` /
         // `image_interleave` only for the SenseNova-U1 ids (the sole in-process understanding
         // path). A non-SenseNova understanding job is not MLX-eligible, so the mlx worker
         // refuses it and it remains queued.
-        if matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave)
-            && !understanding_job_is_mlx_eligible(job)
+        if matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave) && !job.mlx_eligible
         {
             return false;
         }
@@ -4075,7 +4464,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // (model_mac_support pose), so the `mlx` worker still claims them and other descriptors decline.
     if !worker_is_candle(worker)
         && !worker.gpu_id.eq_ignore_ascii_case("mlx")
-        && image_job_candle_pose_reject(job)
+        && job.candle_pose_reject
     {
         return false;
     }
@@ -4096,11 +4485,11 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // here too (mirroring the mlx `JobType::ImageGenerate | JobType::ImageEdit` claim arm): without
         // it an unsupported edit model would be claimed by candle and fail instead of remaining queued.
         if matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit)
-            && !(image_job_is_candle_eligible(job) || image_job_candle_pose_reject(job))
+            && !(job.candle_eligible || job.candle_pose_reject)
         {
             return false;
         }
-        if matches!(job.job_type, JobType::ImageDetail) && !image_detail_native_eligible(job) {
+        if matches!(job.job_type, JobType::ImageDetail) && !job.candle_eligible {
             return false;
         }
         // The candle worker advertises only the base `video_generate` (txt2video); refuse the
@@ -4111,7 +4500,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
                 | JobType::VideoExtend
                 | JobType::VideoBridge
                 | JobType::PersonReplace
-        ) && !video_job_is_candle_eligible(job)
+        ) && !job.candle_eligible
         {
             return false;
         }
@@ -4123,7 +4512,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // up whenever ANY candle trainer is registered) and fail it terminally instead of leaving it
         // queued. Applies to both dry-run and real runs; mirrors the mlx training gate above.
         if matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)
-            && !training_job_is_candle_eligible(job)
+            && !job.candle_eligible
         {
             // Same gate for the ControlNet studio job (epic 10159): the candle worker claims it only
             // when its resolved plan's kernel (`krea_control`) has a candle trainer registered;
@@ -4133,7 +4522,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // Dataset captioning (sc-5098): the candle worker serves only JoyCaption (the candle
         // captioner provider). A non-`joy_caption` caption job is refused and remains queued.
         // Eligibility is backend-neutral (captioner == joy_caption), so reuse the mlx gate.
-        if matches!(job.job_type, JobType::TrainingCaption) && !caption_job_is_mlx_eligible(job) {
+        if matches!(job.job_type, JobType::TrainingCaption) && !job.candle_eligible {
             return false;
         }
         // SenseNova-U1 understanding (sc-5501): the candle worker serves `image_vqa` /
@@ -4142,7 +4531,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // backend-neutral (the model is SenseNova-U1), so reuse the understanding gate; a
         // non-SenseNova understanding job is refused and remains queued.
         if matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave)
-            && !understanding_job_is_mlx_eligible(job)
+            && !job.candle_eligible
         {
             return false;
         }
@@ -4150,14 +4539,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // worker serves Real-ESRGAN (`ort`/CUDA, sc-5499) AND SeedVR2 (`candle-gen-seedvr2`, the
         // Windows/CUDA sibling of mlx-gen-seedvr2). Only `aura-sr` has no candle path, so it is
         // refused and remains queued.
-        if matches!(job.job_type, JobType::ImageUpscale) && !upscale_job_is_candle_eligible(job) {
+        if matches!(job.job_type, JobType::ImageUpscale) && !job.candle_eligible {
             return false;
         }
         // Video upscale (sc-5928): the candle worker serves the net-new SeedVR2 video upscaler. A
         // non-SeedVR2 engine is refused (no other video-upscale backend exists off-Mac).
-        if matches!(job.job_type, JobType::VideoUpscale)
-            && !video_upscale_job_is_candle_eligible(job)
-        {
+        if matches!(job.job_type, JobType::VideoUpscale) && !job.candle_eligible {
             return false;
         }
     }
@@ -4169,7 +4556,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // capability, so it needs no extra generic-worker guard here.
     if !worker.gpu_id.eq_ignore_ascii_case("mlx")
         && !worker_is_candle(worker)
-        && upscale_job_requests_seedvr2(job)
+        && job.seedvr2_upscale
     {
         return false;
     }
@@ -4179,7 +4566,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
             .iter()
             .any(|owned| owned.as_str() == capability)
     };
-    if !advertises(required_capability(job)) {
+    if !advertises(&job.required_capability) {
         return false;
     }
     // A real (non-dry-run) LoRA training job additionally needs the execute
@@ -4187,7 +4574,7 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     // available. Dry-run plan validation needs just the base `lora_train`
     // capability. This keeps a real run queued for a capable worker instead of
     // failing terminally after a worker without a matching native engine claims it.
-    if is_real_training_job(job) {
+    if job.real_training {
         return advertises(WorkerCapability::LoraTrainExecute.as_str());
     }
     true
@@ -4312,46 +4699,15 @@ fn dispatch_score_is_better(candidate: DispatchScore, current: DispatchScore) ->
             && candidate.memory_usage_percent <= DISPATCH_RECOVERED_MEMORY_USAGE_THRESHOLD_PERCENT)
 }
 
-/// Header-only rejection for claim selection. This intentionally proves only a
-/// *negative*: anything that survives is still passed through
-/// [`worker_supports_job`] after its full snapshot is loaded, so dynamic routing
-/// (model family, mode, LoRA, pose, preview, and training-plan predicates) stays
-/// exactly where its source of truth has always been.
+/// Header-only compatibility for claim selection. The persisted facts were
+/// produced by the same payload predicates as [`worker_supports_job`], and the
+/// worker-dependent policy itself is shared verbatim.
 fn worker_may_support_claim_candidate(worker: &WorkerSnapshot, candidate: &ClaimCandidate) -> bool {
-    if worker.status == WorkerStatus::Unhealthy
-        || (job_requires_gpu(&candidate.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu"))
-    {
-        return false;
-    }
-    let advertises = |capability: &str| {
-        worker
-            .capabilities
-            .iter()
-            .any(|owned| owned.as_str() == capability)
-    };
-    match candidate.job_type {
-        // Payload decides whether these use the native or preview capability.
-        JobType::PersonDetect => {
-            advertises(WorkerCapability::PersonDetect.as_str())
-                || advertises(WorkerCapability::PersonDetectPreview.as_str())
-        }
-        JobType::PersonTrack => {
-            advertises(WorkerCapability::PersonTrack.as_str())
-                || advertises(WorkerCapability::PersonTrackPreview.as_str())
-        }
-        // The payload still decides whether execution capability is required,
-        // but a worker without the base planning capability cannot claim either.
-        JobType::LoraTrain | JobType::ControlTraining => {
-            advertises(WorkerCapability::LoraTrain.as_str())
-        }
-        _ => advertises(candidate.job_type.as_str()),
-    }
+    worker_supports_claim_routing_facts(worker, &candidate.facts)
 }
 
-/// Scan every durable candidate header, but hydrate a complete job only after
-/// the header has ruled out the common incompatible-prefix case. Once a
-/// compatible rank has been found, lower ranks cannot win under the durable
-/// queue policy, so their JSON is never loaded either.
+/// Scan durable candidate headers, select the exact compatibility/affinity
+/// winner entirely from scalars, then hydrate that one routing snapshot.
 fn choose_claimable_job_from_candidates(
     connection: &Connection,
     candidates: Vec<ClaimCandidate>,
@@ -4369,37 +4725,36 @@ fn choose_claimable_job_from_candidates(
         if !worker_may_support_claim_candidate(worker, &candidate) {
             continue;
         }
-        let job = connection.query_row(
-            "select * from jobs where id = ?1 and status = 'queued'",
-            params![candidate.id],
-            row_to_job,
-        )?;
-        hydration.routing_snapshots_hydrated += 1;
-        if !worker_supports_job(worker, &job) {
-            continue;
-        }
         highest_compatible_rank.get_or_insert(candidate.queue_rank);
-        compatible.push(job);
+        compatible.push(candidate);
     }
 
-    Ok(choose_claimable_job(compatible, worker))
+    let Some(selected) = choose_claimable_candidate(compatible, worker) else {
+        return Ok(None);
+    };
+    let job = connection.query_row(
+        "select * from jobs where id = ?1 and status = 'queued'",
+        params![selected.id],
+        row_to_job,
+    )?;
+    hydration.routing_snapshots_hydrated += 1;
+    if selected.facts != ClaimRoutingFacts::from_job(&job) {
+        return Err(JobsStoreError::ClaimRoutingFactsMismatch {
+            job_id: job.id,
+            version: CLAIM_ROUTING_FACTS_VERSION,
+        });
+    }
+    Ok(Some(job))
 }
 
-fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Option<JobSnapshot> {
-    let compatible = rows
-        .into_iter()
-        .filter(|job| worker_supports_job(worker, job))
-        .collect::<Vec<_>>();
+fn choose_claimable_candidate(
+    compatible: Vec<ClaimCandidate>,
+    worker: &WorkerSnapshot,
+) -> Option<ClaimCandidate> {
     let first = compatible.first()?;
-    // The SQL input is ordered by durable queue rank first. Restrict the existing explicit-GPU /
-    // warm-model optimization to that highest compatible tier so affinity can optimize peers but
-    // can never leapfrog an automatically or manually prioritized job.
-    let highest_rank = job_queue_rank(first);
-    let compatible = compatible
-        .into_iter()
-        .take_while(|job| job_queue_rank(job) == highest_rank)
-        .collect::<Vec<_>>();
-    let first = compatible.first()?;
+    // Compatibility scanning already stopped below the first compatible rank.
+    // Preserve the pre-existing affinity order inside that rank: oldest
+    // explicit-GPU match, then oldest warm-model auto job, then FIFO.
     if is_non_gpu_job_type(first.job_type.as_str()) || first.requested_gpu != "auto" {
         return compatible.into_iter().next();
     }
@@ -4412,17 +4767,15 @@ fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Opti
     }
     compatible
         .iter()
-        .find(|job| job_matches_loaded_model(job, worker))
+        .find(|candidate| candidate_matches_loaded_model(candidate, worker))
         .cloned()
         .or_else(|| compatible.into_iter().next())
 }
 
-fn job_queue_rank(job: &JobSnapshot) -> i64 {
-    job.extra
-        .get("queueRank")
-        .and_then(Value::as_i64)
-        .unwrap_or_default()
-        .max(0)
+fn candidate_matches_loaded_model(candidate: &ClaimCandidate, worker: &WorkerSnapshot) -> bool {
+    candidate.requested_gpu == "auto"
+        && !is_non_gpu_job_type(candidate.job_type.as_str())
+        && routing_model_keys_match_loaded(&candidate.facts.model_keys, worker)
 }
 
 fn job_matches_loaded_model(job: &JobSnapshot, worker: &WorkerSnapshot) -> bool {
@@ -4432,7 +4785,13 @@ fn job_matches_loaded_model(job: &JobSnapshot, worker: &WorkerSnapshot) -> bool 
     {
         return false;
     }
-    let keys = desired_model_keys(&job.payload);
+    routing_model_keys_match_loaded(&desired_model_keys(&job.payload), worker)
+}
+
+fn routing_model_keys_match_loaded(keys: &[String], worker: &WorkerSnapshot) -> bool {
+    if worker.loaded_models.is_empty() {
+        return false;
+    }
     worker
         .loaded_models
         .iter()

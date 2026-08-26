@@ -1805,6 +1805,225 @@ fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
 }
 
 #[test]
+fn claim_hydrates_one_snapshot_behind_same_type_dynamic_incompatibilities() {
+    let store = store("same-type-routing-prefix");
+    register_candle_worker(&store, "worker-candle");
+
+    // Every prefix row advertises the same ImageGenerate type/capability as the
+    // tail. Only payload policy distinguishes them: unsupported model, reserved
+    // mode, unpublished packed tier, and unsupported adapter composition.
+    for index in 0..80 {
+        let payload = match index % 4 {
+            0 => json!({ "model": "pulid_flux_dev", "prompt": "unsupported model" }),
+            1 => json!({
+                "model": "flux2_dev",
+                "mode": "style_variations",
+                "prompt": "unsupported mode"
+            }),
+            2 => json!({
+                "model": "flux_schnell",
+                "prompt": "unsupported tier",
+                "advanced": { "mlxQuantize": 6 }
+            }),
+            _ => json!({
+                "model": "boogu_image",
+                "prompt": "unsupported adapter",
+                "loras": [{ "id": "style", "scale": 0.8 }]
+            }),
+        };
+        store
+            .create_job(image_job(object(payload)))
+            .expect("same-type incompatible job creates");
+    }
+    let compatible = store
+        .create_job(image_job(object(json!({
+            "model": "z_image_turbo",
+            "prompt": "compatible tail"
+        }))))
+        .expect("compatible job creates");
+
+    let claimed = store
+        .claim_next_job("worker-candle")
+        .expect("claim succeeds")
+        .expect("compatible tail claims");
+    assert_eq!(claimed.id, compatible.id);
+    assert_eq!(
+        store.last_claim_hydration(),
+        sceneworks_core::jobs_store::ClaimHydrationStats {
+            candidate_rows_scanned: 81,
+            routing_snapshots_hydrated: 1,
+            claimed_snapshot_hydrated: 1,
+        },
+        "same-type model/mode/tier/adapter rejections stay header-only"
+    );
+}
+
+#[test]
+fn same_rank_warm_model_selection_hydrates_only_the_winner() {
+    let store = store("same-rank-warm-model-headers");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: vec!["warm-model".to_owned()],
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    for index in 0..80 {
+        store
+            .create_job(image_job(object(json!({
+                "model": format!("cold-model-{index}"),
+                "prompt": "cold peer"
+            }))))
+            .expect("cold compatible peer creates");
+    }
+    let warm = store
+        .create_job(image_job(object(json!({
+            "model": "warm-model",
+            "prompt": "warm compatible tail"
+        }))))
+        .expect("warm job creates");
+
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("warm job claims");
+    assert_eq!(claimed.id, warm.id);
+    let hydration = store.last_claim_hydration();
+    assert_eq!(hydration.candidate_rows_scanned, 81);
+    assert_eq!(hydration.routing_snapshots_hydrated, 1);
+    assert_eq!(hydration.claimed_snapshot_hydrated, 1);
+}
+
+#[test]
+fn direct_payload_sql_fails_closed_until_initialize_backfills_facts() {
+    let store = store("direct-payload-stales-claim-facts");
+    register_candle_worker(&store, "worker-candle");
+    let job = store
+        .create_job(image_job(object(json!({
+            "model": "z_image_turbo",
+            "prompt": "original"
+        }))))
+        .expect("job creates");
+
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set payload_json = ?1 where id = ?2",
+            params![
+                json!({ "model": "z_image_turbo", "prompt": "out-of-band" }).to_string(),
+                job.id
+            ],
+        )
+        .expect("direct payload edit writes");
+    drop(connection);
+
+    assert!(matches!(
+        store.claim_next_job("worker-candle"),
+        Err(JobsStoreError::StaleClaimRoutingFacts { ref job_id, .. }) if job_id == &job.id
+    ));
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued,
+        "stale facts must never claim or skip the row silently"
+    );
+
+    store
+        .initialize()
+        .expect("initialize backfills current facts");
+    assert_eq!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("claim succeeds after backfill")
+            .expect("job claims")
+            .id,
+        job.id
+    );
+}
+
+#[test]
+fn selected_snapshot_rejects_corrupt_current_version_projection() {
+    let store = store("corrupt-current-claim-facts");
+    register_candle_worker(&store, "worker-candle");
+    let job = store
+        .create_job(image_job(object(json!({
+            "model": "pulid_flux_dev",
+            "prompt": "not candle compatible"
+        }))))
+        .expect("job creates");
+
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update jobs set claim_candle_eligible = 1 where id = ?1",
+            params![job.id],
+        )
+        .expect("projection corruption writes");
+    drop(connection);
+
+    assert!(matches!(
+        store.claim_next_job("worker-candle"),
+        Err(JobsStoreError::ClaimRoutingFactsMismatch { ref job_id, .. }) if job_id == &job.id
+    ));
+    assert_eq!(store.last_claim_hydration().routing_snapshots_hydrated, 1);
+    assert_eq!(store.last_claim_hydration().claimed_snapshot_hydrated, 0);
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn pending_caption_payload_rewrite_refreshes_claim_facts_atomically() {
+    let store = store("caption-payload-refreshes-claim-facts");
+    register_candle_worker(&store, "worker-candle");
+    let job = store
+        .create_job(CreateJob {
+            initial_status: Some(JobStatus::PendingCaption),
+            ..image_job(object(json!({
+                "model": "pulid_flux_dev",
+                "prompt": "before caption"
+            })))
+        })
+        .expect("pending job creates");
+
+    let promotion = store
+        .promote_pending_caption_job(
+            &job.id,
+            Some(object(json!({
+                "model": "z_image_turbo",
+                "prompt": "after caption"
+            }))),
+        )
+        .expect("promotion succeeds");
+    assert!(promotion.promoted);
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    let (eligible, payload_revision, facts_payload_revision): (i64, i64, i64) = connection
+        .query_row(
+            "select claim_candle_eligible, payload_revision, claim_payload_revision
+               from jobs where id = ?1",
+            params![job.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("facts read");
+    assert_eq!(eligible, 1);
+    assert_eq!(payload_revision, facts_payload_revision);
+    drop(connection);
+
+    assert_eq!(
+        store
+            .claim_next_job("worker-candle")
+            .expect("claim succeeds")
+            .expect("rewritten job claims")
+            .id,
+        job.id
+    );
+}
+
+#[test]
 fn real_lora_train_requires_execute_capability() {
     let store = store("lora-train-execute-routing");
     // A GPU worker that can validate dry-run plans but lacks the inference backend
