@@ -12,6 +12,7 @@ import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.m
 import { routedLanes } from "./check-tier-integrity.mjs";
 import {
   evidenceSemantics,
+  RECORD_STATUSES,
   validateBundle as validateCalibrationBundle,
 } from "./memory-calibration-harness.mjs";
 import {
@@ -828,6 +829,14 @@ function isTemporalVideoCell(cell, modality) {
     (Array.isArray(envelope.fps) && envelope.fps.length > 0) ||
     Number.isFinite(envelope.defaultFps)
   );
+}
+
+// sc-21715. The matrix spells keys in camelCase and the bundle spells statuses in snake_case, so the
+// tally's key set is a pure function of `RECORD_STATUSES` rather than a second list that can drift
+// from it. Deliberately NOT exported: the sc-17774 test re-derives these keys itself, and a shared
+// helper would let a wrong mapping agree with itself on both sides.
+function calibrationStatusKey(status) {
+  return status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
 }
 
 export function calibrationBinding(
@@ -5020,6 +5029,30 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     );
   const mlxStagedModels = stagedByModality("image");
   const mlxStagedVideoModels = stagedByModality("video");
+  // sc-21715. The status tally PARTITIONS the bundle: one key per member of `RECORD_STATUSES`, which
+  // is read from the bundle schema, so a status added there appears here rather than falling outside
+  // every published count. Before this it was a hand-written pair (`complete`, `runtimeComplete`) and
+  // `summary.calibrationRuns` was `records.length`, which are the same number only while the corpus
+  // happens to hold nothing else — true for all 108 shipped records and false the moment a `gated`
+  // capture is admitted (the sc-11045 five-rung is exactly that, held outside the bundle for this
+  // reason). The two counts disagreed silently; now the parts sum to the whole by construction and
+  // the assertion below fails generation if they ever do not.
+  const calibrationRunsByStatus = Object.fromEntries(
+    RECORD_STATUSES.map((status) => [
+      calibrationStatusKey(status),
+      calibrationBundle.records.filter((record) => record.status === status).length,
+    ]),
+  );
+  const talliedCalibrationRuns = Object.values(calibrationRunsByStatus).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  if (talliedCalibrationRuns !== calibrationBundle.records.length) {
+    throw new Error(
+      `calibrationRunsByStatus does not partition the bundle: tallied ${talliedCalibrationRuns} of ` +
+        `${calibrationBundle.records.length} records`,
+    );
+  }
   const matrix = {
     // 2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were both RENAMED (now plural)
     // and RETYPED (integer -> backend->id object). A reader written against 1 gets `undefined` for
@@ -5069,7 +5102,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     // `videoMlxStagedStaticCoverage`(+Denominator) and `rung4Survey.pendingFamilyBackends`. A
     // version-7 reader that took `owningModelStory` as an integer, or `imageModels` as the entry
     // count, is wrong on both — hence a version, not an additive bump.
-    schemaVersion: 8,
+    //
+    // 9 (sc-21715): `summary.calibrationRunsByStatus` PARTITIONS the bundle instead of counting two
+    // of its statuses. It gained required `gated` and `negativeComplete` keys, so its values now sum
+    // to `summary.calibrationRuns` (which has always counted every record) by construction. A
+    // version-8 reader that took `complete + runtimeComplete` as the bundle size is wrong as soon as
+    // a non-certifying receipt is admitted — the disagreement this version exists to end.
+    schemaVersion: 9,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,
@@ -5195,13 +5234,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         .map(([id, entry]) => ({ id, ...entry }))
         .sort((left, right) => left.id.localeCompare(right.id)),
       fullModels: 0,
+      // sc-21715: EVERY record in the evidence bundle, whatever its status — not the certifying
+      // subset. It answers "how many receipts exist", and `matrix.calibrationRuns.length` answers
+      // "how many bound to a published coordinate"; `calibrationRunsByStatus` splits this total into
+      // what each receipt certifies. A `gated` or `negative_complete` receipt is therefore counted
+      // here and named there, never invisible in both.
       calibrationRuns: calibrationBundle.records.length,
-      calibrationRunsByStatus: {
-        complete: calibrationBundle.records.filter((record) => record.status === "complete").length,
-        runtimeComplete: calibrationBundle.records.filter(
-          (record) => record.status === "runtime_complete",
-        ).length,
-      },
+      calibrationRunsByStatus,
       currentCalibrationRuns: cells.reduce(
         (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
         0,
@@ -5325,8 +5364,13 @@ export function renderMarkdown(matrix) {
     })`,
     `- MLX staged-residency static coverage: image ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}, video ${matrix.summary.videoMlxStagedStaticCoverage}/${matrix.summary.videoMlxStagedStaticCoverageDenominator}`,
     `- Full models: ${matrix.summary.fullModels}`,
+    `- Calibration records in the evidence bundle: ${matrix.summary.calibrationRuns}`,
     `- Full complete calibration records: ${matrix.summary.calibrationRunsByStatus.complete}`,
     `- Base-only runtime-complete calibration records: ${matrix.summary.calibrationRunsByStatus.runtimeComplete}`,
+    // sc-21715: rendered even at zero. A gated capture that certifies nothing is still a capture that
+    // happened, and a line that only appears once the count moves cannot be read as "none yet".
+    `- Gated calibration records (captured, certifying nothing): ${matrix.summary.calibrationRunsByStatus.gated}`,
+    `- Negative-complete calibration records: ${matrix.summary.calibrationRunsByStatus.negativeComplete}`,
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unmeasured lane stays distinguishable from an absent one.`,
     "",

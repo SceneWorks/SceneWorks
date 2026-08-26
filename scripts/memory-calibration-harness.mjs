@@ -18,6 +18,10 @@ export const HARNESS_VERSION = "sceneworks-memory-v5";
 // sc-18864 bumped the RECORD SHAPE (per-phase `deviceBytes`/`wiredBytes` removed) without changing
 // the measuring instrument, so the bundle schema version moves and the harness version does not.
 export const SCHEMA_VERSION = 5;
+// sc-21715: the record-status universe, READ from the bundle schema rather than transcribed here, so
+// a status added there cannot leave a downstream tally silently partial. Every consumer that
+// partitions a bundle by status (`summary.calibrationRunsByStatus`) derives its keys from this list.
+export const RECORD_STATUSES = Object.freeze([...CALIBRATION_SCHEMA.$defs.record.properties.status.enum]);
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",

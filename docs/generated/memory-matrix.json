@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 8,
+  "schemaVersion": 9,
   "generatedFrom": {
     "sceneWorksRevision": "source-tree:472bd21e0d25e49779c443e71893bf9b75e4b91912668d728bc6f4417c0fd0a2",
     "inferenceRevision": "624fed20c1969b851b60265e3b9dac951068c1f5",
@@ -193,7 +193,9 @@
     "calibrationRuns": 108,
     "calibrationRunsByStatus": {
       "complete": 85,
-      "runtimeComplete": 23
+      "runtimeComplete": 23,
+      "gated": 0,
+      "negativeComplete": 0
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {

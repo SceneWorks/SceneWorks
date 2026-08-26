@@ -25,7 +25,10 @@ and regenerating gives:
 
 - `summary.currentCalibrationRuns`: **0 → 0** (unchanged).
 - `summary.calibrationRunsByStatus`: `{complete: 85, runtimeComplete: 23}` (unchanged — the five are
-  counted in neither bucket).
+  counted in neither bucket). sc-21715 has since made this tally PARTITION the bundle, so the same
+  ingest today reads `{complete: 85, runtimeComplete: 23, gated: 5, negativeComplete: 0}` — the five
+  are named rather than uncounted, and neither certifying bucket moves, which is the claim this
+  bullet was making.
 - `npm run report:stale-lanes`: `9 stale, 0 current` (unchanged); `candle:krea_2_turbo` still ranked
   #8 at `1/1` bindings, **`0/0` records**, `status=stale`.
 
@@ -34,13 +37,16 @@ to stand on. Stamping the shipped bindings to this revision would assert a promo
 does not support, which is the "launder a stale measurement into a current one" failure the
 calibration runbook refuses by design. **§7d is deliberately not performed here.**
 
-One further reason to keep these records out of the admission bundle: they would be the first
-`gated` records ever to enter it, and that surfaces a latent inconsistency in the generator —
-`summary.calibrationRuns` is `records.length` (113) while
+One further reason to keep these records out of the admission bundle at the time: they would have
+been the first `gated` records ever to enter it, and that surfaced a latent inconsistency in the
+generator — `summary.calibrationRuns` was `records.length` (113) while
 `"the published summary re-derives from the evidence bundle and the closure ledger (sc-17774)"`
-recomputes it as `complete + runtimeComplete` (108). The two agreed only because every record in the
-bundle had always been complete. That is a real defect in its own right, but it is not this story's
-to fix, and forcing it open is not a precondition for publishing a gated oracle.
+recomputed it as `complete + runtimeComplete` (108). The two agreed only because every record in the
+bundle had always been complete. That was a real defect in its own right, not this story's to fix,
+and forcing it open was never a precondition for publishing a gated oracle. It was filed as sc-21715
+and fixed there: the tally now partitions the bundle over every admitted status, so admitting these
+five is no longer blocked by it. Promotion still is — for the reasons above, which are about
+evidence, not about counting.
 
 ## Capture provenance
 
