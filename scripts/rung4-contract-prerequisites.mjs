@@ -1210,6 +1210,6 @@ function main(argv) {
   );
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main(process.argv.slice(2));
 }
