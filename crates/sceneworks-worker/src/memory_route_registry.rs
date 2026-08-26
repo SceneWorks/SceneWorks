@@ -425,14 +425,31 @@ const PLAIN_SINGLE_CONTROL_IP: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::SingleControl,
     MemoryRouteLoadProfile::IpAdapter,
 ];
+// sc-21609: SingleControl/MultiControl/IpAdapter/Identity removed. Control loads consult this
+// registry under the `z_image_turbo_control` engine id (image_jobs/zimage.rs), never the base id,
+// so those entries could not shape anything and their witnesses claimed routes production cannot
+// take under this provider; the entry advertises no character mode, so no identity route exists.
+// The control lane's real shaping lives on the dedicated `z_image_turbo_control` row below.
 const LEGACY_Z_IMAGE_TURBO_PROFILES: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Plain,
     MemoryRouteLoadProfile::Lora,
-    MemoryRouteLoadProfile::SingleControl,
-    MemoryRouteLoadProfile::MultiControl,
-    MemoryRouteLoadProfile::IpAdapter,
     MemoryRouteLoadProfile::Pid,
-    MemoryRouteLoadProfile::Identity,
+];
+// sc-21609: the MLX SDXL advanced lanes' real load shapes, widened from text_to_image+plain on
+// Michael's coverage decision. Base/edit carry adapters (`image_jobs/sdxl.rs`, `base.rs`
+// `with_adapters`); detail loads a tile ControlNet (`image_jobs/detail.rs`, single_control /
+// lora_single_control); character sets an IP adapter (`SdxlSubMode::Ip`). `image_inpaint` is
+// deliberately absent: production canonicalizes it to `edit_image` before routing, so an
+// ImageInpaint witness would name a coordinate no request ever carries.
+const SDXL_MLX_BASE_MODES: &[MemoryRouteMode] =
+    &[MemoryRouteMode::TextToImage, MemoryRouteMode::EditImage];
+const SDXL_MLX_DETAIL_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::SingleControl,
+    MemoryRouteLoadProfile::LoraSingleControl,
+];
+const SDXL_MLX_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
+    MemoryRouteLoadProfile::IpAdapter,
+    MemoryRouteLoadProfile::LoraIpAdapter,
 ];
 const TEXT_ONLY: &[MemoryRouteMode] = &[MemoryRouteMode::TextToImage];
 const CHARACTER_ONLY: &[MemoryRouteMode] = &[MemoryRouteMode::CharacterImage];
@@ -760,12 +777,33 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
+    // sc-21609: `BF16_Q4_Q8`, not `ALL_TIERS` — Metal has no FP4 hardware and
+    // `nvfp4_host_eligible()` is hard-false on macOS, so an MLX nvfp4 witness can never
+    // correspond to a real load (the FLUX.2 rows record the same convention).
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "sdxl",
-        tiers: ALL_TIERS,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN,
+        tiers: BF16_Q4_Q8,
+        modes: SDXL_MLX_BASE_MODES,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: true,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "sdxl",
+        tiers: BF16_Q4_Q8,
+        modes: &[MemoryRouteMode::ImageDetail],
+        load_profiles: SDXL_MLX_DETAIL_PROFILES,
+        requires_sequential_selection: false,
+        legacy_shaping: true,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "sdxl",
+        tiers: BF16_Q4_Q8,
+        modes: CHARACTER_ONLY,
+        load_profiles: SDXL_MLX_IP_PROFILES,
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
@@ -802,6 +840,31 @@ const RULES: &[MemoryRouteRule] = &[
         tiers: ALL_TIERS,
         modes: TEXT_AND_STYLE,
         load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: true,
+    },
+    // sc-21609: the strict-pose control lanes consult the registry under these `_control` engine
+    // ids (`image_jobs/zimage.rs` ZIMAGE_CONTROL_ENGINE_ID / ZIMAGE_BASE_CONTROL_ENGINE_ID), so
+    // without rows here every control load stayed EagerMaterialization and the engines' fully
+    // implemented rung-4 control surfaces were unreachable. `legacy_shaping: true` because these
+    // rows must actually shape the spec — a witness-only row would claim a deferred route
+    // production does not take. Single control only: the lane gates on pose inputs and the Candle
+    // twins declare the same profile.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "z_image_turbo_control",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: SINGLE_CONTROL,
+        requires_sequential_selection: false,
+        legacy_shaping: true,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "z_image_control",
+        tiers: BF16_Q4_Q8,
+        modes: TEXT_ONLY,
+        load_profiles: SINGLE_CONTROL,
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
@@ -996,6 +1059,25 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
         legacy_shaping: false,
+    },
+    // sc-21609: the MLX twin, enabling the deferred shape Michael's coverage decision turned on.
+    // mlx-gen-bernini implements rung 4 at every tier behind `structurally_streamable` (Dir +
+    // DeferredMaterialization + no adapters); until this row existed no MLX bernini load was ever
+    // shaped deferred, so the whole surface was unreachable. `PLAIN` and not `PLAIN_LORA`: the MLX
+    // still lane builds its spec with no adapters at all (`image_jobs/bernini.rs`), so a Lora
+    // witness here would be fiction — and the block stream refuses adapters regardless. The MLX
+    // consult site passes `TextToImage` for every cold load, so plain VIDEO loads shape through
+    // this row too (adapted video loads keep their Wan adapters and stay off the stream at the
+    // engine gate); the registry's image-mode vocabulary cannot witness the video modes — that
+    // residue is recorded on the rung-4 survey.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "bernini",
+        tiers: BF16_Q4_Q8,
+        modes: BERNINI_STILL_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: true,
     },
     // SC-20788: all three Chroma turnkey routes expose the same exact request-scoped Candle
     // Resident/Staged surface. Their public identity remains route-local, and PiD is a typed load
@@ -6761,6 +6843,10 @@ mod tests {
             .load_shape,
             LoadShape::EagerMaterialization
         );
+        // sc-21609 widened the Mlx sdxl coverage to the advanced lanes production actually routes,
+        // so edit/plain now shapes deferred; the fail-closed property is held by a coordinate no
+        // request ever carries — production canonicalizes `image_inpaint` to `edit_image` before
+        // routing, so an ImageInpaint consult must stay eager.
         assert_eq!(
             apply_registered_load_shape(
                 MemoryRouteBackend::Mlx,
@@ -6768,6 +6854,116 @@ mod tests {
                 MemoryRouteMode::EditImage,
                 spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
                 false
+            )
+            .load_shape,
+            LoadShape::DeferredMaterialization
+        );
+        assert_eq!(
+            apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "sdxl",
+                MemoryRouteMode::ImageInpaint,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Plain),
+                false
+            )
+            .load_shape,
+            LoadShape::EagerMaterialization
+        );
+        // The new per-lane rows shape exactly their own profiles: a detail (tile-ControlNet) load
+        // defers, while the same control profile under a mode the detail lane does not serve stays
+        // eager.
+        assert_eq!(
+            apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "sdxl",
+                MemoryRouteMode::ImageDetail,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl),
+                false
+            )
+            .load_shape,
+            LoadShape::DeferredMaterialization
+        );
+        assert_eq!(
+            apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "sdxl",
+                MemoryRouteMode::CharacterImage,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::IpAdapter),
+                false
+            )
+            .load_shape,
+            LoadShape::DeferredMaterialization
+        );
+        assert_eq!(
+            apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "sdxl",
+                MemoryRouteMode::TextToImage,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl),
+                false
+            )
+            .load_shape,
+            LoadShape::EagerMaterialization
+        );
+    }
+
+    #[test]
+    fn sc21609_enabled_lanes_shape_deferred_and_unrouted_coordinates_stay_eager() {
+        // Bernini: plain loads defer at every tier (the consult site passes TextToImage for every
+        // MLX cold load, video included); a load carrying adapters maps to the Lora profile, which
+        // this provider's row deliberately omits — the MLX still lane never builds one and the
+        // block stream refuses adapters.
+        for tier in [
+            MemoryRouteTier::Bf16,
+            MemoryRouteTier::Q4,
+            MemoryRouteTier::Q8,
+        ] {
+            assert_eq!(
+                apply_registered_load_shape(
+                    MemoryRouteBackend::Mlx,
+                    "bernini",
+                    MemoryRouteMode::TextToImage,
+                    spec(tier, MemoryRouteLoadProfile::Plain),
+                    false
+                )
+                .load_shape,
+                LoadShape::DeferredMaterialization
+            );
+        }
+        assert_eq!(
+            apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "bernini",
+                MemoryRouteMode::TextToImage,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::Lora),
+                false
+            )
+            .load_shape,
+            LoadShape::EagerMaterialization
+        );
+        // Z-Image control lanes consult under the `_control` engine ids; the single-control
+        // profile now defers there, and the base provider's id no longer carries control profiles
+        // at all — a control consult against the base id stays eager in both directions.
+        for provider in ["z_image_turbo_control", "z_image_control"] {
+            assert_eq!(
+                apply_registered_load_shape(
+                    MemoryRouteBackend::Mlx,
+                    provider,
+                    MemoryRouteMode::TextToImage,
+                    spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl),
+                    false
+                )
+                .load_shape,
+                LoadShape::DeferredMaterialization
+            );
+        }
+        assert_eq!(
+            apply_registered_load_shape(
+                MemoryRouteBackend::Mlx,
+                "z_image_turbo",
+                MemoryRouteMode::TextToImage,
+                spec(MemoryRouteTier::Q4, MemoryRouteLoadProfile::SingleControl),
+                true
             )
             .load_shape,
             LoadShape::EagerMaterialization

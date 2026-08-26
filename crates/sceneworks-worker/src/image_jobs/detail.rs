@@ -108,7 +108,17 @@ fn detail_spec(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
-    spec
+    // sc-21609: consult the route registry with this lane's REAL mode before the cache seam. The
+    // generator-cache cold path consults with `TextToImage` for every load, which the detail
+    // coordinate (single_control profile) deliberately does not match — without this call the
+    // registry's image_detail row could never shape anything and its witnesses would be fiction.
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Mlx,
+        "sdxl",
+        crate::memory_route_registry::MemoryRouteMode::ImageDetail,
+        spec,
+        false,
+    )
 }
 
 trait DetailTileRefiner {
@@ -915,4 +925,28 @@ pub(crate) async fn run_image_detail_job(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod detail_load_shape_tests {
+    use super::*;
+
+    /// sc-21609: the detail lane consults the route registry with its REAL mode. Deleting the
+    /// `apply_registered_load_shape` call from `detail_spec` (the cold path would then consult as
+    /// `TextToImage`, which the single-control coordinate does not match) turns this red.
+    #[test]
+    fn detail_spec_carries_the_production_deferred_load_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let spec = detail_spec(
+            root.path().to_owned(),
+            root.path().join("control.safetensors"),
+            Some(Quant::Q4),
+            Vec::new(),
+        );
+        assert_eq!(
+            spec.load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+            "an SDXL detail (tile-ControlNet) load must be shaped by the image_detail registry row"
+        );
+    }
 }
