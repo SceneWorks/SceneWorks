@@ -1444,6 +1444,12 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    // Enforce the Rust-owned target capability before touching a dataset, allocating
+    // output ids, or normalizing an image in place. The target catalog is returned
+    // directly to clients, so every advertised numeric bound is a submit-time
+    // contract rather than an advisory UI hint.
+    sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
+        .map_err(training_plan_error_to_api_error)?;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -1704,7 +1710,7 @@ pub(crate) async fn create_training_job(
         file_name,
         created_at: now_rfc3339(),
     })
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    .map_err(training_plan_error_to_api_error)?;
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
     // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
@@ -1882,6 +1888,28 @@ pub(crate) async fn create_training_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+fn training_plan_error_to_api_error(
+    error: sceneworks_core::training::TrainingPlanError,
+) -> ApiError {
+    match error {
+        sceneworks_core::training::TrainingPlanError::TargetLimit(limit) => {
+            let detail = limit.to_string();
+            let context = serde_json::to_value(&limit).unwrap_or_else(|_| {
+                json!({
+                    "kind": "training_target_limit"
+                })
+            });
+            ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                detail,
+                "training_target_limit",
+                context,
+            )
+        }
+        other => ApiError::bad_request(other.to_string()),
+    }
 }
 
 /// Final adapter files a trainer is required to produce. Wan A14B is a dual-expert model and its

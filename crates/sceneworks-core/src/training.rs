@@ -2629,6 +2629,97 @@ pub enum TrainingPlanError {
     EmptyDataset,
     /// A hyperparameter is out of range; carries a human-facing reason.
     InvalidConfig(String),
+    /// A value falls outside the target capability that was advertised to the
+    /// client. Kept structured so the API can return a field-specific error
+    /// without scraping a human-facing sentence.
+    TargetLimit(TrainingTargetLimitError),
+}
+
+/// A target-advertised limit rejected while normalizing a training request.
+///
+/// These errors deliberately name the request field and the advertised bound.
+/// A target catalog is a capability contract, not presentation-only metadata:
+/// an unknown numeric entry fails closed rather than becoming an unenforced UI
+/// hint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrainingTargetLimitError {
+    BelowMinimum {
+        field: String,
+        value: u64,
+        minimum: u64,
+    },
+    AboveMaximum {
+        field: String,
+        value: u64,
+        maximum: u64,
+    },
+    UnsupportedValue {
+        field: String,
+        value: String,
+        allowed: Vec<String>,
+    },
+    UnsupportedNumericValue {
+        field: String,
+        value: u64,
+        allowed: Vec<u64>,
+    },
+    InvalidAdvertisedLimit {
+        field: String,
+        detail: String,
+    },
+    UnsupportedNumericLimit {
+        field: String,
+    },
+}
+
+impl std::fmt::Display for TrainingTargetLimitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BelowMinimum {
+                field,
+                value,
+                minimum,
+            } => write!(formatter, "{field} ({value}) must be at least {minimum}."),
+            Self::AboveMaximum {
+                field,
+                value,
+                maximum,
+            } => write!(formatter, "{field} ({value}) must be at most {maximum}."),
+            Self::UnsupportedValue {
+                field,
+                value,
+                allowed,
+            } => write!(
+                formatter,
+                "Unsupported {field} '{value}'. Allowed values: {}.",
+                allowed.join(", ")
+            ),
+            Self::UnsupportedNumericValue {
+                field,
+                value,
+                allowed,
+            } => write!(
+                formatter,
+                "Unsupported {field} {value}. Allowed values: {}.",
+                allowed
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::InvalidAdvertisedLimit { field, detail } => {
+                write!(
+                    formatter,
+                    "Training target limit '{field}' is invalid: {detail}."
+                )
+            }
+            Self::UnsupportedNumericLimit { field } => write!(
+                formatter,
+                "Training target advertises unsupported numeric limit '{field}'."
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for TrainingPlanError {
@@ -2638,6 +2729,7 @@ impl std::fmt::Display for TrainingPlanError {
                 formatter.write_str("Training dataset has no items. Add at least one image.")
             }
             Self::InvalidConfig(detail) => formatter.write_str(detail),
+            Self::TargetLimit(error) => error.fmt(formatter),
         }
     }
 }
@@ -2805,10 +2897,12 @@ fn resolve_item_path(
     Ok(path.display().to_string())
 }
 
-fn validate_training_config_for_target(
+pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
+    validate_advertised_numeric_limits(target, config)?;
+    validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
@@ -2877,6 +2971,174 @@ fn validate_training_config_for_target(
                 target.name
             )));
         }
+    }
+    Ok(())
+}
+
+/// Enforce every numeric capability currently advertised in a target's `limits`
+/// bag. Adding a new numeric limit without adding its request-field mapping is
+/// intentionally rejected: otherwise a provider could publish a bound that the
+/// shared request boundary silently ignores.
+fn validate_advertised_numeric_limits(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    for (field, advertised) in &target.limits {
+        if !contains_json_number(advertised) {
+            continue;
+        }
+        let values = advertised.as_array().ok_or_else(|| {
+            invalid_advertised_limit(field, "numeric limits must be an array of integer bounds")
+        })?;
+
+        match field.as_str() {
+            "rank" => validate_advertised_numeric_range(field, values, u64::from(config.rank))?,
+            "alpha" => validate_advertised_numeric_range(field, values, u64::from(config.alpha))?,
+            "steps" => validate_advertised_numeric_range(field, values, u64::from(config.steps))?,
+            "batchSize" => {
+                validate_advertised_numeric_range(field, values, u64::from(config.batch_size))?
+            }
+            "resolutions" => validate_advertised_numeric_choices(
+                field,
+                "resolution",
+                values,
+                u64::from(config.resolution),
+            )?,
+            _ => {
+                return Err(TrainingPlanError::TargetLimit(
+                    TrainingTargetLimitError::UnsupportedNumericLimit {
+                        field: field.clone(),
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn contains_json_number(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::Array(values) => values.iter().any(contains_json_number),
+        Value::Object(values) => values.values().any(contains_json_number),
+        Value::Null | Value::Bool(_) | Value::String(_) => false,
+    }
+}
+
+fn validate_advertised_numeric_range(
+    field: &str,
+    values: &[Value],
+    value: u64,
+) -> Result<(), TrainingPlanError> {
+    let bounds = numeric_limit_values(field, values)?;
+    let [minimum, maximum] = bounds.as_slice() else {
+        return Err(invalid_advertised_limit(
+            field,
+            "a numeric range must contain exactly two integer bounds",
+        ));
+    };
+    if minimum > maximum {
+        return Err(invalid_advertised_limit(
+            field,
+            "the minimum must not exceed the maximum",
+        ));
+    }
+    if value < *minimum {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::BelowMinimum {
+                field: field.to_owned(),
+                value,
+                minimum: *minimum,
+            },
+        ));
+    }
+    if value > *maximum {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::AboveMaximum {
+                field: field.to_owned(),
+                value,
+                maximum: *maximum,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_advertised_numeric_choices(
+    advertised_field: &str,
+    request_field: &str,
+    values: &[Value],
+    value: u64,
+) -> Result<(), TrainingPlanError> {
+    let allowed = numeric_limit_values(advertised_field, values)?;
+    if allowed.is_empty() {
+        return Err(invalid_advertised_limit(
+            advertised_field,
+            "a numeric choice list must not be empty",
+        ));
+    }
+    if !allowed.contains(&value) {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::UnsupportedNumericValue {
+                field: request_field.to_owned(),
+                value,
+                allowed,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn numeric_limit_values(field: &str, values: &[Value]) -> Result<Vec<u64>, TrainingPlanError> {
+    values
+        .iter()
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                invalid_advertised_limit(field, "numeric bounds must be non-negative integers")
+            })
+        })
+        .collect()
+}
+
+fn invalid_advertised_limit(field: &str, detail: &str) -> TrainingPlanError {
+    TrainingPlanError::TargetLimit(TrainingTargetLimitError::InvalidAdvertisedLimit {
+        field: field.to_owned(),
+        detail: detail.to_owned(),
+    })
+}
+
+fn validate_advertised_optimizer_limit(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    let Some(values) = target.limits.get("optimizers") else {
+        return Ok(());
+    };
+    let values = values.as_array().ok_or_else(|| {
+        invalid_advertised_limit("optimizers", "an optimizer choice list must be an array")
+    })?;
+    let allowed = values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                invalid_advertised_limit("optimizers", "optimizer choices must be strings")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if allowed.is_empty() {
+        return Err(invalid_advertised_limit(
+            "optimizers",
+            "an optimizer choice list must not be empty",
+        ));
+    }
+    if !allowed.iter().any(|value| value == &config.optimizer) {
+        return Err(TrainingPlanError::TargetLimit(
+            TrainingTargetLimitError::UnsupportedValue {
+                field: "optimizer".to_owned(),
+                value: config.optimizer.clone(),
+                allowed,
+            },
+        ));
     }
     Ok(())
 }
