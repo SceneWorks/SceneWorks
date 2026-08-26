@@ -330,6 +330,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setActiveView,
     studioLaunch,
     models = [],
+    modelCatalogStatus = "ready",
     createModelDownloadJob,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     registerProjectSwitchGuard,
@@ -1763,6 +1764,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   return (
     <ModelAvailabilityGate
       ready={trainingReady}
+      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
       title="Training needs a trainable base model"
       description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
       offers={trainingOffers}

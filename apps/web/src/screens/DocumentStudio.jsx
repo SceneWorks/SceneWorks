@@ -157,6 +157,7 @@ export function DocumentStudio() {
     jobAction,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     models = [],
+    modelCatalogStatus = "ready",
     rememberLocalGenerationJob,
     setActiveView,
     requestedGpu,
@@ -370,6 +371,7 @@ export function DocumentStudio() {
   return (
     <ModelAvailabilityGate
       ready={modelReady}
+      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
       title="Document Studio needs an interleave-capable model"
       description="Interleaved text-image documents need a model like SenseNova-U1. Download one to get started."
       offers={modelOffers}

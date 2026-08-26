@@ -158,6 +158,7 @@ export function CharacterStudio() {
     purgeAsset,
     imageModels,
     models = [],
+    modelCatalogStatus = "ready",
     jobs = [],
     latestImageAssets,
     loras,
@@ -830,6 +831,7 @@ export function CharacterStudio() {
             >
               <ModelAvailabilityGate
                 ready={angleModels.length > 0}
+                initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
                 title="Angle Set needs an angle-capable model"
                 description="Generating character angle sets needs a model like InstantID (RealVisXL). Download one to get started."
                 offers={angleOffers}
@@ -874,6 +876,7 @@ export function CharacterStudio() {
             >
               <ModelAvailabilityGate
                 ready={poseModels.length > 0}
+                initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
                 title="Pose Library needs a pose-capable model"
                 description="Generating character poses needs a model like InstantID (RealVisXL). Download one to get started."
                 offers={poseOffers}

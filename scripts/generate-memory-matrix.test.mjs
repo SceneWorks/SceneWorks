@@ -3332,11 +3332,10 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
   // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
   const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  // The pinned revision is the epic-11037 terminal pin: the inference-main merge of the NVFP4
-  // universal-candle feature branch (sc-11045). Keep this literal alongside the current generated
-  // receipt: the assertion below only means something while the pin is known, and
-  // `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c");
+  // The pinned revision is the current committed inference-main head. Keep this literal
+  // alongside the current generated receipt: the assertion below only means something while the
+  // pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
+  assert.equal(pin, "624fed20c1969b851b60265e3b9dac951068c1f5");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
