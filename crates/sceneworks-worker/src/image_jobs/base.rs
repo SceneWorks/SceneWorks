@@ -126,6 +126,10 @@ fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageRoute {
+    /// FLUX.1's IP-Adapter and strict-control providers are separate graphs.  A reference plus
+    /// pose set must not be claimed by the control route, which would otherwise consume the pose
+    /// while treating the reference only as post-generation scoring input.
+    FluxIpAdapterPoseReject,
     ZImageControl,
     ZImageBaseControl,
     QwenControl,
@@ -236,6 +240,20 @@ const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
     "flux2_dev",
 ];
 
+/// FLUX.1-dev has independent IP-Adapter and strict-control providers, neither of which composes
+/// the other's conditioning. Keep this predicate at route selection so a combined request is
+/// refused before either provider can silently discard the other input.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn flux1_ipadapter_pose_combination(request: &ImageRequest) -> bool {
+    request.model == "flux_dev"
+        && request.mode != "edit_image"
+        && non_empty(&request.reference_asset_id)
+        && !pose_entries(request).is_empty()
+}
+
 /// The production FLUX strict-control router, expressed as the exact base-model → dedicated
 /// provider mapping used by the two `..._control_available` arms below. Keeping this pure seam next
 /// to [`prepare_image_route`] lets source-bound audits ask the router whether a model really has a
@@ -263,7 +281,9 @@ fn resolve_image_route_with_imported_availability(
     sdxl_imported_available: bool,
     mage_finetuned_available: bool,
 ) -> Option<ImageRoute> {
-    if zimage_control_available(request, settings) {
+    if flux1_ipadapter_pose_combination(request) {
+        Some(ImageRoute::FluxIpAdapterPoseReject)
+    } else if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
     } else if zimage_base_control_available(request, settings) {
         // Base (non-distilled, full-CFG) Z-Image strict control (advanced.poses on `z_image`) →
@@ -619,6 +639,7 @@ impl ImageRoute {
             // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
             // renders, each its own seed. No angle/pose grouping (the lane claims no conditioning).
             | ImageRoute::MageFinetuned
+            | ImageRoute::FluxIpAdapterPoseReject
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,
@@ -717,6 +738,8 @@ enum CandleImageRoute {
     KolorsIpAdapter,
     /// FLUX XLabs IP-Adapter reference conditioning (sc-5872).
     FluxIpAdapter,
+    /// FLUX.1's IP-Adapter and strict-control providers cannot compose one another's input.
+    FluxIpAdapterPoseReject,
     /// PuLID-FLUX face identity (sc-5492).
     Pulid,
     /// Qwen-Image strict-pose ControlNet (sc-5489).
@@ -958,7 +981,6 @@ impl CandleImageRoute {
             | CandleImageRoute::SdxlEdit
             | CandleImageRoute::SdxlIpAdapter
             | CandleImageRoute::KolorsIpAdapter
-            | CandleImageRoute::FluxIpAdapter
             | CandleImageRoute::Pulid
             | CandleImageRoute::QwenControl
             | CandleImageRoute::KolorsControl
@@ -1063,6 +1085,7 @@ impl CandleImageRoute {
             CandleImageRoute::KreaControl => krea_control_candle::KREA_CONTROL_ENGINE,
             CandleImageRoute::PoseReject
             | CandleImageRoute::PoseControlBaseMissing
+            | CandleImageRoute::FluxIpAdapterPoseReject
             | CandleImageRoute::KolorsCompositeReject => STUB_ADAPTER,
             CandleImageRoute::ZimageComfyui => {
                 zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE
@@ -1135,7 +1158,9 @@ fn resolve_candle_image_route_with_prepared_availability(
     // Order matches the historical ladder: the edit / reference / identity / control lanes are all
     // checked BEFORE the generic `is_candle_engine` txt2img arm (they share candle txt2img model ids, so
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
-    if instantid_available(request, settings) {
+    if flux1_ipadapter_pose_combination(request) {
+        Some(CandleImageRoute::FluxIpAdapterPoseReject)
+    } else if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
     } else if sdxl_control_candidate(request) {
         // Same precedence as the core router: InstantID stays isolated, then generic SDXL control
@@ -13005,6 +13030,10 @@ mod candle_label_tests {
         assert!(
             !CandleImageRoute::SenseNovaEdit.applies_request_loras(&request),
             "SenseNova descriptors expose no user-adapter slot"
+        );
+        assert!(
+            !CandleImageRoute::FluxIpAdapter.applies_request_loras(&request),
+            "the bespoke FLUX IP-Adapter provider has no user-adapter input, so the route guard must refuse LoRAs"
         );
 
         let adapter = AdapterSpec::new(

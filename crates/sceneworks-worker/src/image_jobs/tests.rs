@@ -9829,6 +9829,42 @@ fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
     }
 }
 
+// sc-21673: FLUX.1's IP-Adapter and strict-control routes are separate providers. A request that
+// carries both a reference image and poses must select the explicit refusal, never the control route
+// (which would consume poses but use the reference only for post-generation scoring) or plain IP-Adapter.
+#[cfg(target_os = "macos")]
+#[test]
+fn image_route_refuses_flux1_ipadapter_plus_pose_without_dropping_conditioning() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let model_path = dir.path().to_string_lossy().to_string();
+
+    let plain_ipadapter = request(json!({
+        "projectId": "p", "model": "flux_dev", "count": 1,
+        "referenceAssetId": "identity",
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    assert_eq!(
+        resolve_image_route(&plain_ipadapter, &settings),
+        Some(ImageRoute::Mlx),
+        "the plain FLUX.1 IP-Adapter request retains the registry route"
+    );
+
+    let ipadapter_with_pose = request(json!({
+        "projectId": "p", "model": "flux_dev", "count": 1,
+        "referenceAssetId": "identity",
+        "advanced": {
+            "modelPath": model_path,
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    let route = resolve_image_route(&ipadapter_with_pose, &settings);
+    assert_eq!(route, Some(ImageRoute::FluxIpAdapterPoseReject));
+    assert_ne!(route, Some(ImageRoute::Flux1DevControl));
+    assert_ne!(route, Some(ImageRoute::Mlx));
+}
+
 // sc-20747: the three independently accepted SDXL-family model ids use the backend-neutral OpenPose
 // provider. The route is weight-blind so a missing base/control artifact fails in the handler instead
 // of falling through to plain MLX generation, and it wins over edit/reference routes so conflicts fail
@@ -11717,7 +11753,6 @@ fn sc18477_every_named_bespoke_lane_declares_real_adapter_application() {
         CandleImageRoute::SdxlEdit,
         CandleImageRoute::SdxlIpAdapter,
         CandleImageRoute::Flux2Edit,
-        CandleImageRoute::FluxIpAdapter,
         CandleImageRoute::Pulid,
         CandleImageRoute::QwenEdit,
         CandleImageRoute::QwenImageComfyui,
