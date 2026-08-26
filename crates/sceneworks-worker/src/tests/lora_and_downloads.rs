@@ -2118,9 +2118,17 @@ struct ManagedImportFixture {
     source: PathBuf,
     install_dir: PathBuf,
     manifest_path: PathBuf,
+    model_id: String,
 }
 
 async fn managed_import_fixture(base_url: String) -> ManagedImportFixture {
+    managed_import_fixture_with_id(base_url, "managed_krea").await
+}
+
+async fn managed_import_fixture_with_id(
+    base_url: String,
+    model_id: &str,
+) -> ManagedImportFixture {
     let temp = tempdir().expect("tempdir creates");
     let mut settings = test_settings(base_url.clone(), None);
     settings.api_url = base_url;
@@ -2133,13 +2141,17 @@ async fn managed_import_fixture(base_url: String) -> ManagedImportFixture {
         .expect("manifest writes");
     let source = settings.data_dir.join("models/incoming/kreamania.safetensors");
     write_krea_native_safetensors(&source, 0x5a);
-    let install_dir = settings.data_dir.join("models/imports/managed_krea");
+    let install_dir = settings
+        .data_dir
+        .join("models/imports")
+        .join(model_id);
     ManagedImportFixture {
         _temp: temp,
         settings,
         source,
         install_dir,
         manifest_path,
+        model_id: model_id.to_owned(),
     }
 }
 
@@ -2148,7 +2160,7 @@ impl ManagedImportFixture {
         let mut job_json = job_snapshot_json("job-1", false);
         job_json["type"] = json!("model_import");
         job_json["payload"] = json!({
-            "modelId": "managed_krea",
+            "modelId": self.model_id,
             "modelName": "Managed Krea",
             "sourcePath": self.source.to_str().expect("utf-8 source"),
             "targetDir": self.install_dir.to_str().expect("utf-8 target"),
@@ -2164,11 +2176,14 @@ impl ManagedImportFixture {
                 "credentialHost": "civitai.com"
             },
             "manifestEntry": {
-                "id": "managed_krea",
+                "id": self.model_id,
                 "name": "Managed Krea",
                 "type": "image",
                 "family": "krea_2",
-                "source": { "provider": "civitai", "path": "models/imports/managed_krea" },
+                "source": {
+                    "provider": "civitai",
+                    "path": format!("models/imports/{}", self.model_id),
+                },
             },
         });
         serde_json::from_value(job_json).expect("job deserializes")
@@ -2183,7 +2198,7 @@ impl ManagedImportFixture {
             .get("models")?
             .as_array()?
             .iter()
-            .find(|entry| entry.get("id").and_then(Value::as_str) == Some("managed_krea"))
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(self.model_id.as_str()))
             .cloned()
     }
 
@@ -2202,13 +2217,18 @@ impl ManagedImportFixture {
         let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
             &self.settings.data_dir,
         );
-        assert!(store.record("managed/managed_krea").is_err(), "{context}");
+        assert!(
+            store
+                .record(&format!("managed/{}", self.model_id))
+                .is_err(),
+            "{context}"
+        );
         assert_eq!(
             store.inventory().map(|inventory| inventory.records.len()),
             Ok(0),
             "{context}"
         );
-        let staging = store.staging_root().join("managed_krea");
+        let staging = store.staging_root().join(&self.model_id);
         assert!(!staging.exists(), "{context}: staging survived");
         assert!(
             self.source.is_file(),
@@ -2320,6 +2340,71 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
 
     // Nothing is left staged.
     assert!(!store.staging_root().join("managed_krea").exists());
+}
+
+/// sc-11045 (minor f): an install committed under a REGISTERED managed variant's id is confirmed
+/// against that registration, and a mismatch fails the job.
+///
+/// `ManagedCheckpointVariantV1::confirm_installed` — including the `size_bytes` comparison its own
+/// doc comment calls the reason the field is not decorative — had no production caller at all. The
+/// registered size is what a client renders as "how much will this download"; with nothing reading
+/// it, it could drift arbitrarily far from the pinned artifact with nothing red anywhere.
+///
+/// The fixture's bytes are a few hundred, not the pinned 7.6 GB, so both the digest and the size
+/// disagree with the registration. The import's OWN integrity check passes (the job declares the
+/// digest of the bytes it is actually importing), so the refusal below can only come from the
+/// registration confirmation.
+///
+/// Failing mutation (run): delete the `if let Some(variant) = managed_nvfp4_variant(...)` block
+/// after the commit in `run_model_import_job`. The job then completes and records a curated
+/// variant's identity over bytes the registration does not describe.
+#[tokio::test]
+async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_registration() {
+    let _env = isolate_hf_cache();
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let variant_id = "nvfp4-krea-2-turbo";
+    assert!(
+        sceneworks_core::managed_checkpoint_variants::managed_nvfp4_variant(variant_id).is_some(),
+        "fixture check: the id under test is a registered variant"
+    );
+    let fixture = managed_import_fixture_with_id(base_url, variant_id).await;
+    // The digest of the bytes actually being imported, so the ingest's own verification PASSES and
+    // the only thing left to refuse is the registration mismatch.
+    let expected = sha256_hex(&fixture.source);
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    super::model_jobs::run_model_import_job(
+        &api,
+        &fixture.settings,
+        &client,
+        &fixture.job(Some(&expected)),
+    )
+    .await
+    .expect("a registration mismatch fails the job rather than erroring the worker");
+
+    let posts = posts.lock().expect("posts lock");
+    let failure = posts
+        .iter()
+        .find(|post| post.get("status").and_then(Value::as_str) == Some("failed"))
+        .unwrap_or_else(|| panic!("expected a failed progress post, got {posts:?}"));
+    let detail = failure
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("a failed import must carry an error detail: {failure:?}"));
+    assert!(
+        detail.contains("managed variant's registration"),
+        "the failure must name the registration confirmation, got {detail:?}"
+    );
+    assert!(
+        detail.contains("[managed-variant]"),
+        "and carry the registry's typed diagnostic, got {detail:?}"
+    );
+    // The manifest never records the curated identity over bytes the registration does not describe.
+    assert!(
+        fixture.manifest_entry().is_none(),
+        "a refused confirmation must not leave a manifest entry: {detail:?}"
+    );
 }
 
 /// AC1: a hash-mismatched ingest leaves no runnable partial install — no install directory, no

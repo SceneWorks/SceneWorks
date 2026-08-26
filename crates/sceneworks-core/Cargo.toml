@@ -62,6 +62,10 @@ rustix = { version = "1", features = ["fs"] }
 # integration test stands in for the other process by taking the SAME lock on its own descriptor.
 fs2 = "0.4"
 jsonschema = "0.28"
+# sc-11043: the managed-variant suite pins a fixture checkpoint's own SHA-256 into a variant so the
+# pinned-checksum verification path runs for real. Same 0.10 line the crate already depends on, so
+# no new locked version appears.
+sha2 = "0.10"
 tempfile = "3.13"
 
 [lints]

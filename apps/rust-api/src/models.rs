@@ -2948,10 +2948,167 @@ pub(crate) fn normalize_model_import_source(
     Ok((provenance, revision))
 }
 
+/// Re-resolve a managed NVFP4 variant's pin SERVER-SIDE (sc-11043, epic 11037).
+///
+/// `GET /api/v1/models/managed-variants` advertises, for each registered variant, the exact import
+/// body that installs it. That body is a convenience for the client, and a convenience is not a
+/// guarantee: without this, a client could `POST` `modelId: "nvfp4-krea-2-turbo"` with any repo,
+/// revision or file it liked — or omit `expectedSha256` entirely, which the worker's
+/// `if let Some(..)` check treats as "nothing to verify" — and SceneWorks would record unverified
+/// bytes under the curated variant's identity, its checkpoint id, and its provenance. AC3's
+/// "verified file checksum" has to be enforced by the server or it is only client-cooperative.
+///
+/// So the registration wins. The registry is keyed on the very id the request claims, so when the
+/// id names a variant, the repo, revision, file list and `expectedSha256` are taken from the
+/// registration rather than from the body. A request that explicitly names a DIFFERENT pin is
+/// refused rather than silently rewritten — that is a client bug or an attempt, and both deserve a
+/// diagnostic. There is still exactly ONE import pipeline: this only fills in the fetch, and
+/// everything after it (normalisation, licence gate, install-id validation, the ingest) is the
+/// generic path every other import walks.
+///
+/// A managed variant is a pinned FETCH of specific upstream bytes, so the ownership modes that do
+/// not fetch — a linked library reference, a local copy, an upload, a bare URL — cannot claim one.
+fn resolve_managed_variant_pin(payload: &mut ModelImportRequest) -> Result<(), ApiError> {
+    use sceneworks_core::managed_checkpoint_variants::{
+        match_managed_nvfp4_variant_id, ManagedVariantIdMatch,
+    };
+    // Case-INSENSITIVELY, because a managed variant's id is its install-directory name and its
+    // checkpoint identity, and `safe_download_dir` preserves whatever case the request supplied
+    // while NTFS and a default APFS volume do not. An exact-match lookup therefore missed
+    // `"NVFP4-Krea-2-Turbo"` — no registered repo, revision, file or checksum was applied — while
+    // the distinct-id collision check saw a new id and the filesystem saw the curated variant's own
+    // directory. Arbitrary bytes then landed under the curated identity with nothing verified.
+    //
+    // A near miss is REFUSED, never normalized to the canonical id. Rewriting it would install
+    // something the request did not name, which is the same class of silent substitution this
+    // function exists to refuse everywhere else; the diagnostic names the canonical id so a client
+    // bug is one edit away from correct.
+    let variant = match match_managed_nvfp4_variant_id(payload.model_id.as_deref().unwrap_or("")) {
+        ManagedVariantIdMatch::Unregistered => return Ok(()),
+        ManagedVariantIdMatch::Exact(variant) => variant,
+        ManagedVariantIdMatch::NearMiss(variant) => {
+            return Err(ApiError::bad_request(format!(
+                "Model id '{}' differs only in case from the managed NVFP4 variant '{}', which \
+                 shares its install directory and checkpoint identity on this platform. Import it \
+                 under the exact id '{}', or choose a model id that is not a case variant of a \
+                 managed variant.",
+                payload.model_id.as_deref().unwrap_or("").trim(),
+                variant.variant_id,
+                variant.variant_id
+            )));
+        }
+    };
+    let claim = |detail: &str| {
+        Err(ApiError::bad_request(format!(
+            "Model id '{}' is a managed NVFP4 variant pinned to {}@{} {}; {detail}",
+            variant.variant_id, variant.repo, variant.revision, variant.repo_file
+        )))
+    };
+
+    if payload.linked_root_id.is_some() || payload.linked_relative_path.is_some() {
+        return claim(
+            "it is installed by fetching those pinned bytes, so it cannot be claimed by a linked \
+             library reference. Import your own copy under a different model id.",
+        );
+    }
+    if !option_str_is_empty(payload.source_url.as_deref())
+        || !option_str_is_empty(payload.source_path.as_deref())
+    {
+        return claim(
+            "it cannot be installed from a source URL or a local path. Import your own copy under \
+             a different model id.",
+        );
+    }
+    match payload.source.as_ref() {
+        None | Some(ModelImportSourceV1::HuggingFace { .. }) => {}
+        Some(_) => {
+            return claim(
+                "it is a Hugging Face repo import. Import your own copy under a different model \
+                 id.",
+            )
+        }
+    }
+    if let Some(repo) = payload.repo.as_deref().map(str::trim) {
+        if !repo.is_empty() && repo != variant.repo {
+            return claim(&format!("this request names repo '{repo}'"));
+        }
+    }
+    if let Some(ModelImportSourceV1::HuggingFace {
+        repo,
+        revision,
+        files,
+    }) = payload.source.as_ref()
+    {
+        if repo.trim() != variant.repo {
+            return claim(&format!("this request names repo '{}'", repo.trim()));
+        }
+        if let Some(revision) = revision.as_deref().map(str::trim) {
+            if !revision.is_empty() && revision != variant.revision {
+                return claim(&format!("this request names revision '{revision}'"));
+            }
+        }
+        if !files.is_empty() && files.iter().any(|file| file.trim() != variant.repo_file) {
+            return claim("this request names a different file in the repo");
+        }
+    }
+    if !payload.files.is_empty()
+        && payload
+            .files
+            .iter()
+            .any(|file| file.trim() != variant.repo_file)
+    {
+        return claim("this request names a different file in the repo");
+    }
+    if let Some(expected) = payload.expected_sha256.as_deref().map(str::trim) {
+        if !expected.is_empty() && !expected.eq_ignore_ascii_case(&variant.sha256) {
+            return claim(&format!(
+                "this request asserts checksum '{expected}', not the pinned '{}'",
+                variant.sha256
+            ));
+        }
+    }
+    if let Some(family) = payload.family.as_deref().map(str::trim) {
+        if !family.is_empty()
+            && sceneworks_core::lora_family::canonical_lora_family(family) != variant.family
+        {
+            return claim(&format!("this request names family '{family}'"));
+        }
+    }
+
+    // The registration is now the source of truth for every fetch fact, including the ones the
+    // request left out. `expectedSha256` in particular is filled in rather than defaulted to
+    // "unverified", which is the whole point.
+    payload.repo = None;
+    payload.source_url = None;
+    payload.source_path = None;
+    payload.files = Vec::new();
+    payload.source = Some(ModelImportSourceV1::HuggingFace {
+        repo: variant.repo.clone(),
+        revision: Some(variant.revision.clone()),
+        files: vec![variant.repo_file.clone()],
+    });
+    payload.expected_sha256 = Some(variant.sha256.clone());
+    payload.family = Some(variant.family.clone());
+    if payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        payload.name = Some(variant.display_name.clone());
+    }
+    Ok(())
+}
+
 pub(crate) async fn queue_model_import_job(
     state: AppState,
     mut payload: ModelImportRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    // A curated managed NVFP4 variant is identified by its `modelId`, and its pin is re-resolved
+    // from the registry before anything else reads the body — so no client-supplied repo,
+    // revision, file or (absent) checksum can record unverified bytes under that identity.
+    resolve_managed_variant_pin(&mut payload)?;
     // Linked (in-place) ownership: an approved library root plus a confined relative path, and
     // never an absolute path (epic 20398, sc-20635). It is an ALTERNATIVE ownership mode rather
     // than another way to FETCH, so it is resolved before source normalisation and excludes it
@@ -7498,6 +7655,26 @@ fn project_imported_operation_surface(
     }
 
     object.remove("runtimeQuantTiers");
+
+    // A checkpoint STORED as NVFP4 has exactly one runtime tier: its own (sc-11043, epic 11037).
+    // The q4/q8/bf16 sweep below describes what a route can quantize a dense import TO, which is a
+    // question that does not arise here — these bytes are already packed E2M1 and nothing
+    // re-quantizes them. Offering the sweep for such an entry advertised `q4` for an NVFP4
+    // checkpoint, which is precisely the alias E2 forbids, and the admission gate then refused
+    // every job the offer produced: the picker showed tiers the router would not accept.
+    //
+    // Keyed on the SOURCE codec — what the weights are stored in — never on what a load would
+    // materialize them as, which is a per-run receipt this catalog projection cannot know.
+    if sceneworks_core::jobs_store::imported_entry_source_codec(object)
+        == Some(sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID)
+    {
+        object.insert(
+            "runtimeQuantTiers".to_owned(),
+            Value::Array(vec![Value::String("nvfp4".to_owned())]),
+        );
+        return;
+    }
+
     let mut runtime_quant_tiers = Vec::new();
     for tier in ["q4", "q8"] {
         if routes.iter().any(|route| {
@@ -12607,6 +12784,33 @@ mod imported_lora_advertisement_tests {
         assert!(wrong_shape["ui"].get("editReferences").is_none());
         assert!(wrong_shape.get("runtimeQuantTiers").is_none());
         assert_eq!(wrong_shape["macSupport"]["supported"], json!(false));
+    }
+
+    /// sc-11043 (epic 11037): a checkpoint STORED as NVFP4 offers exactly its own tier.
+    ///
+    /// The q4/q8/bf16 sweep describes what a route can quantize a dense import TO; these bytes are
+    /// already packed E2M1 and nothing re-quantizes them. Offering the sweep advertised `q4` for an
+    /// NVFP4 checkpoint — the alias E2 forbids — and every job the offer produced was then refused
+    /// by the admission gate, so the picker showed tiers the router would not accept.
+    #[test]
+    fn an_nvfp4_import_offers_its_own_tier_and_never_q4() {
+        let mut native = entry("user_krea_nvfp4", "krea_2");
+        native.insert("importQuantFormat".to_owned(), json!("nvfp4"));
+        apply_imported_provider_surface_for_lanes(&mut native, false, true);
+        assert_eq!(native["runtimeQuantTiers"], json!(["nvfp4"]));
+
+        // A dense sibling through the same route is untouched: the projection keys on the entry's
+        // own source codec, not on the family or the route's advertised quants.
+        let mut dense = entry("user_krea_bf16", "krea_2");
+        dense.insert("importQuantFormat".to_owned(), json!("bf16"));
+        apply_imported_provider_surface_for_lanes(&mut dense, false, true);
+        assert_eq!(dense["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+
+        // A classification with no proved engine codec is not an NVFP4 claim.
+        let mut packed = entry("user_krea_packed", "krea_2");
+        packed.insert("importQuantFormat".to_owned(), json!("comfy_quant_packed"));
+        apply_imported_provider_surface_for_lanes(&mut packed, false, true);
+        assert_eq!(packed["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
     }
 
     #[test]

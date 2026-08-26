@@ -45,7 +45,7 @@ pub(crate) use routing::mlx::*;
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
     candle_routed_image_models, checkpoint_plan_checkpoint_id, imported_control_intent_is_material,
-    imported_entry_installed_path, imported_entry_loadable_path,
+    imported_entry_installed_path, imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
     imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
     mac_capabilities, model_candle_support, model_mac_support, video_job_type_for_mode,
@@ -781,6 +781,22 @@ impl JobsStore {
         // Batch size per job (epic 10402, sc-10426) — added after the table shipped,
         // so back-fill the column on existing generation_metrics tables.
         ensure_column(&transaction, "generation_metrics", "image_count", "integer")?;
+        // Source codec vs execution representation (sc-21484, epic 11037) — added after the table
+        // shipped, so back-fill both columns on existing tables like `image_count` above.
+        //
+        // Two columns rather than one because they answer two different questions and historically
+        // got collapsed into `quant_label`: `source_codec` is what the file STORES (device
+        // independent — `"nvfp4-v1"` on every host) and `execution_representation` is what THIS run
+        // materialized it as (`"native-packed"` / `"dense-fallback"`). Both stay null on every
+        // historical row and on every run whose lane does not classify a source codec; a null
+        // `execution_representation` means "not measured", never "dense".
+        ensure_column(&transaction, "generation_metrics", "source_codec", "text")?;
+        ensure_column(
+            &transaction,
+            "generation_metrics",
+            "execution_representation",
+            "text",
+        )?;
         // Retention may remove the owning queue row, but Generation Stats is
         // historical product data rather than queue history. Materialize the
         // joined row before purging so aggregate charts remain complete.
@@ -796,6 +812,43 @@ impl JobsStore {
             create index if not exists idx_genmetrics_history_created
               on generation_metrics_history(j_created_at);
             ",
+        )?;
+        // The history mirror is created `as select m.*, j.…` from `generation_metrics`, so a FRESH
+        // database inherits every column added above. An EXISTING database does not — its history
+        // table was materialized before those columns existed — so each new metrics column has to
+        // be back-filled here as well (sc-21484).
+        //
+        // Back-filling is not enough on its own: `ensure_column` appends, so on an existing
+        // database these two land AFTER the `j_*` identity columns while the source query produces
+        // them BEFORE. The count still matches, so a positional `insert … select m.*, j.…` would
+        // not error — it would silently write `j_type` into `source_codec`. That is why
+        // `purge_terminal_jobs_completed_before` names every column on both sides instead of
+        // relying on `*`; keep it that way.
+        //
+        // `image_count` is here for the same reason and was MISSED (sc-11045 review): it was
+        // back-filled onto `generation_metrics` (epic 10402) but never onto the history mirror, so
+        // a database materialized before epic 10402 has a history table without it — and both
+        // pieces of named SQL below reference `image_count` on that table by name. Every retention
+        // sweep and every Generation Stats read on such an install fails with "no such column"
+        // rather than degrading. Naming the columns is what makes the mapping order-independent; it
+        // is also what makes a MISSING column a hard error instead of a silent shift.
+        ensure_column(
+            &transaction,
+            "generation_metrics_history",
+            "image_count",
+            "integer",
+        )?;
+        ensure_column(
+            &transaction,
+            "generation_metrics_history",
+            "source_codec",
+            "text",
+        )?;
+        ensure_column(
+            &transaction,
+            "generation_metrics_history",
+            "execution_representation",
+            "text",
         )?;
         backfill_claim_routing_facts(&transaction)?;
         transaction.commit()?;
@@ -840,8 +893,29 @@ impl JobsStore {
         );
         transaction.execute(
             &format!(
-                "insert or replace into generation_metrics_history
-                 select m.*, j.type, j.status, j.project_id, j.created_at
+                // Every column is NAMED on both sides rather than `select m.*, j.…` (sc-21484).
+                // The history mirror is created by `create table … as select`, so on a fresh
+                // database its column ORDER matches `generation_metrics` — but a column added
+                // later by `ensure_column` is appended, and on an existing database that puts it
+                // after the `j_*` identity columns here while the select still produces it before
+                // them. The arity matches either way, so a positional insert would not fail: it
+                // would write `j_type` into the new column and shift every value after it. Naming
+                // the columns makes the mapping independent of physical order in both tables.
+                "insert or replace into generation_metrics_history (
+                     job_id, model, quant_label, quant_bits, source_codec,
+                     execution_representation, sampler, scheduler, scheduler_shift, steps,
+                     image_count, guidance_scale, true_cfg_scale, guidance_method, use_pid,
+                     pid_target, width, height, seed, loras_json, load_ms, sample_ms, decode_ms,
+                     total_ms, peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
+                     updated_at, j_type, j_status, j_project_id, j_created_at
+                 )
+                 select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
+                        m.execution_representation, m.sampler, m.scheduler, m.scheduler_shift,
+                        m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
+                        m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
+                        m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
+                        m.peak_memory_bytes, m.peak_memory_pct, m.peak_gpu_load_pct, m.backend,
+                        m.updated_at, j.type, j.status, j.project_id, j.created_at
                    from generation_metrics m join jobs j on j.id = m.job_id
                   where j.{predicate}"
             ),
@@ -1264,10 +1338,11 @@ impl JobsStore {
                 guidance_method, use_pid, pid_target, width, height, seed,
                 loras_json, load_ms, sample_ms, decode_ms, total_ms,
                 peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
-                image_count, updated_at
+                image_count, source_codec, execution_representation, updated_at
             ) values (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
+                ?28, ?29
             )
             on conflict(job_id) do update set
                 model = coalesce(excluded.model, generation_metrics.model),
@@ -1295,6 +1370,11 @@ impl JobsStore {
                 peak_gpu_load_pct = coalesce(excluded.peak_gpu_load_pct, generation_metrics.peak_gpu_load_pct),
                 backend = coalesce(excluded.backend, generation_metrics.backend),
                 image_count = coalesce(excluded.image_count, generation_metrics.image_count),
+                source_codec = coalesce(excluded.source_codec, generation_metrics.source_codec),
+                execution_representation = coalesce(
+                    excluded.execution_representation,
+                    generation_metrics.execution_representation
+                ),
                 updated_at = excluded.updated_at
             ",
             params![
@@ -1324,6 +1404,8 @@ impl JobsStore {
                 metrics.peak_gpu_load_pct.as_ref().and_then(Number::as_f64),
                 metrics.backend,
                 metrics.image_count,
+                metrics.source_codec,
+                metrics.execution_representation,
                 now,
             ],
         )?;
@@ -1375,12 +1457,35 @@ impl JobsStore {
             bindings.push(Box::new(quant_label.to_owned()));
         }
         let mut sql = String::from(
+            // Both `union all` branches NAME every column, in one order, rather than
+            // `select m.*, j.…` / `select *` (sc-21484). `union all` matches its branches
+            // POSITIONALLY and takes the result names from the first branch, so an unnamed
+            // right branch is only correct while the two tables' physical column order
+            // agrees. It does not on an upgraded database: `generation_metrics_history` was
+            // materialized before `source_codec` / `execution_representation` existed, so
+            // `ensure_column` appends them AFTER the `j_*` identity columns, while the left
+            // branch produces them before. Same arity, so nothing errors — history rows
+            // would just read back with `source_codec` holding `j_type` and every later
+            // value shifted, breaking Generation Stats on every existing install.
             "select stats.* from (
-               select m.*, j.type as j_type, j.status as j_status,
+               select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
+                      m.execution_representation, m.sampler, m.scheduler, m.scheduler_shift,
+                      m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
+                      m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
+                      m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
+                      m.peak_memory_bytes, m.peak_memory_pct, m.peak_gpu_load_pct, m.backend,
+                      m.updated_at, j.type as j_type, j.status as j_status,
                       j.project_id as j_project_id, j.created_at as j_created_at
                  from generation_metrics m join jobs j on j.id = m.job_id
                union all
-               select * from generation_metrics_history
+               select job_id, model, quant_label, quant_bits, source_codec,
+                      execution_representation, sampler, scheduler, scheduler_shift,
+                      steps, image_count, guidance_scale, true_cfg_scale,
+                      guidance_method, use_pid, pid_target, width, height, seed,
+                      loras_json, load_ms, sample_ms, decode_ms, total_ms,
+                      peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
+                      updated_at, j_type, j_status, j_project_id, j_created_at
+                 from generation_metrics_history
              ) stats",
         );
         if !conditions.is_empty() {
@@ -3442,6 +3547,8 @@ fn row_to_generation_metrics(row: &Row<'_>) -> rusqlite::Result<GenerationMetric
         model: row.get("model")?,
         quant_label: row.get("quant_label")?,
         quant_bits: row.get("quant_bits")?,
+        source_codec: row.get("source_codec")?,
+        execution_representation: row.get("execution_representation")?,
         sampler: row.get("sampler")?,
         scheduler: row.get("scheduler")?,
         scheduler_shift: scheduler_shift.map(number_from_f64),

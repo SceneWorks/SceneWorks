@@ -43,12 +43,17 @@ fn krea_imported_operation(request: &ImageRequest) -> gen_core::ImportedModelOpe
     checkpoint_plan_operation(request)
 }
 
+/// Whether this request's checkpoint is **stored** in the NVFP4 source codec.
+///
+/// Reads the same `imported_entry_source_codec` the scheduler's admission gate reads (sc-21484,
+/// epic 11037), so claim and dispatch cannot disagree about what the checkpoint is. The name says
+/// what it means: this is the SOURCE fact. It does not say the run will execute the packed W4A4
+/// operand — that depends on the host's probed capability and on the load receipt, neither of which
+/// exists at route-selection time, and both of which are reported separately on the asset receipt
+/// and the telemetry row.
 fn krea_imported_native_nvfp4(request: &ImageRequest) -> bool {
-    request
-        .model_manifest_entry
-        .get("importQuantFormat")
-        .and_then(Value::as_str)
-        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
+    sceneworks_core::jobs_store::imported_entry_source_codec(&request.model_manifest_entry)
+        == Some(sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID)
 }
 
 /// Resolve the exact imported source shape and operation through the live provider registry. An
@@ -715,8 +720,9 @@ fn krea_imported_control_raw_settings(
     control_scale: f32,
     pose_count: usize,
     adapter_count: usize,
+    dit: Option<&Path>,
 ) -> JsonObject {
-    let mut raw = krea_imported_raw_settings(request, steps, false, adapter_count);
+    let mut raw = krea_imported_raw_settings(request, steps, false, adapter_count, dit);
     raw.insert("guidanceScale".to_owned(), Value::Null);
     raw.insert("controlScale".to_owned(), json!(control_scale));
     raw.insert("poseCount".to_owned(), json!(pose_count));
@@ -818,8 +824,14 @@ async fn generate_krea_imported_control_stream(
 
     let poses = parse_poses(request);
     let count = poses.len();
-    let mut raw_settings =
-        krea_imported_control_raw_settings(request, steps, control_scale, count, adapters.len());
+    let mut raw_settings = krea_imported_control_raw_settings(
+        request,
+        steps,
+        control_scale,
+        count,
+        adapters.len(),
+        Some(dit.as_path()),
+    );
     raw_settings.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(Value::from).unwrap_or(Value::Null),
@@ -1063,8 +1075,14 @@ async fn generate_krea_imported_control_stream(
 
     let poses = parse_poses(request);
     let count = poses.len();
-    let raw_settings =
-        krea_imported_control_raw_settings(request, steps, control_scale, count, adapters.len());
+    let raw_settings = krea_imported_control_raw_settings(
+        request,
+        steps,
+        control_scale,
+        count,
+        adapters.len(),
+        Some(dit.as_path()),
+    );
     // Strict pose shares one seed across the set so noise-derived attributes stay constant.
     let seed = resolve_seed(request, 0);
 
@@ -1217,9 +1235,20 @@ fn imported_model_quant(
             .or_else(|| value.as_str()?.trim().parse().ok())
     });
     let selected = if krea_imported_native_nvfp4(request) {
+        // Whether NVFP4 rides the LoadSpec at all is the PROVIDER's vocabulary, not the entry's:
+        // a provider advertising `Quant::Nvfp4` (the Krea single-file lane) takes the explicit
+        // instruction, while one that does not (the FLUX.2 Klein single-file lane, sc-21485)
+        // derives the packing from the file's compiled plan and takes no quant on its spec — its
+        // `supported_quants` lists only the quantize-on-load tiers q4/q8. Either way the request
+        // tier is vetted here: anything other than "nvfp4" or nothing must never reach the
+        // NVFP4-stored bytes.
+        let advertises_nvfp4 = descriptor
+            .capabilities
+            .supported_quants
+            .contains(&Quant::Nvfp4);
         match named.as_deref() {
-            None if bits.is_none() => Some(Quant::Nvfp4),
-            Some("nvfp4") if bits.is_none() => Some(Quant::Nvfp4),
+            None if bits.is_none() => advertises_nvfp4.then_some(Quant::Nvfp4),
+            Some("nvfp4") if bits.is_none() => advertises_nvfp4.then_some(Quant::Nvfp4),
             Some(other) => {
                 return Err(WorkerError::InvalidPayload(format!(
                     "{label} is stored as native NVFP4 and cannot be loaded as '{other}'."
@@ -1271,13 +1300,33 @@ fn imported_model_quant(
 /// are CFG-free (the Turbo descriptor advertises `supports_guidance=false`). `is_edit` records the
 /// Kontext edit lane (sc-14119) vs plain t2i/img2img, and `adapter_count` the number of applied
 /// LoRA/LoKr adapters (sc-14111 — the edit identity LoRA included).
+///
+/// # The three checkpoint facts
+///
+/// `checkpointWeightFacts` (sc-21484, epic 11037) records what the imported checkpoint's weights
+/// are **stored** in, what this **host** can execute in that packing, and — separately — what the
+/// load actually **materialized**, rather than letting the single `quantTier`/`mlxQuantize` value
+/// stand for all three. `advanced.quantTier: "nvfp4"` says which variant the user asked for; it
+/// does not say the run executed NVFP4 natively, and on a pre-Blackwell host, a datacenter
+/// `sm_100`, a Mac or a CPU box it did not. The facts object is absent when the entry carries no
+/// verified source classification — absent, never defaulted.
 fn krea_imported_raw_settings(
     request: &ImageRequest,
     steps: u32,
     is_edit: bool,
     adapter_count: usize,
+    dit: Option<&Path>,
 ) -> JsonObject {
     let mut raw = request.advanced.clone();
+    crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
+        &mut raw,
+        crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
+            &request.model_manifest_entry,
+            dit,
+            crate::checkpoint_weight_facts_host::materialization_from_runtime(None),
+        )
+        .as_ref(),
+    );
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
     raw.insert(
@@ -1856,7 +1905,8 @@ async fn generate_krea_imported_stream(
     );
     let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
     let text_style_gain = resolve_text_style_gain(request);
-    let mut raw_settings = krea_imported_raw_settings(request, steps, is_edit, adapter_count);
+    let mut raw_settings =
+        krea_imported_raw_settings(request, steps, is_edit, adapter_count, Some(dit.as_path()));
     raw_settings.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(Value::from).unwrap_or(Value::Null),
@@ -1893,6 +1943,14 @@ async fn generate_krea_imported_stream(
         .then(|| request.negative_prompt.clone());
 
     let engine_id = descriptor.id;
+    // Captured for the post-load facts rebuild (sc-11045): the engine's receipt only exists once
+    // the load materializes, on the blocking thread, so the drive closure re-assembles the three
+    // facts there and streams the finished receipt object back over the event channel. `dit` is
+    // about to move into the LoadSpec.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let dit_for_facts = dit.clone();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(base_dir.clone()),
@@ -2001,6 +2059,7 @@ async fn generate_krea_imported_stream(
             },
         ),
         move |model, tx, cancel| {
+            let facts_tx = tx.clone();
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
@@ -2042,6 +2101,21 @@ async fn generate_krea_imported_stream(
                     Err(_) if cancel.is_cancelled() => return Ok(None),
                     Err(error) => return Err(error),
                 };
+                // The engine's receipt exists only after the load materialized, so the three facts
+                // are re-assembled HERE — on the blocking thread with the handle in hand — and
+                // streamed to the consumer, which stamps them onto every subsequent asset in place
+                // of the pre-load `no-runtime-receipt` version (sc-11045). Sent after every image
+                // on purpose: publication is last-write-wins engine-side, so the latest event
+                // always describes the most recent materialization.
+                if let Some(facts) = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+                    &manifest_entry_for_facts,
+                    Some(dit_for_facts.as_path()),
+                    model.checkpoint_weight_facts(),
+                ) {
+                    let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
+                        facts: crate::checkpoint_weight_facts_host::facts_receipt_object(&facts),
+                    });
+                }
                 Ok(Some((seed, out_width, out_height, pixels)))
             })
         },

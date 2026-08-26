@@ -163,6 +163,12 @@ mod engines;
 // on the lanes that link no engines at all.
 pub mod engine_capability_facts;
 mod gpu;
+// The three-fact producer for imported checkpoints (sc-21484, epic 11037). Not cfg-gated: the
+// source binding and source codec are stated on every platform, and the dense-only capability arm
+// is the answer for macOS/MLX, CPU and the non-candle builds — a fact set that only existed where
+// the candle lane is linked would leave exactly the hosts that take the dense fallback unable to
+// say so.
+mod checkpoint_weight_facts_host;
 pub mod memory_route_registry;
 use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

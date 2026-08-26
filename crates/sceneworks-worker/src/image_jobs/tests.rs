@@ -2966,7 +2966,7 @@ fn imported_krea_records_the_sampler_it_explicitly_executes() {
         "model": "kreamania_v4_int8",
         "advanced": { "sampler": "not-the-runtime-sampler" }
     }));
-    let raw = krea_imported_raw_settings(&req, 8, false, 0);
+    let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
     assert_eq!(raw.get("resolvedSampler"), Some(&json!("euler")));
 }
 
@@ -20501,6 +20501,7 @@ mod preview_stream_tests {
             GenEvent::Loading { .. } => "Loading",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
+            GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::Image { .. } => "Image",
         }
     }
@@ -23483,6 +23484,208 @@ fn a_quantized_plan_is_gated_on_the_providers_advertised_tiers_not_on_its_layer_
     }
 }
 
+/// A single-file Krea NVFP4 transformer: the `_quantization_metadata` layer map plus one complete
+/// packed triplet (`U8` weight / `F8_E4M3` blocked scale / scalar `F32` second scale) per
+/// projection, over the `krea_2` family marker.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_krea_nvfp4_safetensors(path: &Path) {
+    let layers = 6;
+    let mut declared = serde_json::Map::new();
+    for index in 0..layers {
+        declared.insert(
+            format!("blocks.{index}.attn.wq"),
+            json!({"format": "nvfp4", "group_size": 16}),
+        );
+    }
+    let mut header = serde_json::Map::new();
+    header.insert(
+        "__metadata__".to_owned(),
+        json!({
+            "format": "pt",
+            "_quantization_metadata": serde_json::to_string(&json!({"layers": declared})).unwrap(),
+        }),
+    );
+    let mut entries: Vec<(String, &'static str, Vec<u64>)> = vec![(
+        "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+        "BF16",
+        vec![128, 128],
+    )];
+    for index in 0..layers {
+        let base = format!("blocks.{index}.attn.wq");
+        entries.push((format!("{base}.weight"), "U8", vec![128, 32]));
+        entries.push((format!("{base}.weight_scale"), "F8_E4M3", vec![128, 4]));
+        entries.push((format!("{base}.weight_scale_2"), "F32", vec![]));
+    }
+    let mut offset = 0_u64;
+    for (name, dtype, shape) in &entries {
+        let width = match *dtype {
+            "F32" => 4,
+            "BF16" | "F16" => 2,
+            _ => 1,
+        };
+        let bytes = shape.iter().product::<u64>().max(1) * width;
+        header.insert(
+            name.clone(),
+            json!({"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + bytes]}),
+        );
+        offset += bytes;
+    }
+    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
+    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(encoded);
+    bytes.resize(bytes.len() + offset as usize, 0x5a);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// Feature-end review (sc-11045, epic 11037, major 6) — the DISPATCH half of linked NVFP4 exposure.
+///
+/// A LINKED copy of a packed NVFP4 checkpoint must be refused a `q4` tier exactly as a managed copy
+/// is. `imported_model_quant` gates on `krea_imported_native_nvfp4`, which reads
+/// `imported_entry_source_codec` off the manifest entry — and until sc-11045 that answered `None`
+/// for every linked entry, because only the managed import branch stamped `importQuantFormat`. The
+/// guard was therefore off for linked copies, and `Quant::Q4` (or `mlxQuantize: 4`) could be handed
+/// to packed E2M1 bytes.
+///
+/// The entry is NOT hand-written: it is what `model_jobs::linked_checkpoint_manifest_entry`
+/// produces for this compile, with the classification the production job reads off the same file.
+///
+/// Failing mutation (run): pass `None` for `classification` — i.e. drop the stamping — and the
+/// `q4`/`mlxQuantize` rows stop being refused as native NVFP4.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
+    let fx = CheckpointPlanFixture::new("linked-nvfp4-dispatch", true);
+    let relative = "kreamania_nvfp4.safetensors";
+    let file = fx.library_dir.join(relative);
+    write_krea_nvfp4_safetensors(&file);
+    let compiled = fx
+        .store
+        .compile_linked(&fx.root_id, relative)
+        .expect("the packed linked checkpoint compiles");
+
+    let classification = crate::model_jobs::base_weight_manifest_classification(&file);
+    assert_eq!(
+        classification,
+        Some(("transformer_file", "nvfp4")),
+        "fixture check: the file's own header proves it is packed NVFP4"
+    );
+
+    let queued: JsonObject = json!({
+        "id": "linked_kreamania_nvfp4",
+        "type": "image",
+        "catalogScope": "user",
+        "source": {
+            "provider": "linked-library",
+            "rootId": fx.root_id,
+            "relativePath": relative,
+        },
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(
+        queued.clone(),
+        &compiled,
+        classification,
+    );
+
+    let descriptor = crate::inference_runtime::imported_model_descriptor(
+        "krea_2",
+        gen_core::ImportedModelSource::TransformerFile,
+        gen_core::ImportedModelOperation::Generate,
+    )
+    .expect("fixture check: this backend binds krea_2 transformer-file generation");
+
+    let request_with = |advanced: Value| {
+        request(json!({
+            "projectId": "p",
+            "model": "linked_kreamania_nvfp4",
+            "prompt": "a fox",
+            "count": 1,
+            "advanced": advanced,
+            "modelManifestEntry": Value::Object(entry.clone()),
+        }))
+    };
+
+    for advanced in [
+        json!({ "quantTier": "q4" }),
+        json!({ "quantTier": "q8" }),
+        json!({ "quant": "q4" }),
+        json!({ "quantTier": "bf16" }),
+        json!({ "mlxQuantize": 4 }),
+    ] {
+        let error = imported_model_quant(&request_with(advanced.clone()), &descriptor, "Linked")
+            .expect_err("packed NVFP4 bytes accept no other tier");
+        let WorkerError::InvalidPayload(message) = error else {
+            panic!("{advanced}: expected a typed payload refusal, got {error:?}");
+        };
+        assert!(
+            message.contains("stored as native NVFP4"),
+            "{advanced}: the refusal must come from the NATIVE-NVFP4 guard, not from the \
+             provider's advertised-tier check: {message}"
+        );
+    }
+
+    // The NEGATIVE CONTROL, and the named mutation made permanent: the SAME compile, the SAME
+    // request, stamped with NO classification is exactly what an unstamped linked entry was before
+    // sc-11045 — and the native guard does not fire for it. Without this the assertions above are
+    // satisfied by any refusal at all, and the mutation ("pass `None` for classification") could
+    // only be run by hand on a lane that executes candle/MLX tests.
+    let unstamped =
+        crate::model_jobs::linked_checkpoint_manifest_entry(queued.clone(), &compiled, None);
+    assert_eq!(
+        sceneworks_core::jobs_store::imported_entry_source_codec(&unstamped),
+        None,
+        "the pre-sc-11045 shape: the same packed bytes, with no source codec anywhere"
+    );
+    let unstamped_request = request(json!({
+        "projectId": "p",
+        "model": "linked_kreamania_nvfp4",
+        "prompt": "a fox",
+        "count": 1,
+        "advanced": { "quantTier": "q4" },
+        "modelManifestEntry": Value::Object(unstamped),
+    }));
+    let unguarded = imported_model_quant(&unstamped_request, &descriptor, "Linked");
+    let message = match unguarded {
+        Ok(_) => String::new(),
+        Err(WorkerError::InvalidPayload(message)) => message,
+        Err(other) => panic!("unexpected error shape: {other:?}"),
+    };
+    assert!(
+        !message.contains("stored as native NVFP4"),
+        "SANITY: without the stamp the native guard cannot fire — so the rows above are measuring \
+         the stamp, not some unrelated refusal: {message}"
+    );
+
+    // The checkpoint's own tier is what it accepts, and an unspecified tier resolves to it too —
+    // so this is a guard, not a blanket refusal. Only where the registered provider advertises the
+    // packed tier at all: MLX has no NVFP4 consumer, so on that lane every tier including its own
+    // is refused, and asserting acceptance there would measure the registry rather than the guard.
+    if descriptor
+        .capabilities
+        .supported_quants
+        .contains(&gen_core::Quant::Nvfp4)
+    {
+        for advanced in [json!({ "quantTier": "nvfp4" }), json!({})] {
+            let (quant, bits) =
+                imported_model_quant(&request_with(advanced.clone()), &descriptor, "Linked")
+                    .unwrap_or_else(|error| {
+                        panic!("{advanced} must resolve to the packed tier: {error}")
+                    });
+            assert_eq!(quant, Some(gen_core::Quant::Nvfp4), "{advanced}");
+            assert_eq!(bits, None, "{advanced}: a packed tier is never a bit count");
+        }
+    }
+}
+
 /// Feature-end review (sc-20398, blocker 11) — linked/managed parity beyond Krea: the SDXL row.
 ///
 /// The Krea row already proves a linked and a managed copy of the same bytes compile to one
@@ -24989,7 +25192,7 @@ fn an_approved_root_becomes_a_selectable_plan_backed_model_through_the_import_st
         "SANITY: the queued entry is not yet plan-backed"
     );
 
-    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled);
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled, None);
     assert_eq!(
         sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
         Some(compiled.checkpoint_id.as_str()),
@@ -25065,6 +25268,7 @@ fn relinking_a_moved_library_restores_the_route_without_touching_the_manifest_en
             .unwrap()
             .clone(),
         &compiled,
+        None,
     );
     let mut payload = json!({
         "projectId": "p",
@@ -25200,7 +25404,7 @@ fn the_linked_import_stamp_carries_the_plan_identity_and_no_install_path() {
         "SANITY: the queued entry is not yet plan-backed"
     );
 
-    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled);
+    let entry = crate::model_jobs::linked_checkpoint_manifest_entry(queued, &compiled, None);
     assert_eq!(
         sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&entry),
         Some(checkpoint_id),
