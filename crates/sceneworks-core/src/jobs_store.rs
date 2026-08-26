@@ -307,6 +307,24 @@ pub struct JobsStore {
     /// `list_jobs`); the separate worker PROCESS keeps its own connection, so
     /// cross-process access and WAL semantics are unchanged.
     lock: Mutex<Option<Connection>>,
+    /// Deterministic, per-store evidence for the last claim's selection work.
+    /// This is deliberately a count, rather than a duration: a large queue must
+    /// not be able to turn a claim's JSON/snapshot work into an untestable timing
+    /// assertion (sc-21620).
+    last_claim_hydration: Mutex<ClaimHydrationStats>,
+}
+
+/// Selection work performed by the most recent claim on this store.
+///
+/// `candidate_rows_scanned` may grow with the queue: scanning lightweight SQL
+/// headers is what lets a compatible job behind an incompatible prefix remain
+/// visible. `routing_snapshots_hydrated` is the expensive part and must not
+/// include rows rejected by their durable type/capability headers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClaimHydrationStats {
+    pub candidate_rows_scanned: usize,
+    pub routing_snapshots_hydrated: usize,
+    pub claimed_snapshot_hydrated: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -458,11 +476,18 @@ impl JobsStore {
         Self {
             db_path: db_path.into(),
             lock: Mutex::new(None),
+            last_claim_hydration: Mutex::new(ClaimHydrationStats::default()),
         }
     }
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Return deterministic instrumentation for the last call to
+    /// [`Self::claim_next_job`] or [`Self::claim_next_job_routed`].
+    pub fn last_claim_hydration(&self) -> ClaimHydrationStats {
+        *self.last_claim_hydration.lock()
     }
 
     pub fn initialize(&self) -> JobsStoreResult<()> {
@@ -2301,10 +2326,12 @@ impl JobsStore {
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
         let worker_gpu_id = worker.gpu_id.clone();
         let has_active_gpu_job = active_gpu_job_exists(&transaction, &worker.gpu_id)?;
+        let mut hydration = ClaimHydrationStats::default();
 
         let mut statement = transaction.prepare(&format!(
             "
-            select * from jobs
+            select id, type, queue_rank
+              from jobs
              where status = 'queued'
                and (type in ({list}) or requested_gpu = 'auto' or requested_gpu = ?1)
                and (?2 = 0 or type in ({list}))
@@ -2312,23 +2339,28 @@ impl JobsStore {
             ",
             list = non_gpu_job_types_sql()
         ))?;
-        let queued_rows = collect_jobs(statement.query_map(
+        let queued_rows = collect_claim_candidates(statement.query_map(
             params![worker.gpu_id, i64::from(has_active_gpu_job)],
-            row_to_job,
+            row_to_claim_candidate,
         )?)?;
-        // No row cap (sc-1630): choose_claimable_job must see every gpu/type-gated queued row,
-        // or a capability-incompatible prefix (e.g. 50+ jobs the worker can't run) would hide a
-        // later compatible job and the worker would sit idle. It also needs the whole compatible
-        // set for its priority pass (an explicit-GPU / loaded-model job jumps ahead of an earlier
-        // auto-GPU one), so a bounded scan can't preserve that anyway. The WHERE above already
-        // narrows rows to this worker's gpu/type lane; pushing the capability filter into SQL is
-        // the scale lever if queues ever grow large enough for the full scan to matter.
-        let queued = choose_claimable_job(queued_rows, &worker);
+        // No row cap (sc-1630): a compatible job must remain visible behind any number of
+        // incompatible rows. The scan deliberately reads only the durable routing header;
+        // full snapshot + JSON hydration happens only after that header says the worker could
+        // plausibly run the row. This preserves capability routing and FIFO/priority selection
+        // without turning a large incompatible prefix into unbounded JSON work.
+        let queued = choose_claimable_job_from_candidates(
+            &transaction,
+            queued_rows,
+            &worker,
+            &mut hydration,
+        )?;
         let Some(queued) = queued else {
+            *self.last_claim_hydration.lock() = hydration;
             return Ok((None, None));
         };
         drop(statement);
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
+            *self.last_claim_hydration.lock() = hydration;
             return Ok((None, None));
         }
         if should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
@@ -2350,6 +2382,7 @@ impl JobsStore {
                 "deferred_to_mlx",
                 "idle_mlx_available",
             );
+            *self.last_claim_hydration.lock() = hydration;
             return Ok((None, Some(decision)));
         }
 
@@ -2378,8 +2411,10 @@ impl JobsStore {
             params![queued.id, now, worker_id],
         )?;
         let job = self.get_job_on_connection(&transaction, &queued.id)?;
+        hydration.claimed_snapshot_hydrated += 1;
         transaction.commit()?;
         let decision = route_decision_for_claim(&queued, &worker);
+        *self.last_claim_hydration.lock() = hydration;
         Ok((Some(job), decision))
     }
 
@@ -3131,6 +3166,34 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         title,
         extra,
     })
+}
+
+/// The durable, scalar header needed to rule out jobs that a worker cannot
+/// possibly claim. Keeping this separate from [`JobSnapshot`] is the claim
+/// path's scale boundary: queued rows that fail this header check never decode
+/// either `payload_json` or `result_json`.
+#[derive(Debug)]
+struct ClaimCandidate {
+    id: String,
+    job_type: JobType,
+    queue_rank: i64,
+}
+
+fn row_to_claim_candidate(row: &Row<'_>) -> rusqlite::Result<ClaimCandidate> {
+    Ok(ClaimCandidate {
+        id: row.get("id")?,
+        job_type: parse_string_enum(&row.get::<_, String>("type")?),
+        queue_rank: row.get::<_, i64>("queue_rank")?.max(0),
+    })
+}
+
+fn collect_claim_candidates<F>(
+    rows: rusqlite::MappedRows<'_, F>,
+) -> JobsStoreResult<Vec<ClaimCandidate>>
+where
+    F: FnMut(&Row<'_>) -> rusqlite::Result<ClaimCandidate>,
+{
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Map a `generation_metrics` row to the contract struct (epic 10402). Reads
@@ -4247,6 +4310,79 @@ fn dispatch_score_is_better(candidate: DispatchScore, current: DispatchScore) ->
             && candidate.gpu_load_percent <= DISPATCH_RECOVERED_LOAD_THRESHOLD_PERCENT)
         || (current.memory_usage_percent >= DISPATCH_HIGH_MEMORY_USAGE_THRESHOLD_PERCENT
             && candidate.memory_usage_percent <= DISPATCH_RECOVERED_MEMORY_USAGE_THRESHOLD_PERCENT)
+}
+
+/// Header-only rejection for claim selection. This intentionally proves only a
+/// *negative*: anything that survives is still passed through
+/// [`worker_supports_job`] after its full snapshot is loaded, so dynamic routing
+/// (model family, mode, LoRA, pose, preview, and training-plan predicates) stays
+/// exactly where its source of truth has always been.
+fn worker_may_support_claim_candidate(worker: &WorkerSnapshot, candidate: &ClaimCandidate) -> bool {
+    if worker.status == WorkerStatus::Unhealthy
+        || (job_requires_gpu(&candidate.job_type) && worker.gpu_id.eq_ignore_ascii_case("cpu"))
+    {
+        return false;
+    }
+    let advertises = |capability: &str| {
+        worker
+            .capabilities
+            .iter()
+            .any(|owned| owned.as_str() == capability)
+    };
+    match candidate.job_type {
+        // Payload decides whether these use the native or preview capability.
+        JobType::PersonDetect => {
+            advertises(WorkerCapability::PersonDetect.as_str())
+                || advertises(WorkerCapability::PersonDetectPreview.as_str())
+        }
+        JobType::PersonTrack => {
+            advertises(WorkerCapability::PersonTrack.as_str())
+                || advertises(WorkerCapability::PersonTrackPreview.as_str())
+        }
+        // The payload still decides whether execution capability is required,
+        // but a worker without the base planning capability cannot claim either.
+        JobType::LoraTrain | JobType::ControlTraining => {
+            advertises(WorkerCapability::LoraTrain.as_str())
+        }
+        _ => advertises(candidate.job_type.as_str()),
+    }
+}
+
+/// Scan every durable candidate header, but hydrate a complete job only after
+/// the header has ruled out the common incompatible-prefix case. Once a
+/// compatible rank has been found, lower ranks cannot win under the durable
+/// queue policy, so their JSON is never loaded either.
+fn choose_claimable_job_from_candidates(
+    connection: &Connection,
+    candidates: Vec<ClaimCandidate>,
+    worker: &WorkerSnapshot,
+    hydration: &mut ClaimHydrationStats,
+) -> JobsStoreResult<Option<JobSnapshot>> {
+    let mut compatible = Vec::new();
+    let mut highest_compatible_rank = None;
+
+    for candidate in candidates {
+        hydration.candidate_rows_scanned += 1;
+        if highest_compatible_rank.is_some_and(|rank| candidate.queue_rank < rank) {
+            break;
+        }
+        if !worker_may_support_claim_candidate(worker, &candidate) {
+            continue;
+        }
+        let job = connection.query_row(
+            "select * from jobs where id = ?1 and status = 'queued'",
+            params![candidate.id],
+            row_to_job,
+        )?;
+        hydration.routing_snapshots_hydrated += 1;
+        if !worker_supports_job(worker, &job) {
+            continue;
+        }
+        highest_compatible_rank.get_or_insert(candidate.queue_rank);
+        compatible.push(job);
+    }
+
+    Ok(choose_claimable_job(compatible, worker))
 }
 
 fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Option<JobSnapshot> {

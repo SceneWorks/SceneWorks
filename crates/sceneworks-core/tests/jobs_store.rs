@@ -1789,6 +1789,19 @@ fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
         .expect("claim succeeds")
         .expect("compatible job claimed despite the incompatible prefix");
     assert_eq!(claimed.id, download_job.id);
+    let hydration = store.last_claim_hydration();
+    assert_eq!(
+        hydration.candidate_rows_scanned, 61,
+        "every durable header is scanned so the compatible tail cannot starve"
+    );
+    assert_eq!(
+        hydration.routing_snapshots_hydrated, 1,
+        "the 60 incompatible image rows must not hydrate payload/result JSON"
+    );
+    assert_eq!(
+        hydration.claimed_snapshot_hydrated, 1,
+        "only the selected row is reloaded after assignment"
+    );
 }
 
 #[test]
@@ -7428,7 +7441,7 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
 fn concurrent_claims_never_lock_and_stay_exactly_once() {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{Arc, Barrier, Mutex as StdMutex};
     use std::thread;
     use std::time::Duration;
 
@@ -7461,6 +7474,7 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     let claimed: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
     let errors: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
     let remaining = Arc::new(AtomicUsize::new(JOBS));
+    let first_claim_start = Arc::new(Barrier::new(WORKERS));
 
     let mut handles = Vec::new();
     for w in 0..WORKERS {
@@ -7468,14 +7482,29 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
         let claimed = Arc::clone(&claimed);
         let errors = Arc::clone(&errors);
         let remaining = Arc::clone(&remaining);
+        let first_claim_start = Arc::clone(&first_claim_start);
         handles.push(thread::spawn(move || {
             let store = JobsStore::new(path);
             let worker_id = format!("worker-{w}");
+            // Make the first claim a real SQLite race. Without this rendezvous a
+            // fast first thread can drain enough rows that the test only exercises
+            // sequential claims and falsely appears to prove contention safety.
+            first_claim_start.wait();
             while remaining.load(Ordering::SeqCst) > 0 {
                 match store.claim_next_job(&worker_id) {
                     Ok(Some(job)) => {
                         claimed.lock().unwrap().push(job.id.clone());
                         remaining.fetch_sub(1, Ordering::SeqCst);
+                        if let Err(error) = store.heartbeat_worker(WorkerHeartbeat {
+                            worker_id: worker_id.clone(),
+                            status: WorkerStatus::Busy,
+                            current_job_id: Some(job.id.clone()),
+                            loaded_models: Vec::new(),
+                            utilization: None,
+                            status_reason: None,
+                        }) {
+                            errors.lock().unwrap().push(error.to_string());
+                        }
                         // Free the worker so it keeps claiming and the queue drains.
                         if let Err(error) = store.update_job_progress(
                             &job.id,
@@ -7515,6 +7544,20 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     let unique: HashSet<&String> = claimed.iter().collect();
     assert_eq!(claimed.len(), JOBS, "every job claimed (count)");
     assert_eq!(unique.len(), JOBS, "no job claimed twice");
+    for job_id in claimed.iter() {
+        assert_eq!(
+            primary.get_job(job_id).expect("claimed job reloads").status,
+            JobStatus::Completed,
+            "the overlapping heartbeat must not overwrite terminal progress"
+        );
+    }
+    for worker in 0..WORKERS {
+        let snapshot = primary
+            .get_worker(&format!("worker-{worker}"))
+            .expect("worker reloads");
+        assert_eq!(snapshot.status, WorkerStatus::Idle);
+        assert_eq!(snapshot.current_job_id, None);
+    }
 }
 
 /// sc-8950 / F-148 — read-only methods (list_jobs/get_job/list_workers/
