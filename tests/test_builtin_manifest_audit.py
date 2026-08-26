@@ -571,48 +571,50 @@ def test_control_weight_authority_audit_detects_absence_and_fallback_mutations()
     )
 
 
-def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback():
-    """sc-14476 lane inventory and regression guard.
+AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
+    "image_jobs/base.rs": "model.default_repo()",
+    "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
+    "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
+    "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
+    "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
+    "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
+    "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
+    "image_jobs/pulid.rs": "PULID_FLUX_REPO",
+    "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
+    "image_jobs/qwen_edit_candle.rs": "crate::engines::MODEL_TABLE",
+    "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
+    "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
+    "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
+    "sensenova_jobs.rs": "default_repo_for(&request.model)",
+    "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
+}
 
-    The marker names the effective resolution source in each lane. Explicit
-    constants below are justified because their repo is staged as a co-requisite
-    of a different model (InstantID/PuLID), while video resolves Wan tiers from
-    the request's own downloads. Any new reader must be consciously added here.
-    """
-    audited_lanes = {
-        "image_jobs/base.rs": "model.default_repo()",
-        "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
-        "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
-        "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
-        "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
-        "image_jobs/krea_control_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/krea_edit_candle.rs": "default_repo_for(&request.model)",
-        "image_jobs/pulid.rs": "PULID_FLUX_REPO",
-        "image_jobs/pulid_candle.rs": "PULID_CANDLE_FLUX_REPO",
-        "image_jobs/qwen_edit_candle.rs": "crate::engines::MODEL_TABLE",
-        "image_jobs/sdxl_edit_candle.rs": "sdxl_edit_candle_default_repo(&request.model)",
-        "image_jobs/sdxl_ipadapter.rs": "sdxl_ipadapter_default_repo(&request.model)",
-        "image_jobs/zimage_edit_candle.rs": "default_repo_for(&request.model)",
-        "sensenova_jobs.rs": "default_repo_for(&request.model)",
-        "video_jobs/candle.rs": "candle_wan_tier_repo_from_downloads(request, engine_id)",
+
+def _worker_sources() -> dict[str, str]:
+    return {
+        path.relative_to(WORKER_SOURCE_PATH).as_posix(): path.read_text(encoding="utf-8")
+        for path in WORKER_SOURCE_PATH.rglob("*.rs")
     }
-    actual_lanes: set[str] = set()
-    for path in WORKER_SOURCE_PATH.rglob("*.rs"):
-        source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
-        if re.search(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source):
-            actual_lanes.add(path.relative_to(WORKER_SOURCE_PATH).as_posix())
 
+
+def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
+    sources: dict[str, str], audited_lanes: dict[str, str]
+) -> None:
+    actual_lanes = {
+        relative_path
+        for relative_path, source in sources.items()
+        if re.search(
+            r"\.model_manifest_entry\s*\.get\(\"repo\"\)",
+            source.split("\n#[cfg(test)]", maxsplit=1)[0],
+        )
+    }
     assert actual_lanes == set(audited_lanes), (
         "top-level model_manifest_entry.repo lane inventory changed; audit every added/removed lane: "
         f"added={sorted(actual_lanes - set(audited_lanes))}, "
         f"removed={sorted(set(audited_lanes) - actual_lanes)}"
     )
     for relative_path, fallback_marker in audited_lanes.items():
-        source = (
-            (WORKER_SOURCE_PATH / relative_path)
-            .read_text(encoding="utf-8")
-            .split("\n#[cfg(test)]", maxsplit=1)[0]
-        )
+        source = sources[relative_path].split("\n#[cfg(test)]", maxsplit=1)[0]
         reads = list(re.finditer(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source))
         assert reads, f"{relative_path}: inventoried lane no longer contains a top-level repo read"
         for read in reads:
@@ -627,9 +629,74 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
         "image_jobs/sdxl_ipadapter.rs",
         "image_jobs/zimage_control.rs",
     ):
-        source = (WORKER_SOURCE_PATH / relative_path).read_text(encoding="utf-8")
+        source = sources[relative_path]
         assert "default_repo_for(model)" in source, (
             f"{relative_path}: per-family fallback no longer delegates to MODEL_TABLE"
+        )
+
+
+def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback():
+    """sc-14476 lane inventory and regression guard.
+
+    The marker names the effective installed resolution source in each lane. Explicit constants are
+    permitted only when a built-in download stages that exact repo; video's generic lane instead
+    selects from the request's own downloads. Any new reader must be consciously added here.
+    """
+    _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
+        _worker_sources(), AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES
+    )
+
+
+def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
+    production = source.split("\n#[cfg(test)]", maxsplit=1)[0]
+    assert '.model_manifest_entry.get("repo")' not in production, (
+        "MiniMax-H3 Candle must not accept a top-level manifest repo override; its q4/q8 and "
+        "bf16/shared components come from two separately pinned installed snapshots"
+    )
+    for declaration, use in (
+        (
+            'const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";',
+            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?",
+        ),
+        (
+            'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)",
+        ),
+    ):
+        assert declaration in production, f"missing exact MiniMax-H3 repo authority: {declaration}"
+        assert use in production, f"MiniMax-H3 resolver no longer consumes {use}"
+
+
+def test_minimax_h3_candle_repo_audit_rejects_override_and_root_mutations():
+    source = _worker_sources()["video_jobs/minimax_h3.rs"]
+    _assert_minimax_h3_candle_uses_exact_installed_roots(source)
+
+    for label, mutated in (
+        (
+            "upstream root",
+            source.replace(
+                'const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";',
+                'const CANDLE_MINIMAX_H3_REPO: &str = "mutable/upstream";',
+            ),
+        ),
+        (
+            "tier rehost root",
+            source.replace(
+                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "mutable/rehost";',
+            ),
+        ),
+        (
+            "manifest override",
+            source.replace(
+                "let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;",
+                'let root = request.model_manifest_entry.get("repo").unwrap();',
+            ),
+        ),
+    ):
+        _must_fail_assertion(
+            lambda mutated=mutated: _assert_minimax_h3_candle_uses_exact_installed_roots(mutated),
+            f"the MiniMax-H3 Candle audit must reject a {label} mutation",
         )
 
 
@@ -983,7 +1050,11 @@ def test_measured_memory_rows_declare_their_workload_geometry():
     assert measured_ids.isdisjoint(unmeasured_ids), measured_ids & unmeasured_ids
     assert measured_ids | unmeasured_ids == {row[0] for row in candle_rows}
 
-    measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
+    measured_image_rows = [
+        row
+        for row in measured_rows
+        if row[0] not in {"scail2_14b", "minimax_h3", "minimax_h3_ref"}
+    ]
     assert all(
         row[1].get("vramMeasuredPixels") == 1024 * 1024
         for row in measured_image_rows
@@ -991,6 +1062,11 @@ def test_measured_memory_rows_declare_their_workload_geometry():
     scail = [row for row in measured_rows if row[0] == "scail2_14b"]
     assert len(scail) == 1
     assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
+    minimax_h3 = [
+        row for row in measured_rows if row[0] in {"minimax_h3", "minimax_h3_ref"}
+    ]
+    assert {row[0] for row in minimax_h3} == {"minimax_h3", "minimax_h3_ref"}
+    assert all(row[1].get("vramMeasuredPixels") == 1344 * 768 for row in minimax_h3)
 
     # Unmeasured rows still declare the geometry of their estimate or conservative gate, but they
     # do not enter the calibrated 1024² set. FLUX.2-dev is deliberately the sole 256² gate: its

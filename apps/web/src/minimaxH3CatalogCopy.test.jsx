@@ -436,9 +436,9 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     // pin predated it, so this file asserted the caveat was cited against the PIN BUMP (sc-18650)
     // rather than against the PR.
     //
-    // sc-19721 is that pin bump: `Cargo.toml` now pins `75d66db5`, which carries #640, and the
-    // engine's own `max_size` is `MAX_CANVAS_EDGE = 2016` on both lanes. The refusal is gone, so the
-    // caveat is a false claim and is deleted rather than re-pointed at a third event.
+    // The permanent inference pin `28f0563baa03640ade1635356d2d54fe8a477f1a` carries the provider
+    // geometry with `MAX_CANVAS_EDGE = 2016` on both lanes. The refusal is gone, so the caveat is a
+    // false claim and is deleted rather than re-pointed at a third event.
     //
     // What keeps this from being a vacuous absence check is that the real guard lives where it can
     // read the engine: `pinned_engine_geometry.rs` asserts every advertised MiniMax-H3 resolution's

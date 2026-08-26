@@ -8676,8 +8676,8 @@ mod model_size_concurrency_tests {
         // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
         // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
         // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
-        // windows/linux gain exactly one. `minimax_h3_ref` deliberately gained no off-Mac row, which
-        // is why that is +1 and not +2.
+        // windows/linux gain exactly one at that point. SC-20756 later adds the distinct hosted
+        // `q4/transformer_ref/*` context for the reference partition.
         //
         // sc-20267 then widened `minimax_h3`'s q4/q8 tier rows to `["macos","windows","linux"]`. That
         // SWAPS which key that +1 is off-Mac without changing the count: `model_download` prefers the
@@ -8688,9 +8688,8 @@ mod model_size_concurrency_tests {
         // is not — a reader auditing this count off-Mac will find a repo the sc-19558 note says those
         // platforms never fetch.
         //
-        // (The reason `minimax_h3_ref` has no off-Mac row is NOT that candle "default-denies ref2va" —
-        // that premise was falsified by sc-17157, which is an ancestor of the pinned inference
-        // revision. See the trailing note in that entry's `downloads` for the current reason.)
+        // SC-20756 then makes the already-hosted Ref2VA tiers installable off-Mac; the pinned
+        // provider has admitted that conditioning surface since sc-17157.
         //
         // SC-18902 (main) then removed Eros's failed Candle route and platform-scoped both of its
         // download rows to macOS, so its primary context leaves Windows/Linux while macOS is
@@ -8706,11 +8705,12 @@ mod model_size_concurrency_tests {
         //   main  sc-19708 instantid_face_stack    +1 / +1 / +1   (unscoped row)
         //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
         //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
-        // giving 89 / 85 / 85. Each side read only its own set and so read 87/84/84 (main) or
+        //   epic  sc-20756 H3 Ref2VA off-Mac tier  +0 / +1 / +1
+        // giving 89 / 86 / 86. Each side read only its own set and so read 87/84/84 (main) or
         // 88/85/85 (epic, at the previous sync); neither is right once both land.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 89_usize), ("windows", 85), ("linux", 85)]
+            [("macos", 89_usize), ("windows", 86), ("linux", 86)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

@@ -594,6 +594,20 @@ export function collectMemoryContractMismatches({
           selectorDigest: engine.get(laneKey(backend, cell.provider))?.selectorDigest,
         })), cell);
       }
+      // Clean-base claims per (provider, modelId, tier), for the withheld-overlay probe below. Keyed
+      // WITHOUT the mode axis on purpose (sc-21510): a provider's rung-4 gate is a property of the
+      // loaded overlay spec, not of the request mode — FLUX.1's `structurally_streamable` requires
+      // `identity.is_none() && ip_adapter.is_none()` no matter which mode routed the load, and its
+      // `validate_load_contract` rejects an identity spec for `flux1_dev` outright. A dump's contract
+      // surface carries neither a mode nor an overlay axis, so when the survey claims the same
+      // (provider, model, tier) at clean base in ANY mode, a loaded-overlay coordinate reached only
+      // through the route witnesses is the engine side over-approximating, not a survey omission.
+      const cleanBaseClaims = new Set();
+      for (const cell of surveyCoordinates.values()) {
+        if (cell.overlay === "none") {
+          cleanBaseClaims.add(`${cell.provider}:${cell.modelId}:${cell.tier}`);
+        }
+      }
       const engineCoordinates = new Map();
       for (const cell of familyCells) {
         const contract = engine.get(laneKey(backend, cell.provider));
@@ -657,7 +671,7 @@ export function collectMemoryContractMismatches({
         if (surveyCoordinates.has(key)) continue;
         const row = JSON.parse(key);
         row.direction = "engine_to_survey";
-        // Does the survey claim this same coordinate at CLEAN BASE and withhold only the loaded
+        // Does the survey claim this provider/model/tier at CLEAN BASE and withhold only the loaded
         // overlay? Then the two sides are not in conflict — the engine side simply cannot express
         // the distinction. A dump's contract surface is keyed (tier, offloadPolicy, loadShape) with
         // NO overlay axis, so `implementedByTier` cannot say "rung 4 at overlay none only", while
@@ -666,15 +680,33 @@ export function collectMemoryContractMismatches({
         // `klein_streamable` requires `klein_overlay(spec).is_none()`, and Mage's
         // `surface_streamable` requires `spec.adapters.is_empty()`. The route witnesses DO reach
         // those overlays — routing is not rung capability — so the engine side over-approximates.
-        const baseKey = reconciliationMismatchKey({ ...row, direction: "survey_to_engine", overlay: "none" });
-        const withheldOverlay = row.overlay !== "none" && surveyCoordinates.has(baseKey);
+        // The probe deliberately ignores the mode axis; see `cleanBaseClaims` above.
+        const withheldOverlay =
+          row.overlay !== "none" &&
+          cleanBaseClaims.has(`${row.provider}:${row.modelId}:${row.tier}`);
+        // Does the verdict's own request-peak record mark this entry unmeasured at this coordinate?
+        // Then the absence from the implementation scopes is a recorded measured-verdict decision,
+        // not an omission (sc-21510): SC-15525 marks `illustrious_xl_v1`/`_v2` unmeasured in
+        // `requestPeak.scopes`, and publishing the coordinates anyway would overturn that record.
+        // Only an EXPLICIT entry name counts — an unmeasured top-level finding with no scopes says
+        // nothing per-coordinate and must not launder ordinary underclaims.
+        const withheldUnmeasured = (verdict.requestPeak?.scopes ?? []).some(
+          (scope) =>
+            scope.finding === "unmeasured" &&
+            (scope.entries ?? []).includes(row.modelId) &&
+            (scope.tiers ?? [row.tier]).includes(row.tier) &&
+            (scope.modes ?? [row.mode]).includes(row.mode) &&
+            (scope.overlays ?? [row.overlay]).includes(row.overlay),
+        );
         out.push(because(
           row,
           verdict.implementation === "none"
             ? "survey_records_none"
-            : withheldOverlay
-              ? "survey_withholds_loaded_overlay"
-              : "survey_scope_underclaims",
+            : withheldUnmeasured
+              ? "survey_withholds_unmeasured_entry"
+              : withheldOverlay
+                ? "survey_withholds_loaded_overlay"
+                : "survey_scope_underclaims",
         ));
       }
     }

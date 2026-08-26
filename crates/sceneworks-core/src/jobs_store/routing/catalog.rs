@@ -1145,38 +1145,16 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // in `video_mode_is_mlx_eligible` — the generic arm would have handed `minimax_h3_ref` the
     // t2v/i2v it cannot do while refusing the one mode it can.
     //
-    // Every candle column is false, and that is a statement about the LANE rather than about VRAM.
-    //
-    // TWO of the three historical reasons are now DISCHARGED, and the columns still stay false on
-    // the third. Recorded as a ledger rather than rewritten in place, because each was cited as
-    // sufficient on its own and a reader needs to know which one is actually load-bearing today:
-    //
-    //   * "there is no candle code" — DISCHARGED by sc-17156: `candle-gen-minimax-h3` is a real
-    //     end-to-end t2va + fl2va generator registered in `candle-gen-catalog`, and `minimax_h3`
-    //     carries a `candle` block.
-    //   * "there is nothing off-Mac to install" — DISCHARGED by sc-19558: `minimax_h3` now declares
-    //     a `platforms: ["windows", "linux"]` raw-snapshot download set (transformer + text encoder
-    //     + both VAEs + the FL2VA audio-VAE config triple, 144.6 GB from the public
-    //     `MiniMaxAI/MiniMax-H3` at the same pinned revision the macOS co-requisites use). That is
-    //     exactly the layout `REQUIRED_COMPONENT_DIRS` reads, so the weights are obtainable.
-    //     `candle_video_routed_models_have_an_installable_off_mac_download` binds this column to
-    //     that row set: flip it with no off-Mac row and the test goes red.
-    //   * **STILL OPEN, and why these stay false:** there is no candle DISPATCH ARM and no measured
-    //     ceiling. `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is
-    //     `#[cfg(target_os = "macos")]` end to end — `generate_minimax_h3` does not exist off-Mac —
-    //     and the manifest's `candle` block is `measured: false` with no `vramGbByTier` and no
-    //     `minMemoryGb`. Flipping a column today would route a job to a lane with weights and no
-    //     renderer, which is the GH #2074 shape inverted.
-    //
-    // `minimax_h3_ref`'s candle columns stay false for the SAME kind of reason, not a different
-    // kind (sc-20267 corrected the old "candle default-denies ref2va" claim — sc-17157 landed the
-    // candle port and is an ancestor of the pinned revision): it has no off-Mac `transformer_ref`
-    // download rows (sc-19558/sc-19573), no candle dispatch arm, and no measured off-Mac ceiling
-    // of its own. See the manifest entry's `downloads` trailing note for the authoritative record.
+    // The base entry is Candle-routed as of sc-20755: sc-20753 supplied the real direct/replay
+    // dispatch, sc-20754 supplied measured q4/q8/bf16 ceilings, and this story binds the route to
+    // the matching tier resolver and fail-closed fit gate. Its t2va + fl2va modes therefore use the
+    // base partition on both lanes; it is not a generic Candle i2v/VACE model.
     //
     // Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
-    VideoModelCaps::new("minimax_h3", true, false, false, false),
-    VideoModelCaps::new("minimax_h3_ref", true, false, false, false),
+    VideoModelCaps::new("minimax_h3", true, true, false, false),
+    // MiniMax-H3 reference partition (sc-20756): dedicated Ref2VA Candle route over the hosted
+    // transformer_ref tiers, sharing the provider and accepted q4/q8/bf16 ceilings with base.
+    VideoModelCaps::new("minimax_h3_ref", true, true, false, false),
 ];
 
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
@@ -2437,6 +2415,10 @@ mod tests {
         // Mochi 1 (sc-11991): the candle descriptor is `mac_only: false` and ingests the same hosted
         // mlx-affine tiers, so the off-Mac t2v lane is real. Not in the i2v/VACE subsets (t2v only).
         "mochi_1",
+        // MiniMax-H3 partitions: base t2va/fl2va (sc-20755) plus Ref2VA (sc-20756), both using
+        // the dedicated provider route and accepted q4/q8/bf16 admission ceilings.
+        "minimax_h3",
+        "minimax_h3_ref",
     ];
 
     const EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
@@ -3631,16 +3613,6 @@ mod tests {
             ("ltx_2_3_eros", "extend_clip"),
             ("ltx_2_3_eros", "video_bridge"),
             ("ltx_2_3_eros", "replace_person"),
-            ("minimax_h3", "text_to_video"),
-            ("minimax_h3", "image_to_video"),
-            ("minimax_h3", "first_last_frame"),
-            // Back since sc-18650 restored the MLX Ref2VA declaration (the `minimax_h3_ref` arm
-            // in `routing/mlx.rs`; the conditioning requirement now admits the engines' ordered
-            // omni-reference surface). MLX-only for the reasons the manifest entry documents: no
-            // off-Mac `transformer_ref` download rows, no candle dispatch arm
-            // (`video_jobs/minimax_h3.rs` is macOS-gated end to end) and no measured off-Mac
-            // ceiling — not an engine conditioning refusal.
-            ("minimax_h3_ref", "reference_to_video"),
         ];
 
         let models = builtin_video_models();

@@ -8,6 +8,7 @@ import {
   MODEL_STORIES,
   SOURCE_PATHS,
   activeCalibrationPlan,
+  assertMinimaxH3CalibrationPlan,
   assertCellOwnershipIsBackendScoped,
   assertCharacterizationIsConsistent,
   assertCalibrationPlanTargetsResolvedCoordinates,
@@ -42,6 +43,7 @@ import {
   rung4ContractAdmits,
   familyStory,
   parseVideoEngineIds,
+  parseInternalCandleVideoRoutes,
   parseVideoRoutes,
   assertOwnershipRegistriesAreDisjoint,
   assertUnroutedEntriesAreDeclared,
@@ -2457,11 +2459,20 @@ test("rung 4 is refused exactly where the family's OWN prerequisite graph refuse
       exempt += 1;
     }
   }
-  // Both partitions have to be occupied or the assertion above grades nothing — a lane set that is
-  // all-declaring would make it a restatement of the old blanket proxy, and an all-exempt one would
-  // make its loop body unreachable.
-  assert.ok(heldBack > 0, "no lane exercises the held-back branch");
+  // The exempt partition has to be occupied or the record set has collapsed into the old blanket
+  // proxy (every family declaring the edge). The held-back partition, by contrast, may be honestly
+  // EMPTY: its sole occupant used to be `flux2_klein_9b_true_v2:mlx`, whose staged column was
+  // all-Missing only because the entry's converter-packed bf16 tier was invisible to the tier
+  // universe and it surveyed at the `default` pseudo-tier (fixed in sc-21510). A declaring lane
+  // whose staged column CAN stage is refused nothing, so an empty held-back partition just means
+  // every declaring lane stages today; require instead that declaring lanes still exist at all, so
+  // a records collapse to nobody-declares cannot pass silently, and keep the per-lane rung-4
+  // assertion above live the moment any declaring lane stops staging.
   assert.ok(exempt > 0, "no lane exercises the exempt branch — the gate would be indistinguishable from the blanket proxy");
+  assert.ok(
+    lanes.some(({ key }) => declares.get(key)),
+    "no lane belongs to a declaring family — the records no longer discriminate against the catalog",
+  );
 });
 
 test("the rung-1 predicate reaches exactly the families whose provider declares that edge", async () => {
@@ -3321,28 +3332,10 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
   // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
   const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  // sc-19721 moved the pin onto the inference sc-17137 feature head; the 2026-08-19 main sync
-  // re-stamped it to main's sc-20523 pin; sc-18650 (the epic-final bump) re-stamped it to the
-  // inference-main merge of that head (f17c82544, tree-identical to 2881696cd); the true epic-final
-  // bump re-stamped it again to the #726 inference-main merge (4013049764), then epic 20738's
-  // final pin advanced it to the feature train's inference-main merge (b646a6f89), then the LTX
-  // GroupNorm broadcast correction advanced main to 31e02510a. sc-20644 re-stamped THIS branch to
-  // the inference sc-20398 feature head (bdca0edf5), the epic's mid-epic tracking pin, and the
-  // 2026-08-24 main sync deliberately kept it: a feature branch tracks its own inference feature
-  // head, and main's 31e02510a is adopted at the epic's terminal pin bump, not by a sync. The
-  // sc-20644 tracking refresh then advanced that feature head to 725c6bc59 — inference #787, which
-  // adds NVFP4 (sc-20641) and the registered Wan adapter + Krea MXFP8 (sc-20644) and carries the
-  // LTX GroupNorm fix in through inference's own #794 main sync, so 31e02510a is now an ancestor of
-  // this pin rather than a thing still owed. sc-20651 — epic 20398's SINGLE terminal pin bump —
-  // then advanced it off the feature head onto inference MAIN's merge of that head (6d8be650d,
-  // inference #800), which is the adoption a sync deliberately deferred: 725c6bc59 is an ancestor
-  // of it, and the delta is the epic's own 13 review commits plus the merge. The epic's campaign
-  // closure then advanced it once more, to 1caa68636 — inference MAIN's merge of #801, the int8
-  // precedence fix that unblocked the campaign's int8 parity leg (6d8be650d is its ancestor; the
-  // delta is that one fix plus the merge, and it declares no capability). The literal is
-  // re-stamped rather than relaxed to a shape check: the assertion below only means something
-  // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "1caa6863673c0a6be33115506b059e25238d2011");
+  // The pinned revision is the committed SC-20757 inference feature head. Keep this literal
+  // alongside the current generated receipt: the assertion below only means something while the
+  // pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
+  assert.equal(pin, "28f0563baa03640ade1635356d2d54fe8a477f1a");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
@@ -5249,53 +5242,28 @@ test("a plan row for an OUT-OF-MATRIX family is exempt, and nothing else is (sc-
   const plan = activeCalibrationPlan(
     JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8")),
   );
-  const minimaxRow = (over = {}) => ({
-    name: "mlx-minimax-h3-q4-t2va-window",
-    evidenceScope: "authoritative",
-    backend: "mlx",
-    loadShape: "deferred_materialization",
-    rung: "bounded_transformer_residency",
-    engagedRungs: ["bounded_transformer_residency"],
-    calibrationFingerprint: "minimax-h3-mlx-deferred-v1",
-    fixture: "minimax-h3-q4-1344x768-f124",
-    cases: [{ parameters: {}, expectedResult: "passed" }],
-    ...over,
-    target: {
-      provider: "minimax_h3",
-      modelId: "minimax_h3",
-      tier: "q4",
-      mode: "text_to_video_audio",
-      overlay: "none",
-      geometry: { width: 1344, height: 768, batch: 1, frames: 124 },
-      ...over.target,
-    },
-  });
-  const withRow = (over) => {
-    const mutated = JSON.parse(JSON.stringify(plan));
-    mutated.providers.push(minimaxRow(over));
-    return mutated;
-  };
-
-  // The fix, at both entry points: exported guard and the generation path `--check` takes.
-  for (const modelId of ["minimax_h3", "minimax_h3_ref"]) {
-    const planned = withRow({ target: { modelId } });
-    assert.doesNotThrow(() =>
-      assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
-    );
-    await buildMatrix({
-      publish: false,
-      sourceOverrides: { calibrationPlan: JSON.stringify(planned) },
-    });
-  }
+  const minimaxRows = plan.providers.filter((entry) => entry.target.modelId === "minimax_h3");
+  assert.ok(minimaxRows.length > 0, "the terminal campaign has checked-in MiniMax-H3 plan rows");
+  assert.doesNotThrow(() =>
+    assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells, { outOfMatrixEntries }),
+  );
+  await buildMatrix({ publish: false });
 
   // ...and it is an exemption, not a hole. A family in NEITHER the matrix nor the survey's
   // out-of-matrix set still fails closed, and so does a row that merely borrows the exempt family's
   // provider — the exemption is keyed on `target.modelId`, the same field the subtraction is.
-  for (const [label, over] of [
-    ["a family in neither set", { target: { modelId: "hailuo_4", provider: "hailuo_4" } }],
-    ["an exempt provider on an unknown model", { target: { modelId: "not_a_catalog_entry" } }],
+  for (const [label, mutate] of [
+    ["a family in neither set", (entry) => {
+      entry.target.modelId = "hailuo_4";
+      entry.target.provider = "hailuo_4";
+    }],
+    ["an exempt provider on an unknown model", (entry) => {
+      entry.target.modelId = "not_a_catalog_entry";
+    }],
   ]) {
-    const planned = withRow(over);
+    const planned = structuredClone(plan);
+    const donor = planned.providers.find((entry) => entry.target.modelId !== "minimax_h3");
+    mutate(donor);
     assert.throws(
       () =>
         assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
@@ -5311,8 +5279,48 @@ test("a plan row for an OUT-OF-MATRIX family is exempt, and nothing else is (sc-
   // The exemption is opt-in and defaults to the strict behaviour, so a caller that forgets to pass
   // the set gets the old guard rather than a silently widened one.
   assert.throws(
-    () => assertCalibrationPlanTargetsResolvedCoordinates(withRow({}), resolved.cells),
+    () => assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells),
     /match no resolved matrix coordinate/,
+  );
+});
+
+test("MiniMax-H3 has one legal measured-spanning grid per implemented tier/rung family (sc-18663)", async () => {
+  const plan = activeCalibrationPlan(
+    JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8")),
+  );
+  const rows = plan.providers.filter((entry) => entry.target.modelId === "minimax_h3");
+  assert.equal(rows.length, 72, "3 tiers × 4 implemented rungs × 2 areas × 3 frame levels");
+  assert.doesNotThrow(() => assertMinimaxH3CalibrationPlan(plan));
+  await buildMatrix({ publish: false });
+
+  const families = new Map();
+  for (const row of rows) {
+    const key = `${row.target.tier}:${row.rung}`;
+    if (!families.has(key)) families.set(key, []);
+    families.get(key).push(row);
+    assert.equal(row.target.geometry.frames % 17, 5, `${row.name}: frame lattice`);
+  }
+  assert.equal(families.size, 12, "only the three tiers and four implemented rungs are planned");
+  for (const [family, entries] of families) {
+    assert.equal(entries.length, 6, `${family}: the full 2×3 grid is planned`);
+    assert.equal(new Set(entries.map((entry) => entry.target.geometry.width * entry.target.geometry.height)).size, 2);
+    assert.equal(new Set(entries.map((entry) => entry.target.geometry.frames)).size, 3);
+  }
+
+  // Bounded attention is structurally unavailable for every MiniMax-H3 tier.  It must not slip
+  // into a declared composition just because it appears earlier in a generic five-rung ladder.
+  const impossible = structuredClone(plan);
+  impossible.providers.find((entry) =>
+    entry.target.modelId === "minimax_h3" && entry.rung === "bounded_decode",
+  ).engagedRungs = ["resident", "bounded_decode", "bounded_attention"];
+  assert.throws(
+    () => assertMinimaxH3CalibrationPlan(impossible),
+    /declares engaged rungs/,
+  );
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { calibrationPlan: JSON.stringify(impossible) } }),
+    /declares engaged rungs/,
+    "the generator must reject an impossible declared engaged rung before terminal capture",
   );
 });
 
@@ -5785,6 +5793,49 @@ test("the two worker declarations of a video route must agree (sc-18815)", async
   assert.throws(
     () => parseVideoRoutes(drifted),
     /video route svd:mlx resolves to provider svd_xt_v2.*video route declarations disagree/s,
+  );
+});
+
+test("MiniMax-H3 Candle dispatch exposes the authorized base and Ref2VA routes", async () => {
+  const [dispatch, minimax, routingCatalog, routingCandle, routingMlx, bodies] = await Promise.all([
+    readFile(new URL("../crates/sceneworks-worker/src/video_jobs/mod.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-worker/src/video_jobs/minimax_h3.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
+    Object.fromEntries(
+      await Promise.all(
+        Object.entries(SOURCE_PATHS).map(async ([name, relative]) => [
+          name,
+          await readFile(new URL(`../${relative}`, import.meta.url), "utf8"),
+        ]),
+      ),
+    ),
+  ]);
+  const internal = parseInternalCandleVideoRoutes(dispatch, minimax);
+  assert.deepEqual([...internal], [
+    ["minimax_h3", "minimax_h3"],
+    ["minimax_h3_ref", "minimax_h3"],
+  ]);
+  const publicRoutes = parseVideoRoutes(bodies);
+  const routedBackends = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  // sc-20755 authorizes the base t2va/fl2va executor and sc-20756 authorizes Ref2VA.
+  // The worker keeps this family on its dedicated direct resolver rather than the generic
+  // `*_engine_id` parsers, so public authorization is the catalog lane, not `publicRoutes`.
+  assert.equal(publicRoutes.get("minimax_h3")?.candle, undefined);
+  assert.equal(publicRoutes.get("minimax_h3_ref")?.candle, undefined);
+  assert.deepEqual([...routedBackends.get("minimax_h3")], ["mlx", "candle"]);
+  assert.deepEqual([...routedBackends.get("minimax_h3_ref")], ["mlx", "candle"]);
+
+  assert.throws(
+    () => parseInternalCandleVideoRoutes(
+      dispatch.replace(
+        "} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {\n        CandleVideoRoute::MiniMaxH3(engine_id)\n    } else if is_candle_video_engine(&request.model) {",
+        "} else if is_candle_video_engine(&request.model) {",
+      ),
+      minimax,
+    ),
+    /direct Candle dispatch no longer selects CandleVideoRoute::MiniMaxH3/,
   );
 });
 
