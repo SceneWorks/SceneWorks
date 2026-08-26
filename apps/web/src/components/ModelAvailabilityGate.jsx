@@ -9,6 +9,8 @@ import { terminalStatuses } from "../constants.js";
 //
 // Props:
 //   ready          — when true, render `children` (the Studio body) unchanged.
+//   initializing   — availability is not authoritative yet; render an indeterminate startup state
+//                    instead of download offers derived from an empty or fallback catalog.
 //   title/description — gate copy.
 //   eyebrow        — the kicker above the title. Defaults to the Studio wording ("No supported
 //                    model installed", i.e. none of a whole family qualifies); a screen gated on
@@ -26,6 +28,7 @@ function offerSizeText(model) {
 
 export function ModelAvailabilityGate({
   ready,
+  initializing = false,
   title,
   description,
   eyebrow = "No supported model installed",
@@ -39,6 +42,26 @@ export function ModelAvailabilityGate({
 }) {
   if (ready) {
     return children;
+  }
+  if (initializing) {
+    return (
+      <section className="model-availability-gate" aria-live="polite">
+        <div className="model-availability-gate-card">
+          <div className="section-heading">
+            <p className="eyebrow">Starting local catalog</p>
+            <h2>Initializing models…</h2>
+          </div>
+          <p>Checking which models are installed and available on this machine.</p>
+          <div
+            aria-label="Initializing models"
+            className="catalog-progress catalog-progress--indeterminate"
+            role="progressbar"
+          >
+            <span />
+          </div>
+        </div>
+      </section>
+    );
   }
   const activeJobFor = (model) =>
     downloadJobs.find((job) => job.payload?.modelId === model.id && !terminalStatuses.has(job.status));

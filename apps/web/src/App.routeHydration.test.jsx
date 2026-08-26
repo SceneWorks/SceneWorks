@@ -144,6 +144,33 @@ describe("route-owned App hydration (sc-14783)", () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
+  it("shows model initialization instead of unverified fallback rows", async () => {
+    const models = deferred();
+    installFetch({
+      "/api/v1/models": () => models.promise,
+    });
+    await renderApp();
+
+    await navigate("Image");
+    expect(container.textContent).toContain("Initializing models");
+    expect(container.textContent).not.toContain("Z-Image-Turbo");
+    expect(container.querySelector('[aria-label="Initializing models"]')).toBeTruthy();
+
+    await act(async () => {
+      models.resolve(response([{
+        id: "krea_2_turbo",
+        name: "Krea 2 Turbo",
+        type: "image",
+        capabilities: ["text_to_image"],
+        installState: "installed",
+      }]));
+    });
+    await settle();
+
+    expect(container.textContent).not.toContain("Initializing models");
+    expect(container.textContent).toContain("Krea 2 Turbo");
+  });
+
   it("hydrates and renders character training datasets on first Characters navigation", async () => {
     installFetch({
       "/api/v1/projects/project-a/characters": () =>

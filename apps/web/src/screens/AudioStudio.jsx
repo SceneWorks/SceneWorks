@@ -205,6 +205,7 @@ export function AudioStudio() {
     assets = [],
     audioModels = [],
     models = [],
+    modelCatalogStatus = "ready",
     jobs = [],
     audioLocalJobs = [],
     recentAudioAssets = [],
@@ -778,6 +779,7 @@ export function AudioStudio() {
   return (
     <ModelAvailabilityGate
       ready={modelReady}
+      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
       title="Audio Studio needs an audio model"
       description="Download a recommended audio model to start generating speech, music and sound."
       offers={modelOffers}
