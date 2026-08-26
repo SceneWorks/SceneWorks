@@ -3332,10 +3332,10 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
   // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
   const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  // The pinned revision is the committed SC-20757 inference feature head. Keep this literal
+  // The pinned revision is the current committed inference-main head. Keep this literal
   // alongside the current generated receipt: the assertion below only means something while the
   // pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "28f0563baa03640ade1635356d2d54fe8a477f1a");
+  assert.equal(pin, "624fed20c1969b851b60265e3b9dac951068c1f5");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the

@@ -95,9 +95,10 @@ fn checkpoint_plan_backend_eligible(
 /// loader opens (a single transformer file, a fused checkpoint, a component directory, a ComfyUI
 /// tree), and a plan whose roles could be read two ways must not be silently resolved one of them.
 ///
-/// A family whose dialects disagree refuses rather than guessing. Nothing shipped today declares
-/// two shapes; the refusal exists so that the day one does, it is a planning-time diagnostic and not
-/// a load-time surprise.
+/// A family whose dialects disagree refuses rather than guessing. FLUX.2 deliberately declares both
+/// a ComfyUI tree and a standalone transformer file, so the general plan route refuses until the
+/// persisted plan records a dialect id. A bespoke lane that already knows the exact source shape
+/// validates that shape through `checkpoint_plan_lane_source_shape` instead.
 fn checkpoint_plan_source_shape(
     adapter: &gen_core::CheckpointAdapterRegistration,
     checkpoint_id: &str,
@@ -121,6 +122,41 @@ fn checkpoint_plan_source_shape(
             many.len()
         ))),
     }
+}
+
+/// Validate the exact on-disk shape a bespoke lane opens against the registered adapter.
+///
+/// Unlike [`checkpoint_plan_source_shape`], this does not infer one shape for the whole family: the
+/// caller is the loader for a specific dialect and therefore already knows whether it opens a file,
+/// directory, fused checkpoint, or ComfyUI tree. The adapter remains authoritative — a lane cannot
+/// claim a shape the family never registered — while a second, unrelated dialect does not make the
+/// known lane ambiguous.
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn checkpoint_plan_lane_source_shape(
+    adapter: &gen_core::CheckpointAdapterRegistration,
+    checkpoint_id: &str,
+    expected: gen_core::ImportedModelSource,
+) -> WorkerResult<gen_core::ImportedModelSource> {
+    if adapter
+        .dialects
+        .iter()
+        .any(|dialect| dialect.source == expected)
+    {
+        return Ok(expected);
+    }
+    let mut declared: Vec<gen_core::ImportedModelSource> =
+        adapter.dialects.iter().map(|dialect| dialect.source).collect();
+    declared.sort();
+    declared.dedup();
+    Err(WorkerError::InvalidPayload(format!(
+        "[checkpoint-plan:no-adapter-binding] checkpoint {checkpoint_id:?} ({} family): this \
+         bespoke lane opens {expected:?}, but the registered adapter declares source shapes \
+         {declared:?}",
+        adapter.family
+    )))
 }
 
 /// The persisted checkpoint id a manifest entry is bound to, when it is plan-backed. The same
@@ -1177,6 +1213,29 @@ fn checkpoint_plan_entry_routes_to(entry: &JsonObject, family: &str) -> bool {
         .map_or(true, |declared| declared == family)
 }
 
+/// The importer-stamped structural dialect of one plan-backed manifest entry.
+///
+/// Family identity cannot answer this: FLUX.2 registers both a standalone transformer file and a
+/// ComfyUI tree. Missing and unknown labels fail closed so a sibling family lane cannot claim the
+/// plan by family alone. These are the canonical labels emitted by the catalog and capability facts.
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn checkpoint_plan_entry_source_shape(
+    entry: &JsonObject,
+) -> Option<gen_core::ImportedModelSource> {
+    match entry.get("importSourceShape").and_then(Value::as_str) {
+        Some("transformer_file") => Some(gen_core::ImportedModelSource::TransformerFile),
+        Some("fused_checkpoint") => Some(gen_core::ImportedModelSource::FusedCheckpoint),
+        Some("transformer_directory") => {
+            Some(gen_core::ImportedModelSource::TransformerDirectory)
+        }
+        Some("comfy_ui_tree") => Some(gen_core::ImportedModelSource::ComfyUiTree),
+        _ => None,
+    }
+}
+
 /// Refuse a plan whose family is not the one the asking lane loads.
 ///
 /// Reached only for an entry whose DECLARED family already routes here
@@ -1394,6 +1453,16 @@ pub(crate) fn checkpoint_plan_bespoke_tree(
     if !checkpoint_plan_entry_routes_to(&request.model_manifest_entry, family) {
         return Ok(None);
     }
+    // The entry's importer-stamped dialect is the only source identity a compiled plan carries:
+    // the plan itself records component roles, not a dialect id. A sibling dialect for the same
+    // family must decline here rather than being fed to this ComfyUI-tree loader. The retained plan
+    // route refusal is raised later if no correct sibling lane claims it.
+    let Some(source) = checkpoint_plan_entry_source_shape(&request.model_manifest_entry) else {
+        return Ok(None);
+    };
+    if source != gen_core::ImportedModelSource::ComfyUiTree {
+        return Ok(None);
+    }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
     let resolved = store
@@ -1402,7 +1471,7 @@ pub(crate) fn checkpoint_plan_bespoke_tree(
     checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
     checkpoint_plan_backend_eligible(adapter, &checkpoint_id)?;
-    let source = checkpoint_plan_source_shape(adapter, &checkpoint_id)?;
+    let source = checkpoint_plan_lane_source_shape(adapter, &checkpoint_id, source)?;
     let primary = checkpoint_plan_primary(&resolved, source)?;
     let mut consumed = primary.consumed.clone();
     let mut sidecars = Vec::with_capacity(consumed_roles.len());

@@ -23935,7 +23935,7 @@ fn a_linked_zimage_tree_resolves_all_three_artifacts_from_its_plan() {
             "id": "linked_ztree",
             "catalogScope": "user",
             "family": "z-image",
-            "importSourceShape": "comfyui_tree",
+            "importSourceShape": "comfy_ui_tree",
             "importPlan": { "checkpointId": checkpoint_id }
         }
     }));
@@ -24022,7 +24022,7 @@ fn a_linked_qwen_image_tree_consumes_its_optional_vae_from_the_plan() {
                 "id": format!("linked_{id}"),
                 "catalogScope": "user",
                 "family": "qwen-image",
-                "importSourceShape": "comfyui_tree",
+                "importSourceShape": "comfy_ui_tree",
                 "importPlan": { "checkpointId": checkpoint_id }
             }
         }))
@@ -24126,7 +24126,7 @@ fn a_linked_flux2_tree_loads_the_plans_dit_and_refuses_a_layer_the_lane_would_ig
                 "id": format!("linked_{id}"),
                 "catalogScope": "user",
                 "family": "flux2",
-                "importSourceShape": "comfyui_tree",
+                "importSourceShape": "comfy_ui_tree",
                 "importPlan": { "checkpointId": checkpoint_id }
             }
         }))
@@ -24196,6 +24196,22 @@ fn a_linked_flux2_tree_loads_the_plans_dit_and_refuses_a_layer_the_lane_would_ig
             .expect("the decline is not a refusal")
             .is_none(),
         "the bespoke lane must decline a request the plan route claims"
+    );
+
+    // FLUX.2 also registers a standalone TransformerFile dialect for Klein. A request shape the
+    // general plan route declines must not let this ComfyUI-tree lane claim that sibling dialect by
+    // family alone: it has a different loader and a different resident companion contract.
+    let mut standalone = req.clone();
+    standalone.model = "linked_flux2_klein".to_owned();
+    standalone.model_manifest_entry.insert(
+        "importSourceShape".to_owned(),
+        Value::String("transformer_file".to_owned()),
+    );
+    assert!(
+        flux2_comfyui_candle::prepare_flux2_comfyui_sources(&standalone, &fx.settings)
+            .expect("a sibling dialect declines rather than raising a tree-lane error")
+            .is_none(),
+        "the FLUX.2-dev ComfyUI lane must not claim a plan-backed Klein transformer file"
     );
 }
 
@@ -24420,6 +24436,73 @@ fn checkpoint_plan_family_truth_is_read_from_the_registered_adapter() {
         matches!(refusal, WorkerError::InvalidPayload(_)),
         "backend ineligibility is a typed payload diagnostic, not an engine error"
     );
+}
+
+/// sc-21623 terminal Windows repair: a bespoke lane supplies its exact dialect shape instead of
+/// demanding that the family have only one shape.
+///
+/// FLUX.2 is the live counterexample: its adapter registers a ComfyUI-tree dev loader and a
+/// standalone-transformer Klein loader. The general plan route must continue to refuse because a
+/// compiled plan has no dialect id, while the tree lane can safely select `ComfyUiTree` after
+/// proving that exact shape is registered. This test is portable across the MLX and Candle builds
+/// that include the checkpoint-plan implementation, so the contract is covered before the
+/// Candle-only behavioural test reaches Windows.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn a_bespoke_lane_accepts_its_registered_shape_on_a_multi_dialect_family() {
+    use gen_core::ImportedModelSource::{ComfyUiTree, FusedCheckpoint, TransformerFile};
+
+    let adapter = &gen_core::FLUX2_CHECKPOINT_ADAPTER;
+    let id = "linked/root-test/flux2";
+    let ambiguous = checkpoint_plan_source_shape(adapter, id)
+        .expect_err("the general plan route cannot infer one of two dialect shapes");
+    assert!(
+        ambiguous
+            .to_string()
+            .contains("[checkpoint-plan:ambiguous-component]"),
+        "{ambiguous}"
+    );
+    assert_eq!(
+        checkpoint_plan_lane_source_shape(adapter, id, ComfyUiTree).unwrap(),
+        ComfyUiTree,
+        "the ComfyUI lane knows which registered FLUX.2 dialect it opens"
+    );
+    assert_eq!(
+        checkpoint_plan_lane_source_shape(adapter, id, TransformerFile).unwrap(),
+        TransformerFile,
+        "the standalone-file dialect remains independently selectable"
+    );
+    let absent = checkpoint_plan_lane_source_shape(adapter, id, FusedCheckpoint)
+        .expect_err("a bespoke lane cannot invent an unregistered source shape");
+    let message = absent.to_string();
+    assert!(
+        message.contains("[checkpoint-plan:no-adapter-binding]")
+            && message.contains("FusedCheckpoint")
+            && message.contains("ComfyUiTree")
+            && message.contains("TransformerFile"),
+        "{message}"
+    );
+
+    let tree_entry = json!({ "importSourceShape": "comfy_ui_tree" });
+    assert_eq!(
+        checkpoint_plan_entry_source_shape(tree_entry.as_object().unwrap()),
+        Some(ComfyUiTree),
+        "the importer-stamped tree dialect is the lane's per-entry authority"
+    );
+    for sibling_or_invalid in [
+        json!({ "importSourceShape": "transformer_file" }),
+        json!({ "importSourceShape": "comfyui_tree" }),
+        json!({}),
+    ] {
+        assert_ne!(
+            checkpoint_plan_entry_source_shape(sibling_or_invalid.as_object().unwrap()),
+            Some(ComfyUiTree),
+            "a sibling, unknown, or missing entry dialect must not enter the ComfyUI-tree lane"
+        );
+    }
 }
 
 /// The plan is consumed everywhere or refused (sc-20634 review). The inspector emits multi-layer
