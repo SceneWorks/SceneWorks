@@ -9739,10 +9739,10 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
-// base/overlay is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
-// to the plain MLX txt2img lane (`ImageRoute::Mlx`), which would silently render an unconditioned image
-// and drop the poses. Generalizes the sc-11796 krea-only reject to every wired family — the MLX twin of
-// the candle `candle_image_route_rejects_wired_pose_when_control_base_absent` (sc-11171/F-008).
+// base/overlay is NOT installed must route to a loud reject, NOT fall through to the plain MLX txt2img
+// lane (`ImageRoute::Mlx`), which would silently render an unconditioned image and drop the poses.
+// `flux_dev` with a reference is the sc-21673 exception: the requested IP-Adapter + pose combination is
+// rejected before the missing-control-base check so neither conditioning input can be silently discarded.
 #[cfg(target_os = "macos")]
 #[test]
 fn image_route_rejects_wired_pose_when_control_base_absent() {
@@ -9764,9 +9764,14 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
             "advanced": { "poses": [{ "id": "a" }] }
         }));
         let route = resolve_image_route(&pose, &settings);
+        let expected = if *model == "flux_dev" {
+            ImageRoute::FluxIpAdapterPoseReject
+        } else {
+            ImageRoute::PoseControlBaseMissing
+        };
         assert_eq!(
             route,
-            Some(ImageRoute::PoseControlBaseMissing),
+            Some(expected),
             "wired pose family {model:?} with an absent control base must loudly reject",
         );
         assert_ne!(
@@ -19930,9 +19935,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "Flux2Comfyui",
         // Bernini still-image companion: a plain base load.
         "Bernini",
-        // These reject arms error before any generation, so they never allocate.
+        // These reject arms error before any generation, so they never allocate or load an overlay.
         "PoseReject",
         "PoseControlBaseMissing",
+        "FluxIpAdapterPoseReject",
         "KolorsCompositeReject",
         // Generic provider arms — both reach the shared `generate_candle_stream` gate.
         "CandleTxt2Img",
