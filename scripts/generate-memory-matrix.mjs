@@ -17,7 +17,7 @@ import {
 import {
   reconcileMemoryContracts,
 } from "./lib/memory-contract-reconciliation.mjs";
-import { contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
+import { CONVERTER_TIER_OVERRIDES, contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
@@ -1522,7 +1522,9 @@ function parseBackendTierOverrides(instantIdSource) {
   if (!candleDense) {
     throw new Error("could not derive InstantID's dense Candle tier from instantid.rs");
   }
-  return new Map([["instantid_realvisxl:candle", [candleDense]]]);
+  // The converter-packed tier sets are shared with the projector's `catalogAxes` so the matrix's
+  // cell universe and the projection's declaration universe cannot disagree about them (sc-21510).
+  return new Map([["instantid_realvisxl:candle", [candleDense]], ...CONVERTER_TIER_OVERRIDES]);
 }
 
 function modesFor(model) {
@@ -1595,25 +1597,36 @@ export function declarationModelForCoordinate({ backend, rung, route, provider, 
     : model;
 }
 
-export function providerFor(model, backend, overlay, route) {
+export function providerFor(model, backend, overlay, route, mode) {
   // Per-backend (sc-18815): the image lane's `engineFor` returns the one table route on either
   // backend, so this is unchanged for it, while a video entry gets the provider that backend
   // actually loads instead of whichever one happened to be listed first. No `?? route.engine`
   // fallback: `engineFor` throws on a backend it cannot serve, and falling through to the scalar is
   // how a candle provider reached an MLX cell in the first place.
+  //
+  // A contract row that names a DISTINCT `runtimeProvider` for this (mode, overlay) owns the lane
+  // (sc-21510). This used to hold only for the `control` overlay, so Krea's and FLUX.2 Klein's
+  // route-local EDIT providers (`krea_2_edit`, `flux2_klein_9b_edit`, …) could never label a cell:
+  // every edit/character cell carried the base engine id, the edit rows bound to nothing, and their
+  // real, witnessed capability read as `declared_cell_absent` drift. The mode filter keeps the base
+  // rows in charge of the modes they declare; a coordinate no row covers falls through to the base
+  // engine exactly as before.
   const engine = route.engineFor(backend);
-  if (overlay !== "control") return engine;
   const contract = model[backend]?.memoryStrategyContract;
   const declared = [...new Set((contract?.implementations ?? [])
-    .filter((implementation) => implementation.overlays?.includes(overlay))
+    .filter((implementation) =>
+      implementation.overlays?.includes(overlay) &&
+      (mode === undefined || implementation.modes?.includes(mode)))
     .map((implementation) => implementation.runtimeProvider ?? contract.provider))];
   if (declared.length === 1) return declared[0];
   if (declared.length > 1) {
     throw new Error(
-      `${model.id}:${backend}:${overlay} declares ambiguous runtime providers: ${declared.join(", ")}`,
+      `${model.id}:${backend}:${mode ?? "(any mode)"}:${overlay} declares ambiguous runtime providers: ${declared.join(", ")}`,
     );
   }
-  return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine;
+  return overlay === "control"
+    ? (CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine)
+    : engine;
 }
 
 function matrixOverlayFor(recordOverlay) {
@@ -4629,7 +4642,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       for (const tier of tiersFor(model, backend, backendTierOverrides)) {
         for (const mode of modesFor(model)) {
           for (const overlay of overlaysFor(model, backend, route)) {
-            const provider = providerFor(model, backend, overlay, route);
+            const provider = providerFor(model, backend, overlay, route, mode);
             for (const rung of RUNGS) {
               const status = strategyStatus({
                 backend,

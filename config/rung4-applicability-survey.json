@@ -529,7 +529,8 @@
             "The window size is INERT above 1 on this family: 30/15/8/4/2 all land on the same peak and an all-covering attribution control matches window 8 exactly, so `TRANSFORMER_WINDOW_SIZES` publishes [1] rather than a ladder.",
             "Component scope and streamability are two different levers and must not be conflated. Making the encoder streamable at all under Sequential is what let bf16 fit 8 GB (conditioning 8.489 -> 2.718 GiB); the tunable TextEncoder scope cuts conditioning a further 46.5% and moves the request peak 0.0%, which is why the published default is Dit — see gen-core's memory_strategy prerequisite note.",
             "Overlays are compatible here, in contrast to Krea/Candle: adapters are installed as forward-time residuals and `BlockAdapters` replays the captured list onto each materialized block, so a LoRA-carrying request can still stream.",
-            "The declaration is per LOAD, and the matrix has no load-source axis. Rung 4 is Missing for a single-file / ComfyUI load, because streaming rebuilds blocks from the snapshot per window and an in-memory `Weights` has no re-openable source. Every catalog route here is a `WeightsSource::Dir` registry load, so the cells are right for the routes the matrix covers — but a consumer must not read them as covering a user-imported single-file checkpoint."
+            "The declaration is per LOAD, and the matrix has no load-source axis. Rung 4 is Missing for a single-file / ComfyUI load, because streaming rebuilds blocks from the snapshot per window and an in-memory `Weights` has no re-openable source. Every catalog route here is a `WeightsSource::Dir` registry load, so the cells are right for the routes the matrix covers — but a consumer must not read them as covering a user-imported single-file checkpoint.",
+            "sc-21510: the 6 standing control-lane route findings (z_image_control and z_image_turbo_control rung-4 rows, all tiers) are real and deliberately left. MLX control loads consult the route registry under the `_control` engine ids (image_jobs/zimage.rs), which have NO Mlx rows, so `apply_registered_load_shape` misses, the spec stays eager, and rung 4 is unreachable on the control lanes today — while the base `z_image_turbo` row's control/identity witness profiles are unreachable the other way (control loads never pass the base id). Settled by Mlx `z_image_control`/`z_image_turbo_control` RULES rows with `legacy_shaping: true` (a production load-shape change) plus a control-lane measurement, or by narrowing the manifest control rows and the memory_route_registry axes golden that pins them — an owner decision."
           ]
         },
         "candle": {
@@ -633,8 +634,7 @@
           ],
           "implementedOverlays": [
             "none",
-            "lora",
-            "identity"
+            "lora"
           ],
           "strategyParameters": {
             "transformerWindowSize": 1,
@@ -706,7 +706,9 @@
           "findings": [
             "The five-block QwenFunControlBranch is structurally windowable because it is the same uniform QwenTransformerBlock stack, but the MLX control provider does not implement its block stream in this change. It is a real resident remainder, and qwen_image_control is excluded from rung 3/4 instead of inheriting a family-level claim.",
             "Window 1 is the sole bounded production cadence. The same-stream window-60-versus-window-1 attribution control did not move the conditioning-bound request peak, while the authoritative complete rung-3-versus-rung-4 requests moved the peak by 75.02% for BF16, 52.90% for Q4, and 63.76% for Q8.",
-            "The Q4 and Q8 rung-4 captures passed output-equivalence thresholds, range verification, loadability, cleanup, cancellation/error-path scenarios, and the required negative mutation check."
+            "The Q4 and Q8 rung-4 captures passed output-equivalence thresholds, range verification, loadability, cleanup, cancellation/error-path scenarios, and the required negative mutation check.",
+            "sc-21510: `identity` removed from implementedOverlays. No MLX qwen load path ever sets an identity/ip-adapter component — qwen identity ships as a character LoRA on the base transformer (SceneWorks image_jobs/qwen.rs), the route registry's qwen_image_edit row is plain+lora only, and no identity route witness exists. No calibration evidence covers an identity coordinate, so nothing measured is being narrowed away.",
+            "sc-21510: the 20 standing reconciliation overclaims (qwen_image q4/q8 text_to_image, qwen_image_edit q4/q8 edit/character at none/lora) are the committed capability dump under-reporting, not survey error: `is_streamable_spec` admits packed q4/q8 snapshots, but the dump enumerates surfaces with a synthetic weights-free LoadSpec, so `packed_quant_bits` fails closed at q4/q8 (mlx-gen-qwen-image registers no MemoryContractSurfaceResolverRegistration). The verdict stands on the checked-in q4/q8 calibration evidence; settled by the inference-side surface-resolver fix and the dump regenerated at the next pin bump."
           ]
         },
         "candle": {
@@ -1532,7 +1534,17 @@
             {
               "entries": ["flux2_klein_9b", "flux2_klein_9b_kv"],
               "tiers": ["bf16", "q8", "q4"],
-              "modes": ["text_to_image", "image_to_image"],
+              "modes": ["text_to_image", "image_to_image", "edit_image", "character_image"],
+              "overlays": ["none"],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": ["flux2_klein_9b_true_v2"],
+              "tiers": ["bf16"],
+              "modes": ["text_to_image", "image_to_image", "edit_image", "character_image"],
               "overlays": ["none"],
               "strategyParameters": {
                 "transformerWindowSize": 1,
@@ -1565,7 +1577,8 @@
           },
           "findings": [
             "Shared modulation is a real difference from FLUX.1: `mod_img`/`mod_txt`/`mod_single` are per-stream, not per-block, so they stay resident across every window. They are small, but a window-size calculation that assumes all trunk weights are per-block will be wrong here.",
-            "The KV-cache variant (flux2_klein_9b_kv) retains reference K/V per layer across the forward. That is activation state, not weight residency, so it does not block the rung — but it does mean the rung-4 saving on that variant is a smaller share of the request peak than on the non-KV twin."
+            "The KV-cache variant (flux2_klein_9b_kv) retains reference K/V per layer across the forward. That is activation state, not weight residency, so it does not block the rung — but it does mean the rung-4 saving on that variant is a smaller share of the request peak than on the non-KV twin.",
+            "sc-21510: edit_image/character_image and the bf16-only true_v2 conversion added to the scopes. The matrix previously could not label an edit-provider cell (its provider axis varied only on the control overlay), so these coordinates were unclaimable; they are served by the registered flux2_klein_9b_edit / flux2_klein_9b_kv_edit providers, whose dumped contracts implement the rung at every scoped tier and whose route witnesses cover edit_image and character_image at the plain profile. Overlays stay [\"none\"]: klein_streamable requires an empty overlay spec, so loaded-overlay coordinates are withheld, not omitted."
           ]
         },
         "candle": {
@@ -2381,6 +2394,16 @@
                   "illustrious_xl_v2"
                 ],
                 "finding": "unmeasured"
+              },
+              {
+                "entries": [
+                  "realvisxl_lightning"
+                ],
+                "tiers": [
+                  "bf16"
+                ],
+                "finding": "unmeasured",
+                "reason": "sc-21510: `EXPECTED_RUNG_FOUR` covers realvisxl_lightning at q4 only; no bf16 rung-4 run exists for this entry, so the bf16 coordinates stay withheld until one does (or an explicit decision publishes them unmeasured)."
               }
             ],
             "reason": "Measured per entry per tier at 1024²/4 steps against that same entry's own staged control, at the shipped cadence (Apple/Metal, byte-identical output): sdxl bf16 19.005 → 14.938 GiB (−21.40%); realvisxl bf16 19.003 → 14.936 (−21.40%); realvisxl q8 17.693 → 15.516 (−12.31%); realvisxl q4 16.654 → 15.493 (−6.97%); realvisxl_lightning q4 16.654 → 15.493 (−6.97%). The saving is the whole `transformer_blocks` weight set (4.071 / 2.166 / 1.149 GiB by tier), so what rung 4 is worth is a function of the tier — a selector sizing it off the q8 row under-buys at bf16 by a factor of three. The peak column is FLAT across the whole cadence domain [1,2,5,10] at every geometry the instrument can resolve, because the peak is taken in the decode rather than in the windowed forward; cadence buys wall clock only (1262 vs 3524 ms/step at 1024²), which is why SC-17679 moved the default to the widest cadence 10. illustrious_xl_v1/v2 are `unmeasured`: their staged peak is realvisxl q8's 17.693 GiB to the millibyte, but rung 4 never ran on them because `streamable` refuses their snapshot (sc-17522).",
@@ -2401,7 +2424,8 @@
             "The skip connections bound the SIZE of the win, not its validity. They keep down-path ACTIVATIONS alive across the forward, and rung 4 bounds WEIGHT residency — so the weight bound over each 10-deep sub-stack still holds; what does not shrink is the activation term it is competing against. The measured wins (−6.97% to −21.40% by tier) are that competition priced.",
             "The rung needs a plan PER Transformer2D, not one per model, and that is what shipped: eleven `BlockPlan`s at a shared cadence. `BlockPlan::new` clamps a window to its stack's depth, so a cadence wider than 2 degrades the five 2-deep sub-stacks to fully resident rather than erroring — which is why the domain is stated once and not per depth, and why 10 is the widest cadence that means anything here.",
             "Rungs 2 and 3 are `Missing` WITH measurements rather than unattempted. Rung 2's tiled decode works and is the family's biggest lever — 19.0032 → 15.8660 GiB (−16.51%) of request peak for ~7% wall clock, isolated decode 14.360 → 11.237 GiB (−21.7%) at edge 896 — but it is withheld on QUALITY: the inherited sibling drift bar is 48/255, and on the production latent the same 1024²/edge-896/overlap-192 geometry drifts 84/255 (the synthetic-latent sweep read 38, which is why the withholding argument had to be measured on production latents). It fails the bar outright at 1280²/1536²/2048², and `decode_tile_edges` has no geometry axis to vary the edge with output size. Rung 3's `sdpa_budgeted_bhsd` reaches every attention site including the IP-Adapter branch, but moves the peak 0.00% at BOTH measured scopes — the request (19.0032 → 19.0032 GiB) and the U-Net seam (6.5868 → 6.5868 GiB) — and is not bit-exact on its query-row axis (max|Δeps| 5.25e-3 at one step; 57/255 of image movement at one step, a different image by six). An earlier revision published the seam as +5.1% from an un-warmed control; warmed, both U-Nets read +0.00%.",
-            "illustrious_xl_v1 and illustrious_xl_v2 are `Missing` at rung 4 outright, because q8 is their only advertised tier. The cause is the SNAPSHOT, not the architecture: their `unet/` weights are genuinely packed (u32 codes with .scales/.biases, 3.46 GiB, byte-for-byte realvisxl q8's shape) but their `unet/config.json` ships without the `quantization` marker, so `packed_quant_bits` reads nothing, `needs_load_time_quant` returns true, `load_leaves_blocks_lazy` is false and `streamable` refuses. The rung fails closed, which is correct; the repair is a republished snapshot, tracked as sc-17522."
+            "illustrious_xl_v1 and illustrious_xl_v2 are `Missing` at rung 4 outright, because q8 is their only advertised tier. The cause is the SNAPSHOT, not the architecture: their `unet/` weights are genuinely packed (u32 codes with .scales/.biases, 3.46 GiB, byte-for-byte realvisxl q8's shape) but their `unet/config.json` ships without the `quantization` marker, so `packed_quant_bits` reads nothing, `needs_load_time_quant` returns true, `load_leaves_blocks_lazy` is false and `streamable` refuses. The rung fails closed, which is correct; the repair is a republished snapshot, tracked as sc-17522.",
+            "sc-21510: the standing reconciliation overclaims for this family are real and deliberately left, in two parts. (1) realvisxl q4/q8 and realvisxl_lightning q4 at text_to_image/none: the committed capability dump under-reports — `streamable` is tier-agnostic on a packed snapshot, but the dump enumerates surfaces with a synthetic weights-free LoadSpec, so `load_leaves_blocks_lazy` fails closed at q4/q8 (mlx-gen-sdxl registers no MemoryContractSurfaceResolverRegistration). Settled by the inference-side surface-resolver fix and the dump regenerated at the next pin bump. (2) the lora-overlay coordinates and the bf16 edit_image/image_inpaint/image_detail/character_image rows: production DOES route them on MLX (sdxl advanced/detail/ip lanes, with adapters), but the Mlx `sdxl` memory_route_registry row is text_to_image+plain only and `legacy_shaping: true`, so widening it changes production load shaping and flips the `lens_q4_only_and_text_only_rules_fail_closed` golden — an owner decision, not a survey or manifest edit."
           ],
           "implementationScopes": [
             {
@@ -2832,7 +2856,8 @@
             "Rung 0 is the no-extra-controls baseline: both experts co-reside during denoise. Rung 1 does not provide a request-side choice over the cross-phase schedule. `memory_strategy.rs:727-737` says so explicitly: every generate path releases completed phases unconditionally and `GenerationMemory::stage_residency` selects nothing. Therefore the corrected SC-18816 descriptor tuple is `supports_sequential_offload = false`, `unconditionally_engages_staged_residency = true` for BOTH `bernini` and `bernini_renderer`; the former `true` selectable flag was a workaround, not evidence of a selectable seam.",
             "Rung 2 is a real request-selected spatial tile edge over `[768, 640, 512, 384, 320, 256]` with overlap 64; rung 3 is a request-selected attention budget over both experts; rung 4 is a request-selected global 80-block deferred stream with windows `[1, 2, 4, 5, 8, 10, 20]` and default 10. The block stream is unavailable for an in-memory/single-file load and refuses adapters, so only the catalog's directory-backed, no-overlay routes are claimed.",
             "The same phase and trunk mechanisms serve every video mode (`t2v`, `v2v`, `r2v`, `rv2v`, `mv2v`, `ads2v`) and the one-frame image entry. Modes change conditioning inputs and guidance pass count, not the stage order or decoder. Guided modes re-walk a window several times per denoise step, which is a latency cost rather than a different applicability verdict.",
-            "No image cell is assigned a modality-specific value by this reconciliation: `bernini_image` and `bernini` intentionally share this one provider verdict. The generated-artifact review must still diff image cells after the final inference pin; a pin-derived state change is not to be hidden by falsifying the shared survey."
+            "No image cell is assigned a modality-specific value by this reconciliation: `bernini_image` and `bernini` intentionally share this one provider verdict. The generated-artifact review must still diff image cells after the final inference pin; a pin-derived state change is not to be hidden by falsifying the shared survey.",
+            "sc-21510: the reconciliation's 24 bernini overclaim findings are real and deliberately left standing. The engine implements rung 4 at every tier, but SceneWorks' memory_route_registry RULES table has no Mlx bernini row, so apply_registered_load_shape returns every bernini spec eager and structurally_streamable can never hold — rung 4 is genuinely unreachable on MLX today, by SceneWorks-side omission rather than engine incapacity. What settles it: an Mlx RULES row with legacy_shaping:true (a production load-shape change) plus a bernini request-peak measurement — an owner decision, not a survey edit, since narrowing this verdict would misstate the engine and enrolling witness-only would claim a route production does not take."
           ]
         },
         "candle": {

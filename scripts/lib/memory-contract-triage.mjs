@@ -77,6 +77,16 @@ const CLASSES = Object.freeze({
       "different grains. Narrowing the verdicts would change this class, but nothing here says the " +
       "survey is WRONG.",
   },
+  survey_withholds_unmeasured_entry: {
+    disposition: "by-construction",
+    title: "survey withholds a coordinate its request-peak record marks unmeasured",
+    rationale:
+      "The verdict's own `requestPeak.scopes` names the entry with `finding: \"unmeasured\"`, so " +
+      "the absence from the implementation scopes is a recorded measured-verdict decision — " +
+      "SC-15525 records `illustrious_xl_v1`/`_v2` this way. Publishing the coordinate would " +
+      "overturn that record. What settles it is the request-peak measurement for the entry, or an " +
+      "explicit decision to publish it unmeasured.",
+  },
   survey_withholds_loaded_overlay: {
     disposition: "by-construction",
     title: "survey withholds a loaded overlay the engine dump cannot exclude",
@@ -153,6 +163,7 @@ const CAUSE_CLASSES = new Map([
   ["survey_records_none", "survey_records_none"],
   ["survey_scope_underclaims", "survey_scope_underclaims"],
   ["survey_withholds_loaded_overlay", "survey_withholds_loaded_overlay"],
+  ["survey_withholds_unmeasured_entry", "survey_withholds_unmeasured_entry"],
   ["survey_scope_overclaims", "survey_scope_overclaims"],
   ["declared_cell_absent", "manifest_overdeclares_cell"],
   ["declared_route_unwitnessed", "manifest_overdeclares_route"],
