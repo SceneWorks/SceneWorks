@@ -1283,10 +1283,13 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
         "Missing",
         "Implemented/unverified",
     }
-    # Where it IS implemented it is on exactly the (bf16, overlay-none) slice, so the count is one
-    # per MODE — derived from the published axes rather than pinned, because a hardcoded number would
-    # go stale on any legitimate mode or tier drift and would stop meaning "bf16/none only". The
-    # backend that implements it is not asserted here; that is the sibling JS test's subject.
+    # Where it IS implemented it is on exactly the production coordinates the manifest declares
+    # (sc-21609): text_to_image and edit_image at clean base, character_image at the identity
+    # overlay — image_inpaint canonicalizes to edit_image before routing and image_detail always
+    # loads a tile ControlNet (control overlay, no cell), so neither can carry the rung. Derived as
+    # a mode COUNT rather than a hardcoded number so a legitimate tier drift does not stale it; the
+    # exact mode/overlay split is asserted per-coordinate by the sibling JS test.
+    SDXL_RUNG4_MODES = {"text_to_image", "edit_image", "character_image"}
     implementing = [row for row in sdxl_lane if row["implemented"]]
     assert implementing, "SDXL's rung-4 coverage must not vanish"
     for row in sdxl_lane:
@@ -1295,9 +1298,10 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
         assert row["coordinates"] == len(axes["tiers"]) * len(axes["modes"]) * len(
             axes["overlays"]
         )
-        assert row["implemented"] in (0, len(axes["modes"])), (
-            "SDXL publishes rung 4 on bf16/overlay-none only, across every mode, or not at all"
-        )
+        assert row["implemented"] in (
+            0,
+            len(SDXL_RUNG4_MODES & set(axes["modes"])),
+        ), "SDXL publishes rung 4 on exactly its declared production modes, or not at all"
     # Rung 4 is Missing OUTRIGHT on both Illustrious entries: q8 is their only advertised tier and
     # its snapshot omits the `quantization` marker, so `streamable` refuses (inference sc-17522).
     # A partially-implemented family must not carry its siblings' coverage onto them.
