@@ -726,7 +726,9 @@ export function validateRecord(record) {
   object(record, "record");
   text(record.id, "record.id");
   text(record.logicalCaseId, `${record.id}.logicalCaseId`);
-  if (!["complete", "runtime_complete", "gated", "negative_complete"].includes(record.status)) {
+  // sc-21715: read from the schema (`RECORD_STATUSES`) rather than transcribed, so this check and
+  // every downstream tally admit exactly the same set.
+  if (!RECORD_STATUSES.includes(record.status)) {
     fail(`${record.id}: invalid status`);
   }
   if (!["authoritative", "candidate", "fixture"].includes(record.evidenceScope)) {

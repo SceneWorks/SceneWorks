@@ -3770,6 +3770,32 @@ test("a survey edit rotates the source fingerprint", async () => {
   assert.equal(edited.generatedFrom.sources.rung4Survey.path, SOURCE_PATHS.rung4Survey);
 });
 
+test("the published status tally's key set is the bundle schema's status enum (sc-21715)", async () => {
+  // The generator derives `summary.calibrationRunsByStatus` from `RECORD_STATUSES`, so a status
+  // added to the bundle schema appears in the object automatically — but the matrix schema pins the
+  // key set with `additionalProperties: false` and a fixed `required`, so the artifact would then
+  // fail validation with an opaque "additional properties not allowed". Connecting the two is what
+  // turns that into a legible failure here, the same way the rung-4 vocabularies are connected
+  // below. Both `required` and `properties` are checked: either alone would let a key be admitted
+  // and not demanded, or demanded and not admitted.
+  const schema = JSON.parse(
+    await readFile(new URL("../packages/schemas/memory-matrix.schema.json", import.meta.url), "utf8"),
+  );
+  const tally = schema.properties.summary.properties.calibrationRunsByStatus;
+  const expected = RECORD_STATUSES.map((status) =>
+    status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()),
+  );
+  assert.deepEqual([...tally.required].sort(), [...expected].sort());
+  assert.deepEqual(Object.keys(tally.properties).sort(), [...expected].sort());
+  assert.equal(tally.additionalProperties, false);
+  // ...and the artifact carries exactly that key set, so the schema and the writer cannot agree
+  // with each other while the shipped document holds something else.
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(Object.keys(matrix.summary.calibrationRunsByStatus).sort(), [...expected].sort());
+});
+
 test("the survey vocabulary, the generator's enums and the published schema agree", async () => {
   // Three copies of the same vocabulary — the survey file documents it, the generator validates
   // against it, the schema constrains the artifact. Nothing connected them, so a value added to one
@@ -5407,8 +5433,16 @@ test("a gated receipt keeps the summary and its recomputation in agreement (sc-2
   const bound = matrix.calibrationRuns.find((run) => run.record.id === gated.id);
   assert.ok(bound, "a gated receipt still binds to its coordinate");
   assert.equal(bound.semantics, "gated");
+  // The donor binds ELIGIBLY, and the clone differs from it only in `status` (plus the `hardware`
+  // perturbation that rotates the id). Pinning the donor's empty reason set and the clone's exact
+  // one-reason set is what makes `gated` the cause: an already-ineligible donor would satisfy
+  // `eligible === false` while proving nothing, which is the drift a `.includes()` cannot see.
+  const donorBound = matrix.calibrationRuns.find((run) => run.record.id === donor.id);
+  assert.ok(donorBound, "the donor must still bind");
+  assert.deepEqual(donorBound.binding.reasons, []);
+  assert.equal(donorBound.binding.eligible, true);
   assert.equal(bound.binding.eligible, false);
-  assert.ok(bound.binding.reasons.includes("record-not-complete"));
+  assert.deepEqual(bound.binding.reasons, ["record-not-complete"]);
   assert.equal(matrix.summary.currentCalibrationRuns, baseline.summary.currentCalibrationRuns);
 });
 
