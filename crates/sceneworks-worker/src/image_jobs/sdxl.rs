@@ -91,13 +91,29 @@ fn sdxl_advanced_spec(
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
+    let character = ip_adapter_dir.is_some();
     if let Some(ip) = ip_adapter_dir {
         spec = spec.with_ip_adapter(WeightsSource::Dir(ip));
     }
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
-    spec
+    // sc-21609: consult the route registry with this lane's REAL mode before the cache seam. The
+    // generator-cache cold path consults with `TextToImage` for every load, which the
+    // character-image coordinate (ip_adapter profiles) deliberately does not match — without this
+    // call the registry's character_image row could never shape anything and its witnesses would
+    // be fiction. The edit sub-mode consults as edit_image, matching the base/edit row.
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Mlx,
+        "sdxl",
+        if character {
+            crate::memory_route_registry::MemoryRouteMode::CharacterImage
+        } else {
+            crate::memory_route_registry::MemoryRouteMode::EditImage
+        },
+        spec,
+        false,
+    )
 }
 
 /// Generate one SDXL image conditioned on `conditioning` (Reference[/Mask]). SDXL is true-CFG
@@ -510,3 +526,34 @@ async fn generate_sdxl_advanced_stream(
 // `runtime_macos::providers::instantid::InstantId` (not an inventory `Generator`), so this is a dedicated
 // stream parallel to `generate_sdxl_advanced_stream`, not an MLX_MODELS row.
 // ---------------------------------------------------------------------------
+
+#[cfg(all(test, target_os = "macos"))]
+mod advanced_load_shape_tests {
+    use super::*;
+
+    /// sc-21609: the advanced lane consults the route registry with its REAL sub-mode. Deleting
+    /// the `apply_registered_load_shape` call from `sdxl_advanced_spec` (the cold path would then
+    /// consult as `TextToImage`, which the ip_adapter coordinate does not match) turns the
+    /// character case red; the edit case defers through the edit_image row.
+    #[test]
+    fn advanced_specs_carry_the_production_deferred_load_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let character = sdxl_advanced_spec(
+            root.path().to_owned(),
+            Some(Quant::Q4),
+            Vec::new(),
+            Some(root.path().join("ip")),
+        );
+        assert_eq!(
+            character.load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+            "an SDXL character (IP-adapter) load must be shaped by the character_image registry row"
+        );
+        let edit = sdxl_advanced_spec(root.path().to_owned(), Some(Quant::Q4), Vec::new(), None);
+        assert_eq!(
+            edit.load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+            "an SDXL advanced edit load must be shaped by the edit_image registry row"
+        );
+    }
+}

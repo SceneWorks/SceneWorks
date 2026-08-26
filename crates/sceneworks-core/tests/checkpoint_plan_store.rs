@@ -370,11 +370,26 @@ fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
     let again = fx.store.resolve(&compiled.checkpoint_id).unwrap();
     assert!(!again.layers[0].rehashed, "the stamp was refreshed");
 
-    // Same size, different bytes (an in-place edit or a retargeted root): drift, refused.
+    // Same size, different bytes with a changed stamp (an in-place edit or a retargeted root):
+    // drift, refused. Windows can defer its observable last-write-time update for a rapid same-size
+    // rewrite, so advance the fixture mtime explicitly instead of making this regression depend on
+    // filesystem timing. Production still takes the cheap path only while the full stamp matches.
+    let bound_modified = fs::metadata(&file).unwrap().modified().unwrap();
     let mut mutated = bytes.clone();
     let last = mutated.len() - 1;
     mutated[last] ^= 0xff;
     fs::write(&file, &mutated).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(bound_modified + Duration::from_secs(10)))
+        .unwrap();
+    assert_ne!(
+        fs::metadata(&file).unwrap().modified().unwrap(),
+        bound_modified,
+        "the drift fixture must actually change the resolver's stamp"
+    );
     match fx.store.resolve(&compiled.checkpoint_id) {
         Err(CheckpointPlanError::SourceDrifted {
             checkpoint_id,

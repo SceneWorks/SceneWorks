@@ -4389,7 +4389,31 @@ pub(crate) async fn run_lora_import_job(
         }
     }
 
-    // One header read, two answers (sc-14057). The declared half matters most for the repo/URL
+    // Validate the exact MiniMax-H3 trainer namespace after a repo/URL transfer, at the first point
+    // where those routes have a local header. Local/upload imports already run the same shared
+    // validator in rust-api. A partial/lookalike export must fail before its install marker is
+    // written and long before a render tries to bind `lora_unet_blocks_*` at the engine.
+    if let Some(adapter_path) = first_safetensors_path(&target_dir) {
+        if let Ok(header) = sceneworks_core::lora_family::read_safetensors_header(&adapter_path) {
+            let h3_expected =
+                optional_payload_string(&job.payload, "family").is_some_and(|family| {
+                    sceneworks_core::lora_family::canonical_lora_family(family) == "minimax-h3"
+                });
+            if let Err(error) = validate_minimax_h3_trainer_header(&header, h3_expected) {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "LoRA import failed.",
+                    Some(format!(
+                        "Unsupported MiniMax-H3 adapter namespace or layout: {error}"
+                    )),
+                )
+                .await;
+            }
+        }
+    }
+
+    // Family plus declared metadata (sc-14057). The declared half matters most for the repo/URL
     // routes: their file did not exist when the API queued the job, so this is the only point at
     // which the adapter can describe itself.
     let (detected_family, adapter_metadata) = match inspect_adapter_in_dir(&target_dir) {

@@ -20,8 +20,8 @@ use sceneworks_core::jobs_store::NATIVE_CONVERTERS;
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
     apply_adapter_metadata_to_manifest_entry, apply_model_manifest_defaults, detect_model_family,
-    first_safetensors_path, inspect_adapter_in_dir, reconcile_detected_family, FamilyMismatch,
-    SafetensorsHeaderError,
+    first_safetensors_path, inspect_adapter_in_dir, reconcile_detected_family,
+    validate_minimax_h3_trainer_header, FamilyMismatch, SafetensorsHeaderError,
 };
 // Only the cfg-gated adapter resolvers (image `resolve_adapters` / `classify_adapter`, video
 // `resolve_lora_file`) use these, so gate the import identically or the parity
@@ -119,6 +119,11 @@ mod resolved_cache_promotion;
 // the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
+// sc-21027: MiniMax-H3's FL2VA provider labels its two conditioning-force boundaries. A Metal
+// watchdog timeout there poisons this process's command queue, so record the first timeout, refuse
+// the next claim, and clean-exit exactly once for the existing auto-worker supervisor to replace.
+// All-targets so the lifecycle and ordering regressions run weights-free on neither/Candle lanes.
+mod mlx_worker_recovery;
 // Request-scoped execution planning (sc-18317, epic 18304 P2): the warm-hit execution-policy
 // decision the `LoadIdentity`/`ExecutionPolicy` split (sc-18305) left owing, plus selection of
 // gen-core's typed execution domains (graph-eval cadence, FFN chunk, CFG batching) from what each
@@ -1490,6 +1495,53 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         });
     }
     loop {
+        // A Metal watchdog timeout poisons the command queue for this OS process. The just-failed
+        // job was already made terminal by `run_utility_job`; stop BEFORE `poll_once` can claim a
+        // successor, mark this instance unhealthy, and clean-exit. Under `GPU_ID=auto` the existing
+        // supervisor observes that single exit and spawns a fresh process with fresh Metal state.
+        // Clean exit is intentional: an abnormal-exit attribution would manufacture a second job
+        // failure after the truthful first timeout has already been persisted.
+        if settings.gpu_id == "mlx" {
+            if let Some(recycle) = mlx_worker_recovery::global().begin_recycle() {
+                emit_event_value(
+                    Level::ERROR,
+                    json!({
+                        "event": "mlx_h3_i2v_poisoned_worker_recycle",
+                        "workerId": settings.worker_id,
+                        "gpuId": settings.gpu_id,
+                        "firstTimeout": recycle.first_timeout,
+                        "sawSubmissionsIgnored": recycle.saw_submissions_ignored,
+                    }),
+                );
+                let _ = heartbeat_with_reason(
+                    &api,
+                    &settings,
+                    WorkerStatus::Unhealthy,
+                    None,
+                    Some(recycle.reason),
+                )
+                .await;
+                return Ok(());
+            }
+            if let Some(reason) = mlx_worker_recovery::global().quarantine_reason() {
+                // This is reachable only when shutdown interrupted the active job's terminal-write
+                // retry. Stay unclaimable rather than recycling on an unconfirmed failure or
+                // falling through to `poll_once`; the shutdown arm normally resolves immediately.
+                let _ = heartbeat_with_reason(
+                    &api,
+                    &settings,
+                    WorkerStatus::Unhealthy,
+                    None,
+                    Some(reason),
+                )
+                .await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
+                    _ = shutdown_signal() => return Ok(()),
+                }
+                continue;
+            }
+        }
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
             next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
             recheck_gpu_health(&api, &settings, &mut health).await?;
@@ -2225,8 +2277,83 @@ async fn run_utility_job(
                 // but ~35 other load seams build `WorkerError::Engine` directly — a host driver
                 // problem hits all of them identically. Annotating here catches every one, and is a
                 // no-op when the guidance is already present.
-                let detail = annotate_cuda_driver_failure(&error.to_string());
-                let _ = fail_job(api, &job.id, message, Some(detail)).await;
+                let original_detail = error.to_string();
+                let recovery_detail = if settings.gpu_id == "mlx" {
+                    mlx_worker_recovery::global().observe(&original_detail)
+                } else {
+                    None
+                };
+                if let Some(detail) = &recovery_detail {
+                    emit_event_value(
+                        Level::ERROR,
+                        json!({
+                            "event": "mlx_h3_i2v_worker_poisoned",
+                            "workerId": settings.worker_id,
+                            "gpuId": settings.gpu_id,
+                            "jobId": job.id,
+                            "originalError": original_detail,
+                            "jobError": detail,
+                        }),
+                    );
+                }
+                let poisoned = recovery_detail.is_some();
+                let detail = recovery_detail
+                    .unwrap_or_else(|| annotate_cuda_driver_failure(&original_detail));
+                if poisoned {
+                    // A clean child exit is not an abnormal death, so the supervisor deliberately
+                    // will not invent a second terminal attribution for it. Persist the original
+                    // timeout before arming that exit. Transport/API failures keep this process
+                    // quarantined and retry without claiming; shutdown cancellation stops the
+                    // retry and leaves the loop's no-claim backstop armed.
+                    let mut attempt = 0_u32;
+                    let _ = mlx_worker_recovery::persist_terminal_failure_with(
+                        mlx_worker_recovery::global(),
+                        || {
+                            attempt = attempt.saturating_add(1);
+                            let post_attempt = attempt;
+                            let detail = detail.clone();
+                            let job_id = job.id.clone();
+                            let shutdown = shutdown.clone();
+                            async move {
+                                let Err(terminal_error) =
+                                    fail_job(api, &job_id, message, Some(detail)).await
+                                else {
+                                    return mlx_worker_recovery::TerminalPersistenceAttempt::Persisted;
+                                };
+                                emit_event_value(
+                                    Level::ERROR,
+                                    json!({
+                                        "event": "mlx_h3_i2v_terminal_failure_retry",
+                                        "workerId": settings.worker_id,
+                                        "gpuId": settings.gpu_id,
+                                        "jobId": &job_id,
+                                        "attempt": post_attempt,
+                                        "error": terminal_error.to_string(),
+                                    }),
+                                );
+                                if shutdown.is_cancelled() {
+                                    return mlx_worker_recovery::TerminalPersistenceAttempt::Stop;
+                                }
+                                let _ = heartbeat_with_reason(
+                                    api,
+                                    settings,
+                                    WorkerStatus::Unhealthy,
+                                    Some(&job_id),
+                                    mlx_worker_recovery::global().quarantine_reason(),
+                                )
+                                .await;
+                                tokio::time::sleep(Duration::from_secs(
+                                    settings.poll_seconds.max(1),
+                                ))
+                                .await;
+                                mlx_worker_recovery::TerminalPersistenceAttempt::Retry
+                            }
+                        },
+                    )
+                    .await;
+                } else {
+                    let _ = fail_job(api, &job.id, message, Some(detail)).await;
+                }
                 tracing::error!(
                     event = "utility_job_failed",
                     jobId = %job.id,
@@ -2241,7 +2368,12 @@ async fn run_utility_job(
     // (epic 10402, sc-10404). Best-effort: never fails the job.
     let metrics = metrics_probe.finish().await;
     job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
-    let _ = heartbeat(api, settings, WorkerStatus::Idle, None).await;
+    // Do not advertise Idle after a poison latch. The next loop turn reports Unhealthy and exits
+    // before polling, so no scheduler observation can mistake this process for claimable between
+    // the active job's truthful failure and the supervisor's replacement.
+    if settings.gpu_id != "mlx" || mlx_worker_recovery::global().can_claim() {
+        let _ = heartbeat(api, settings, WorkerStatus::Idle, None).await;
+    }
 }
 
 async fn run_placeholder_job(

@@ -1065,6 +1065,10 @@ pub(crate) async fn queue_lora_import_job(
     let mut adapter_metadata = AdapterFileMetadata::default();
     if let Some(local_source) = payload.source_path.clone() {
         let secondary_source = payload.secondary_source_path.clone();
+        let h3_expected = payload
+            .family
+            .as_deref()
+            .is_some_and(|family| canonical_lora_family(family) == "minimax-h3");
         let (local_source, detected, declared) = tokio::task::spawn_blocking(move || {
             validate_lora_import_source_path(&local_source, &source_roots)?;
             // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise
@@ -1072,7 +1076,7 @@ pub(crate) async fn queue_lora_import_job(
             if let Some(secondary_source) = secondary_source.as_deref() {
                 validate_lora_import_source_path(secondary_source, &source_roots)?;
             }
-            inspect_lora_source(&local_source)
+            inspect_lora_source_for_family(&local_source, h3_expected)
                 .map(|(detected, declared)| (local_source, detected, declared))
         })
         .await
@@ -1473,6 +1477,14 @@ pub(crate) fn validate_lora_specs_for_model(
             )));
         }
         let header = validate_lora_safetensors_header(lora_id, lora)?;
+        if let Some(header) = &header {
+            let h3_expected = model_families.iter().any(|family| family == "minimax-h3");
+            validate_minimax_h3_trainer_header(header, h3_expected).map_err(|error| {
+                ApiError::bad_request(format!(
+                    "LoRA {lora_id} has an unsupported MiniMax-H3 adapter layout: {error}"
+                ))
+            })?;
+        }
         if let Some(detected_family) = header.as_ref().and_then(detect_lora_family) {
             // `model_families` are normalized (via `model_lora_families` →
             // `normalize_lora_family`, `_`→`-`), but `detect_lora_family` returns the catalog/
@@ -1734,6 +1746,13 @@ pub(crate) fn detect_family_from_local_path(source_path: &str) -> Result<Option<
 pub(crate) fn inspect_lora_source(
     source_path: &str,
 ) -> Result<(Option<String>, AdapterFileMetadata), ApiError> {
+    inspect_lora_source_for_family(source_path, false)
+}
+
+fn inspect_lora_source_for_family(
+    source_path: &str,
+    h3_expected: bool,
+) -> Result<(Option<String>, AdapterFileMetadata), ApiError> {
     let path = FsPath::new(source_path);
     let Some(safetensors_path) = first_safetensors_path(path) else {
         return Ok((None, AdapterFileMetadata::default()));
@@ -1752,6 +1771,11 @@ pub(crate) fn inspect_lora_source(
              download. Re-import the complete file."
         ))
         }
+    })?;
+    validate_minimax_h3_trainer_header(&header, h3_expected).map_err(|error| {
+        ApiError::bad_request(format!(
+            "Unsupported MiniMax-H3 adapter namespace or layout: {error}"
+        ))
     })?;
     Ok((detect_lora_family(&header), read_adapter_metadata(&header)))
 }
@@ -2622,6 +2646,147 @@ mod base_model_gating_tests {
             .unwrap()
             .write_all(&bytes)
             .unwrap();
+    }
+
+    fn write_minimax_h3_trainer_lora(
+        dir: &std::path::Path,
+        file_name: &str,
+        mutate: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) {
+        use std::io::Write;
+        let rank = 16;
+        let mut header = serde_json::Map::new();
+        header.insert(
+            "__metadata__".to_owned(),
+            json!({
+                "ss_network_module": "networks.lora_minimax_h3",
+                "ss_h3_lora_token_refiner": "False",
+                "ss_network_dim": "16",
+                "ss_network_alpha": "16",
+            }),
+        );
+        for block in 0..50 {
+            for (leaf, input, output) in [
+                ("attn_qkv_proj", 5_376, 21_504),
+                ("attn_out_proj", 7_168, 5_376),
+                ("mlp_fc1", 5_376, 28_672),
+                ("mlp_fc2", 14_336, 5_376),
+            ] {
+                let target = format!("lora_unet_blocks_{block}_{leaf}");
+                header.insert(
+                    format!("{target}.lora_down.weight"),
+                    json!({ "dtype": "F16", "shape": [rank, input], "data_offsets": [0, 0] }),
+                );
+                header.insert(
+                    format!("{target}.lora_up.weight"),
+                    json!({ "dtype": "F16", "shape": [output, rank], "data_offsets": [0, 0] }),
+                );
+                header.insert(
+                    format!("{target}.alpha"),
+                    json!({ "dtype": "F32", "shape": [], "data_offsets": [0, 0] }),
+                );
+            }
+        }
+        mutate(&mut header);
+        let bytes_header = serde_json::to_vec(&Value::Object(header)).unwrap();
+        let mut bytes = (bytes_header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&bytes_header);
+        std::fs::File::create(dir.join(file_name))
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    fn minimax_h3_model_fixture() -> Vec<Value> {
+        vec![json!({
+            "id": "minimax_h3",
+            "family": "minimax-h3",
+            "loraCompatibility": { "families": ["minimax-h3"] }
+        })]
+    }
+
+    #[test]
+    fn trainer_namespace_is_classified_at_import_and_accepted_by_h3_preflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_trainer_lora(tmp.path(), "community.safetensors", |_| {});
+        let path = tmp.path().join("community.safetensors");
+
+        let (family, metadata) = inspect_lora_source(path.to_str().unwrap())
+            .expect("the exact trainer namespace imports");
+        assert_eq!(family.as_deref(), Some("minimax-h3"));
+        assert_eq!((metadata.rank, metadata.alpha), (Some(16), Some(16.0)));
+
+        let lora = json!({
+            "id": "minimax_h3_community",
+            "installState": "installed",
+            "installedPath": path,
+            "families": ["minimax-h3"],
+        });
+        validate_lora_specs_for_model(
+            &minimax_h3_model_fixture(),
+            &[],
+            "minimax_h3",
+            &[lora],
+            true,
+            "LoRA",
+        )
+        .expect("the intentional trunk-only trainer export passes before generation");
+    }
+
+    #[test]
+    fn malformed_or_unsupported_h3_trainer_namespaces_fail_actionably_before_generation() {
+        let partial = tempfile::tempdir().unwrap();
+        write_minimax_h3_trainer_lora(partial.path(), "partial.safetensors", |header| {
+            header.remove("lora_unet_blocks_49_mlp_fc2.alpha");
+        });
+        let import_error =
+            inspect_lora_source(partial.path().join("partial.safetensors").to_str().unwrap())
+                .expect_err("local import must reject a partial trainer export");
+        assert!(
+            format!("{import_error:?}").contains("missing alpha"),
+            "{import_error:?}"
+        );
+
+        let unsupported = tempfile::tempdir().unwrap();
+        use std::io::Write;
+        let header = serde_json::to_vec(&json!({
+            "lora_unet_transformer_blocks_0_attn_to_q.lora_down.weight": {
+                "dtype": "F16", "shape": [16, 5376], "data_offsets": [0, 0]
+            }
+        }))
+        .unwrap();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        let path = unsupported.path().join("unknown.safetensors");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        let local_error = inspect_lora_source_for_family(path.to_str().unwrap(), true)
+            .expect_err("a local import declared as H3 must reject an unknown namespace");
+        assert!(
+            format!("{local_error:?}").contains("unsupported MiniMax-H3 adapter namespace"),
+            "{local_error:?}"
+        );
+        let lora = json!({
+            "id": "minimax_h3_unknown_namespace",
+            "installState": "installed",
+            "installedPath": path,
+            "families": ["minimax-h3"],
+        });
+        let preflight_error = validate_lora_specs_for_model(
+            &minimax_h3_model_fixture(),
+            &[],
+            "minimax_h3",
+            &[lora],
+            true,
+            "LoRA",
+        )
+        .expect_err("an unknown H3 namespace must not reach generation");
+        assert!(
+            format!("{preflight_error:?}").contains("unsupported MiniMax-H3 adapter namespace"),
+            "{preflight_error:?}"
+        );
     }
 
     /// sc-18725: the end-to-end submit gate for the turbo accelerators, on BOTH H3 partitions.
