@@ -24647,8 +24647,13 @@ fn checkpoint_plan_family_truth_is_read_from_the_registered_adapter() {
 /// FLUX.2 is the live counterexample: its adapter registers a ComfyUI-tree dev loader and a
 /// standalone-transformer Klein loader. The general plan route must continue to refuse because a
 /// compiled plan has no dialect id, while the tree lane can safely select `ComfyUiTree` after
-/// proving that exact shape is registered. This test is backend-portable so the contract is covered
-/// before the Candle-only behavioural test reaches Windows.
+/// proving that exact shape is registered. This test is portable across the MLX and Candle builds
+/// that include the checkpoint-plan implementation, so the contract is covered before the
+/// Candle-only behavioural test reaches Windows.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn a_bespoke_lane_accepts_its_registered_shape_on_a_multi_dialect_family() {
     use gen_core::ImportedModelSource::{ComfyUiTree, FusedCheckpoint, TransformerFile};
