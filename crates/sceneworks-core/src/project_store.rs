@@ -1303,6 +1303,11 @@ impl ProjectStore {
         let path = timeline_file_path(&project_path, &timeline_id, &name);
         let rel_path = relative_string(&project_path, &path)?;
         write_json(&path, &timeline)?;
+        // A rename changes the slug portion of the timeline file name while keeping
+        // its id. Remove every prior document for this id after the replacement has
+        // reached disk; otherwise a later reindex sees duplicate ids and can
+        // nondeterministically revive the pre-rename content.
+        remove_stale_timeline_files(&project_path, &timeline_id, &path)?;
         index_timeline(&project_path, &timeline, &rel_path)?;
         Ok(timeline)
     }
@@ -1410,7 +1415,15 @@ impl ProjectStore {
         // the listing — fail open and return whatever the table currently
         // holds (possibly empty), which is strictly better than an error.
         if total == 0 && project_has_sidecars(&project_path) {
-            let _ = reindex_project_path(project_id, &project_path, false);
+            if let Err(error) = reindex_project_path(project_id, &project_path, false) {
+                tracing::warn!(
+                    event = "asset_list_auto_reindex_failed",
+                    project_id,
+                    project = %project_path.display(),
+                    error = %error,
+                    "could not rebuild the asset index while listing; returning indexed rows"
+                );
+            }
             connection = connect_project_db(&project_path)?;
         }
 
@@ -1453,12 +1466,18 @@ impl ProjectStore {
         let mut assets = Vec::new();
         for (row_id, sidecar_rel, asset_json) in rows {
             let Some(asset_json) = asset_json else {
+                tracing::warn!(event = "asset_list_indexed_envelope_missing", asset_id = %row_id, "skipping asset row with no indexed envelope");
                 continue;
             };
-            let Ok(mut asset) = serde_json::from_str::<Value>(&asset_json) else {
-                continue;
+            let mut asset = match serde_json::from_str::<Value>(&asset_json) {
+                Ok(asset) => asset,
+                Err(error) => {
+                    tracing::warn!(event = "asset_list_indexed_envelope_invalid", asset_id = %row_id, error = %error, "skipping malformed indexed asset envelope");
+                    continue;
+                }
             };
             if !indexed_asset_envelope_is_valid(&row_id, sidecar_rel.as_deref(), &asset) {
+                tracing::warn!(event = "asset_list_indexed_envelope_invalid", asset_id = %row_id, "skipping invalid indexed asset envelope");
                 continue;
             }
             if let Some(sidecar_rel) = sidecar_rel {
@@ -1466,13 +1485,17 @@ impl ProjectStore {
                     object.insert("sidecarPath".to_owned(), Value::String(sidecar_rel));
                 }
             }
-            let Ok(asset) = hydrate_indexed_asset_cached(
+            let asset = match hydrate_indexed_asset_cached(
                 project_id,
                 &project_path,
                 asset,
                 &mut generation_sets,
-            ) else {
-                continue;
+            ) {
+                Ok(asset) => asset,
+                Err(error) => {
+                    tracing::warn!(event = "asset_list_indexed_envelope_hydration_failed", asset_id = %row_id, error = %error, "skipping asset whose indexed envelope could not be hydrated");
+                    continue;
+                }
             };
             if seen_asset_ids.insert(row_id) {
                 assets.push(asset);
@@ -2898,7 +2921,7 @@ impl ProjectStore {
         let character_store = CharacterStore::new(&self.data_dir, project_path.clone());
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
         let mut moved = Vec::new();
-        for member_id in upscale_lineage_group(&project_path, asset_id) {
+        for member_id in upscale_lineage_group(&project_path, asset_id)? {
             let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
             let mut asset = read_json(&sidecar_path)?;
             {
@@ -2969,7 +2992,7 @@ impl ProjectStore {
         character_store.get_character(project_id, character_id)?;
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
         let mut moved = Vec::new();
-        for member_id in upscale_lineage_group(&project_path, asset_id) {
+        for member_id in upscale_lineage_group(&project_path, asset_id)? {
             let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
             let mut asset = read_json(&sidecar_path)?;
             {
@@ -3609,6 +3632,8 @@ fn run_ensure_ready_before_lock_hook(project_path: &Path) {
 thread_local! {
     static FAIL_NEXT_ASSET_INDEX_DB_MUTATION: Cell<bool> = const { Cell::new(false) };
     static FAIL_NEXT_ASSET_SIDECAR_REMOVE: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NEXT_UPSCALE_LINEAGE_DB_READ: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NEXT_ASSET_POSTER_DB_READ: Cell<bool> = const { Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -3619,6 +3644,42 @@ fn fail_next_asset_index_db_mutation() {
 #[cfg(test)]
 fn fail_next_asset_sidecar_remove() {
     FAIL_NEXT_ASSET_SIDECAR_REMOVE.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn fail_next_upscale_lineage_db_read() {
+    FAIL_NEXT_UPSCALE_LINEAGE_DB_READ.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_asset_poster_db_read() {
+    FAIL_NEXT_ASSET_POSTER_DB_READ.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn maybe_fail_upscale_lineage_db_read() -> ProjectStoreResult<()> {
+    if FAIL_NEXT_UPSCALE_LINEAGE_DB_READ.with(|fail| fail.replace(false)) {
+        return Err(ProjectStoreError::Sqlite(rusqlite::Error::InvalidQuery));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn maybe_fail_upscale_lineage_db_read() -> ProjectStoreResult<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn maybe_fail_asset_poster_db_read() -> ProjectStoreResult<()> {
+    if FAIL_NEXT_ASSET_POSTER_DB_READ.with(|fail| fail.replace(false)) {
+        return Err(ProjectStoreError::Sqlite(rusqlite::Error::InvalidQuery));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+pub(crate) fn maybe_fail_asset_poster_db_read() -> ProjectStoreResult<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3922,23 +3983,19 @@ const UPSCALE_LINEAGE_QUERY: &str = "
     select id from connected
 ";
 
-fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> Vec<String> {
+fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> ProjectStoreResult<Vec<String>> {
     let mut group = vec![asset_id.to_owned()];
-    let Ok(connection) = connect_project_db(project_path) else {
-        return group;
-    };
-    let Ok(mut statement) = connection.prepare(UPSCALE_LINEAGE_QUERY) else {
-        return group;
-    };
-    let Ok(rows) = statement.query_map(params![asset_id], |row| row.get::<_, String>(0)) else {
-        return group;
-    };
-    for id in rows.filter_map(Result::ok) {
+    let connection = connect_project_db(project_path)?;
+    maybe_fail_upscale_lineage_db_read()?;
+    let mut statement = connection.prepare(UPSCALE_LINEAGE_QUERY)?;
+    let rows = statement.query_map(params![asset_id], |row| row.get::<_, String>(0))?;
+    for id in rows {
+        let id = id?;
         if id != asset_id && !group.contains(&id) {
             group.push(id);
         }
     }
-    group
+    Ok(group)
 }
 
 fn reindex_project_path(
@@ -3963,19 +4020,30 @@ fn reindex_project_path(
     let mut counts = ReindexCounts::default();
     for sidecar_path in asset_sidecars(project_path)? {
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
-        let Ok(asset) = read_json(&sidecar_path) else {
-            continue;
+        let asset = match read_json(&sidecar_path) {
+            Ok(asset) => asset,
+            Err(error) => {
+                tracing::warn!(event = "asset_reindex_sidecar_invalid", sidecar = %sidecar_path.display(), error = %error, "skipping malformed asset sidecar during reindex");
+                continue;
+            }
         };
-        if asset.get("id").is_none() || asset.pointer("/file/path").is_none() {
-            continue;
-        }
-        index_asset_on_connection(
+        if let Err(error) = index_asset_on_connection(
             &transaction,
             project_id,
             project_path,
             &asset,
             Some(&sidecar_path),
-        )?;
+        ) {
+            match error {
+                // The caller's rebuild transaction is the SQLite invariant: never
+                // turn a database failure into a superficially successful index.
+                ProjectStoreError::Sqlite(_) => return Err(error),
+                error => {
+                    tracing::warn!(event = "asset_reindex_sidecar_invalid", sidecar = %sidecar_path.display(), error = %error, "skipping malformed asset sidecar during reindex");
+                    continue;
+                }
+            }
+        }
         counts.assets += 1;
     }
 
@@ -3985,19 +4053,27 @@ fn reindex_project_path(
             continue;
         }
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::GenerationSetRead);
-        let Ok(generation_set) = read_json(&entry) else {
-            continue;
+        let generation_set = match read_json(&entry) {
+            Ok(generation_set) => generation_set,
+            Err(error) => {
+                tracing::warn!(event = "generation_set_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed generation set sidecar during reindex");
+                continue;
+            }
         };
-        if generation_set.get("id").is_none() {
-            continue;
-        }
+        let id = match required_str(&generation_set, "id") {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(event = "generation_set_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed generation set sidecar during reindex");
+                continue;
+            }
+        };
         transaction.execute(
             "
             insert or replace into generation_sets (id, mode, model, prompt, created_at, job_id)
             values (?1, ?2, ?3, ?4, ?5, ?6)
             ",
             params![
-                required_str(&generation_set, "id")?,
+                id,
                 optional_str(&generation_set, "mode").unwrap_or("unknown"),
                 optional_str(&generation_set, "model").unwrap_or("unknown"),
                 optional_str(&generation_set, "prompt").unwrap_or(""),
@@ -4018,12 +4094,20 @@ fn reindex_project_path(
             continue;
         }
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::TimelineRead);
-        let Ok(timeline) = read_json(&entry) else {
-            continue;
+        let timeline = match read_json(&entry) {
+            Ok(timeline) => timeline,
+            Err(error) => {
+                tracing::warn!(event = "timeline_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed timeline sidecar during reindex");
+                continue;
+            }
         };
-        if timeline.get("id").is_none() {
-            continue;
-        }
+        let id = match required_str(&timeline, "id") {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(event = "timeline_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed timeline sidecar during reindex");
+                continue;
+            }
+        };
         let rel_path = relative_string(project_path, &entry)?;
         transaction.execute(
             "
@@ -4032,7 +4116,7 @@ fn reindex_project_path(
             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ",
             params![
-                required_str(&timeline, "id")?,
+                id,
                 optional_str(&timeline, "name").unwrap_or("Timeline"),
                 rel_path,
                 optional_str(&timeline, "aspectRatio").unwrap_or("16:9"),
@@ -4496,6 +4580,33 @@ fn index_timeline(project_path: &Path, timeline: &Value, rel_path: &str) -> Proj
         ],
     )?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Remove every other readable timeline document with this id. Used by
+/// [`ProjectStore::save_timeline`] to make the replacement file authoritative
+/// without trusting the current database path alone.
+fn remove_stale_timeline_files(
+    project_path: &Path,
+    timeline_id: &str,
+    authoritative_path: &Path,
+) -> ProjectStoreResult<()> {
+    for candidate in read_dir_paths(&project_path.join("timelines"))? {
+        if candidate == authoritative_path
+            || !candidate
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(".sceneworks.timeline.json"))
+        {
+            continue;
+        }
+        let Ok(candidate_timeline) = read_json(&candidate) else {
+            continue;
+        };
+        if candidate_timeline.get("id").and_then(Value::as_str) == Some(timeline_id) {
+            fs::remove_file(candidate)?;
+        }
+    }
     Ok(())
 }
 
@@ -5995,7 +6106,8 @@ mod tests {
     use super::{
         apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
         connect_project_db, ensure_project_db_ready, fail_next_asset_index_db_mutation,
-        fail_next_asset_sidecar_remove, find_timeline_file, guess_mime_from_filename,
+        fail_next_asset_poster_db_read, fail_next_asset_sidecar_remove,
+        fail_next_upscale_lineage_db_read, find_timeline_file, guess_mime_from_filename,
         index_timeline, install_ensure_ready_before_lock_hook, is_safe_relative_path,
         is_safe_upload_extension, normalize_asset_tags, normalize_image_upload, read_json,
         read_registry_payload, sniff_image_format, upload_extension, upscale_lineage_group,
@@ -6536,7 +6648,7 @@ mod tests {
         );
         drop(connection);
 
-        let group = upscale_lineage_group(&project_path, "grandchild");
+        let group = upscale_lineage_group(&project_path, "grandchild").expect("lineage query");
         assert_eq!(group.first().map(String::as_str), Some("grandchild"));
         assert_eq!(group.len(), 3);
         assert!(group.contains(&"base".to_owned()));
@@ -7398,6 +7510,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn injected_sqlite_reads_abort_or_record_asset_moves() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store
+            .create_project("Move DB failure")
+            .expect("project creates");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_move",
+                &json!({
+                    "assetId": "move_me",
+                    "mediaPath": "assets/images/genset_move/move_me.png",
+                    "mimeType": "image/png",
+                    "displayName": "Move me",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "character_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "safe",
+                }),
+            )
+            .expect("asset persists");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let sidecar = project_path.join("assets/images/genset_move/move_me.sceneworks.json");
+        let media = project_path.join("assets/images/genset_move/move_me.png");
+        std::fs::write(&media, b"image").expect("media writes");
+
+        fail_next_upscale_lineage_db_read();
+        assert!(matches!(
+            store.move_asset_to_library(&project.id, "move_me"),
+            Err(ProjectStoreError::Sqlite(_))
+        ));
+        assert!(project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
+        assert_eq!(
+            read_json(&sidecar).expect("unmoved sidecar")["origin"],
+            json!("character_studio"),
+            "the group query failed before changing a partial move"
+        );
+        store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("dirty marker repairs after failed group query");
+
+        fail_next_asset_poster_db_read();
+        let error = store
+            .move_asset_to_library(&project.id, "move_me")
+            .expect_err("poster database failure propagates");
+        assert!(matches!(error, ProjectStoreError::Sqlite(_)), "{error:?}");
+        assert!(project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
+        let repaired = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("dirty marker records and repairs the post-index failure");
+        assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired[0]["origin"], json!("image_studio"));
+        assert!(!project_path.join(ASSET_INDEX_DIRTY_MARKER).exists());
+    }
+
     /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though
     /// its assets are still on disk as `.sceneworks.json` sidecars (these DBs
     /// predate the asset index / `sidecar_path` column and were never reindexed).
@@ -7465,6 +7636,54 @@ mod tests {
             .list_assets(&project.id, false, false, AssetScope::All)
             .expect("second list");
         assert_eq!(again.len(), 1, "result is stable on subsequent opens");
+    }
+
+    #[test]
+    fn list_assets_rebuild_skips_a_corrupt_sidecar_and_stays_recovered() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store
+            .create_project("Corrupt rebuild")
+            .expect("project creates");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_ok",
+                &json!({
+                    "assetId": "healthy",
+                    "mediaPath": "assets/images/genset_ok/healthy.png",
+                    "mimeType": "image/png",
+                    "displayName": "Healthy",
+                    "createdAt": "2026-05-25T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "safe",
+                }),
+            )
+            .expect("healthy asset persists");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        std::fs::write(
+            project_path.join("assets/images/genset_ok/corrupt.sceneworks.json"),
+            b"{not valid json",
+        )
+        .expect("corrupt sidecar writes");
+        connect_project_db(&project_path)
+            .expect("open db")
+            .execute("delete from assets", [])
+            .expect("clear index to force automatic rebuild");
+
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("corrupt sidecar does not disable listing");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], json!("healthy"));
+        let repeated = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("successful rebuild is recorded despite corrupt sidecar");
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(repeated[0]["id"], json!("healthy"));
     }
 
     #[test]
@@ -11918,6 +12137,58 @@ mod tests {
             found.relative_path,
             "timelines/main.sceneworks.timeline.json"
         );
+    }
+
+    #[test]
+    fn renaming_a_timeline_removes_the_stale_file_before_reindex() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store
+            .create_project("Timeline rename")
+            .expect("project creates");
+        let original = store
+            .create_timeline(&project.id, "Old cut", "16:9", 24)
+            .expect("timeline creates");
+        let timeline_id = original["id"].as_str().expect("timeline id").to_owned();
+        let old_file = store
+            .timeline_file(&project.id, &timeline_id)
+            .expect("old timeline file")
+            .path;
+        let mut renamed = original;
+        renamed["name"] = json!("Final cut");
+        renamed["tracks"][0]["items"] = json!([]);
+        store
+            .save_existing_timeline(&project.id, &timeline_id, renamed)
+            .expect("rename saves");
+
+        let project_path = std::path::PathBuf::from(&project.path);
+        let files: Vec<_> = std::fs::read_dir(project_path.join("timelines"))
+            .expect("timeline directory")
+            .map(|entry| entry.expect("timeline entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".sceneworks.timeline.json"))
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "the old timeline file is removed");
+        assert!(
+            !old_file.exists(),
+            "the pre-rename file cannot be reindexed"
+        );
+        assert!(files[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("final-cut-")));
+
+        let counts = store
+            .reindex_project(&project.id)
+            .expect("reindex succeeds");
+        assert_eq!(counts.timelines, 1);
+        let recovered = store
+            .get_timeline(&project.id, &timeline_id)
+            .expect("renamed timeline remains authoritative");
+        assert_eq!(recovered["name"], json!("Final cut"));
     }
 
     // ---- Key Point Library (sc-4434) ---------------------------------------------------

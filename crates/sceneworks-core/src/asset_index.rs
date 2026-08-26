@@ -10,6 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::project_store::{
+    connect_project_db_migrated, maybe_fail_asset_poster_db_read,
     record_asset_list_filesystem_operation, AssetListFilesystemOperation, ProjectStoreError,
     ProjectStoreResult,
 };
@@ -366,19 +367,19 @@ fn attach_indexed_poster_url(
     else {
         return Ok(());
     };
-    let Ok(connection) = Connection::open(project_path.join("project.db")) else {
-        return Ok(());
-    };
-    let Ok(poster_sha256) = connection
+    // A poster URL is a capability for the DB-backed blob, not an optional
+    // filesystem decoration. Propagate an unavailable/corrupt SQLite read so a
+    // mutating caller leaves its repair marker behind instead of claiming a
+    // successful move with an unverified poster invariant.
+    maybe_fail_asset_poster_db_read()?;
+    let connection = connect_project_db_migrated(project_path)?;
+    let poster_sha256 = connection
         .query_row(
             "select poster_sha256 from assets where id = ?1 and poster_bytes is not null",
             params![asset_id],
             |row| row.get::<_, Option<String>>(0),
         )
-        .optional()
-    else {
-        return Ok(());
-    };
+        .optional()?;
     if let Some(object) = asset.as_object_mut() {
         object.remove("posterUrl");
         if let Some(poster_sha256) = poster_sha256.flatten() {
