@@ -35,13 +35,21 @@ const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 
 // epic 3720 (sc-3724): the backend-neutral captioner contract types come from `gen_core`; the
 // selected runtime bundle explicitly includes its JoyCaption implementation.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+use gen_core::CAPTION_TRIGGER_WORD_CONFORMANCE;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{
     apply_caption_trigger_words, CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling,
-    Image, LoadSpec, Progress, WeightsSource, CAPTION_TRIGGER_WORD_CONFORMANCE,
+    Image, LoadSpec, Progress, WeightsSource,
 };
 #[cfg(any(
     target_os = "macos",
