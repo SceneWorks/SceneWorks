@@ -42,13 +42,16 @@ with `preservedCandleOnly: true` rather than normalized away.
 2026-08-14, with the direct approval preserved in Shortcut activity 19457. The former
 `epic-8588-conditioning-sequencing` record is intentionally absent: the authoritative Candle
 runtime facts now prove all six of its cells on both backends. It also records four product-decision
-records for the 13 Eros cells withdrawn from Candle by SC-18902; four
-epic-17137 sequencing records approved 2026-08-16 for the 10 `minimax_h3` cells the sc-19721 pin bump
-made visible; and four more approved 2026-08-20 for the 9 `minimax_h3_ref` cells sc-18650's Ref2VA
-activation made visible — 8 of those on the Ref2VA activation itself, and a ninth,
-`conditioningShape/referenceVideo`, approved separately later the same day once PR #2460's
-`referenceVideo => videoClip` fix exposed it (`mlxOnlyCellCount` 80 -> 81). `summary.exceptionCount`
-in `matrix.json` is the live count; this paragraph records provenance, not population.
+records for the 13 Eros cells withdrawn from Candle by SC-18902; the one residual
+SC-20756 enabled Ref2VA operation, all three conditioning shapes, all three precision tiers and
+LoRA. SC-20757 now covers both MiniMax-H3 Candle LoKr cells: the H3-specific fabricated LoKr
+fixture on the committed tiny H3 DiT, exercised on actual Candle CUDA, applied/adapted exactly one
+target, matched zero unmatched targets,
+and measured residual rel-max `3.737437e-7 < 2e-5` in two passes. The receipt records
+`realAdapter=false` and `realRender=false`; it is not evidence of a published H3 LoKr artifact or
+a real-weight render.
+`summary.exceptionCount` in `matrix.json` is the live count; this paragraph records provenance, not
+population.
 Schema v2 keeps the capability-axis `category` separate from `decisionType`. Exceptions must
 classify the decision as `technical_blocker`, `licensing_blocker`, `hardware_floor`,
 `sequencing_choice`, or `product_decision`; provide non-empty evidence; name an approver and authority

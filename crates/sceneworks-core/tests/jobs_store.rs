@@ -4198,7 +4198,13 @@ fn platform_sweep_fires_even_with_a_live_candle_worker_that_will_never_claim() {
     let job = job_of(
         &store,
         JobType::VideoGenerate,
-        json!({ "model": "minimax_h3", "mode": "text_to_video", "prompt": "p" }),
+        // Krea Realtime remains macOS-only, so a live generic Candle worker cannot rescue it.
+        json!({
+            "model": "krea_realtime_14b",
+            "mode": "image_to_video",
+            "sourceAssetId": "img-1",
+            "prompt": "p"
+        }),
     );
     backdate_job_created_at(&store, &job.id);
 

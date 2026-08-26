@@ -8,6 +8,7 @@
 //! while a `Some(family)` that disagrees with a user-supplied family is
 //! grounds to reject the import.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -849,6 +850,244 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
     }
 }
 
+/// Exact kohya network module emitted by the MiniMax-H3 trainer.
+pub const MINIMAX_H3_TRAINER_NETWORK_MODULE: &str = "networks.lora_minimax_h3";
+
+/// Metadata flag that makes the trainer's intentional trunk-only export explicit.
+pub const MINIMAX_H3_TOKEN_REFINER_METADATA_KEY: &str = "ss_h3_lora_token_refiner";
+
+/// Header-only receipt for one validated MiniMax-H3 trainer adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MiniMaxH3TrainerHeaderReceipt {
+    /// Source modules before the fused QKV target expands to three runtime linears.
+    pub source_targets: usize,
+    /// Distinct factor ranks in stable order.
+    pub ranks: Vec<usize>,
+    /// The explicit metadata says that the absent token-refiner branch is intentional.
+    pub trunk_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MiniMaxH3TrainerLeaf {
+    AttnQkvProj,
+    AttnOutProj,
+    MlpFc1,
+    MlpFc2,
+}
+
+impl MiniMaxH3TrainerLeaf {
+    const ALL: [Self; 4] = [
+        Self::AttnQkvProj,
+        Self::AttnOutProj,
+        Self::MlpFc1,
+        Self::MlpFc2,
+    ];
+
+    const fn flattened(self) -> &'static str {
+        match self {
+            Self::AttnQkvProj => "attn_qkv_proj",
+            Self::AttnOutProj => "attn_out_proj",
+            Self::MlpFc1 => "mlp_fc1",
+            Self::MlpFc2 => "mlp_fc2",
+        }
+    }
+
+    const fn geometry(self) -> (usize, usize) {
+        match self {
+            Self::AttnQkvProj => (5_376, 21_504),
+            Self::AttnOutProj => (7_168, 5_376),
+            Self::MlpFc1 => (5_376, 28_672),
+            Self::MlpFc2 => (14_336, 5_376),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MiniMaxH3TrainerRole {
+    Down,
+    Up,
+    Alpha,
+}
+
+fn parse_minimax_h3_trainer_key(
+    key: &str,
+) -> Option<(usize, MiniMaxH3TrainerLeaf, MiniMaxH3TrainerRole)> {
+    let rest = key.strip_prefix("lora_unet_blocks_")?;
+    let digits_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits_len == 0 || rest.as_bytes().get(digits_len) != Some(&b'_') {
+        return None;
+    }
+    let block = rest[..digits_len].parse::<usize>().ok()?;
+    if block >= 50 {
+        return None;
+    }
+    let target_and_role = &rest[digits_len + 1..];
+    let (role, target) = [
+        (MiniMaxH3TrainerRole::Down, ".lora_down.weight"),
+        (MiniMaxH3TrainerRole::Up, ".lora_up.weight"),
+        (MiniMaxH3TrainerRole::Alpha, ".alpha"),
+    ]
+    .into_iter()
+    .find_map(|(role, suffix)| {
+        target_and_role
+            .strip_suffix(suffix)
+            .map(|target| (role, target))
+    })?;
+    let leaf = MiniMaxH3TrainerLeaf::ALL
+        .into_iter()
+        .find(|leaf| target == leaf.flattened())?;
+    Some((block, leaf, role))
+}
+
+fn safetensors_header_shape(value: &Value) -> Option<Vec<usize>> {
+    value
+        .get("shape")?
+        .as_array()?
+        .iter()
+        .map(|dimension| usize::try_from(dimension.as_u64()?).ok())
+        .collect()
+}
+
+/// Validate the exact 50-block × four-leaf MiniMax-H3 trainer namespace without reading tensor
+/// data. `h3_expected` tightens preflight for a selected H3 model: an unknown `lora_unet_*`
+/// namespace is rejected actionably instead of reaching the engine as an unsupported key.
+///
+/// Existing Diffusers/PEFT and ComfyUI key spaces return `Ok(None)` and keep their established
+/// handling. The trainer namespace is deliberately strict: every target needs down/up/alpha,
+/// factor geometry must compose, unknown or partial keys fail, and trunk-only adapters must say
+/// `ss_h3_lora_token_refiner=False` explicitly.
+pub fn validate_minimax_h3_trainer_header(
+    header: &Value,
+    h3_expected: bool,
+) -> Result<Option<MiniMaxH3TrainerHeaderReceipt>, String> {
+    let object = header
+        .as_object()
+        .ok_or_else(|| "safetensors header is not a JSON object".to_owned())?;
+    let metadata = object.get("__metadata__").and_then(Value::as_object);
+    let network_module = metadata
+        .and_then(|metadata| metadata.get("ss_network_module"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let tensor_keys = object
+        .keys()
+        .filter(|key| key.as_str() != "__metadata__")
+        .collect::<Vec<_>>();
+    let has_trainer_prefix = tensor_keys.iter().any(|key| {
+        key.starts_with("lora_unet_blocks_")
+            && [
+                "_attn_qkv_proj.",
+                "_attn_out_proj.",
+                "_mlp_fc1.",
+                "_mlp_fc2.",
+            ]
+            .iter()
+            .any(|leaf| key.contains(leaf))
+    });
+    let declares_trainer = network_module == Some(MINIMAX_H3_TRAINER_NETWORK_MODULE);
+    if !declares_trainer && !has_trainer_prefix {
+        if h3_expected && tensor_keys.iter().any(|key| key.starts_with("lora_unet_")) {
+            return Err(format!(
+                "unsupported MiniMax-H3 adapter namespace; expected Diffusers/PEFT, ComfyUI, or the exact trainer namespace lora_unet_blocks_{{0..49}}_* with __metadata__[\"ss_network_module\"] = {MINIMAX_H3_TRAINER_NETWORK_MODULE:?}"
+            ));
+        }
+        return Ok(None);
+    }
+    match network_module {
+        Some(MINIMAX_H3_TRAINER_NETWORK_MODULE) => {}
+        Some(other) => {
+            return Err(format!(
+                "unsupported MiniMax-H3 trainer namespace {other:?}; expected __metadata__[\"ss_network_module\"] = {MINIMAX_H3_TRAINER_NETWORK_MODULE:?}"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "MiniMax-H3 trainer keys require __metadata__[\"ss_network_module\"] = {MINIMAX_H3_TRAINER_NETWORK_MODULE:?}"
+            ));
+        }
+    }
+    let token_refiner = metadata
+        .and_then(|metadata| metadata.get(MINIMAX_H3_TOKEN_REFINER_METADATA_KEY))
+        .and_then(Value::as_str);
+    if !token_refiner.is_some_and(|value| value.trim().eq_ignore_ascii_case("false")) {
+        return Err(format!(
+            "the 50-block MiniMax-H3 trainer adapter omits token-refiner targets, so __metadata__[\"{MINIMAX_H3_TOKEN_REFINER_METADATA_KEY}\"] must be False"
+        ));
+    }
+
+    let mut groups: BTreeMap<
+        (usize, MiniMaxH3TrainerLeaf),
+        BTreeMap<MiniMaxH3TrainerRole, Vec<usize>>,
+    > = BTreeMap::new();
+    for key in tensor_keys {
+        let (block, leaf, role) = parse_minimax_h3_trainer_key(key).ok_or_else(|| {
+            format!(
+                "unsupported or malformed MiniMax-H3 trainer tensor {key:?}; expected lora_unet_blocks_{{0..49}}_{{attn_qkv_proj,attn_out_proj,mlp_fc1,mlp_fc2}}.{{lora_down.weight,lora_up.weight,alpha}}"
+            )
+        })?;
+        let shape = safetensors_header_shape(&object[key]).ok_or_else(|| {
+            format!("MiniMax-H3 trainer tensor {key:?} has no valid safetensors shape")
+        })?;
+        if groups
+            .entry((block, leaf))
+            .or_default()
+            .insert(role, shape)
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate MiniMax-H3 trainer tensor role in {key:?}"
+            ));
+        }
+    }
+
+    let mut ranks = BTreeSet::new();
+    for block in 0..50 {
+        for leaf in MiniMaxH3TrainerLeaf::ALL {
+            let target = format!("lora_unet_blocks_{block}_{}", leaf.flattened());
+            let roles = groups.get(&(block, leaf)).ok_or_else(|| {
+                format!("partial MiniMax-H3 trainer adapter: missing target {target}")
+            })?;
+            let down = roles.get(&MiniMaxH3TrainerRole::Down).ok_or_else(|| {
+                format!("partial MiniMax-H3 trainer adapter: {target} is missing lora_down.weight")
+            })?;
+            let up = roles.get(&MiniMaxH3TrainerRole::Up).ok_or_else(|| {
+                format!("partial MiniMax-H3 trainer adapter: {target} is missing lora_up.weight")
+            })?;
+            let alpha = roles.get(&MiniMaxH3TrainerRole::Alpha).ok_or_else(|| {
+                format!("partial MiniMax-H3 trainer adapter: {target} is missing alpha")
+            })?;
+            let (in_dim, out_dim) = leaf.geometry();
+            if down.len() != 2 || down[0] == 0 || down[1] != in_dim {
+                return Err(format!(
+                    "malformed MiniMax-H3 trainer tensor {target}.lora_down.weight: expected [rank, {in_dim}], got {down:?}"
+                ));
+            }
+            let rank = down[0];
+            if up.as_slice() != [out_dim, rank] {
+                return Err(format!(
+                    "malformed MiniMax-H3 trainer tensor {target}.lora_up.weight: expected [{out_dim}, {rank}], got {up:?}"
+                ));
+            }
+            if !(alpha.is_empty() || alpha.as_slice() == [1]) {
+                return Err(format!(
+                    "malformed MiniMax-H3 trainer tensor {target}.alpha: expected scalar [] or [1], got {alpha:?}"
+                ));
+            }
+            ranks.insert(rank);
+        }
+    }
+    if groups.len() != 200 {
+        return Err(format!(
+            "MiniMax-H3 trainer adapter must contain exactly 200 source targets (50 blocks × four leaves), found {}",
+            groups.len()
+        ));
+    }
+    Ok(Some(MiniMaxH3TrainerHeaderReceipt {
+        source_targets: groups.len(),
+        ranks: ranks.into_iter().collect(),
+        trunk_only: true,
+    }))
+}
+
 /// Identifies a family from a single architecture-unique tensor-name segment,
 /// bypassing the `MIN_KEY_MATCHES` marker-count floor the bucket scorer enforces.
 ///
@@ -922,12 +1161,10 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
     // `lightx2v/Minimax-h3-Turbo` diffusers files carry 24 refiner tensors of 624 (the refiner is
     // load-bearing, not optional — sc-18724), so one marker identifies the whole shipped set.
     //
-    // 🔴 Deliberately does NOT match the `_comfyui_` twins from the same repo. They spell the same
-    // sub-module `diffusion_model.token_refiner.blocks.<n>.` — `blocks`, not `refiner_blocks` — and
-    // they are a genuinely different key space (fused `attn.qkv_proj`, SwiGLU halves swapped) that
-    // the engine REFUSES rather than folds, because folding one is shape-valid and numerically wrong
-    // (sc-18724). Claiming `minimax-h3` for them would walk the file past the API's compatibility
-    // gate into a hard install-time failure; leaving them unclaimed is the honest verdict.
+    // The `_comfyui_` twins from the same repo use a different key space (fused `attn.qkv_proj`,
+    // SwiGLU halves swapped). The inference adapter now converts that layout explicitly; this
+    // marker remains specific to Diffusers because the ComfyUI spelling has no equally unique
+    // segment. Exact trainer exports are identified from `ss_network_module` above.
     //
     // Both the diffusers dotted form and the kohya/flattened underscore form are matched, per the
     // Anima and Krea precedent above.
@@ -1751,6 +1988,16 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
     {
         return Some(canonical_lora_family(family));
     }
+    // `ss_network_module` is a code namespace, not a free-form base-model label: only the exact
+    // trainer module is architecture evidence. A lookalike must remain unsupported rather than
+    // classify confidently through the looser name matching used for repo ids below.
+    if metadata
+        .get("ss_network_module")
+        .and_then(Value::as_str)
+        .is_some_and(|module| module.trim() == MINIMAX_H3_TRAINER_NETWORK_MODULE)
+    {
+        return Some("minimax-h3".to_owned());
+    }
     for key in [
         "baseModel",
         "base_model",
@@ -1811,6 +2058,13 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         return None;
+    }
+    if normalized == MINIMAX_H3_TRAINER_NETWORK_MODULE
+        || normalized.contains("minimax-h3")
+        || normalized.contains("minimax_h3")
+        || normalized.contains("minimaxh3")
+    {
+        return Some("minimax-h3".to_owned());
     }
     // Check chroma before flux: Chroma is FLUX.1-schnell-derived, so a Chroma
     // LoRA's metadata may name both. Only metadata can distinguish the two — by
@@ -2508,10 +2762,11 @@ mod tests {
         keys
     }
 
-    /// The `_comfyui_` twins' key space from the same repo — a DIFFERENT architecture
-    /// spelling (`diffusion_model.blocks.*`, q/k/v fused into `attn.qkv_proj`, SwiGLU
-    /// halves swapped in `mlp.fc1`), which the engine refuses rather than folds. Note
-    /// its refiner is `token_refiner.blocks.`, NOT `token_refiner.refiner_blocks.`.
+    /// The `_comfyui_` twins' key space from the same repo — a different architecture spelling
+    /// (`diffusion_model.blocks.*`, q/k/v fused into `attn.qkv_proj`, SwiGLU halves swapped in
+    /// `mlp.fc1`) which the inference adapter converts. Its refiner is
+    /// `token_refiner.blocks.`, NOT the architecture-unique `token_refiner.refiner_blocks.` marker,
+    /// so header-only family detection remains conservatively inconclusive.
     fn minimax_h3_comfyui_keys() -> Vec<String> {
         const TARGETS: [&str; 4] = ["attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2"];
         let mut keys = Vec::new();
@@ -2540,6 +2795,42 @@ mod tests {
             }
         }
         keys
+    }
+
+    fn minimax_h3_trainer_header(rank: usize) -> Value {
+        let mut header = Map::new();
+        header.insert(
+            "__metadata__".to_owned(),
+            json!({
+                "ss_network_module": MINIMAX_H3_TRAINER_NETWORK_MODULE,
+                "ss_h3_lora_token_refiner": "False",
+                "ss_network_dim": rank.to_string(),
+                "ss_network_alpha": rank.to_string(),
+            }),
+        );
+        for block in 0..50 {
+            for (leaf, input, output) in [
+                ("attn_qkv_proj", 5_376, 21_504),
+                ("attn_out_proj", 7_168, 5_376),
+                ("mlp_fc1", 5_376, 28_672),
+                ("mlp_fc2", 14_336, 5_376),
+            ] {
+                let target = format!("lora_unet_blocks_{block}_{leaf}");
+                header.insert(
+                    format!("{target}.lora_down.weight"),
+                    json!({ "dtype": "F16", "shape": [rank, input], "data_offsets": [0, 0] }),
+                );
+                header.insert(
+                    format!("{target}.lora_up.weight"),
+                    json!({ "dtype": "F16", "shape": [output, rank], "data_offsets": [0, 0] }),
+                );
+                header.insert(
+                    format!("{target}.alpha"),
+                    json!({ "dtype": "F32", "shape": [], "data_offsets": [0, 0] }),
+                );
+            }
+        }
+        Value::Object(header)
     }
 
     #[test]
@@ -3067,15 +3358,81 @@ mod tests {
     }
 
     #[test]
-    fn does_not_claim_minimax_h3_for_the_comfyui_twin_key_space() {
-        // 🔴 sc-18724 / sc-18725. `lightx2v/Minimax-h3-Turbo` publishes each adapter twice; the
-        // `_comfyui_` twins fuse q/k/v into `attn.qkv_proj` and carry `mlp.fc1` as `[gate | value]`
-        // where our DiT is `[value | gate]`. Folding one is shape-valid and numerically WRONG (the
-        // sc-18740 class, which shipped green at cosine 0.73-0.78), so the engine refuses them.
-        // Detection must therefore NOT vouch for that key space as `minimax-h3` — a confident-but-
-        // wrong family here would carry the file past the API gate to a hard failure at install.
-        // The discriminator is real, not incidental: the ComfyUI refiner is `token_refiner.blocks.`
-        // while the diffusers one is `token_refiner.refiner_blocks.`.
+    fn validates_and_classifies_the_exact_trunk_only_minimax_h3_trainer_header() {
+        let header = minimax_h3_trainer_header(16);
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+        assert_eq!(
+            validate_minimax_h3_trainer_header(&header, true).expect("valid trainer header"),
+            Some(MiniMaxH3TrainerHeaderReceipt {
+                source_targets: 200,
+                ranks: vec![16],
+                trunk_only: true,
+            })
+        );
+        assert!(header
+            .as_object()
+            .expect("header object")
+            .keys()
+            .all(|key| !key.contains("token_refiner")));
+    }
+
+    #[test]
+    fn trainer_header_rejects_independent_partial_shape_flag_and_namespace_mutations() {
+        let mut missing_leaf = minimax_h3_trainer_header(16);
+        missing_leaf
+            .as_object_mut()
+            .unwrap()
+            .remove("lora_unet_blocks_37_mlp_fc2.alpha");
+        let error = validate_minimax_h3_trainer_header(&missing_leaf, true)
+            .expect_err("a missing leaf role must fail");
+        assert!(error.contains("missing alpha"), "{error}");
+
+        let mut qkv_shape = minimax_h3_trainer_header(16);
+        qkv_shape["lora_unet_blocks_0_attn_qkv_proj.lora_up.weight"]["shape"] = json!([21_503, 16]);
+        let error = validate_minimax_h3_trainer_header(&qkv_shape, true)
+            .expect_err("a wrong fused-QKV row count must fail");
+        assert!(error.contains("expected [21504, 16]"), "{error}");
+
+        let mut token_refiner = minimax_h3_trainer_header(16);
+        token_refiner["__metadata__"]["ss_h3_lora_token_refiner"] = json!("True");
+        let error = validate_minimax_h3_trainer_header(&token_refiner, true)
+            .expect_err("an absent refiner cannot be implicit");
+        assert!(error.contains("must be False"), "{error}");
+
+        let mut wrong_network = minimax_h3_trainer_header(16);
+        wrong_network["__metadata__"]["ss_network_module"] = json!("networks.lora_h3_guess");
+        let error = validate_minimax_h3_trainer_header(&wrong_network, true)
+            .expect_err("a lookalike namespace must fail");
+        assert!(error.contains(MINIMAX_H3_TRAINER_NETWORK_MODULE), "{error}");
+
+        let unsupported =
+            header_from_keys(&["lora_unet_transformer_blocks_0_attn_to_q.lora_down.weight"]);
+        let error = validate_minimax_h3_trainer_header(&unsupported, true)
+            .expect_err("an unknown H3 lora_unet namespace must fail before generation");
+        assert!(
+            error.contains("unsupported MiniMax-H3 adapter namespace"),
+            "{error}"
+        );
+
+        let unrelated = header_from_keys(&[
+            "lora_unet_blocks_0_self_attn_q_proj.lora_down.weight",
+            "lora_unet_blocks_0_self_attn_q_proj.lora_up.weight",
+        ]);
+        assert_eq!(
+            validate_minimax_h3_trainer_header(&unrelated, false).unwrap(),
+            None,
+            "an unstamped non-H3 lora_unet_blocks namespace keeps its existing import path"
+        );
+    }
+
+    #[test]
+    fn comfyui_twin_remains_inconclusive_without_an_architecture_unique_marker() {
+        // The inference adapter converts this fused/raw layout, but header-only classification is a
+        // separate question. `diffusion_model.blocks.*` is shared and the ComfyUI refiner is
+        // `token_refiner.blocks.` rather than the Diffusers `token_refiner.refiner_blocks.` unique
+        // marker, so an unstamped file stays inconclusive. A user-supplied H3 family may still pass
+        // the compatibility gate and reach the converter; the detector simply does not invent it.
         let keys = minimax_h3_comfyui_keys();
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 

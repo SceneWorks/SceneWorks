@@ -558,6 +558,39 @@ pub(crate) fn builtin_model_entry(id: &str) -> Value {
         .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
 }
 
+/// sc-20754: the three MiniMax-H3 Candle tiers were measured in separate idle CUDA processes at the
+/// shipped 1344x768 / 124-frame / 50-NFE workload. Pin the evidence as one atomic manifest fact so
+/// dropping a tier, reverting `measured`, or falling back to the old absent gate is immediately red.
+#[test]
+fn minimax_h3_candle_vram_rows_are_the_three_measured_cuda_receipts() {
+    let entry = builtin_model_entry("minimax_h3");
+    let candle = entry
+        .get("candle")
+        .and_then(Value::as_object)
+        .expect("minimax_h3 candle block");
+    assert_eq!(candle.get("measured").and_then(Value::as_bool), Some(true));
+    assert_eq!(candle.get("minMemoryGb").and_then(Value::as_u64), Some(43));
+    assert_eq!(
+        candle
+            .get("vramMeasuredPixels")
+            .and_then(Value::as_u64),
+        Some(1_032_192)
+    );
+
+    let tiers = candle
+        .get("vramGbByTier")
+        .and_then(Value::as_object)
+        .expect("all three measured tier rows");
+    assert_eq!(tiers.len(), 3);
+    for (tier, peak_gb) in [("q4", 40.068), ("q8", 74.696), ("bf16", 67.012)] {
+        let actual = tiers
+            .get(tier)
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("minimax_h3 measured {tier} row"));
+        assert!((actual - peak_gb).abs() < f64::EPSILON * 8.0, "{tier}: {actual}");
+    }
+}
+
 /// sc-12155 lint: every `type: "image"` model that carries a candle VRAM budget
 /// (`candle.vramGbByTier`) MUST declare `mlx.quantize` explicitly.
 ///
