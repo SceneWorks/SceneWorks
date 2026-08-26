@@ -345,6 +345,7 @@ test("every class is reachable, dispositions total, and no class is silently abs
     "survey_records_none",
     "survey_scope_underclaims",
     "survey_withholds_loaded_overlay",
+    "survey_withholds_unmeasured_entry",
     "survey_scope_overclaims",
     "manifest_overdeclares_cell",
     "manifest_overdeclares_route",
