@@ -302,6 +302,7 @@ export function ImageStudio() {
     gpuOptions,
     imageModels,
     models = [],
+    modelCatalogStatus = "ready",
     jobs = [],
     importAsset,
     latestImageAssets,
@@ -2749,6 +2750,7 @@ export function ImageStudio() {
   return (
     <ModelAvailabilityGate
       ready={modelReady}
+      initializing={modelCatalogStatus === "idle" || modelCatalogStatus === "loading"}
       title="Image Studio needs an image model"
       description="Download a recommended image model to start generating."
       offers={modelOffers}
