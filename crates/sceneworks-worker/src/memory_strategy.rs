@@ -770,9 +770,9 @@ mod tests {
         MemoryCalibrationIdentity, MemoryConformanceState, MemoryEvidenceDimensions,
         MemoryEvidenceKey, MemoryFormulaKind, MemoryLifecycleCapabilities, MemoryMode,
         MemoryParameterRanges, MemoryParityContract, MemoryParityResult, MemoryPhase,
-        MemoryPrerequisiteScope, MemoryRequestScope, MemoryRunContext, MemoryRunOutcome,
-        MemoryStrategyCapability, MemoryStrategyParameters, MemoryStrategyPrerequisite,
-        MemoryWindowMaterialization, Precision, Quant,
+        MemoryPrerequisiteScope, MemoryReferenceShape, MemoryRequestScope, MemoryRunContext,
+        MemoryRunOutcome, MemoryStrategyCapability, MemoryStrategyParameters,
+        MemoryStrategyPrerequisite, MemoryWindowMaterialization, Precision, Quant,
     };
     use std::sync::{Arc, Mutex};
 
@@ -880,7 +880,7 @@ mod tests {
                 tier: tier(),
                 load_shape: LoadShape::DeferredMaterialization,
                 mode: MemoryMode::TextToImage,
-                reference_shape: gen_core::MemoryReferenceShape::None,
+                reference_shape: MemoryReferenceShape::None,
                 overlay: None,
                 geometry: MemoryGeometry {
                     width: 1024,

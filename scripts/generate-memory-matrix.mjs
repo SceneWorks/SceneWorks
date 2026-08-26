@@ -17,7 +17,7 @@ import {
 import {
   reconcileMemoryContracts,
 } from "./lib/memory-contract-reconciliation.mjs";
-import { contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
+import { CONVERTER_TIER_OVERRIDES, contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
@@ -1429,6 +1429,45 @@ export function parseVideoRoutes(bodies, unionOnlyMlxRoutes = UNION_ONLY_MLX_ROU
   return routes;
 }
 
+/**
+ * Direct-only Candle dispatches that deliberately do not make a user-facing Candle lane.
+ *
+ * `parseVideoRoutes` is the matrix's public-route parser: its output is joined with the routing
+ * catalog, so adding a direct/replay executor there would make an unmeasured lane look like a
+ * schedulable capability. MiniMax-H3 is the current case. Its resolver is intentionally kept in
+ * `video_jobs/mod.rs`, outside `candle_video_engine_id`; parse it independently so the contract
+ * still proves the internal arm names the real provider while the matrix keeps it excluded until
+ * `candle_video_routed` flips.
+ */
+export function parseInternalCandleVideoRoutes(candleDispatchSource, minimaxSource) {
+  const directRouteArm =
+    "} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {\n" +
+    "        CandleVideoRoute::MiniMaxH3(engine_id)\n" +
+    "    } else if is_candle_video_engine(&request.model) {";
+  if (!candleDispatchSource.includes(directRouteArm)) {
+    throw new Error(
+      "memory-matrix: MiniMax-H3 direct Candle dispatch no longer selects CandleVideoRoute::MiniMaxH3",
+    );
+  }
+  const engine = minimaxSource.match(
+    /const\s+MINIMAX_H3_ENGINE_ID:\s*&str\s*=\s*"([^"]+)"\s*;/,
+  )?.[1];
+  if (
+    !engine ||
+    !minimaxSource.includes(
+      "sceneworks_core::video_request::is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)",
+    )
+  ) {
+    throw new Error(
+      "memory-matrix: could not resolve MiniMax-H3's shared internal Candle engine id",
+    );
+  }
+  return new Map([
+    ["minimax_h3", engine],
+    ["minimax_h3_ref", engine],
+  ]);
+}
+
 // sc-16268: anchored on CODE, not on a doc comment. Provenance hashes these sources with inert
 // comments stripped, so a parse that reads comment text would let a semantic change slip past the
 // staleness tripwire. SC-18816 deliberately parses the broader staged-residency sweep rather than
@@ -1483,7 +1522,9 @@ function parseBackendTierOverrides(instantIdSource) {
   if (!candleDense) {
     throw new Error("could not derive InstantID's dense Candle tier from instantid.rs");
   }
-  return new Map([["instantid_realvisxl:candle", [candleDense]]]);
+  // The converter-packed tier sets are shared with the projector's `catalogAxes` so the matrix's
+  // cell universe and the projection's declaration universe cannot disagree about them (sc-21510).
+  return new Map([["instantid_realvisxl:candle", [candleDense]], ...CONVERTER_TIER_OVERRIDES]);
 }
 
 function modesFor(model) {
@@ -1556,25 +1597,36 @@ export function declarationModelForCoordinate({ backend, rung, route, provider, 
     : model;
 }
 
-export function providerFor(model, backend, overlay, route) {
+export function providerFor(model, backend, overlay, route, mode) {
   // Per-backend (sc-18815): the image lane's `engineFor` returns the one table route on either
   // backend, so this is unchanged for it, while a video entry gets the provider that backend
   // actually loads instead of whichever one happened to be listed first. No `?? route.engine`
   // fallback: `engineFor` throws on a backend it cannot serve, and falling through to the scalar is
   // how a candle provider reached an MLX cell in the first place.
+  //
+  // A contract row that names a DISTINCT `runtimeProvider` for this (mode, overlay) owns the lane
+  // (sc-21510). This used to hold only for the `control` overlay, so Krea's and FLUX.2 Klein's
+  // route-local EDIT providers (`krea_2_edit`, `flux2_klein_9b_edit`, …) could never label a cell:
+  // every edit/character cell carried the base engine id, the edit rows bound to nothing, and their
+  // real, witnessed capability read as `declared_cell_absent` drift. The mode filter keeps the base
+  // rows in charge of the modes they declare; a coordinate no row covers falls through to the base
+  // engine exactly as before.
   const engine = route.engineFor(backend);
-  if (overlay !== "control") return engine;
   const contract = model[backend]?.memoryStrategyContract;
   const declared = [...new Set((contract?.implementations ?? [])
-    .filter((implementation) => implementation.overlays?.includes(overlay))
+    .filter((implementation) =>
+      implementation.overlays?.includes(overlay) &&
+      (mode === undefined || implementation.modes?.includes(mode)))
     .map((implementation) => implementation.runtimeProvider ?? contract.provider))];
   if (declared.length === 1) return declared[0];
   if (declared.length > 1) {
     throw new Error(
-      `${model.id}:${backend}:${overlay} declares ambiguous runtime providers: ${declared.join(", ")}`,
+      `${model.id}:${backend}:${mode ?? "(any mode)"}:${overlay} declares ambiguous runtime providers: ${declared.join(", ")}`,
     );
   }
-  return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine;
+  return overlay === "control"
+    ? (CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine)
+    : engine;
 }
 
 function matrixOverlayFor(recordOverlay) {
@@ -1748,7 +1800,8 @@ export const OUT_OF_MATRIX_CELL_STATES = Object.freeze([
  *
  * Rung 4's only shared prerequisite is `LoadShape::DeferredMaterialization`
  * (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, inference
- * `crates/contracts/gen-core/src/memory_strategy.rs:310-313` at the pinned f17c82544). SC-15998
+ * `crates/contracts/gen-core/src/memory_strategy.rs:317-320` at the permanent pin
+ * 28f0563baa03640ade1635356d2d54fe8a477f1a). SC-15998
  * removed the rung-1 edge the
  * survey's notes asserted, because it had encoded one provider's coupled loader shape as universal
  * arithmetic.
@@ -1933,7 +1986,7 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
       // dates every path in it. These records are surveyed at a revision of their own —
       // MiniMax-H3's MLX paths resolve at e09f46aaf and its Candle ones at 79f02e6d0, two DIFFERENT
       // trees, and neither is the pin. What the field asserts has moved since it was introduced: at
-      // the pinned f17c82544 both H3 crates exist and both anchors are ANCESTORS of it, so the
+      // the permanent pin 28f0563baa03640ade1635356d2d54fe8a477f1a carries both H3 crates and both anchors are ANCESTORS of it, so the
       // field now reads "last surveyed here, not re-surveyed since" rather than "the pinned tree
       // has no such crate yet". Without it the record silently mixes revisions and reads as if the
       // matrix's own pin dated it (sc-18664; meaning restated sc-18650 pre-merge review).
@@ -2676,8 +2729,8 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
  * is the right question for the edge it now serves, because gen-core's `validate_selection` accepts
  * a `Rung { .. EngagedInSameRequest }` prerequisite when `MemoryProviderContract::engages` holds,
  * and for an edge the realization itself appended, `engages` reduces to that rung being declared
- * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1346-1362` at the
- * pinned rev `f17c82544`: `required_by_realization` is true by construction, so the conjunction is
+ * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1544-1558` at the
+ * pinned rev `28f0563baa03640ade1635356d2d54fe8a477f1a`: `required_by_realization` is true by construction, so the conjunction is
  * the `matches!(self.support(rung), Some(Implemented))` term).
  *
  * This is the reduction of ONE of `validate_selection`'s two accepting arms, not of the whole
@@ -2801,8 +2854,8 @@ export function stagedResidencyIsAvailable({
  * gen-core's `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, mirrored (sc-19542).
  *
  * `&[MemoryStrategyPrerequisite::LoadShape(LoadShape::DeferredMaterialization)]` at the pinned rev
- * `f17c82544` — inference `crates/contracts/gen-core/src/memory_strategy.rs:310-313`, the identifier
- * on line 312. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
+ * `28f0563baa03640ade1635356d2d54fe8a477f1a` — inference `crates/contracts/gen-core/src/memory_strategy.rs:317-320`, the identifier
+ * on line 319. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
  * a provider demands of rung 4 it appends itself, which is what
  * `config/rung4-contract-prerequisites.json` records per (family, backend).
  *
@@ -2836,8 +2889,8 @@ const RUNG4_PREREQUISITE_EVALUATORS = Object.freeze({
   "load-shape": () => true,
   /**
    * gen-core's `EngagedInSameRequest` arm has TWO ways to be satisfied, and this mirrors both —
-   * inference `crates/contracts/gen-core/src/memory_strategy.rs:1862-1873` at the pinned
-   * `f17c82544`.
+   * inference `crates/contracts/gen-core/src/memory_strategy.rs:2059-2070` at the pinned
+   * `28f0563baa03640ade1635356d2d54fe8a477f1a`.
    *
    * 1. `if self.engages(selection.strategy, rung) { continue }`. For an edge the realization itself
    *    appended, `engages`'s `required_by_realization` term is true by construction, so the
@@ -2901,13 +2954,13 @@ export const RUNG4_DECLARED_SUPPORTS = Object.freeze([
  * evaluator.
  *
  * `record.additionalPrerequisites` is derived from the pinned revision by
- * `scripts/rung4-contract-prerequisites.mjs`, and 21 of the catalog's 40 (family, backend) pairs
- * carry the rung-1 edge while 19 do not — so which families this consults the rung-1 predicate for
+ * `scripts/rung4-contract-prerequisites.mjs`, and 23 of the catalog's 40 (family, backend) pairs
+ * carry the rung-1 edge while 17 do not — so which families this consults the rung-1 predicate for
  * is now a property of the providers rather than a blanket rule.
  *
- * WHAT THAT 21/19 IS AND IS NOT (measured, sc-19542 review f6)
+ * WHAT THAT 23/17 IS AND IS NOT (measured, sc-19542 review f6)
  *
- * 21/19 is a fact about the RECORD SET, not about this catalog. Instrumenting this arm over a full
+ * 23/17 is a fact about the RECORD SET, not about this catalog. Instrumenting this arm over a full
  * generation run measures the difference it actually makes:
  *
  *   * 426 evaluations reach `rung4ContractAdmits`, spanning 17 of the 40 (family, backend) pairs.
@@ -2922,11 +2975,11 @@ export const RUNG4_DECLARED_SUPPORTS = Object.freeze([
  *   * Old and new therefore agree on 40/40 probed keys, which is why the generated artifact is
  *     BYTE-IDENTICAL across this change.
  *
- * So "19 lanes no longer consult the rung-1 proxy" is true of the record set and reaches 2 lanes in
+ * So "17 lanes no longer consult the rung-1 proxy" is true of the record set and reaches 2 lanes in
  * practice. The fix is still the right one — it replaces a proxy that happens to agree today with
  * the graph the contract actually walks, and the divergence it prevents is the first time a
  * provider's prerequisites change — but it is a correctness change with a byte-identical artifact,
- * not a change in what this catalog admits. Stated here because a reader who takes 21/19 as the
+ * not a change in what this catalog admits. Stated here because a reader who takes 23/17 as the
  * blast radius will over-read every one of those numbers.
  *
  * An edge flagged `conditional` — appended by a `then_some` on a runtime condition, or inside a
@@ -3887,8 +3940,8 @@ export function plannedCellIds(calibrationPlan, cells) {
  * universe, so those entries resolve to no cell BY CONSTRUCTION. Requiring a plan row for one of
  * them to match a coordinate is therefore a category error, not a missing-coordinate report: such a
  * family is validated by its `outOfMatrixFamilies` record — every stack, both claims, on every
- * generation — instead of by a published cell, and epic 17137's terminal campaign has to be able to
- * plan captures against MiniMax-H3 before the matrix can carry a verdict for it.
+ * generation — instead of by a published cell, and the checked-in plan captures the MiniMax-H3
+ * evidence structure before the matrix can carry a verdict for it.
  *
  * The exemption reads the SAME set the universe subtraction reads (`survey.outOfMatrixCatalogEntries`,
  * computed once in `parseRung4Survey`), so the two cannot drift into exempting rows the matrix does
@@ -3924,6 +3977,149 @@ export function assertCalibrationPlanTargetsResolvedCoordinates(
       "and overlays normalise through matrixOverlayFor. A plan entry that addresses nothing cannot be " +
       "captured against: the record it would produce binds to no cell (sc-18099).",
   );
+}
+
+// MiniMax-H3 is deliberately outside the published matrix while its video route is promoted, but
+// its terminal receipts still need a closed, executable plan.  The provider contract at this pin
+// makes rung support a load-shape property (not a tier property): resident, staged residency and
+// bounded decode are implemented eagerly; transformer residency is implemented only deferred;
+// bounded attention is structurally unavailable.  Keep that declaration beside the plan so a row
+// cannot silently schedule an impossible engaged composition before it reaches the real-weight host.
+const MINIMAX_H3_PLAN = Object.freeze({
+  tiers: ["q4", "q8", "bf16"],
+  frames: [124, 209, 294],
+  areas: ["576x320", "1344x768"],
+  rungs: {
+    resident: {
+      loadShape: "eager_materialization",
+      engagedRungs: ["resident"],
+      parameters: {},
+    },
+    staged_residency: {
+      loadShape: "eager_materialization",
+      engagedRungs: ["resident", "staged_residency"],
+      parameters: {},
+    },
+    bounded_decode: {
+      loadShape: "eager_materialization",
+      engagedRungs: ["resident", "bounded_decode"],
+      parameters: { decodeTileEdge: 256, decodeOverlap: 64 },
+    },
+    bounded_transformer_residency: {
+      loadShape: "deferred_materialization",
+      engagedRungs: ["resident", "bounded_decode", "bounded_transformer_residency"],
+      parameters: {
+        decodeTileEdge: 256,
+        decodeOverlap: 64,
+        transformerWindowSize: 1,
+        transformerWindowComponent: "both",
+      },
+    },
+  },
+});
+
+function minimaxPlanError(detail) {
+  throw new Error(`MiniMax-H3 calibration plan: ${detail}`);
+}
+
+function minimaxPlanRank(entries) {
+  // Columns are [1, pixels, pixels*frames].  Search exact integer determinants so a near-singular
+  // temporal design cannot become a fit merely because a floating-point elimination rounded it.
+  const points = entries.map((entry) => {
+    const { width, height, frames } = entry.target.geometry;
+    return [1n, BigInt(width * height), BigInt(width * height * frames)];
+  });
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      for (let k = j + 1; k < points.length; k += 1) {
+        const [a, b, c] = [points[i], points[j], points[k]];
+        const determinant =
+          a[0] * (b[1] * c[2] - b[2] * c[1]) -
+          a[1] * (b[0] * c[2] - b[2] * c[0]) +
+          a[2] * (b[0] * c[1] - b[1] * c[0]);
+        if (determinant !== 0n) return 3;
+      }
+    }
+  }
+  return 0;
+}
+
+/**
+ * Validate the checked-in MiniMax-H3 video grid while that family remains out of matrix.
+ *
+ * The checked-in plan has 72 rows: one exact 2-area x 3-frame spanning grid per implemented
+ * (tier, rung) family. It deliberately replaces the superseded 14-duration cross-product: frames
+ * are regressors (`pixels * frames`), not a per-duration matrix identity. The plan remains planned
+ * evidence structure; zero accepted SceneWorks calibration receipts is the closed/terminal evidence state
+ * for this epic, and no further campaign is scheduled.
+ */
+export function assertMinimaxH3CalibrationPlan(calibrationPlan) {
+  const rows = calibrationPlan.providers.filter((entry) => entry.target?.modelId === "minimax_h3");
+  const expectedRungs = Object.keys(MINIMAX_H3_PLAN.rungs);
+  const expectedCount = MINIMAX_H3_PLAN.tiers.length * expectedRungs.length *
+    MINIMAX_H3_PLAN.areas.length * MINIMAX_H3_PLAN.frames.length;
+  if (rows.length !== expectedCount) {
+    minimaxPlanError(`requires exactly ${expectedCount} spanning-grid rows, found ${rows.length}`);
+  }
+  const byFamily = new Map();
+  for (const row of rows) {
+    const { target = {} } = row;
+    const expected = MINIMAX_H3_PLAN.rungs[row.rung];
+    const family = `${target.tier}:${row.rung}`;
+    if (!expected || !MINIMAX_H3_PLAN.tiers.includes(target.tier)) {
+      minimaxPlanError(`${row.name}: ${family} is not an implemented MiniMax-H3 tier/rung family`);
+    }
+    if (
+      row.evidenceScope !== "authoritative" ||
+      row.backend !== "mlx" ||
+      target.provider !== "minimax_h3" ||
+      target.mode !== "text_to_video" ||
+      target.overlay !== "none" ||
+      target.geometry?.batch !== 1 ||
+      row.calibrationFingerprint !== "minimax-h3-mlx-staged-joint-av-eager-abi3-v1"
+    ) minimaxPlanError(`${row.name}: does not name the capturable MLX MiniMax-H3 t2va lane`);
+    if (row.loadShape !== expected.loadShape) {
+      minimaxPlanError(`${row.name}: ${row.rung} requires ${expected.loadShape}`);
+    }
+    if (JSON.stringify(row.engagedRungs) !== JSON.stringify(expected.engagedRungs)) {
+      minimaxPlanError(`${row.name}: declares engaged rungs ${JSON.stringify(row.engagedRungs)} but ${row.rung} implements ${JSON.stringify(expected.engagedRungs)}`);
+    }
+    const cases = row.cases;
+    if (
+      !Array.isArray(cases) || cases.length !== 1 || cases[0].expectedResult !== "passed" ||
+      JSON.stringify(cases[0].parameters) !== JSON.stringify(expected.parameters)
+    ) minimaxPlanError(`${row.name}: must carry the exact implemented ${row.rung} parameters`);
+    const resolution = `${target.geometry?.width}x${target.geometry?.height}`;
+    if (!MINIMAX_H3_PLAN.areas.includes(resolution) || !MINIMAX_H3_PLAN.frames.includes(target.geometry?.frames)) {
+      minimaxPlanError(`${row.name}: is outside the corrected two-area, three-frame grid`);
+    }
+    const expectedFixture = `minimax-h3-mlx-${target.tier}-${resolution}-f${target.geometry.frames}-fps24-seed17137`;
+    if (row.fixture !== expectedFixture) minimaxPlanError(`${row.name}: fixture must bind its exact tier, geometry, cadence, and seed`);
+    if (!byFamily.has(family)) byFamily.set(family, []);
+    byFamily.get(family).push(row);
+  }
+  for (const tier of MINIMAX_H3_PLAN.tiers) {
+    for (const rung of expectedRungs) {
+      const family = `${tier}:${rung}`;
+      const entries = byFamily.get(family) ?? [];
+      if (entries.length !== MINIMAX_H3_PLAN.areas.length * MINIMAX_H3_PLAN.frames.length) {
+        minimaxPlanError(`${family} requires one row for every area/frame grid point`);
+      }
+      const coordinates = new Set(entries.map((entry) => {
+        const { width, height, frames } = entry.target.geometry;
+        return `${width}x${height}xf${frames}`;
+      }));
+      const expectedCoordinates = new Set(
+        MINIMAX_H3_PLAN.areas.flatMap((resolution) =>
+          MINIMAX_H3_PLAN.frames.map((frames) => `${resolution}xf${frames}`),
+        ),
+      );
+      if (coordinates.size !== expectedCoordinates.size || [...coordinates].some((point) => !expectedCoordinates.has(point))) {
+        minimaxPlanError(`${family} does not carry the complete measured-spanning grid`);
+      }
+      if (minimaxPlanRank(entries) !== 3) minimaxPlanError(`${family} is collinear in (pixels, pixels*frames)`);
+    }
+  }
 }
 
 /**
@@ -4271,6 +4467,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const calibrationPlan = activeCalibrationPlan(JSON.parse(bodies.calibrationPlan));
+  assertMinimaxH3CalibrationPlan(calibrationPlan);
   // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
   // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
   const inferenceClosureDigests = validatedInferenceClosures(
@@ -4307,7 +4504,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // MINUS the survey's declared OUT-OF-MATRIX entries (sc-18664 × sc-18815, reconciled by the
   // sc-17137 main sync). Those records name catalog entries the matrix cannot yet carry a verdict
   // for — MiniMax-H3 is the live case: `familyGroup` has no arm for it, no video-route resolver row
-  // exists, and its providers are absent at the pinned inference revision, so admitting it here
+  // exists, and its providers are present at the permanent pinned inference revision, so admitting it here
   // fails generation at `resolveRoute` rather than producing a row. The records are NOT unvalidated
   // escape hatches: `parseOutOfMatrixRung4Families` (run inside `parseRung4Survey` above) validates
   // every one on every generation and throws the day `familyGroup` learns one of the named entries,
@@ -4445,7 +4642,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       for (const tier of tiersFor(model, backend, backendTierOverrides)) {
         for (const mode of modesFor(model)) {
           for (const overlay of overlaysFor(model, backend, route)) {
-            const provider = providerFor(model, backend, overlay, route);
+            const provider = providerFor(model, backend, overlay, route, mode);
             for (const rung of RUNGS) {
               const status = strategyStatus({
                 backend,

@@ -7107,28 +7107,116 @@ fn bernini_backends_share_engine_id_and_video_mode_mapping() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn stall_timeout_override_parses_or_falls_back() {
-    // A valid positive override wins.
+fn video_stall_timeout_operator_override_is_absolute() {
+    // A valid positive override wins even when it is below both the default and the H3 workload
+    // budget. This is the explicit operator escape hatch, not a lower bound.
     assert_eq!(
-        parse_stall_timeout(Some("120".to_owned())),
-        Duration::from_secs(120)
+        video_stall_timeout_policy(Some("120"), "minimax_h3", 768, 1344, 345),
+        VideoStallTimeoutPolicy {
+            timeout: Duration::from_secs(120),
+            basis: "operator_override",
+        }
     );
     assert_eq!(
-        parse_stall_timeout(Some("  90 ".to_owned())),
-        Duration::from_secs(90)
+        video_stall_timeout_policy(
+            Some("  90 "),
+            "wan2_2_ti2v_5b",
+            u32::MAX,
+            u32::MAX,
+            u32::MAX
+        ),
+        VideoStallTimeoutPolicy {
+            timeout: Duration::from_secs(90),
+            basis: "operator_override",
+        }
     );
-    // Unset, blank, non-numeric, or zero all fall back to the default.
-    assert_eq!(parse_stall_timeout(None), VIDEO_STALL_TIMEOUT);
+    // Invalid values are not overrides; H3 must still receive its request-derived budget.
+    for raw in [Some(""), Some("nope"), Some("0")] {
+        assert_eq!(
+            video_stall_timeout_policy(raw, "minimax_h3", 768, 1344, 243).timeout,
+            Duration::from_secs(1176)
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_non_h3_remains_the_global_default() {
+    for raw in [None, Some(""), Some("nope"), Some("0")] {
+        assert_eq!(
+            video_stall_timeout_policy(raw, "wan2_2_ti2v_5b", u32::MAX, u32::MAX, u32::MAX,),
+            VideoStallTimeoutPolicy {
+                timeout: VIDEO_STALL_TIMEOUT,
+                basis: "default",
+            },
+            "invalid or absent override {raw:?} must not make the generic timeout request-aware"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_baseline() {
+    for (width, height) in [(768, 1344), (1344, 768)] {
+        assert_eq!(
+            video_stall_timeout_policy(None, "minimax_h3", width, height, 124),
+            VideoStallTimeoutPolicy {
+                timeout: VIDEO_STALL_TIMEOUT,
+                basis: "minimax_h3_baseline",
+            }
+        );
+    }
+    // A long small-canvas request carries less packed pixel-frame work than the measured shortest
+    // full-canvas baseline, so it does not weaken genuine stall detection either.
     assert_eq!(
-        parse_stall_timeout(Some(String::new())),
+        video_stall_timeout_policy(None, "minimax_h3", 320, 576, 345).timeout,
         VIDEO_STALL_TIMEOUT
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_minimax_h3_243_frame_full_canvas_exceeds_the_false_stall_threshold() {
+    let portrait = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, 243);
+    let landscape = video_stall_timeout_policy(None, "minimax_h3", 1344, 768, 243);
+    assert_eq!(portrait, landscape, "orientation cannot change packed work");
+    assert_eq!(portrait.timeout, Duration::from_secs(1176));
+    assert_eq!(portrait.basis, "minimax_h3_pixel_frames");
+    assert!(portrait.timeout > Duration::from_secs(600));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lattice() {
+    use sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
+
+    let mut previous = VIDEO_STALL_TIMEOUT;
+    for frames in MINIMAX_H3_LEGAL_FRAME_COUNTS {
+        let policy = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, frames);
+        assert!(
+            policy.timeout >= previous,
+            "timeout regressed at legal frame count {frames}"
+        );
+        let expected_seconds = 600_u64
+            .saturating_mul(u64::from(frames))
+            .div_ceil(u64::from(MINIMAX_H3_LEGAL_FRAME_COUNTS[0]));
+        assert_eq!(
+            policy.timeout,
+            Duration::from_secs(expected_seconds),
+            "full-canvas policy must scale with the effective H3 frame lattice"
+        );
+        previous = policy.timeout;
+    }
+    assert_eq!(previous, Duration::from_secs(1670));
+
+    // Mutation/bound proof: out-of-contract dimensions and frame counts cannot expand the stall
+    // budget beyond the largest legal H3 request, and zeroes cannot lower the existing baseline.
     assert_eq!(
-        parse_stall_timeout(Some("nope".to_owned())),
-        VIDEO_STALL_TIMEOUT
+        video_stall_timeout_policy(None, "minimax_h3", u32::MAX, u32::MAX, u32::MAX,).timeout,
+        Duration::from_secs(1670)
     );
     assert_eq!(
-        parse_stall_timeout(Some("0".to_owned())),
+        video_stall_timeout_policy(None, "minimax_h3", 0, 0, 0).timeout,
         VIDEO_STALL_TIMEOUT
     );
 }
@@ -15829,13 +15917,12 @@ fn minimax_h3_never_degrades_to_a_fake_video() {
 
 /// The `VideoRoute::MiniMaxH3` tail arm is REACHED once the engine is ready (sc-19508).
 ///
-/// Without this the arm would be untestable dead code until sc-18650 lands: `minimax_h3_available`
-/// requires the engine to be REGISTERED, which is false at the pinned revision, so every MiniMax job
-/// falls to `Stub` and deleting the arm entirely would be green in every other test. Declaration is
-/// not reachability — this drives the real ladder with the readiness the pin bump will supply.
+/// Without this the arm would be untestable: `minimax_h3_available` requires the engine to be
+/// REGISTERED, and the permanent pin supplies that provider. Declaration is not reachability —
+/// this drives the real ladder with the readiness seam so the live arm cannot be deleted unnoticed.
 ///
-/// The `false` half is equally load-bearing: it pins today's behavior (Stub, where the fail-loud
-/// gate runs) so the arm cannot be made unconditionally live by mistake.
+/// The false half remains load-bearing for the separate readiness seam: it proves that an unavailable
+/// provider still falls to `Stub`, while the true half proves the registered Candle/MLX route arm.
 #[cfg(target_os = "macos")]
 #[test]
 fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
@@ -15897,6 +15984,272 @@ fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
         resolve_video_route_with(&mochi, &settings, false),
         "MiniMax readiness must not change any other model's route"
     );
+}
+
+/// Both catalog partitions are scheduler-reachable and select the real provider rather than a
+/// procedural stub.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_resolves_the_real_route_not_stub() {
+    let settings = Settings {
+        backend_candle_enabled: true,
+        ..offline_settings()
+    };
+    for (model, mode) in [
+        ("minimax_h3", "text_to_video"),
+        ("minimax_h3", "image_to_video"),
+        ("minimax_h3", "first_last_frame"),
+        ("minimax_h3_ref", "reference_to_video"),
+    ] {
+        let req = request(json!({
+            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums"
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&req, &settings)
+                .expect("MiniMax-H3 route resolution must succeed for this fixture"),
+            CandleVideoRoute::MiniMaxH3("minimax_h3"),
+            "{model}/{mode} must dispatch to the real Candle MiniMax-H3 route, never Stub"
+        );
+        let expected = vec!["minimax_h3"];
+        assert_eq!(
+            runtime_descriptor_engine_ids(model, mode),
+            expected,
+            "each partition's shipped modes must be scheduler-reachable"
+        );
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_tier_selection_defaults_q4_and_preserves_explicit_precision() {
+    use crate::video_jobs::minimax_h3::candle_minimax_h3_tier;
+
+    let cases = [
+        (json!({}), ("q4", Some(Quant::Q4))),
+        (json!({ "mlxQuantize": 4 }), ("q4", Some(Quant::Q4))),
+        (json!({ "mlxQuantize": "8" }), ("q8", Some(Quant::Q8))),
+        (json!({ "mlxQuantize": 0 }), ("bf16", None)),
+    ];
+    for (advanced, expected) in cases {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "minimax_h3",
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums",
+            "advanced": advanced
+        }));
+        assert_eq!(candle_minimax_h3_tier(&req), expected);
+    }
+}
+
+/// The scheduler-visible base route must combine the two installed snapshots exactly as the pinned
+/// Candle provider expects: shared components and dense bf16 from upstream, packed q4/q8 DiT and
+/// text encoder from the SceneWorks tier rehost. This is a filesystem resolver test, not just an
+/// enum test, and it also guards the final `VideoGenInput` wiring from silently swapping a root.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
+    use crate::video_jobs::minimax_h3::resolve_candle_minimax_h3_load;
+
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
+    const REHOST: &str = "SceneWorks/minimax-h3-mlx";
+    const REVISION: &str = "1111111111111111111111111111111111111111";
+
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_minimax_h3_roots_")
+        .tempdir()
+        .expect("temp dir");
+    let stage = |repo: &str| {
+        let root = huggingface_repo_cache_path(data.path(), repo)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&root).expect("snapshot dir");
+        std::fs::create_dir_all(root.join("text_encoder")).expect("upstream text encoder");
+        std::fs::write(root.join("text_encoder/config.json"), b"{}").expect("TE config");
+        root
+    };
+    let upstream = stage(UPSTREAM);
+    let rehost = stage(REHOST);
+    for tier in ["q4", "q8"] {
+        std::fs::create_dir_all(rehost.join(tier).join("transformer")).expect("packed transformer");
+        std::fs::write(rehost.join(tier).join("transformer/config.json"), b"{}")
+            .expect("transformer config");
+        std::fs::create_dir_all(rehost.join(tier).join("text_encoder"))
+            .expect("packed text encoder");
+        std::fs::write(rehost.join(tier).join("text_encoder/config.json"), b"{}")
+            .expect("TE config");
+    }
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+
+    for (advanced, tier, quant) in [
+        (json!({}), "q4", Some(Quant::Q4)),
+        (json!({ "mlxQuantize": 8 }), "q8", Some(Quant::Q8)),
+        (json!({ "mlxQuantize": 0 }), "bf16", None),
+    ] {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "minimax_h3",
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums",
+            "advanced": advanced
+        }));
+        let load = resolve_candle_minimax_h3_load(&settings, &req).expect("installed tier");
+        assert_eq!(
+            load.root, upstream,
+            "shared and bf16 root is always upstream"
+        );
+        assert_eq!(load.tier, tier);
+        assert_eq!(load.quant, quant);
+        if quant.is_some() {
+            assert_eq!(load.dit_dir, Some(rehost.join(tier).join("transformer")));
+            assert_eq!(
+                load.text_encoder_dir,
+                Some(rehost.join(tier).join("text_encoder"))
+            );
+        } else {
+            assert_eq!(
+                load.dit_dir, None,
+                "bf16 DiT resolves under the upstream root"
+            );
+            assert_eq!(
+                load.text_encoder_dir, None,
+                "bf16 text encoder resolves under the upstream root"
+            );
+        }
+        assert!(
+            load.dit_dir
+                .as_ref()
+                .is_none_or(|path| !path.to_string_lossy().contains("transformer_ref")),
+            "SC-20755 must never activate the reference partition"
+        );
+    }
+
+    const SOURCE: &str = include_str!("minimax_h3.rs");
+    let candle_arm = SOURCE
+        .split_once("pub(super) async fn generate_candle_minimax_h3(")
+        .expect("Candle entrypoint")
+        .1;
+    let input = candle_arm
+        .split_once("let input = VideoGenInput {")
+        .expect("Candle input")
+        .1
+        .split_once("};")
+        .expect("Candle input closes")
+        .0;
+    for mapping in [
+        "model_dir: load.root",
+        "quant: load.quant",
+        "dit_component_dir: load.dit_dir",
+        "text_encoder_component_dir: load.text_encoder_dir",
+    ] {
+        assert!(
+            input.contains(mapping),
+            "missing exact LoadSpec mapping: {mapping}"
+        );
+    }
+}
+
+/// Ref2VA must select the hosted sibling DiT at all three tiers while preserving the base route's
+/// packed text-encoder split. A torn selected tier fails before provider construction.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_minimax_h3_ref_resolves_hosted_partition_and_rejects_torn_tiers() {
+    use crate::video_jobs::minimax_h3::resolve_candle_minimax_h3_load;
+
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
+    const REHOST: &str = "SceneWorks/minimax-h3-mlx";
+    const REVISION: &str = "2222222222222222222222222222222222222222";
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_minimax_h3_ref_roots_")
+        .tempdir()
+        .expect("temp dir");
+    let stage = |repo: &str| {
+        let root = huggingface_repo_cache_path(data.path(), repo)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&root).expect("snapshot dir");
+        root
+    };
+    let upstream = stage(UPSTREAM);
+    std::fs::create_dir_all(upstream.join("text_encoder")).expect("dense text encoder");
+    std::fs::write(upstream.join("text_encoder/config.json"), b"{}").expect("TE config");
+    let rehost = stage(REHOST);
+    for tier in ["q4", "q8", "bf16"] {
+        std::fs::create_dir_all(rehost.join(tier).join("transformer")).expect("base transformer");
+        std::fs::write(rehost.join(tier).join("transformer/config.json"), b"{}")
+            .expect("base transformer config");
+        std::fs::create_dir_all(rehost.join(tier).join("transformer_ref"))
+            .expect("reference transformer");
+        std::fs::write(rehost.join(tier).join("transformer_ref/config.json"), b"{}")
+            .expect("reference transformer config");
+    }
+    for tier in ["q4", "q8"] {
+        std::fs::create_dir_all(rehost.join(tier).join("text_encoder"))
+            .expect("packed text encoder");
+        std::fs::write(rehost.join(tier).join("text_encoder/config.json"), b"{}")
+            .expect("TE config");
+    }
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+
+    for (advanced, tier, quant) in [
+        (json!({}), "q4", Some(Quant::Q4)),
+        (json!({ "mlxQuantize": 8 }), "q8", Some(Quant::Q8)),
+        (json!({ "mlxQuantize": 0 }), "bf16", None),
+    ] {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "minimax_h3_ref",
+            "mode": "reference_to_video",
+            "prompt": "a lighthouse keeper hums",
+            "advanced": advanced
+        }));
+        let load = resolve_candle_minimax_h3_load(&settings, &req).expect("complete ref tier");
+        assert_eq!(load.root, upstream);
+        assert_eq!(load.tier, tier);
+        assert_eq!(load.quant, quant);
+        assert_eq!(load.dit_dir, Some(rehost.join(tier).join("transformer")));
+        assert_eq!(
+            load.dit_dir
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .map(|parent| parent.join("transformer_ref")),
+            Some(rehost.join(tier).join("transformer_ref"))
+        );
+        assert_eq!(
+            load.text_encoder_dir,
+            quant.map(|_| rehost.join(tier).join("text_encoder"))
+        );
+    }
+
+    std::fs::remove_dir_all(rehost.join("q8").join("transformer_ref"))
+        .expect("remove selected partition");
+    let torn = request(json!({
+        "projectId": "p",
+        "model": "minimax_h3_ref",
+        "mode": "reference_to_video",
+        "prompt": "a lighthouse keeper hums",
+        "advanced": { "mlxQuantize": 8 }
+    }));
+    let error = resolve_candle_minimax_h3_load(&settings, &torn).expect_err("torn tier refused");
+    assert!(error.to_string().contains("missing transformer_ref"));
 }
 
 /// The engine-presence check reads the REGISTRY, not a pinned revision string (sc-19508).
@@ -18169,6 +18522,58 @@ fn a_selected_turbo_variant_changes_the_job_that_reaches_the_engine() {
         "the asset records the WHOLE schedule — the audio shift the engine is fixed at, not just \
          the video half the request can move"
     );
+}
+
+/// The built-in accelerator and a community trainer LoRA are a STACK, not mutually exclusive
+/// modes: both files reach the engine in payload order while only the built-in id supplies the
+/// sampling recipe. This is the plumbing shape used by sc-21028 (Turbo + Civitai/Kohya style).
+#[cfg(target_os = "macos")]
+#[test]
+fn built_in_turbo_and_community_lora_reach_the_engine_as_one_stack() {
+    let tiers = minimax_h3_tier_root("mm_stacked_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_stacked_base_");
+    let probe = ArmProbe::default();
+    let turbo = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_4step_768p");
+    let community = minimax_h3_turbo_lora(tiers.path(), "community_kohya_style_rank16");
+    let expected_paths = [&turbo, &community]
+        .map(|lora| {
+            std::fs::canonicalize(lora["path"].as_str().expect("staged adapter path"))
+                .expect("staged adapter canonicalizes")
+        })
+        .to_vec();
+    let request = minimax_h3_request("minimax_h3", json!({ "loras": [turbo, community] }));
+
+    let (_decoded, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("Turbo plus a community LoRA runs as one adapter stack");
+    let engine_request = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        (engine_request.steps, engine_request.scheduler_shift),
+        (Some(4), Some(6.0)),
+        "the built-in id must still drive its non-default recipe"
+    );
+    let load = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        load.adapters
+            .iter()
+            .map(|adapter| adapter.path.clone())
+            .collect::<Vec<_>>(),
+        expected_paths,
+        "neither adapter may be dropped or reordered before the engine load"
+    );
+    assert_eq!(
+        load.adapters
+            .iter()
+            .map(|adapter| adapter.scale)
+            .collect::<Vec<_>>(),
+        vec![1.0, 1.0],
+        "the community residual and built-in residual keep independent runtime scales"
+    );
+    assert_eq!(raw["minimaxH3Turbo"], json!("minimax_h3_turbo_4step_768p"));
 }
 
 /// Each published variant carries its OWN recipe to the engine — the property a single constant, a

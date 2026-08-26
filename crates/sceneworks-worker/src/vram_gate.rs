@@ -2143,11 +2143,64 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
 }
 
-/// Fail-closed admission for the exact SCAIL-2 Candle package tier. The resolver selects the hosted
-/// payload first and forwards its tier here; a source-ready q4/q8 directory is still unavailable for
-/// production until the catalog carries its measured row. Falling back to on-disk bytes, another
-/// precision, or an absent row would turn incomplete evidence into a real OOM. [`HEADROOM_GB`]
-/// remains the common CUDA reserve added by every measured-peak gate.
+/// Fail-closed admission for the MiniMax-H3 Candle lane. Every user-selectable tier has a
+/// real-weight whole-render peak measured at the shipped 1344x768 geometry; admitting without the
+/// exact tier row (or without a live free-VRAM reading) would make the catalog flip an unproved OOM
+/// path. User LoRA bytes are independently resident and are charged above that baseline.
+pub(crate) fn minimax_h3_fit_error(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    const MEASURED_PIXELS: u64 = 1_032_192;
+    let candle = manifest_entry.get("candle");
+    let measured = candle
+        .and_then(|value| value.get("measured"))
+        .and_then(Value::as_bool);
+    let measured_pixels = candle
+        .and_then(|value| value.get("vramMeasuredPixels"))
+        .and_then(Value::as_u64);
+    let peak_gb = candle
+        .and_then(|value| value.get("vramGbByTier"))
+        .and_then(|tiers| tiers.get(tier_key))
+        .and_then(json_f64)
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let (true, Some(MEASURED_PIXELS), Some(peak_gb)) =
+        (measured == Some(true), measured_pixels, peak_gb)
+    else {
+        return Some(WorkerError::InvalidPayload(format!(
+            "MiniMax-H3 Candle admission is unavailable because the installed catalog has no \
+             complete measured {tier_key} CUDA row at 1344x768. Refusing to load unproved \
+             weights; update SceneWorks before retrying."
+        )));
+    };
+    let Some(budget) = budget else {
+        return Some(WorkerError::InvalidPayload(
+            "MiniMax-H3 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing \
+             to load the measured tier without proving that it fits; verify the NVIDIA \
+             driver/runtime and retry."
+                .to_owned(),
+        ));
+    };
+    let needed_gb = peak_gb + HEADROOM_GB + adapter_bytes as f64 / BYTES_PER_GIB;
+    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+        WorkerError::InvalidPayload(format!(
+            "MiniMax-H3 needs ~{needed} GB of free GPU VRAM for its measured {tier_key} render \
+             peak plus CUDA reserve, but GPU {gpu_id} has ~{available} GB available. Select a \
+             smaller quant tier or use a GPU with more free VRAM.",
+            needed = needed_gb.ceil() as u64,
+            available = budget.free_gb.round() as u64,
+        ))
+    })
+}
+
+/// Fail-closed admission for the shared SCAIL-2 Candle bf16 package. Unlike the generic Wan gate,
+/// SCAIL has no lower-memory Candle tier and no sequential/offload lifecycle, so falling back to
+/// on-disk bytes or admitting an absent row would turn an incomplete catalog into a real OOM. The
+/// exact production render owns `candle.vramGbByTier.bf16`; [`HEADROOM_GB`] remains the common CUDA
+/// reserve added by every measured-peak gate.
 #[cfg(test)]
 pub(crate) fn scail2_video_fit_error(
     manifest_entry: &JsonObject,
@@ -5970,6 +6023,145 @@ mod tests {
             fit_decision(predicted_peak_gb(&small, "q4"), Some(capped)),
             FitDecision::Fits
         );
+    }
+
+    #[test]
+    fn minimax_h3_fit_uses_each_measured_tier_and_fails_closed_without_evidence() {
+        let manifest = obj(json!({
+            "candle": {
+                "measured": true,
+                "vramMeasuredPixels": 1_032_192,
+                "vramGbByTier": { "q4": 40.068, "q8": 74.696, "bf16": 67.012 }
+            }
+        }));
+        let budget = |free_gb| {
+            Some(VramBudget {
+                free_gb,
+                total_gb: 96.0,
+            })
+        };
+
+        for (tier, boundary) in [("q4", 42.068), ("q8", 76.696), ("bf16", 69.012)] {
+            assert!(
+                minimax_h3_fit_error(&manifest, tier, 0, "0", budget(boundary)).is_none(),
+                "{tier} admits at its exact measured peak plus reserve"
+            );
+            let message = minimax_h3_fit_error(&manifest, tier, 0, "0", budget(boundary - 0.001))
+                .expect("one MiB-equivalent below the exact boundary rejects")
+                .to_string();
+            assert!(
+                message.contains(tier),
+                "the rejection names {tier}: {message}"
+            );
+        }
+
+        assert!(minimax_h3_fit_error(&manifest, "q4", 0, "0", None).is_some());
+        for (label, invalid, tier) in [
+            (
+                "measured false",
+                obj(json!({
+                    "candle": {
+                        "measured": false,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": 40.068 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "wrong measured geometry",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_000_000,
+                        "vramGbByTier": { "q4": 40.068 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "missing selected tier",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q8": 74.696 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "unknown tier",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": 40.068 }
+                    }
+                })),
+                "fp8",
+            ),
+            (
+                "zero peak",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": 0.0 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "negative peak",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": -1.0 }
+                    }
+                })),
+                "q4",
+            ),
+            (
+                "non-numeric peak",
+                obj(json!({
+                    "candle": {
+                        "measured": true,
+                        "vramMeasuredPixels": 1_032_192,
+                        "vramGbByTier": { "q4": "NaN" }
+                    }
+                })),
+                "q4",
+            ),
+        ] {
+            assert!(
+                minimax_h3_fit_error(&invalid, tier, 0, "0", budget(96.0)).is_some(),
+                "{label} must fail closed"
+            );
+        }
+        assert!(
+            serde_json::Number::from_f64(f64::NAN).is_none()
+                && serde_json::Number::from_f64(f64::INFINITY).is_none(),
+            "non-finite peaks cannot enter a serde_json catalog; the runtime finite guard is defense in depth"
+        );
+    }
+
+    #[test]
+    fn minimax_h3_fit_charges_additive_lora_bytes() {
+        let manifest = obj(json!({
+            "candle": {
+                "measured": true,
+                "vramMeasuredPixels": 1_032_192,
+                "vramGbByTier": { "q4": 40.068 }
+            }
+        }));
+        let budget = Some(VramBudget {
+            free_gb: 42.5,
+            total_gb: 96.0,
+        });
+        assert!(minimax_h3_fit_error(&manifest, "q4", 0, "0", budget).is_none());
+        assert!(minimax_h3_fit_error(&manifest, "q4", 1024 * 1024 * 1024, "0", budget,).is_some());
     }
 
     /// GPU repro of the sc-11023 warm-swap false reject: occupy REAL VRAM on GPU 0 to mimic a
