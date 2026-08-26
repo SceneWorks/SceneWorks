@@ -3216,11 +3216,24 @@ impl ProjectStore {
     ) -> ProjectStoreResult<AssetMutationResult> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let sidecar_rel = relative_string(&project_path, &sidecar_path)?;
+        if !is_safe_relative_path(&sidecar_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset sidecar path must be project-relative".to_owned(),
+            ));
+        }
         let asset = read_json(&sidecar_path)?;
         let media_rel = asset
             .pointer("/file/path")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // The sidecar is durable, externally writable project state. Validate its
+        // media path before constructing any deletion or trash target from it.
+        if !media_rel.is_empty() && !is_safe_relative_path(media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Asset media path must be project-relative".to_owned(),
+            ));
+        }
         let media_path = project_path.join(media_rel);
         let trash_dir = project_path.join("trash");
         let asset_trash_dir = sidecar_path
@@ -11691,6 +11704,182 @@ mod tests {
             .expect_err("unsafe media path rejected");
         assert!(matches!(error, ProjectStoreError::BadRequest(_)));
         assert!(outside.exists(), "delete must not move outside media");
+    }
+
+    #[test]
+    fn purge_asset_rejects_unsafe_sidecar_media_paths_before_deletion() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Assets").expect("project creates");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let image_dir = project_path.join("assets/images");
+
+        let absolute_target = temp_dir.path().join("absolute-victim.png");
+        let traversal_target = project_path.join("../../traversal-victim.png");
+        std::fs::write(&absolute_target, b"absolute").expect("absolute victim writes");
+        std::fs::write(&traversal_target, b"traversal").expect("traversal victim writes");
+
+        for (asset_id, media_path, target) in [
+            (
+                "purge-absolute",
+                absolute_target.to_string_lossy().into_owned(),
+                &absolute_target,
+            ),
+            (
+                "purge-traversal",
+                "../../traversal-victim.png".to_owned(),
+                &traversal_target,
+            ),
+        ] {
+            let sidecar_path = image_dir.join(format!("{asset_id}.sceneworks.json"));
+            std::fs::write(
+                &sidecar_path,
+                serde_json::to_string_pretty(&json!({
+                    "id": asset_id,
+                    "type": "image",
+                    "displayName": asset_id,
+                    "createdAt": "2026-06-15T00:00:00Z",
+                    "file": {"path": media_path},
+                    "status": {"favorite": false, "rating": 0, "rejected": false, "trashed": false}
+                }))
+                .expect("json"),
+            )
+            .expect("sidecar writes");
+
+            for permanent in [false, true] {
+                let error = store
+                    .purge_asset(&project.id, asset_id, permanent)
+                    .expect_err("unsafe media path rejected");
+                assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+                assert!(target.exists(), "purge must not delete outside media");
+                assert!(sidecar_path.exists(), "purge must not delete the sidecar");
+            }
+        }
+    }
+
+    #[test]
+    fn purge_asset_rejects_unsafe_indexed_sidecar_paths_before_deletion() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        for (asset_id, indexed_sidecar_path) in [
+            (
+                "indexed-absolute",
+                temp_dir.path().join("outside.sceneworks.json"),
+            ),
+            (
+                "indexed-traversal",
+                temp_dir.path().join("data/traversal.sceneworks.json"),
+            ),
+        ] {
+            let project = store.create_project(asset_id).expect("project creates");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let media_rel = format!("assets/images/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-06-15T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("asset persists");
+            let media_path = project_path.join(&media_rel);
+            std::fs::write(&media_path, b"media").expect("media writes");
+            let safe_sidecar_path = media_path.with_extension("sceneworks.json");
+            std::fs::write(&indexed_sidecar_path, b"outside sidecar")
+                .expect("outside sidecar writes");
+
+            let indexed_value = if asset_id == "indexed-traversal" {
+                "../../traversal.sceneworks.json".to_owned()
+            } else {
+                indexed_sidecar_path.to_string_lossy().into_owned()
+            };
+            connect_project_db(&project_path)
+                .expect("project db")
+                .execute(
+                    "update assets set sidecar_path = ?1 where id = ?2",
+                    params![indexed_value, asset_id],
+                )
+                .expect("indexed sidecar path updates");
+
+            for permanent in [false, true] {
+                let error = store
+                    .purge_asset(&project.id, asset_id, permanent)
+                    .expect_err("unsafe indexed sidecar path rejected");
+                assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+                assert!(
+                    indexed_sidecar_path.exists(),
+                    "outside sidecar is untouched"
+                );
+                assert!(safe_sidecar_path.exists(), "safe sidecar is untouched");
+                assert!(media_path.exists(), "media is untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn purge_asset_removes_safe_media_and_sidecar_in_trash_and_permanent_modes() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        for permanent in [false, true] {
+            let project = store
+                .create_project(if permanent {
+                    "Permanent purge"
+                } else {
+                    "Trash purge"
+                })
+                .expect("project creates");
+            let asset_id = if permanent {
+                "permanent-purge"
+            } else {
+                "trash-purge"
+            };
+            let media_rel = format!("assets/images/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-06-15T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("asset persists");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let media_path = project_path.join(&media_rel);
+            std::fs::write(&media_path, b"media").expect("media writes");
+            let sidecar_path = media_path.with_extension("sceneworks.json");
+
+            let result = store
+                .purge_asset(&project.id, asset_id, permanent)
+                .expect("safe asset purges");
+            assert_eq!(result.status, "purged");
+            assert!(!media_path.exists(), "media is removed");
+            assert!(!sidecar_path.exists(), "sidecar is removed");
+            assert!(matches!(
+                store.get_asset(&project.id, asset_id),
+                Err(ProjectStoreError::NotFound(_))
+            ));
+        }
     }
 
     #[test]
