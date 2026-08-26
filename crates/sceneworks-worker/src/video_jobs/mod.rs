@@ -617,53 +617,6 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
     Ok(())
 }
 
-/// VACE-Fun is not a generic Wan fallback: its only supported product route is the dedicated
-/// dual-expert `replace_person` engine. Keep this validation ahead of project/output setup so a
-/// worker that cannot run that engine cannot leave a successful-looking procedural asset behind.
-fn validate_vace_fun_capability(request: &VideoRequest, settings: &Settings) -> WorkerResult<()> {
-    if request.model != "wan_2_2_vace_fun_14b" {
-        return Ok(());
-    }
-    if request.mode != "replace_person" {
-        return Err(WorkerError::InvalidPayload(format!(
-            "wan_2_2_vace_fun_14b supports only replace_person; no real VACE-Fun backend can run {}.",
-            request.mode
-        )));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = settings;
-        Ok(())
-    }
-
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    {
-        if settings.backend_candle_enabled {
-            Ok(())
-        } else {
-            Err(WorkerError::InvalidPayload(
-                "wan_2_2_vace_fun_14b replace_person requires the enabled native Candle backend; \
-                 no real VACE-Fun backend is available on this worker."
-                    .to_owned(),
-            ))
-        }
-    }
-
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
-    {
-        let _ = settings;
-        Err(WorkerError::InvalidPayload(
-            "wan_2_2_vace_fun_14b replace_person requires the native MLX worker on macOS or an \
-             enabled Candle backend; no real VACE-Fun backend is available on this worker."
-                .to_owned(),
-        ))
-    }
-}
-
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
 /// single video asset through the Rust GPU worker.
 pub(crate) async fn run_video_generate_job(
@@ -2194,14 +2147,16 @@ mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};
 mod vace;
+#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+use vace::validate_vace_fun_capability;
 #[cfg(target_os = "macos")]
 use vace::{
     generate_wan_vace, generate_wan_vace_extend_bridge, generate_wan_vace_fun,
-    resolve_wan_vace_model_dir, wan_vace_extend_raw_settings, wan_vace_raw_settings,
-    WAN_VACE_ADAPTER, WAN_VACE_FUN_ADAPTER,
+    resolve_wan_vace_model_dir, validate_vace_fun_capability, wan_vace_extend_raw_settings,
+    wan_vace_raw_settings, WAN_VACE_ADAPTER, WAN_VACE_FUN_ADAPTER,
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use vace::{wan_vace_extend_raw_settings, wan_vace_raw_settings};
+use vace::{validate_vace_fun_capability, wan_vace_extend_raw_settings, wan_vace_raw_settings};
 
 /// Resolve the inference generator descriptors the production dispatch can load for one routed
 /// video model/mode. This is the matching-platform mapping source consumed by the capability-facts
