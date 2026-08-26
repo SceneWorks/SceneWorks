@@ -361,8 +361,8 @@ fn resolve_video_route_with(
 
 /// The candle (Windows/CUDA/Linux) video engine a `run_video_generate_job` request routes to — the
 /// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). The Eros terminal refusal precedes the
-/// backend flag so even a directly invoked legacy job cannot produce a stub; every supported arm is
-/// gated on `settings.backend_candle_enabled`, and returns [`CandleVideoRoute::Stub`] when disabled.
+/// backend flag so even a directly invoked legacy job cannot produce a stub. VACE-Fun is likewise
+/// refused when Candle is disabled; every other supported arm returns [`CandleVideoRoute::Stub`].
 /// The ladder preserves each accepted model-native conditioned provider: base LTX owns I2V, FLF,
 /// extend, bridge, and replacement;
 /// Wan TI2V-5B owns I2V/FLF; VACE-Fun owns its dedicated dual-expert replacement route.
@@ -397,7 +397,7 @@ enum CandleVideoRoute {
     /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
     /// (epic 10451 Phase 2c, sc-10671). Not an `is_candle_video_engine` id — routed off the forwarded row.
     WanComfyui,
-    /// Candle disabled, or no candle engine matched → the procedural stub.
+    /// Candle disabled (except VACE-Fun), or no candle engine matched → the procedural stub.
     Stub,
 }
 
@@ -466,18 +466,19 @@ fn resolve_candle_video_route(
         candle::plan_backed_wan_video_route(request, settings, checkpoint_id)?;
         return Ok(CandleVideoRoute::WanComfyui);
     }
-    if !settings.backend_candle_enabled {
-        return Ok(CandleVideoRoute::Stub);
+    // This must precede the generic backend-disabled fallback. A disabled Candle worker used to
+    // return `Stub` for VACE-Fun and complete a procedural clip, despite having no real provider.
+    // Reuse the job-entry gate so direct route probes and execution have the same capability verdict.
+    if request.model == "wan_2_2_vace_fun_14b" {
+        validate_vace_fun_capability(request, settings)?;
+        return Ok(CandleVideoRoute::ReplacePersonWanVaceFun);
     }
-    if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
+    if !settings.backend_candle_enabled {
         return Ok(CandleVideoRoute::Stub);
     }
     Ok(if request.mode == "replace_person" {
         match scail2_engine_id(&request.model) {
             Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
-            None if request.model == "wan_2_2_vace_fun_14b" => {
-                CandleVideoRoute::ReplacePersonWanVaceFun
-            }
             None if candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled") => {
                 CandleVideoRoute::CandleVideo
             }
@@ -616,6 +617,53 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
     Ok(())
 }
 
+/// VACE-Fun is not a generic Wan fallback: its only supported product route is the dedicated
+/// dual-expert `replace_person` engine. Keep this validation ahead of project/output setup so a
+/// worker that cannot run that engine cannot leave a successful-looking procedural asset behind.
+fn validate_vace_fun_capability(request: &VideoRequest, settings: &Settings) -> WorkerResult<()> {
+    if request.model != "wan_2_2_vace_fun_14b" {
+        return Ok(());
+    }
+    if request.mode != "replace_person" {
+        return Err(WorkerError::InvalidPayload(format!(
+            "wan_2_2_vace_fun_14b supports only replace_person; no real VACE-Fun backend can run {}.",
+            request.mode
+        )));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = settings;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if settings.backend_candle_enabled {
+            Ok(())
+        } else {
+            Err(WorkerError::InvalidPayload(
+                "wan_2_2_vace_fun_14b replace_person requires the enabled native Candle backend; \
+                 no real VACE-Fun backend is available on this worker."
+                    .to_owned(),
+            ))
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = settings;
+        Err(WorkerError::InvalidPayload(
+            "wan_2_2_vace_fun_14b replace_person requires the native MLX worker on macOS or an \
+             enabled Candle backend; no real VACE-Fun backend is available on this worker."
+                .to_owned(),
+        ))
+    }
+}
+
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
 /// single video asset through the Rust GPU worker.
 pub(crate) async fn run_video_generate_job(
@@ -625,6 +673,10 @@ pub(crate) async fn run_video_generate_job(
 ) -> WorkerResult<()> {
     let request = VideoRequest::from_payload(&job.payload);
     video_preflight(&request)?;
+    // VACE-Fun has one real route only: dual-expert person replacement. Refuse a replayed request
+    // that cannot reach that provider before even resolving the project or creating the output
+    // directory; a procedural clip is never an honest substitute for this capability.
+    validate_vace_fun_capability(&request, settings)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -681,20 +733,6 @@ pub(crate) async fn run_video_generate_job(
         ),
     )
     .await?;
-    // sc-3459 (epic 3456): Wan2.2 VACE-Fun A14B routes to the NEW dual-expert VACE engine
-    // `wan2_2_vace_fun_14b`. macOS is served natively via MLX and Windows/Linux via Candle. A worker
-    // binary built without either native backend must fail honestly here — it must NEVER fall
-    // through to the Wan2.1 `generate_wan_vace` backend, which would silently render with the wrong
-    // checkpoint (the exact failure the epic forbids).
-    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
-    if request.model == "wan_2_2_vace_fun_14b" {
-        return Err(WorkerError::InvalidPayload(
-            "wan_2_2_vace_fun_14b requires the native MLX worker on macOS or a worker built with \
-             Candle backend support on Windows/Linux. This worker has neither backend, and the job \
-             will not be routed to the incompatible Wan2.1 VACE engine."
-                .to_owned(),
-        ));
-    }
     // Krea Realtime 14B (epic 8431 / sc-8443) is `mac_only` (descriptor) and has NO candle engine, so
     // an off-Mac job must fail honestly here rather than fall through to the candle stub / a different
     // backend — the same silent-degradation trap the VACE-Fun guard above closes. The full candle port
