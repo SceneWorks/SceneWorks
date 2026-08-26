@@ -1678,7 +1678,7 @@
       "triageDecision": "measure",
       "reviewedCause": "backend-capability",
       "triageNote": "Measure, not eliminate: the f32 width is a property of the port (the BigVGAN decoder's weight-norm reconstruction), not a packing choice, and 0.24 GB does not justify a numeric change to an audio path with no parity coverage below f32.",
-      "source": "mlx-gen-minimax-h3/src/model.rs — `decode_audio` constructs the audio VAE with `Dtype::Float32` literally, and `audio_vae.rs` forces weight-norm `weight_g`/`weight_v` to F32 regardless; config/manifests/builtin.models.jsonc `minimax_h3` audio_vae co-requisite — \"Also dense in every tier\"; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:audio_vae/",
+      "source": "mlx-gen-minimax-h3/src/model.rs — `decode_audio` constructs the audio VAE with `Dtype::Float32` literally, and `audio_vae.rs` forces weight-norm `weight_g`/`weight_v` to F32 regardless; config/manifests/builtin.models.jsonc `minimax_h3` audio_vae co-requisite — \"Also dense in every tier\"; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:audio_vae/. Candle is deliberately excluded from this row: its pinned provider constructs the decoder at the BF16 provider dtype and needs a separate mixed-width isolation before it can share a tier-integrity claim.",
       "note": "This row is why `bf16` appears in appliesToTiers: an f32 component is above tier even on the dense bf16 tier. It is the only such row for this family — the video VAE follows the lane dtype and so is at tier on bf16."
     },
     {
@@ -1691,7 +1691,8 @@
         "bf16"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
       "reason": "The converter's packing predicate excludes eight top-level DiT bases BY NAME (`proj_in`, `proj_out`, `audio_proj_in`, `audio_proj_out`, the two `time_embedder` linears, `context_embedder` and `norm_out.linear`), and the loader reads them with no dtype argument, so they stay at their published width — six of the eight at f32 — in every tier.",
@@ -1708,7 +1709,7 @@
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: these are the model's numerically sensitive I/O projections, the same class every sibling family leaves dense, and 0.17 GB does not justify a packing change with a quality question attached.",
-      "source": "mlx-gen-minimax-h3/src/convert.rs `DENSE_BY_POLICY` and `is_dit_linear_target` (a negative predicate: everything is a packing target except the declared dense sets and the AdaLN group); mlx-gen-minimax-h3/src/dit/heads.rs `LinearBias::from_weights` — \"Load `{prefix}.weight` / `{prefix}.bias` at their published dtype … the dtype is deliberately not a parameter\"; mlx-gen-minimax-h3/src/dit/model.rs — \"`dtype` is the block stack's precision. The 17 input/output tensors are loaded at their own published dtypes instead.\"; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:transformer/",
+      "source": "The shared packed artifact is produced by mlx-gen-minimax-h3/src/convert.rs `DENSE_BY_POLICY` and `is_dit_linear_target` (everything is a packing target except the declared dense sets and AdaLN group). MLX preserves those heads through dit/heads.rs `LinearBias::from_weights` with no dtype parameter. Candle consumes the same tier artifact, and candle-gen-minimax-h3/src/dit/model.rs documents that shards are read at their stored dtype rather than forcing F32 on the mixed f32/bf16 top-level tensors; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:transformer/",
       "note": "TIER-INVARIANT, which is why `bf16` is in appliesToTiers: the f32 half sits above even the dense bf16 tier, and `Precision::Fp32` does not widen these either — the model dtype reaches only the block stack and the refiner. The offline converter re-emits them verbatim, so a q4 shard carries these 16 tensors byte-identical to upstream. NOT the 26 GB `adaln_proj.linear` group: that IS packed, at its own per-tier width, and is evicted before step 0."
     },
     {
@@ -1720,10 +1721,11 @@
         "q8"
       ],
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "cause": "packing-exception",
-      "reason": "Only the DiT and the text encoder are packed per tier; the video VAE is dense in every tier (the Wan precedent) and its loader casts every tensor to the lane's bf16 dtype rather than following the selected quant.",
+      "reason": "Only the DiT and the text encoder are packed per tier; the video VAE is dense in every tier (the Wan precedent), and both MLX and Candle load it at their bf16 provider dtype rather than following the selected quant.",
       "evidenceState": "measured",
       "costGb": null,
       "costBytes": null,
@@ -1732,11 +1734,11 @@
         "q8": 5207737968
       },
       "vaeScope": "full-autoencoder",
-      "isolation": "Summed the exact safetensors-header tensor shapes of every tensor in `vae/` at immutable revision 939557dc319dd91227e30195a763f272ba7f8765 — full autoencoder (encoder + decoder), 703 tensors, 2,603,868,984 elements, published F32 and counted at the MLX lane's BF16 runtime load dtype. Full rather than decoder-only because `MiniMaxH3VideoVae::load` REFUSES a snapshot whose encode half is missing (`if !vae.can_encode() { return Err(..) }`), so the encoder is constructed on every advertised mode including plain text-to-video, and fl2va genuinely runs it to encode keyframes. This is isolated weight residency, excluding activations and allocator overhead.",
+      "isolation": "Summed the exact safetensors-header tensor shapes of every tensor in `vae/` at immutable revision 939557dc319dd91227e30195a763f272ba7f8765 — full autoencoder (encoder + decoder), 703 tensors, 2,603,868,984 elements, published F32 and counted at the MLX lane's BF16 runtime load dtype. Full rather than decoder-only because the MLX `MiniMaxH3VideoVae::load` REFUSES a snapshot whose encode half is missing (`if !vae.can_encode() { return Err(..) }`), so MLX constructs the encoder on every advertised mode including plain text-to-video, and fl2va genuinely runs it to encode keyframes. Candle shares this full row because FL2VA constructs the encoder; its T2VA path uses the documented decode-only loader. This is isolated weight residency, excluding activations and allocator overhead.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: no packed VAE artifact exists for this family in any tier, and the decoder is a 36-layer transformer rather than a conv stack, so a lower-tier repack is engine work with a quality question attached rather than a rehost.",
-      "source": "config/manifests/builtin.models.jsonc `minimax_h3` video_vae co-requisite — \"Dense in EVERY tier (the Wan precedent) — no `variant`, because this is a floor no tier shrinks\"; the width is pinned by mlx-gen-minimax-h3/src/vae.rs, which loads every tensor through `as_dtype(dtype)` where `dtype` is the lane's `self.dtype`; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:vae/",
+      "source": "config/manifests/builtin.models.jsonc `minimax_h3` video_vae co-requisite — \"Dense in EVERY tier (the Wan precedent) — no `variant`, because this is a floor no tier shrinks\"; MLX: mlx-gen-minimax-h3/src/vae.rs loads every tensor through `as_dtype(dtype)` where `dtype` is the lane's `self.dtype`; Candle: candle-gen-minimax-h3/src/model.rs pins the provider to `DType::BF16`, calls `MiniMaxH3VideoVae::load(..., self.dtype)` for FL2VA's full encoder+decoder path, and calls `load_decode_only(..., self.dtype)` for T2VA decode; isolated artifact: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765:vae/",
       "note": null
     },
     {

@@ -1,14 +1,21 @@
 #[allow(unused_imports)]
 use super::prelude::*;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, VideoGenInput};
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
 
 // ---------------------------------------------------------------------------
 // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-19508): a joint audio+video family that emits video AND
-// synchronized stereo audio in ONE denoise pass. macOS/MLX only (`mac_only: true`, no candle
-// engine).
+// synchronized stereo audio in ONE denoise pass. At the permanent inference pin
+// `28f0563baa03640ade1635356d2d54fe8a477f1a`, MLX and off-Mac Candle both dispatch the live family:
+// Candle user routing covers the base t2va/fl2va partition and the Ref2VA partition.
 //
 // Four facts shape this whole block, and every one of them DEVIATES from the Mochi/Krea template it
 // otherwise mirrors:
@@ -68,10 +75,22 @@ use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict
 /// Adapter id recorded on a real MLX MiniMax-H3 asset.
 #[cfg(target_os = "macos")]
 pub(super) const MINIMAX_H3_ADAPTER: &str = "mlx_minimax_h3";
+/// Adapter id recorded by the live off-Mac Candle MiniMax-H3 provider. The base and Ref2VA Candle
+/// routes are user-routed for their supported native modes; this id names the adapter on those jobs.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) const CANDLE_MINIMAX_H3_ADAPTER: &str = "candle_minimax_h3";
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
 
 /// The ONE registry id both catalog entries load. See fact 1 above — the partition split is a
 /// directory, not a provider.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_ENGINE_ID: &str = "minimax_h3";
 
 /// The staged-component key `mlx-gen-minimax-h3::model::DIT_COMPONENT` reads the tiered DiT from.
@@ -113,7 +132,10 @@ pub(super) const MINIMAX_H3_BASE_DIR_ENV: &str = "SCENEWORKS_MLX_MINIMAX_H3_BASE
 ///
 /// Keyed off `sceneworks_core::video_request::is_minimax_h3_model` rather than a retyped id list so
 /// this cannot drift from the predicate every other MiniMax-H3 gate in the app already uses.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
     sceneworks_core::video_request::is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)
 }
@@ -121,16 +143,14 @@ pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
 /// Whether the linked inference bundle actually REGISTERS the MiniMax-H3 engine.
 ///
 /// This is the sc-19508 replacement for sc-17159's hard-coded "not in the pinned inference
-/// revision" string, and the reason the whole arm below can be written before sc-18650 moves the
-/// pin. The engine is reached through `media().load(id, spec)` — a **runtime lookup keyed on a
-/// string** — so nothing in this module needs the provider to be importable at compile time. What
-/// it does need is for the id to be PRESENT in the registry, which is exactly what this reads.
+/// revision" string. The engine is reached through `media().load(id, spec)` — a **runtime lookup
+/// keyed on a string** — so nothing in this module needs the provider to be importable at compile
+/// time. What it does need is for the id to be PRESENT in the registry, which is exactly what this
+/// reads; the permanent pin `28f0563baa03640ade1635356d2d54fe8a477f1a` carries that descriptor.
 ///
-/// Deriving it beat asserting it, and sc-19721 is the proof: at `014134e3` the descriptor was
-/// absent and this refusal fired, and when the pin moved to `75d66db5` the descriptor appeared and
-/// the arm went live with **no code change here**. A hard-coded revision string would have gone
-/// stale instead — which is exactly what happened to every prose citation of the old pin around
-/// it.
+/// Deriving it beats asserting it: a mismatched or incomplete linked provider still fails closed,
+/// while the current permanent pin carries the descriptor and reaches the live arm without a
+/// code-side revision switch. A hard-coded revision string would go stale instead.
 ///
 /// The same `media_descriptor(...).is_none()` idiom already gates the not-in-this-bundle branches
 /// of `mlx_fit_gate`, so this is the established way to ask the question.
@@ -382,7 +402,10 @@ pub(super) fn resolve_minimax_h3_load(
 /// Not a duplicate of the API's `reference_limit_error` (sc-17160): that bounds HOW MANY references
 /// each entry accepts (the base entry declares 0/0/0). This bounds the SHAPE, and it is the layer a
 /// job replayed from an older row or produced by any future non-HTTP path passes through.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_validate_partition(request: &VideoRequest) -> WorkerResult<()> {
     let has_keyframes = request.source_asset_id.is_some() || request.last_frame_asset_id.is_some();
     let image_refs = request.reference_asset_ids.len();
@@ -479,16 +502,14 @@ pub(super) fn minimax_h3_available(request: &VideoRequest, settings: &Settings) 
 /// say anything else, because at that commit there was no arm to fall through to. Now there is, so
 /// the refusal is derived in three layers, each naming its own cause:
 ///
-/// 1. the engine is not in the linked bundle (today's pin) — READ from the registry, not asserted;
+/// 1. the engine is not in the linked bundle — READ from the registry, not asserted;
 /// 2. the conditioning shape does not match the entry's DiT partition;
 /// 3. the weights are unprovisioned or torn.
 ///
-/// The order is deliberate. Before sc-19721's pin bump every MiniMax-H3 job stopped at (1) with
-/// the same honest reason a user got before; at the current pin (`75d66db5`, the first revision
-/// that registers `mlx_gen_minimax_h3` — see `jobs_store/routing/mlx.rs`) the descriptor is
-/// present, (1) passes with no code change here, and an unprovisioned install stops at (3) with
-/// the resolver's precise error — which is exactly the substitution sc-19508 asked for
-/// ("an unprovisioned install must still fail loudly").
+/// The order is deliberate. At the permanent pin
+/// (`28f0563baa03640ade1635356d2d54fe8a477f1a`) the descriptor is present, so a normal request
+/// reaches the conditioning and load checks; a mismatched provider or unprovisioned install still
+/// stops with the precise fail-loud error required by sc-19508.
 #[cfg(target_os = "macos")]
 pub(super) fn ensure_minimax_h3_renderable(
     request: &VideoRequest,
@@ -527,7 +548,10 @@ pub(super) fn ensure_minimax_h3_renderable(
 /// top-level `__metadata__["alpha"]` string, then `DEFAULT_LORA_ALPHA = 8`, never the rank. Nothing
 /// about that fold belongs on this side: `defaultWeight` is the runtime `lora_scale` MULTIPLIER and
 /// the catalog leaves it at 1.0 so the file's own alpha/rank fold lands unmodified.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn resolve_minimax_h3_adapters(
     settings: &Settings,
     request: &VideoRequest,
@@ -565,7 +589,10 @@ pub(super) fn resolve_minimax_h3_adapters(
 /// still reaches the base regime (it is the pre-existing knob this arm already read), but under a
 /// turbo variant the trained shift wins, because a distilled checkpoint sampled at a shift it was
 /// not distilled for is the off-distribution render the recipe exists to prevent.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_sampling(
     request: &VideoRequest,
 ) -> WorkerResult<(
@@ -630,7 +657,10 @@ pub(super) fn minimax_h3_sampling(
 /// source file rather than from anything the caller sent, so it is invisible in both the payload
 /// and the output. A clip supplied silently without audio and a silent clip are the same render and
 /// should read as the same record; a clip whose soundtrack WAS used is a different one.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_raw_settings(
     request: &VideoRequest,
     tier: &str,
@@ -733,7 +763,10 @@ pub(super) fn minimax_h3_raw_settings(
 /// Read off the SHARED `MINIMAX_H3_FPS` rather than retyped: the engine resamples every reference
 /// onto `crate::denoise::MINIMAX_H3_FPS`, and the two being the same number is not a coincidence to
 /// be maintained in two places.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_REFERENCE_CLIP_FPS: u32 =
     sceneworks_core::video_request::MINIMAX_H3_FPS;
 
@@ -744,7 +777,10 @@ pub(super) const MINIMAX_H3_REFERENCE_CLIP_FPS: u32 =
 /// UP to it (the engine's `resolve_canvas_size` does its own upscale, and doing it twice only
 /// costs), and never pads. Its whole job is to keep a 4K source from being materialized at 25 MB a
 /// frame for a canvas that is about to throw 90% of it away.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_CANVAS_SHORT_EDGE: u32 = 768;
 
 /// The audio VAE's rate (`mlx-gen-minimax-h3::audio_config::AUDIO_SAMPLE_RATE`). The engine has no
@@ -752,9 +788,12 @@ pub(super) const MINIMAX_H3_CANVAS_SHORT_EDGE: u32 = 768;
 ///
 /// An ALIAS of the ungated [`super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE`], not a second
 /// literal: a video reference's own soundtrack (extracted here) and a standalone audio reference
-/// (extracted by `super::reference_audio`, which cannot see this macOS-gated module) are checked
+/// (extracted by `super::reference_audio`, which cannot see this backend-gated module) are checked
 /// against the SAME engine constant, so they can never drift apart.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 =
     super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE;
 
@@ -762,7 +801,10 @@ pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 =
 /// and was conditioned on. The engine accepts any positive channel count, so this is a choice
 /// rather than a constraint, and downmixing to mono would discard the stereo image of the very clip
 /// the caller supplied as the reference.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 = 2;
 
 /// Fewest 24 fps frames a reference clip may normalize to — **13**.
@@ -775,7 +817,10 @@ pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 = 2;
 ///
 /// It is re-derived here from its three inputs rather than written as a literal so a fine-tune that
 /// moved either rate would move this with it.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES: usize = {
     // `VIDEO_SAMPLE_FPS = 2.0`, `VISION_TEMPORAL_PATCH = 2`.
     let sample_fps = 2usize;
@@ -794,14 +839,20 @@ pub(super) const MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES: usize = {
 /// cinemascope source is not decoded to a PNG sequence the engine is about to shrink anyway.
 /// Tied to the pinned engine's own const by
 /// `minimax_h3_reference_clip_filter_never_pads_or_upscales`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_CANVAS_MAX_PIXELS: u32 = MINIMAX_H3_CANVAS_SHORT_EDGE * 1344;
 
 /// The widest aspect ratio, either way up, that MiniMax-H3 reads a reference at —
 /// `keyframe::MAX_ASPECT_RATIO`, i.e. 1:4 to 4:1. Checked per decoded clip so a panoramic source is
 /// refused from the asset instead of from inside `Ref2VaReferences::new` after the decode has
 /// already been paid for.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const MINIMAX_H3_MAX_REFERENCE_ASPECT: f64 = 4.0;
 
 /// The `-vf` chain a reference clip is extracted through.
@@ -829,7 +880,10 @@ pub(super) const MINIMAX_H3_MAX_REFERENCE_ASPECT: f64 = 4.0;
 /// satisfy, so the aspect ratio is preserved to the nearest whole pixel rather than the nearest
 /// even one. The engine snaps to a 32 multiple regardless — which is also why the `sqrt` result is
 /// left unsnapped here: this is a materialization bound, not a canvas decision.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_reference_clip_filter(
     fps: u32,
     short_edge: u32,
@@ -853,7 +907,10 @@ pub(super) fn minimax_h3_reference_clip_filter(
 /// Scoped to the INPUT section on purpose. `Stream #…: Audio:` also appears under `Output #…` when
 /// a command writes audio, and a parser that read the whole buffer would answer a different
 /// question the moment this chain grows an audio output.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_clip_input_has_audio(stderr: &str) -> bool {
     stderr
         .lines()
@@ -874,7 +931,10 @@ pub(super) fn minimax_h3_clip_input_has_audio(stderr: &str) -> bool {
 /// What is deliberately NOT refused here: a clip LONGER than the render. The engine truncates it,
 /// that truncation is defined behaviour, and the extraction below has already stopped pulling
 /// frames at the render's own count — so "too long" is not an error shape, it is the normal one.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_validate_reference_clip(
     model: &str,
     asset_id: &str,
@@ -925,7 +985,10 @@ pub(super) fn minimax_h3_validate_reference_clip(
 /// `VideoRequest`), where an empty id would otherwise resolve to the project directory itself
 /// rather than to a clip. Split out of [`resolve_minimax_h3_clip_conditioning`] so the refusal is
 /// callable — and therefore testable — without an `ApiClient`, a `Settings` and a `JobSnapshot`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_clip_asset_id<'a>(
     model: &str,
     asset_id: &'a str,
@@ -959,7 +1022,10 @@ pub(super) fn minimax_h3_clip_asset_id<'a>(
 ///
 /// `frames` is the render's own `17n + 5` count, so a clip is never decoded past the point the
 /// engine would truncate it, and the soundtrack is cut to the matching span.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) async fn resolve_minimax_h3_clip_conditioning(
     api: &ApiClient,
     settings: &Settings,
@@ -1000,7 +1066,10 @@ pub(super) async fn resolve_minimax_h3_clip_conditioning(
 /// [`resolve_minimax_h3_clip_conditioning`] only so the caller can drop the scratch directory on
 /// EVERY exit — including the refusals, which are the paths most likely to leave a multi-hundred-MB
 /// PNG sequence behind.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 async fn minimax_h3_decode_reference_clip(
     api: &ApiClient,
@@ -1097,7 +1166,10 @@ async fn minimax_h3_decode_reference_clip(
 /// reference that is completely invisible in the rendered output when it is wrong — a shuffled
 /// reference still renders a plausible clip — which is why it is asserted directly by
 /// `minimax_h3_reference_clip_frames_keep_source_order`.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) async fn minimax_h3_load_reference_frames(
     work_dir: PathBuf,
 ) -> WorkerResult<Vec<Image>> {
@@ -1136,7 +1208,10 @@ pub(super) async fn minimax_h3_load_reference_frames(
 /// Reading the conditioning rather than the request is what makes this honest: if the assembly
 /// below ever drops a reference or a keyframe, the recorded task changes with it instead of
 /// continuing to claim what the payload asked for.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
     let has_keyframes = conditioning
         .iter()
@@ -1185,7 +1260,10 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
 /// pass on that side to agree with. So whatever order this builds is the order that is labelled and
 /// rotary-clocked, which is exactly why the grouping is stated here rather than left incidental.
 /// The caller's order WITHIN each list is preserved exactly.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn minimax_h3_conditioning(
     first_frame: Option<Image>,
     last_frame: Option<Image>,
@@ -1236,7 +1314,10 @@ pub(super) fn minimax_h3_conditioning(
 /// Async since sc-18650: the clip AND audio references decode through ffmpeg (the audio ones to
 /// satisfy `Ref2VaReferences::check_audio`'s rate gate, fact 5 above), and the shared runner that
 /// owns the heartbeat and the cancel poll is async. Only the still-image half stays synchronous.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) async fn resolve_minimax_h3_conditioning(
     api: &ApiClient,
     settings: &Settings,
@@ -1318,9 +1399,8 @@ pub(super) async fn generate_minimax_h3(
 /// With the loader threaded in, a test drives this whole arm against a stub `Generator` and asserts
 /// on the `GenerationRequest` that actually reached the engine — the conditioning, the coerced
 /// frame count, the fps, the seed, and the ABSENCE of the guidance/negative-prompt fields the
-/// checkpoint rejects — with no weights, no GPU, and no registered MiniMax-H3 engine. That last
-/// part is why this seam matters more here than anywhere else: it is the only way any of this arm
-/// is covered before sc-18650 moves the pin.
+/// checkpoint rejects — with no weights or GPU. The seam remains valuable for request-shape
+/// coverage even though the permanent pin registers the MiniMax-H3 provider.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_minimax_h3_using(
@@ -1414,6 +1494,184 @@ pub(super) async fn generate_minimax_h3_using(
         &request.advanced,
         input,
         load_generator,
+    )
+    .await?;
+    Ok((decoded, raw_settings))
+}
+
+/// The exact tier selected by the product's shared `mlxQuantize` request field. MiniMax-H3's
+/// manifest default is q4; non-positive values explicitly select the dense upstream bf16 route.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_minimax_h3_tier(request: &VideoRequest) -> (&'static str, Option<Quant>) {
+    let bits = request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    });
+    match bits {
+        Some(bits) if bits <= 0 => ("bf16", None),
+        Some(bits) if bits <= 4 => ("q4", Some(Quant::Q4)),
+        Some(_) => ("q8", Some(Quant::Q8)),
+        None => ("q4", Some(Quant::Q4)),
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_minimax_h3_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<PathBuf> {
+    huggingface_snapshot_dir(&settings.data_dir, repo).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "candle MiniMax-H3 weights snapshot not found for {repo}"
+        ))
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_minimax_h3_component_dir(root: &Path, component: &str) -> WorkerResult<PathBuf> {
+    let dir = root.join(component);
+    if dir.is_dir() && dir.join("config.json").is_file() {
+        Ok(dir)
+    } else {
+        Err(WorkerError::InvalidPayload(format!(
+            "candle MiniMax-H3 installed snapshot is incomplete: missing {component}/config.json under {}",
+            root.display()
+        )))
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CandleMiniMaxH3Load {
+    pub(super) root: PathBuf,
+    pub(super) dit_dir: Option<PathBuf>,
+    pub(super) text_encoder_dir: Option<PathBuf>,
+    pub(super) quant: Option<Quant>,
+    pub(super) tier: &'static str,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_minimax_h3_load(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<CandleMiniMaxH3Load> {
+    let (tier, quant) = candle_minimax_h3_tier(request);
+    let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;
+    let is_reference = request.model == "minimax_h3_ref";
+    let tier_root = (quant.is_some() || is_reference)
+        .then(|| candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO))
+        .transpose()?
+        .map(|root| root.join(tier));
+    let dit_dir = match (tier_root.as_deref(), is_reference, quant.is_some()) {
+        (Some(tier_root), true, _) => {
+            // The provider's `transformer` component is always the base partition. Ref2VA derives
+            // `transformer_ref` as its sibling, so validate both halves but stage only the base.
+            let transformer = candle_minimax_h3_component_dir(tier_root, "transformer")?;
+            candle_minimax_h3_component_dir(tier_root, "transformer_ref")?;
+            Some(transformer)
+        }
+        (Some(tier_root), false, true) => {
+            Some(candle_minimax_h3_component_dir(tier_root, "transformer")?)
+        }
+        _ => None,
+    };
+    let text_encoder_dir = if quant.is_some() {
+        Some(candle_minimax_h3_component_dir(
+            tier_root.as_deref().expect("packed tier root"),
+            "text_encoder",
+        )?)
+    } else {
+        candle_minimax_h3_component_dir(&root, "text_encoder")?;
+        None
+    };
+    Ok(CandleMiniMaxH3Load {
+        root,
+        dit_dir,
+        text_encoder_dir,
+        quant,
+        tier,
+    })
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) async fn generate_candle_minimax_h3(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    minimax_h3_validate_partition(request)?;
+    let frames = video_frame_count(&request.model, request.raw_frame_count());
+    let conditioning =
+        resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
+    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
+    let adapters = resolve_minimax_h3_adapters(settings, request)?;
+    let load = resolve_candle_minimax_h3_load(settings, request)?;
+    let adapter_bytes =
+        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "MiniMax-H3 cannot determine the resident size of the requested adapter stack."
+                        .to_owned(),
+                )
+            })?;
+    if let Some(error) = crate::vram_gate::minimax_h3_fit_error(
+        &request.model_manifest_entry,
+        load.tier,
+        adapter_bytes,
+        &settings.gpu_id,
+        super::candle::candle_video_vram_budget(settings).await,
+    ) {
+        return Err(error);
+    }
+    let task = minimax_h3_task(&conditioning);
+    let mut raw_settings = minimax_h3_raw_settings(
+        request,
+        load.tier,
+        task,
+        &conditioning,
+        steps,
+        scheduler_shift,
+        turbo,
+    );
+    if let Value::Object(raw) = &mut raw_settings {
+        raw.insert(
+            "repo".to_owned(),
+            Value::String(CANDLE_MINIMAX_H3_REPO.to_owned()),
+        );
+    }
+    let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
+        engine_id,
+        model_dir: load.root,
+        quant: load.quant,
+        dit_component_dir: load.dit_dir,
+        text_encoder_component_dir: load.text_encoder_dir,
+        adapters,
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt: None,
+        guidance: None,
+        width: request.width,
+        height: request.height,
+        frames,
+        fps: request.fps,
+        steps,
+        scheduler_shift,
+        seed: resolve_video_seed(request) as u64,
+        offload_policy: OffloadPolicy::Sequential,
+        ..VideoGenInput::default()
+    };
+    let decoded = generate_video_using(
+        api,
+        settings,
+        job,
+        backend,
+        &request.advanced,
+        input,
+        crate::inference_runtime::load,
     )
     .await?;
     Ok((decoded, raw_settings))
