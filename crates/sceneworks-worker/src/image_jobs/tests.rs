@@ -20501,6 +20501,7 @@ mod preview_stream_tests {
             GenEvent::Loading { .. } => "Loading",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
+            GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::Image { .. } => "Image",
         }
     }
