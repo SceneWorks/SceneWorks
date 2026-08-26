@@ -276,6 +276,28 @@ export function contractIsLoraOnly(model, backend, baseProvider) {
 }
 
 /**
+ * Tier universes for entries whose shipped tiers no catalog field can express (sc-21510).
+ *
+ * `tiersFor`/`catalogAxes` derive tiers from `vramGbByTier`, download `variant`s and a single-dense
+ * `quantize` marker. A `requiresConversion` entry ships NONE of those — its tier matrix is packed
+ * ON-DEVICE by its converter — so the derivation collapses to whatever `quantize` says. Anima is the
+ * proven case: `anima_quant` packs bf16/q4/q8 (the manifest's own tier-scope caveat says so, and
+ * `minQualityTier: "q8"` clamps the DEFAULT to a tier a q4-only universe could not contain), the
+ * engine contracts implement every rung at all three tiers, and the route witnesses cover them — yet
+ * `quantize: 4` yielded a q4-only universe, orphaning the SC-18457-pinned bf16/q8 declarations.
+ * FLUX.2 Klein true-v2 is the single-tier twin: its converter emits a bf16 snapshot only, and with no
+ * marker at all the universe collapsed to the `default` pseudo-tier. The converter's packed tier set
+ * is not derivable from the entry, so it is recorded here, keyed `modelId:backend`, and shared by the
+ * matrix generator so the two universes cannot drift apart.
+ */
+export const CONVERTER_TIER_OVERRIDES = new Map([
+  ["anima_base:mlx", ["bf16", "q4", "q8"]],
+  ["anima_aesthetic:mlx", ["bf16", "q4", "q8"]],
+  ["anima_turbo:mlx", ["bf16", "q4", "q8"]],
+  ["flux2_klein_9b_true_v2:mlx", ["bf16"]],
+]);
+
+/**
  * What the CATALOG can actually ask of this model on this backend.
  *
  * The third source of truth, alongside the engine contract (capability) and the route witnesses
@@ -300,7 +322,8 @@ export function catalogAxes(model, backend, poseFamilies, baseProvider) {
   const dense =
     model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
   const advertised =
-    backend === "candle" && measured.length ? measured : [...measured, ...downloads, ...dense];
+    CONVERTER_TIER_OVERRIDES.get(`${model.id}:${backend}`) ??
+    (backend === "candle" && measured.length ? measured : [...measured, ...downloads, ...dense]);
   // Mirror the matrix generator through the ONE shared predicate: a backend whose exact contract
   // names only the LoRA load profile for the model's base provider cannot serve a plain public
   // coordinate.

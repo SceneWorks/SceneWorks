@@ -2457,11 +2457,20 @@ test("rung 4 is refused exactly where the family's OWN prerequisite graph refuse
       exempt += 1;
     }
   }
-  // Both partitions have to be occupied or the assertion above grades nothing — a lane set that is
-  // all-declaring would make it a restatement of the old blanket proxy, and an all-exempt one would
-  // make its loop body unreachable.
-  assert.ok(heldBack > 0, "no lane exercises the held-back branch");
+  // The exempt partition has to be occupied or the record set has collapsed into the old blanket
+  // proxy (every family declaring the edge). The held-back partition, by contrast, may be honestly
+  // EMPTY: its sole occupant used to be `flux2_klein_9b_true_v2:mlx`, whose staged column was
+  // all-Missing only because the entry's converter-packed bf16 tier was invisible to the tier
+  // universe and it surveyed at the `default` pseudo-tier (fixed in sc-21510). A declaring lane
+  // whose staged column CAN stage is refused nothing, so an empty held-back partition just means
+  // every declaring lane stages today; require instead that declaring lanes still exist at all, so
+  // a records collapse to nobody-declares cannot pass silently, and keep the per-lane rung-4
+  // assertion above live the moment any declaring lane stops staging.
   assert.ok(exempt > 0, "no lane exercises the exempt branch — the gate would be indistinguishable from the blanket proxy");
+  assert.ok(
+    lanes.some(({ key }) => declares.get(key)),
+    "no lane belongs to a declaring family — the records no longer discriminate against the catalog",
+  );
 });
 
 test("the rung-1 predicate reaches exactly the families whose provider declares that edge", async () => {
