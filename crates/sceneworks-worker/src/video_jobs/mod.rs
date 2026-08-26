@@ -61,12 +61,18 @@ mod prelude {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[allow(unused_imports)]
+    pub(super) use super::scail2::scail2_segment_blocking;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
     pub(super) use super::{
         advanced, assemble_scail2_animate_conditioning, lora_scale, non_empty_negative_prompt,
-        resolve_dense_adapters, resolve_lora_file, scail2_segment_blocking, video_frame_count,
-        wan_frame_count, AdapterSpec, CancelFlag, CharacterStore, Conditioning, GenerationMetrics,
-        GenerationOutput, GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy,
-        Precision, Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
+        resolve_dense_adapters, resolve_lora_file, video_frame_count, wan_frame_count, AdapterSpec,
+        CancelFlag, CharacterStore, Conditioning, GenerationMetrics, GenerationOutput,
+        GenerationRequest, Generator, Image, LoadPhase, LoadSpec, OffloadPolicy, Precision,
+        Progress, Quant, ReplacementMode, WeightsSource, MAX_JOB_LORAS,
     };
     #[allow(unused_imports)]
     pub(super) use super::{
@@ -254,12 +260,10 @@ enum VideoRoute {
 /// ladder for every other mode.
 #[cfg(target_os = "macos")]
 fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
-    // MiniMax-H3 readiness is the ONE ladder input that cannot be reached from a test today: it
-    // requires the engine to be REGISTERED in the linked inference bundle, which is false at the
-    // pinned revision (sc-18650 owns the bump). Left inline, the tail arm below would be dead code
-    // no test can distinguish from a deleted one — declaration without reachability, the exact trap
-    // this epic keeps hitting. Threaded in instead, so `resolve_video_route_with` can be driven
-    // with the readiness the pin bump will supply and the arm is covered NOW.
+    // MiniMax-H3 readiness remains the ONE ladder input that needs an injectable seam in tests:
+    // it requires the engine to be REGISTERED in the linked inference bundle. The permanent pin
+    // `28f0563baa03640ade1635356d2d54fe8a477f1a` carries that descriptor; threading readiness in
+    // keeps `resolve_video_route_with` able to distinguish the live tail arm from a deleted one.
     //
     // Evaluated here rather than in the ladder, but NOT eagerly: `minimax_h3_engine_id` is a pure
     // string check, so every other model short-circuits before any filesystem touch and routing
@@ -344,11 +348,11 @@ fn resolve_video_route_with(
         // id, so routing for every pre-existing model stays byte-identical.
         //
         // `minimax_h3_available` folds in three gates that all have to hold before an arm may run:
-        // the engine is actually REGISTERED in the linked inference bundle (false at the current
-        // pin, and the reason this arm is dormant rather than broken), the conditioning shape
-        // agrees with the entry's DiT partition, and both the tier and its shared components
-        // resolve. Any of them failing drops to `Stub`, where `ensure_video_engine_weights` re-runs
-        // the same checks and surfaces the precise reason instead of a procedural fake clip.
+        // the engine is registered in the linked inference bundle (as it is at permanent pin
+        // `28f0563baa03640ade1635356d2d54fe8a477f1a`), the conditioning shape agrees with the
+        // entry's DiT partition, and both the tier and its shared components resolve. Any of them
+        // failing drops to `Stub`, where `ensure_video_engine_weights` re-runs the same checks and
+        // surfaces the precise reason instead of a procedural fake clip.
         VideoRoute::MiniMaxH3(engine_id)
     } else {
         VideoRoute::Stub
@@ -386,6 +390,10 @@ enum CandleVideoRoute {
     Bernini(&'static str),
     /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
     CandleVideo,
+    /// MiniMax-H3's joint audio/video Candle provider. Current Candle capabilities route the base
+    /// t2va/fl2va and Ref2VA partitions through this live provider at the permanent inference pin;
+    /// direct or replayed off-Mac jobs therefore use the real provider rather than stub output.
+    MiniMaxH3(&'static str),
     /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
     /// (epic 10451 Phase 2c, sc-10671). Not an `is_candle_video_engine` id — routed off the forwarded row.
     WanComfyui,
@@ -500,6 +508,8 @@ fn resolve_candle_video_route(
         // reach the job as a typed error, never fall past here into `Stub` and COMPLETE as
         // procedural video (review blocker 2).
         CandleVideoRoute::WanComfyui
+    } else if let Some(engine_id) = minimax_h3_engine_id(&request.model) {
+        CandleVideoRoute::MiniMaxH3(engine_id)
     } else if is_candle_video_engine(&request.model) {
         CandleVideoRoute::CandleVideo
     } else {
@@ -1102,6 +1112,24 @@ pub(crate) async fn run_video_generate_job(
                     generate_candle_video(api, settings, job, &request, &project_path, backend)
                         .await?;
                 (decoded, adapter, raw_settings, status)
+            }
+            CandleVideoRoute::MiniMaxH3(engine_id) => {
+                let (decoded, raw_settings) = generate_candle_minimax_h3(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_MINIMAX_H3_ADAPTER,
+                    raw_settings,
+                    None::<Value>,
+                )
             }
             CandleVideoRoute::WanComfyui => {
                 let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
@@ -2115,10 +2143,15 @@ mod mochi;
 #[cfg(target_os = "macos")]
 use mochi::{generate_mochi, mochi_available, mochi_engine_id, MOCHI_ADAPTER};
 pub(crate) mod minimax_h3;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use minimax_h3::minimax_h3_engine_id;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use minimax_h3::{generate_candle_minimax_h3, CANDLE_MINIMAX_H3_ADAPTER};
 #[cfg(target_os = "macos")]
-use minimax_h3::{
-    generate_minimax_h3, minimax_h3_available, minimax_h3_engine_id, MINIMAX_H3_ADAPTER,
-};
+use minimax_h3::{generate_minimax_h3, minimax_h3_available, MINIMAX_H3_ADAPTER};
 mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};
@@ -2215,6 +2248,7 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     }
     bernini_engine_id(model)
         .or_else(|| candle::candle_video_engine_id(model))
+        .or_else(|| minimax_h3_engine_id(model))
         .into_iter()
         .collect()
 }
@@ -2388,50 +2422,6 @@ fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
     }
 }
 
-/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
-
-/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
-/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
-/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
-/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
-/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
-/// `person_segment_sam3` vs candle `person_segment_sam3_candle`) plus the paint background, so the
-/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-async fn scail2_segment_blocking<R, F>(
-    api: &ApiClient,
-    settings: &Settings,
-    job_id: &str,
-    task_label: &'static str,
-    segment: F,
-) -> WorkerResult<R>
-where
-    R: Send + 'static,
-    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
-{
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    run_blocking_with_heartbeat(
-        api,
-        settings,
-        job_id,
-        Some(cancel),
-        SCAIL2_SEGMENT_CANCEL_MESSAGE,
-        task_label,
-        crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || segment(flag)),
-    )
-    .await
-}
-
 /// Assemble SCAIL-2 `animate_character` conditioning from already-loaded character images +
 /// driving frames. Each reference is independently segmented into its paired color mask; the
 /// backend-specific SAM3 module and background convention stay at the call site while this
@@ -2451,7 +2441,7 @@ where
     FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<(Image, Image)>> + Send + 'static,
     FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<(Vec<Image>, Vec<Image>)> + Send + 'static,
 {
-    let reference_pairs = scail2_segment_blocking(
+    let reference_pairs = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,
@@ -2459,7 +2449,7 @@ where
         segment_reference,
     )
     .await?;
-    let (driving, driving_mask) = scail2_segment_blocking(
+    let (driving, driving_mask) = scail2::scail2_segment_blocking(
         api,
         settings,
         job_id,

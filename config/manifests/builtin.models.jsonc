@@ -21763,11 +21763,10 @@
         // re-hosted and no byte counts move. The bf16 rows stay platform-split: see the note on the
         // bf16 DiT row below and the off-Mac block further down for which route serves which lane.
         //
-        // ⚠️ THIS IS OBTAINABILITY, NOT ROUTING. `VIDEO_MODEL_CAPS` still carries every candle column
-        // false for both partitions, `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is still
-        // `#[cfg(target_os = "macos")]` end to end, and SceneWorks' own inference pin is unchanged by
-        // sc-20267 — so the app it builds does not yet contain the flip these rows anticipate.
-        // Declaration is not reachability (GH #2074).
+        // ⚠️ OBTAINABILITY AND ROUTING ARE SEPARATE. SC-20755 makes these base-partition rows
+        // scheduler-visible on Candle and binds them to the direct executor, per-tier resolver and
+        // fail-closed admission gate. SC-20756 does the same for the sibling `minimax_h3_ref`
+        // entry over its hosted transformer_ref rows. Declaration is not reachability (GH #2074).
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
@@ -22098,14 +22097,10 @@
         //     (18,780,109,783 B) and is declared as the per-tier sibling co-requisite in the sc-19573
         //     block above. Do not reintroduce it as a dependency of anything.
         //
-        // ⚠️ WHAT THESE ROWS DO **NOT** DO. They make the weights OBTAINABLE off-Mac. They do not
-        // by themselves make the lane serve a job, and `VIDEO_MODEL_CAPS` still carries every candle
-        // column false for both partitions. TWO preconditions remain, and both are named here so
-        // the next reader does not mistake an artifact for a route:
-        //   1. the candle block's `measured: false` — there is no measured VRAM ceiling for this
-        //      lane (`vramGbByTier` / `minMemoryGb` are deliberately absent below); and
-        //   2. `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is `#[cfg(target_os =
-        //      "macos")]` end to end, so there is no candle dispatch arm to route to yet.
+        // ⚠️ WHAT THESE ROWS DO **NOT** DO BY THEMSELVES. They make the weights obtainable off-Mac;
+        // SC-20755 is the separate change that makes the base partition scheduler-visible, resolves
+        // q4/q8 from the rehost and bf16 from this upstream snapshot, and applies SC-20754's measured
+        // ceilings before loading. SC-20756 widens the same contract to `minimax_h3_ref`.
         // `candle_video_routed_models_have_an_installable_off_mac_download`
         // (crates/sceneworks-core/src/jobs_store/tests/mlx_routing_tests.rs) is the guard for the
         // weights half: flip a candle column with no row here and it goes red.
@@ -22240,12 +22235,10 @@
       // this value names the right repo for those two tiers. It is still wrong for the off-Mac bf16
       // tier, whose weights come from `MiniMaxAI/MiniMax-H3`.
       //
-      // INERT EITHER WAY TODAY: nothing off-Mac reads it, because the candle columns in
-      // `VIDEO_MODEL_CAPS` are all false and there is no H3 arm in the candle ladder, so no off-Mac
-      // code path resolves this value. Recorded rather than silently left, because the change that
-      // flips a candle column must resolve the per-tier root the way `resolve_minimax_h3_load`
-      // resolves the macOS one — a single scalar here cannot express "the rehost at q4/q8, upstream
-      // at bf16", which is precisely the shape the off-Mac rows now have.
+      // SC-20755's off-Mac resolver deliberately does not read this scalar: it resolves q4/q8 from
+      // `SceneWorks/minimax-h3-mlx` and bf16 plus shared components from `MiniMaxAI/MiniMax-H3`.
+      // Keeping `paths.model` as the MLX tier root remains correct for the native lane; the Candle
+      // split is represented by its two explicit repository roots rather than by this one value.
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
       },
@@ -22349,8 +22342,8 @@
         "maxReferenceAssets": 0,
         "maxSourceClipAssets": 0,
         "maxReferenceAudioAssets": 0,
-        // Default-only. sc-19721's pin bump (`75d66db5`) DID make the descriptor reachable, so the
-        // engines.rs drift guard can now compare a curated menu against MiniMax-H3's real
+        // Default-only. The permanent inference pin (`28f0563b`) makes the descriptor reachable, so
+        // the engines.rs drift guard can compare a curated menu against MiniMax-H3's real
         // capabilities — but the provider advertises `samplers: ["default"]` and no scheduler menu
         // of its own, so there is nothing to curate INTO. This stays `["default"]` because that is
         // what the engine offers, not because the descriptor is invisible; a curated menu is
@@ -22371,7 +22364,7 @@
         // peak (sc-17150 activity 19121) — a stage the DEFAULT tier no longer runs. sc-19120's
         // packed q4 conditioning stage measures 14.68 GB end to end (inference
         // `mlx-gen-minimax-h3/src/memory_strategy.rs` + `tests/te_tier_generate_stages.rs`, read
-        // at the pinned `75d66db5`), so 96 over-gated the default tier by ~38 GB at the derivation
+        // at permanent inference pin `28f0563b`), so 96 over-gated the default tier by ~38 GB at the derivation
         // geometry and locked the family off every sub-96 GB Mac for no measured reason.
         //
         // THE DERIVATION — max over the shipped q4 pipeline's stages at the LARGEST geometry this
@@ -22408,57 +22401,29 @@
           "schedulers": ["default"]
         }
       },
-      // sc-17156 — THE CANDLE LANE EXISTS AS CODE AND IS NOT YET REACHABLE AS A PRODUCT.
+      // sc-20754 — measured on the Windows CUDA real-weights host, one tier per fresh process on an
+      // idle 96 GB RTX PRO 6000 Blackwell. Every probe used the shipped 1344x768 / 124-frame / 50-NFE
+      // workload, `CANDLE_GEN_OFFLOAD=sequential`, and a 0.00 GB idle baseline. `vramGbByTier` is the
+      // base-10 nvidia-smi POOL high-water, not a weights-floor estimate: q4 40.068 GB, q8 74.696 GB,
+      // bf16 67.012 GB. Decode owned the pool peak in all three runs; the concurrent-live driver
+      // high-waters were 36.69 / 65.80 / 62.66 GiB respectively. The non-monotonic q8/bf16 ordering
+      // is measured, not normalized away: the packed q8 route retained a larger allocator pool.
       //
-      // `candle-gen-minimax-h3` now ships a real end-to-end t2va + fl2va generator and is registered
-      // in `candle-gen-catalog`. What it does NOT yet have is a measured VRAM ceiling or any
-      // artifact a user could install off-Mac, so this block declares the two things that are
-      // provable today and deliberately omits the two that are not.
-      //
-      // ⚠️ NO `vramGbByTier` AND NO `minMemoryGb`, AND THAT IS THE HONEST STATE, NOT AN OVERSIGHT.
-      // The candle probe (`candle-gen-minimax-h3/tests/vram_probe.rs::minimax_h3_vram_bf16`) is
-      // written and wired into the `candle-minimax-h3` CUDA lane behind the `minimax_h3_vram_probe`
-      // dispatch input, but it has never been executed, for two reasons that are both operator
-      // actions rather than code:
-      //   1. the repository variable `CANDLE_MINIMAX_H3_SNAPSHOT` is UNSET, so the lane fails closed
-      //      at its first step by design; and
-      //   2. the pinned `minimax-h3` row in inference's `release/real-weight-models.toml` carries a
-      //      `download_files` allow-list (~11.6 GB: vae/, audio_vae/, FL2VA/audio_vae/, tokenizer/
-      //      and the text-encoder shard INDEX) that deliberately EXCLUDES `transformer/` and the
-      //      fourteen TE shards. A render needs both, so CI cannot materialize what the probe reads.
-      // Until that number exists, `predicted_peak_gb` returning `None` for this model is CORRECT:
-      // the fit gate stays best-effort rather than admitting a card against a guess. Do NOT
-      // backfill an estimate here — a 66.7 GB conditioner staged before a 66.3 GB DiT is not
-      // something to extrapolate from a sibling, and the weights-floor table on sc-17158 activity
-      // 18683 is a weights floor, not a generate peak.
-      //
-      // `measured: false` is therefore load-bearing rather than decorative: it is the schema's own
-      // way of saying this lane's ceilings are not evidence yet.
-      //
-      // ⚠️ THE DOWNLOADS ARE NO LONGER `macos`-ONLY — sc-19558 added the `platforms:
-      // ["windows", "linux"]` raw-snapshot set above, which is the layout this provider's
-      // `REQUIRED_COMPONENT_DIRS` reads, and sc-20267 then widened the q4/q8 DiT and text-encoder
-      // rows to all three platforms once the provider gained `supported_quants: &[Quant::Q4,
-      // Quant::Q8]` and a packed tier loader. So off-Mac now has a THREE-TIER artifact set, not one.
-      // THE ROUTING COLUMNS DID NOT MOVE WITH EITHER CHANGE. A `candle` block is metadata about a
-      // backend; the routing catalog is the authority on which lane serves a request (GH #2074 —
-      // declaration is not reachability), and `VIDEO_MODEL_CAPS` still carries every candle column
-      // false for both partitions because the two open items above — no measured ceiling, and no
-      // candle dispatch arm in `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs`, which is
-      // `#[cfg(target_os = "macos")]` end to end — are unchanged. Obtaining weights is a precondition
-      // of routing, not routing.
-      //
-      // ⚠️ AND NO `vramGbByTier` EVEN THOUGH THERE ARE NOW TIERS OFF-MAC. A tier axis in the download
-      // set is not a measured ceiling: the probe above still has never run, so the per-tier numbers
-      // this block would need do not exist. sc-20267 deliberately added none — a tier column filled in
-      // from the MLX measurements would be a guess about a different loader.
+      // `minMemoryGb` is the DEFAULT q4 measured peak plus the gate's 2 GB dedicated-VRAM reserve,
+      // rounded up to the integer schema: ceil(40.068 + 2) = 43. Per-tier admission still reads each
+      // exact row and adds the same reserve, so q8 and bf16 are never sized against this q4 floor.
+      // Routing remains a separate catalog decision (GH #2074); this block records backend memory
+      // evidence and does not itself make a Candle route reachable.
       "candle": {
+        "minMemoryGb": 43,
+        "vramGbByTier": { "q4": 40.068, "q8": 74.696, "bf16": 67.012 },
+        "vramMeasuredPixels": 1032192,
         // Provable, and structural rather than requested: the provider pins
         // `OFFLOAD_POLICY = OffloadPolicy::Sequential` and ignores `spec.offload_policy` entirely,
         // so a caller cannot talk it into resident staging. Pinned by
         // `the_offload_policy_is_forced_sequential_even_when_resident_is_requested`.
         "supportsSequentialOffload": true,
-        "measured": false
+        "measured": true
       },
       "ui": {
         "label": "MiniMax-H3",
@@ -22491,11 +22456,11 @@
         //      BELOW this entry's advertised 21:9 pair. So `1536x672` / `672x1536` are ADVERTISED
         //      BUT NOT YET RENDERABLE: the area check passes and the edge check refuses.
         //
-        //      ✅ DISCHARGED BY sc-19721's PIN BUMP. `Cargo.toml` now pins `75d66db5`, which
-        //      carries inference PR #640 (`story/sc-17152-h3-max-size-1536`) — the per-edge ceiling
-        //      is `MAX_CANVAS_EDGE = 2016` on both lanes, comfortably above 1536, so the pinned
-        //      engine accepts the pair and the paragraph above is HISTORY, kept only because it
-        //      explains why the area budget alone never settled the question.
+        //      ✅ DISCHARGED BY THE PERMANENT INFERENCE PIN. `Cargo.toml` pins
+        //      `28f0563baa03640ade1635356d2d54fe8a477f1a`; the pinned provider's per-edge ceiling
+        //      is `MAX_CANVAS_EDGE = 2016` on both lanes, comfortably above 1536, so the engine
+        //      accepts the pair and the paragraph above is HISTORY, kept only because it explains
+        //      why the area budget alone never settled the question.
         //
         //      The tie is enforced, not asserted in prose: `pinned_engine_geometry.rs` reads the
         //      PINNED provider's own `capabilities.max_size` and refuses any advertised resolution
@@ -22528,7 +22493,7 @@
         //      not render at all.
         // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
         // in the prompt guide, which is the only place a user would copy that syntax from.
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It RENDERS on macOS only, through the native MLX lane, and needs a large-memory Mac; the weights themselves may be downloadable on other platforms.",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
         "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
         "promptGuide": {
@@ -22594,7 +22559,7 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/transformer_ref/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           // `transformer_ref` is byte-for-byte the same SIZE as `transformer` at every tier — the
           // two carry identical `config.json` and the same 638 tensor names, so a name-comparison
           // check cannot tell them apart; they are different WEIGHTS.
@@ -22607,7 +22572,7 @@
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q8",
           "files": ["q8/transformer_ref/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35302064357,
           "footprint": { "diskSizeBytes": 35302064357, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -22617,7 +22582,7 @@
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "bf16",
           "files": ["bf16/transformer_ref/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 66280569250,
           "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -22636,7 +22601,7 @@
           "componentId": "text_encoder",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 18722713964
         },
         {
@@ -22648,7 +22613,7 @@
           "componentId": "text_encoder",
           "subdir": "q8/text_encoder",
           "files": ["q8/text_encoder/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 33723765614
         },
         {
@@ -22756,7 +22721,7 @@
           "variant": "q4",
           "coRequisite": true,
           "files": ["q4/transformer/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 18780109783
         },
         {
@@ -22766,7 +22731,7 @@
           "variant": "q8",
           "coRequisite": true,
           "files": ["q8/transformer/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35302064357
         },
         {
@@ -22776,34 +22741,57 @@
           "variant": "bf16",
           "coRequisite": true,
           "files": ["bf16/transformer/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 66280569250
+        },
+        // SC-20756 — off-Mac shared floor. All three Ref2VA DiT tiers come from the immutable
+        // SceneWorks rehost above. Packed q4/q8 text encoders come from that same selected tier;
+        // dense bf16 text encoder and the untiered VAEs come from the pinned upstream snapshot.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "variant": "bf16",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          "files": ["text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 66726510529
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "video_vae",
+          "subdir": "vae",
+          "files": ["vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 10415635127
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "audio_vae",
+          "subdir": "audio_vae",
+          "files": ["audio_vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 605431611
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          "files": ["FL2VA/audio_vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 605461455
         }
-        // NO OFF-MAC ROWS HERE, and that is deliberate rather than an omission (sc-19558).
-        // `minimax_h3` gained a `platforms: ["windows", "linux"]` raw-snapshot set because
-        // `candle-gen-minimax-h3` implements t2va + fl2va.
-        //
-        // ⚠️ sc-20267 CORRECTION — THE ORIGINAL REASON IS STALE AND MUST NOT BE RESTATED. It read:
-        // "the candle provider DEFAULT-DENIES `ref2va` at its conditioning allowlist until sc-17157
-        // ports `transformer_ref`, so an off-Mac row here would advertise weights for a mode the only
-        // off-Mac engine refuses." sc-17157 LANDED (inference `32204c935`, "port Ref2VA multi-modal
-        // references to candle") and is an ancestor of the revision this repository pins, so the
-        // pinned candle engine advertises ALL THREE reference conditioning kinds — `Reference`,
-        // `ReferenceVideo` and `ReferenceAudio` — in its descriptor's allowlist. There is no engine
-        // refusal to cite.
-        //
-        // WHAT ACTUALLY KEEPS THE OFF-MAC ROWS ABSENT TODAY, both of which are about this repository
-        // rather than the engine:
-        //   1. every `transformer_ref` row is `macos`-ONLY — this entry's three primaries and the three
-        //      sibling co-requisites on `minimax_h3` alike — and they all live in
-        //      `SceneWorks/minimax-h3-mlx`, while the off-Mac bf16 route reads raw upstream. So
-        //      declaring an off-Mac Ref2VA set means first deciding which route serves `transformer_ref`
-        //      at which tier off-Mac. That platform split is sc-19573's concern; sc-20267 widened only
-        //      the base `transformer` tiers and deliberately left every `transformer_ref` row alone; and
-        //   2. there is still no candle dispatch arm — `crates/sceneworks-worker/src/video_jobs/
-        //      minimax_h3.rs` is `#[cfg(target_os = "macos")]` end to end — and this entry still has no
-        //      measured off-Mac VRAM ceiling of its own.
-        // Add the rows in the same change that resolves those two, not before.
       ],
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
@@ -22869,33 +22857,16 @@
           "schedulers": ["default"]
         }
       },
-      // NO `candle` block HERE — and as of sc-20267 the reason is the SAME KIND as `minimax_h3`'s (a
-      // missing measurement plus a missing dispatch arm), not a different kind.
-      //
-      // ⚠️ sc-20267 CORRECTION — WHAT THIS COMMENT USED TO CLAIM IS FACTUALLY FALSE AGAINST THE PIN.
-      // sc-17156 wrote that the reason was "a REFUSAL IN CODE rather than a missing measurement":
-      // that the candle provider "serves the `transformer` checkpoint only", that `ref2va` is
-      // "DEFAULT-DENIED at the descriptor's conditioning allowlist — `Reference`, `ReferenceVideo` and
-      // `ReferenceAudio` are deliberately absent", and that `Capabilities::validate_request` therefore
-      // turns a reference request into a typed `Unsupported`. sc-17157 landed that port (inference
-      // `32204c935`, "port Ref2VA multi-modal references to candle": the `transformer_ref` partition,
-      // the omni-reference presentation and the audio VAE encoder) and it is an ANCESTOR of the
-      // revision this repository pins — so the pinned candle engine advertises all three reference
-      // conditioning kinds and there is no refusal to point at. The old text is quoted rather than
-      // deleted because it is cited elsewhere as the reason this entry has no candle surface; anyone
-      // who finds that citation should land here and stop.
-      //
-      // THE HONEST CURRENT REASON, and it is exactly two things:
-      //   1. NO MEASURED VRAM CEILING for this entry on the candle lane. It needs its own, not a copy
-      //      of `minimax_h3`'s, because the reference presentation adds an encode stage the base
-      //      partition never runs — and `minimax_h3`'s own candle block still carries `measured: false`
-      //      for a probe that has never been executed, so there is nothing to copy even if copying
-      //      were sound; and
-      //   2. NO CANDLE DISPATCH ARM — `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is
-      //      `#[cfg(target_os = "macos")]` end to end for BOTH partitions.
-      // Neither is a statement about what the engine can do; both are about what this repository can
-      // yet prove and route. See also the trailing note in `downloads` above for why this entry
-      // declares no off-Mac rows.
+      // SC-20756 — the Ref2VA partition uses the same architecture, geometry, offload lifecycle and
+      // accepted base-route tier ceilings as `minimax_h3`; only the selected DiT directory changes
+      // to `transformer_ref`. Admission remains per-tier and fail-closed before any weights load.
+      "candle": {
+        "minMemoryGb": 43,
+        "vramGbByTier": { "q4": 40.068, "q8": 74.696, "bf16": 67.012 },
+        "vramMeasuredPixels": 1032192,
+        "supportsSequentialOffload": true,
+        "measured": true
+      },
       "ui": {
         "label": "MiniMax-H3 References",
         // §IV.2 attribution, same as `minimax_h3` — see that entry for the citation (sc-17227).
@@ -22904,7 +22875,7 @@
         // reference. The two entries are separate model cards and a user can install THIS one
         // without ever reading that one's, so "see the other entry" would leave the withheld
         // components undisclosed on the surface where the decision is actually made.
-        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
         "recommendedFor": ["reference_to_video"],
         "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps — nothing in between renders and 15s is refused rather than shortened to 14.38s — and the same canvas-dominated cost, so start at 576x320.",
         "promptGuide": {
