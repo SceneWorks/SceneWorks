@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "3cd86ba2165f35db7c4fceecbeb7fbd12bca1c0c",
+    "inferenceRevision": "490579320fd1d2c1cf71c749134a04af8711a969",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
