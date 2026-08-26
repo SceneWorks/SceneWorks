@@ -40,8 +40,8 @@ const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use gen_core::{
-    CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling, Image, LoadSpec, Progress,
-    WeightsSource,
+    apply_caption_trigger_words, CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling,
+    Image, LoadSpec, Progress, WeightsSource, CAPTION_TRIGGER_WORD_CONFORMANCE,
 };
 #[cfg(any(
     target_os = "macos",
@@ -243,10 +243,9 @@ pub(crate) async fn run_training_caption_job(
                         blocking_backend.to_uppercase()
                     ))
                 })?;
-            // Prepend any missing trigger words to the caption. Backend-neutral worker-local helper
-            // (sc-5098) — the same logic mlx-gen + candle-gen each ship locally — so the shared path
-            // names no backend-specific symbol.
-            let text = apply_trigger_words(&output.text, &item.trigger_words);
+            // The backend-neutral `gen-core` contract owns trigger-word normalization and complete
+            // token/phrase matching, so the MLX and Candle job paths cannot drift.
+            let text = apply_caption_trigger_words(&output.text, &item.trigger_words);
             tx.blocking_send(CaptionedItem {
                 index,
                 item_id: item.item_id,
@@ -701,32 +700,6 @@ fn caption_step_progress(index: usize, current: u32, total: u32, item_count: usi
     (0.12 + 0.76 * ((index as f64 + within) / item_count)).min(0.9)
 }
 
-/// Prepend the trigger words that are not already present (case-insensitive substring) to the
-/// captioner's text, comma-joined, with the cleaned caption last. Backend-neutral copy of the
-/// identical helper both `mlx-gen` and `candle-gen` ship locally (the comment in the engines noted it
-/// should be lifted out of the provider) — keeping it here means the shared caption path names no
-/// backend-specific symbol (sc-5098). Matches the engine behavior 1:1, including the empty-caption
-/// case (just the missing trigger words).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn apply_trigger_words(caption: &str, trigger_words: &[String]) -> String {
-    let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lower_caption = cleaned.to_lowercase();
-    let mut parts: Vec<String> = trigger_words
-        .iter()
-        .map(|word| word.trim())
-        .filter(|word| !word.is_empty())
-        .filter(|word| !lower_caption.contains(&word.to_lowercase()))
-        .map(ToOwned::to_owned)
-        .collect();
-    if !cleaned.is_empty() {
-        parts.push(cleaned);
-    }
-    parts.join(", ")
-}
-
 #[cfg(all(
     test,
     any(
@@ -875,17 +848,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_trigger_words_prepends_only_missing() {
-        let triggers = vec!["mika_token".to_owned(), "hat".to_owned()];
-        // "hat" already appears in the caption → dropped; "mika_token" prepended.
-        assert_eq!(
-            apply_trigger_words("A portrait of Mika wearing a hat.", &triggers),
-            "mika_token, A portrait of Mika wearing a hat."
-        );
-        // Empty/whitespace caption → just the (whitespace-normalized) trigger words.
-        assert_eq!(apply_trigger_words("   ", &triggers), "mika_token, hat");
-        // No triggers → the cleaned caption unchanged.
-        assert_eq!(apply_trigger_words("  a  cat ", &[]), "a cat");
+    fn caption_trigger_words_follow_gen_core_conformance_matrix() {
+        for case in CAPTION_TRIGGER_WORD_CONFORMANCE {
+            let triggers = case
+                .trigger_words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                apply_caption_trigger_words(case.caption, &triggers),
+                case.expected
+            );
+        }
     }
 
     #[test]
