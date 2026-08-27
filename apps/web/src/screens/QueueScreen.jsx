@@ -184,9 +184,9 @@ function formatMemory(mb) {
     return "Unknown";
   }
   if (mb >= 1024) {
-    return `${(mb / 1024).toFixed(1)} GB`;
+    return `${(mb / 1024).toFixed(1)} GiB`;
   }
-  return `${Math.round(mb)} MB`;
+  return `${Math.round(mb)} MiB`;
 }
 
 function boundedPercent(value) {

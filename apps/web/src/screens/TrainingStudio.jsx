@@ -487,6 +487,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
       captionsDirty);
+  // Refresh awaits the catalog request. Read the current draft state after that
+  // await so a rename begun while refresh is in flight is never overwritten by
+  // the freshly loaded dataset object.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const activeDatasetIdRef = useRef(activeDataset?.id ?? "");
+  activeDatasetIdRef.current = activeDataset?.id ?? "";
   const completedParquetImport = useMemo(
     () =>
       jobs.find(
@@ -998,11 +1005,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
   openDatasetRef.current = openDataset;
 
   async function onRefreshDatasets() {
+    const refreshDatasetId = activeDatasetIdRef.current;
     await refreshTrainingDatasets(activeProject?.id);
-    if (!activeDataset?.id || dirty) {
+    if (
+      !refreshDatasetId ||
+      activeDatasetIdRef.current !== refreshDatasetId ||
+      dirtyRef.current
+    ) {
       return;
     }
-    await openDataset(activeDataset.id);
+    await openDataset(refreshDatasetId);
   }
 
   // Permanently delete the OPEN dataset — the backend wipes its on-disk root (images,

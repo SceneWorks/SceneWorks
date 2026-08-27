@@ -120,7 +120,11 @@ export function CheckpointImportPanel({
   const [activeRootId, setActiveRootId] = useState("");
   const [scan, setScan] = useState(null);
   const [pathDraft, setPathDraft] = useState("");
-  const [labelDraft, setLabelDraft] = useState("");
+  // Adding a library and renaming an existing one can be visible at the same
+  // time. Keep their drafts separate so opening/cancelling a rename never
+  // overwrites the name prepared for the next library.
+  const [addLabelDraft, setAddLabelDraft] = useState("");
+  const [renameLabelDraft, setRenameLabelDraft] = useState("");
   const [renaming, setRenaming] = useState("");
 
   // Managed state. `type` is image-only for the same reason the pre-epic form fixed it: the import
@@ -225,9 +229,9 @@ export function CheckpointImportPanel({
     }
     setBusy("approve");
     try {
-      const root = await library.approve(token, { path, label: labelDraft.trim() || undefined });
+      const root = await library.approve(token, { path, label: addLabelDraft.trim() || undefined });
       setPathDraft("");
-      setLabelDraft("");
+      setAddLabelDraft("");
       const next = await loadRoots();
       setMessage({ ...NEUTRAL, tone: "success", text: `Added ${root?.displayLabel ?? path}.` });
       if (root?.rootId) await runScan(root.rootId);
@@ -266,7 +270,7 @@ export function CheckpointImportPanel({
   }
 
   async function renameRoot(rootId) {
-    const label = labelDraft.trim();
+    const label = renameLabelDraft.trim();
     if (!label) {
       setMessage({ ...NEUTRAL, tone: "error", text: "Enter a name for this library." });
       return;
@@ -275,7 +279,7 @@ export function CheckpointImportPanel({
     try {
       await library.update(token, rootId, { label });
       setRenaming("");
-      setLabelDraft("");
+      setRenameLabelDraft("");
       await loadRoots();
       setMessage({ ...NEUTRAL, tone: "success", text: "Library renamed." });
     } catch (error) {
@@ -498,9 +502,9 @@ export function CheckpointImportPanel({
             Name
             <input
               disabled={busy === "approve"}
-              onChange={(event) => setLabelDraft(event.target.value)}
+              onChange={(event) => setAddLabelDraft(event.target.value)}
               placeholder="Optional"
-              value={labelDraft}
+              value={addLabelDraft}
             />
           </label>
           <button disabled={busy === "approve"} onClick={addLibrary} type="button">
@@ -528,7 +532,7 @@ export function CheckpointImportPanel({
                 <button disabled={busy === `relink:${root.rootId}`} onClick={() => relinkRoot(root.rootId)} type="button">
                   Relink library
                 </button>
-                <button onClick={() => { setRenaming(root.rootId); setLabelDraft(root.label ?? ""); }} type="button">
+                <button onClick={() => { setRenaming(root.rootId); setRenameLabelDraft(root.label ?? ""); }} type="button">
                   Rename
                 </button>
                 <button disabled={busy === `forget:${root.rootId}`} onClick={() => forgetRoot(root)} type="button">
@@ -539,12 +543,12 @@ export function CheckpointImportPanel({
                 <div className="checkpoint-root-rename">
                   <label>
                     New name
-                    <input onChange={(event) => setLabelDraft(event.target.value)} value={labelDraft} />
+                    <input onChange={(event) => setRenameLabelDraft(event.target.value)} value={renameLabelDraft} />
                   </label>
                   <button disabled={busy === `rename:${root.rootId}`} onClick={() => renameRoot(root.rootId)} type="button">
                     Save name
                   </button>
-                  <button onClick={() => setRenaming("")} type="button">
+                  <button onClick={() => { setRenaming(""); setRenameLabelDraft(""); }} type="button">
                     Cancel rename
                   </button>
                 </div>
