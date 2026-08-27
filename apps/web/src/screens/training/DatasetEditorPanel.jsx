@@ -15,7 +15,7 @@ import {
   ReadinessBadge,
   ReadinessFlagDetails,
 } from "./DatasetDoctor.jsx";
-import { datasetItemCount, imageAssetName } from "../../training/datasetHelpers.js";
+import { datasetItemCount, datasetItemSelectionKey, imageAssetName } from "../../training/datasetHelpers.js";
 import { joyCaptionExtraOptions, joyCaptionLengths, joyCaptionTypes } from "../../training/joyCaptionPrompts.js";
 
 // Human label for the detected caption source (sc-2025) — read-only on the card.
@@ -104,7 +104,7 @@ export function DatasetEditorPanel({
   const { datasetDoctor, readinessByKey, onToggleItemAck } = doctorSession;
   const {
     imageAssets, characters, associatedCharacterId, setActiveView, importingAssets,
-    gpuOptions,
+    gpuOptions, onUploadPreparedBundle,
   } = config;
   // Local aliases for the doctor readout's report/loading, still referenced directly by
   // the distributions block and the per-card readiness badges below.
@@ -115,6 +115,7 @@ export function DatasetEditorPanel({
   const [captionFilter, setCaptionFilter] = React.useState("all");
   const [parquetDialogOpen, setParquetDialogOpen] = React.useState(false);
   const [parquetImporting, setParquetImporting] = React.useState(false);
+  const [preparedUploadingId, setPreparedUploadingId] = React.useState("");
   const parquetImportDisabled = !draftName.trim() || memberAssets.length > 0 || parquetImporting;
 
   async function runParquetImport(settings) {
@@ -171,6 +172,20 @@ export function DatasetEditorPanel({
   // Only derivable once the report exists — an item with no entry is "not assessed yet",
   // never silently ready (sc-6534).
   const readyCount = readiness ? memberAssets.filter((asset) => !isFlagged(asset)).length : 0;
+  const savedItemBySelection = React.useMemo(
+    () => new Map((activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item])),
+    [activeDataset],
+  );
+
+  async function uploadPrepared(asset, file) {
+    if (!file || typeof onUploadPreparedBundle !== "function") return;
+    setPreparedUploadingId(asset.id);
+    try {
+      await onUploadPreparedBundle(asset, file);
+    } finally {
+      setPreparedUploadingId("");
+    }
+  }
 
   // The unsaved-state chip is now a real affordance (sc-11970): when there are unsaved
   // changes it pairs the "Unsaved changes" pill with a Discard action that reverts the
@@ -464,6 +479,8 @@ export function DatasetEditorPanel({
               const source = draft.source ?? "manual";
               const name = asset.displayName ?? imageAssetName(asset);
               const readinessEntry = readinessByKey?.get(asset.id);
+              const savedItem = savedItemBySelection.get(asset.id);
+              const preparedPath = savedItem?.ltxPreparedBundlePath;
               return (
                 <article
                   className={["training-caption-card", disabled ? "disabled" : ""].filter(Boolean).join(" ")}
@@ -505,6 +522,22 @@ export function DatasetEditorPanel({
                       value={draft.text ?? ""}
                     />
                     <div className="training-caption-card-actions">
+                      <label className="secondary-action strong">
+                        {preparedUploadingId === asset.id
+                          ? "Uploading…"
+                          : preparedPath
+                            ? "Replace LTX bundle"
+                            : "Upload LTX bundle"}
+                        <input
+                          accept=".safetensors,application/octet-stream"
+                          aria-label={`Upload LTX prepared bundle for ${name}`}
+                          disabled={!savedItem?.id || preparedUploadingId === asset.id}
+                          hidden
+                          onChange={(event) => uploadPrepared(asset, event.target.files?.[0])}
+                          type="file"
+                        />
+                      </label>
+                      {preparedPath ? <span className="training-asset-badge">Prepared</span> : null}
                       <button
                         aria-label={`Remove ${name}`}
                         className="secondary-action"

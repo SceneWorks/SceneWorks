@@ -1585,6 +1585,34 @@ fn request(value: Value) -> VideoRequest {
     VideoRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[test]
+fn worker_video_gate_rejects_shipped_ltx23_lora_on_ltx25() {
+    let request_25 = request(json!({
+        "projectId": "project",
+        "model": "ltx_2_5",
+        "mode": "text_to_video",
+        "prompt": "test",
+        "loras": [{
+            "id": "ltx-camera-control-static",
+            "family": "ltx-video",
+            "modelIds": ["ltx_2_3", "ltx_2_3_eros"]
+        }]
+    }));
+    let error = validate_video_lora_compatibility(&request_25)
+        .expect_err("2.3 adapter must fail before heartbeat on LTX-2.5");
+    assert!(error.to_string().contains("declared for model ltx_2_3"));
+
+    let request_23 = request(json!({
+        "projectId": "project",
+        "model": "ltx_2_3",
+        "mode": "text_to_video",
+        "prompt": "test",
+        "loras": [{ "id": "legacy", "family": "ltx-video" }]
+    }));
+    validate_video_lora_compatibility(&request_23)
+        .expect("legacy family-only LTX-2.3 behavior stays unchanged");
+}
+
 /// Both SCAIL modes carry the model path and one-shot admission together into the shared generator.
 /// The generator cache, not these request arms, decides warm versus cold under its single-owner
 /// transaction; keeping the plan structural prevents either mode from regressing to a racy external

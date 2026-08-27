@@ -2104,6 +2104,19 @@ fn serialize_job_lora_carries_network_type_to_payload() {
 }
 
 #[test]
+fn serialize_job_lora_preserves_exact_model_allowlists_for_the_worker() {
+    let catalog_lora = json!({
+        "id": "ltx25",
+        "family": "ltx-video",
+        "modelIds": ["ltx_2_5"],
+        "model_ids": ["ltx_2_5_alias"],
+    });
+    let payload = serialize_job_lora(&catalog_lora, &json!({}), "ltx25");
+    assert_eq!(payload["modelIds"], json!(["ltx_2_5"]));
+    assert_eq!(payload["model_ids"], json!(["ltx_2_5_alias"]));
+}
+
+#[test]
 fn serialize_job_lora_carries_accelerator_role_to_payload() {
     // The Krea 2 turbo accelerator LoRA (sc-13882) records `role: accelerator`; the generation payload
     // must carry it so the worker can switch a Krea 2 Raw t2i job to the turbo sampling regime (epic

@@ -791,27 +791,86 @@ fn builtin_presets_expose_sdxl_character_default() {
 #[test]
 fn builtin_registry_exposes_ltx_video_target() {
     let registry = builtin_training_targets();
-    let target = registry
-        .targets
-        .iter()
-        .find(|target| target.id == "ltx_video_lora")
-        .expect("ltx_video_lora target present");
+    for (id, base_model, repo, sample_steps) in [
+        ("ltx_video_lora", "ltx_2_3", "SceneWorks/ltx-2.3-mlx", 20),
+        (
+            "ltx_2_5_video_lora",
+            "ltx_2_5",
+            "SceneWorks/ltx-2.5-mlx",
+            30,
+        ),
+    ] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"));
 
-    assert_eq!(target.modality, TrainingModality::Video);
-    assert_eq!(target.output_kind, TrainingOutputKind::Lora);
-    assert_eq!(target.family, "ltx-video");
-    assert_eq!(target.base_model, "ltx_2_3");
-    assert_eq!(target.kernel, "ltx_mlx_lora");
-    assert_eq!(target.defaults.rank, 32);
-    assert_eq!(target.defaults.resolution, 768);
-    assert_eq!(target.defaults.optimizer, "adamw");
-    assert!(
-        target.limits.get("appleSiliconOnly").is_none()
-            && target.limits.get("requiresBackend").is_none(),
-        "LTX training is available on native MLX and candle/CUDA"
-    );
-    assert!(target.ui.get("appleSiliconOnly").is_none());
-    assert!(target.ui.get("backend").is_none());
+        assert_eq!(target.modality, TrainingModality::Video);
+        assert_eq!(target.output_kind, TrainingOutputKind::Lora);
+        assert_eq!(target.family, "ltx-video");
+        assert_eq!(target.base_model, base_model);
+        assert_eq!(target.base_model_repo.as_deref(), Some(repo));
+        assert_eq!(target.kernel, "ltx_mlx_lora");
+        assert_eq!(target.defaults.rank, 32);
+        assert_eq!(target.defaults.resolution, 768);
+        assert_eq!(target.defaults.optimizer, "adamw");
+        assert_eq!(
+            target.defaults.advanced.get("sampleSteps"),
+            Some(&serde_json::json!(sample_steps)),
+            "{id} uses its generation's representable preview step contract"
+        );
+        assert_eq!(
+            target.defaults.advanced.get("outputScope"),
+            Some(&serde_json::json!("project")),
+            "{id} previews and output default to project-relative storage"
+        );
+        assert!(
+            target.limits.get("appleSiliconOnly").is_none()
+                && target.limits.get("requiresBackend").is_none(),
+            "LTX training is advertised on native MLX and candle/CUDA"
+        );
+        assert!(target.ui.get("appleSiliconOnly").is_none());
+        assert!(target.ui.get("backend").is_none());
+        if id == "ltx_2_5_video_lora" {
+            assert_eq!(
+                target.defaults.advanced.get("ltxWorkflow"),
+                Some(&serde_json::json!("t2v_lora"))
+            );
+            assert_eq!(
+                target
+                    .defaults
+                    .advanced
+                    .get("ltxValidation")
+                    .and_then(|value| value.get("videoCfgScale")),
+                Some(&serde_json::json!(3.0))
+            );
+            assert_eq!(
+                target
+                    .defaults
+                    .advanced
+                    .get("ltxValidation")
+                    .and_then(|value| value.get("audioCfgScale")),
+                Some(&serde_json::json!(7.0))
+            );
+            assert_eq!(
+                target.limits.get("preparedBundleSchema"),
+                Some(&serde_json::json!("ltx-prepared-v1"))
+            );
+            assert_eq!(
+                target
+                    .limits
+                    .get("ltxWorkflows")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len),
+                Some(15)
+            );
+            assert_eq!(
+                target.ui.get("datasetModality"),
+                Some(&serde_json::json!("video"))
+            );
+        }
+    }
 }
 
 #[test]
@@ -846,6 +905,41 @@ fn ltx_video_target_resolves_image_dataset_into_plan() {
     assert_eq!(plan.target.family, "ltx-video");
     assert_eq!(plan.target.modality, TrainingModality::Video);
     assert!(!plan.dataset.items.is_empty());
+}
+
+#[test]
+fn ltx_2_5_plan_preserves_prepared_multimodal_bundle_input() {
+    let mut dataset = dataset_fixture();
+    dataset.items[0].extra.insert(
+        "ltxPreparedBundlePath".to_owned(),
+        serde_json::json!("prepared/item-0001.safetensors"),
+    );
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target present");
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_ltx25",
+        target,
+        dataset: &dataset,
+        config: target.defaults.clone(),
+        preset: None,
+        lora_id: "lora_ltx25_new",
+        base_model_path: "/models/ltx25".to_owned(),
+        dataset_root: std::path::Path::new("/datasets/ltx25"),
+        output_dir: std::path::Path::new("/outputs/ltx25"),
+        file_name: "trained.safetensors".to_owned(),
+        created_at: "2026-08-27T00:00:00Z".to_owned(),
+    })
+    .expect("build LTX-2.5 plan");
+
+    assert_eq!(
+        plan.dataset.items[0].extra.get("ltxPreparedBundlePath"),
+        Some(&serde_json::json!("prepared/item-0001.safetensors"))
+    );
 }
 
 #[test]

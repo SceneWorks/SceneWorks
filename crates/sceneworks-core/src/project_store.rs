@@ -958,6 +958,22 @@ impl ProjectStore {
         TrainingDatasetStore::new(project_path).update_dataset(project_id, dataset_id, input)
     }
 
+    pub fn install_ltx_prepared_bundle(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).install_ltx_prepared_bundle(
+            project_id,
+            dataset_id,
+            item_id,
+            source_path,
+        )
+    }
+
     /// Persist freshly-extracted Tier-0 scalars onto dataset items as the readiness cache (sc-6533).
     /// Locked like any dataset mutation; a metadata-only write (no version/`updated_at` bump).
     pub fn cache_dataset_tier0_scalars(

@@ -1084,7 +1084,8 @@
           "outputScope": "project",
           "qualityPreset": "balanced",
           "requestedGpu": "auto",
-          "sampleEvery": 250
+          "sampleEvery": 250,
+          "sampleSteps": 20
         }
       },
       "limits": {
@@ -1126,6 +1127,135 @@
         "datasetModality": "image",
         "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
         "label": "LTX-2.3 Video LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
+      "id": "ltx_2_5_video_lora",
+      "name": "LTX-2.5 Video LoRA",
+      "modality": "video",
+      "outputKind": "lora",
+      "family": "ltx-video",
+      "baseModel": "ltx_2_5",
+      "baseModelRepo": "SceneWorks/ltx-2.5-mlx",
+      "kernel": "ltx_mlx_lora",
+      "defaults": {
+        "rank": 32,
+        "alpha": 32,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 768,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "cacheLatents": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lrScheduler": "constant",
+          "ltxAudio": {
+            "conditions": [],
+            "isGenerated": true
+          },
+          "ltxValidation": {
+            "audioCfgScale": 7.0,
+            "audioModalityGuidanceScale": 3.0,
+            "audioStgScale": 1.0,
+            "fps": 24,
+            "frames": 89,
+            "generateAudio": true,
+            "guidanceRescale": 0.7,
+            "height": 544,
+            "steps": 30,
+            "stgBlocks": [
+              28
+            ],
+            "videoCfgScale": 3.0,
+            "videoModalityGuidanceScale": 3.0,
+            "videoStgScale": 1.0,
+            "width": 960
+          },
+          "ltxVideo": {
+            "conditions": [],
+            "isGenerated": true
+          },
+          "ltxWorkflow": "t2v_lora",
+          "mixedPrecision": "f32",
+          "networkType": "lora",
+          "numFrames": 1,
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleSteps": 30
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          2
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "ltxWorkflows": [
+          "i2v_lora",
+          "t2v_lora",
+          "v2a_lora",
+          "a2v_lora",
+          "t2a_lora",
+          "video_extend_lora",
+          "video_inpainting_lora",
+          "video_outpainting_lora",
+          "video_suffix_lora",
+          "audio_extend_lora",
+          "audio_inpainting_lora",
+          "audio_suffix_lora",
+          "av2av_ic_lora",
+          "v2v_ic_lora",
+          "a2a_ic_lora"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "preparedBundleSchema": "ltx-prepared-v1",
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          4000
+        ]
+      },
+      "ui": {
+        "datasetModality": "video",
+        "description": "Train the full LTX-2.5 video/audio LoRA workflow surface from native preprocessed datasets. Apple Silicon uses MLX; Windows/Linux NVIDIA uses candle/CUDA.",
+        "label": "LTX-2.5 Video LoRA",
         "recommendedFor": [
           "character",
           "style"

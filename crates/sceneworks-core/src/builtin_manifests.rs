@@ -1203,6 +1203,27 @@ mod tests {
     }
 
     #[test]
+    fn ltx_2_3_builtin_loras_are_partitioned_away_from_ltx_2_5() {
+        let ltx: Vec<_> = builtin_loras()
+            .into_iter()
+            .filter(|lora| lora["family"] == serde_json::json!("ltx-video"))
+            .collect();
+        assert_eq!(
+            ltx.len(),
+            4,
+            "the four shipped LTX-2.3 IC-LoRAs are covered"
+        );
+        for lora in ltx {
+            let id = lora["id"].as_str().expect("LTX LoRA id");
+            assert_eq!(
+                lora["modelIds"],
+                serde_json::json!(["ltx_2_3", "ltx_2_3_eros"]),
+                "{id} must not be offered on LTX-2.5: its strict loader contract rejects the shipped 2.3 file"
+            );
+        }
+    }
+
+    #[test]
     fn minimax_h3_turbo_loras_are_registered_and_sha_pinned() {
         // sc-18725 (epic 17137). All FOUR published diffusers checkpoints register as weight-load-only
         // accelerators. Pin every non-default field so this discriminates a real registration from an

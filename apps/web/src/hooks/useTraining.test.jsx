@@ -85,6 +85,26 @@ describe("useTraining deleteTrainingDataset", () => {
     expect(latest.trainingDatasets).toEqual([{ id: "ds_2" }]);
   });
 
+  it("uploads a prepared bundle to the encoded dataset item endpoint and refreshes", async () => {
+    const updated = { id: "ds/a", items: [{ id: "item/b", ltxPreparedBundlePath: "prepared/item_b.safetensors" }] };
+    apiFetchMock.mockResolvedValueOnce(updated);
+    apiFetchMock.mockResolvedValueOnce([]);
+    const file = new File(["bundle"], "prepared.safetensors", { type: "application/octet-stream" });
+
+    let result;
+    await act(async () => {
+      result = await latest.uploadLtxPreparedBundle("ds/a", "item/b", file);
+    });
+
+    expect(result).toEqual(updated);
+    expect(apiFetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/projects/project_a/training/datasets/ds%2Fa/items/item%2Fb/ltx-prepared-bundle",
+    );
+    expect(apiFetchMock.mock.calls[0][2].method).toBe("POST");
+    expect(apiFetchMock.mock.calls[0][2].body).toBeInstanceOf(FormData);
+    expect(apiFetchMock.mock.calls[1][0]).toBe("/api/v1/projects/project_a/training/datasets");
+  });
+
   it("encodes the dataset id in the request path", async () => {
     apiFetchMock.mockResolvedValueOnce({ id: "a/b", status: "deleted" });
     apiFetchMock.mockResolvedValueOnce([]);

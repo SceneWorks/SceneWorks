@@ -2497,12 +2497,36 @@ pub fn lora_base_model(lora: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn lora_declared_model_ids(lora: &Value) -> Vec<&str> {
+    ["modelIds", "model_ids"]
+        .into_iter()
+        .find_map(|key| {
+            let ids: Vec<&str> = lora
+                .get(key)?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .collect();
+            (!ids.is_empty()).then_some(ids)
+        })
+        .unwrap_or_default()
+}
+
 /// Families that share an architecture family but NOT a LoRA-compatible
 /// architecture, so the trained base model must also match (Python
 /// `_BASE_MODEL_GATED_FAMILIES`). Wan: `wan_2_2` (5B) and `wan_2_2_*_14b` (A14B)
-/// are both `wan-video` but cross-applying a LoRA garbles output.
+/// are both `wan-video` but cross-applying a LoRA garbles output. LTX-2.3 and LTX-2.5 share the
+/// `ltx-video` family while their adapter contracts differ (2.5 has no FF bias targets and uses a
+/// strict rank/alpha metadata contract), so a trained output must stay on its recorded generation.
 fn is_base_model_gated_family(family: &str) -> bool {
-    family == "wan-video"
+    matches!(family, "wan-video" | "ltx-video")
+}
+
+fn same_ltx_generation(model_id: &str, base: &str) -> bool {
+    let is_23 = |id: &str| matches!(id, "ltx_2_3" | "ltx_2_3_eros");
+    (is_23(model_id) && is_23(base)) || (model_id == "ltx_2_5" && base == "ltx_2_5")
 }
 
 /// Whether a model id names a **14B-class** Wan-family backbone, by the catalog's own id
@@ -2563,6 +2587,9 @@ pub fn base_model_satisfies_gate(model_family: &str, model_id: &str, base: &str)
         return true;
     }
     let normalized_family = normalize_model_family(model_family);
+    if normalized_family == "ltx-video" {
+        return same_ltx_generation(model_id, base);
+    }
     extra_compatible_lora_families(&normalized_family).contains(&"wan-video")
         && is_wan_14b_class_id(model_id)
         && is_wan_14b_class_id(base)
@@ -2609,7 +2636,7 @@ fn lora_display_id(lora: &Value, index: usize) -> String {
 
 /// Validate every LoRA in `loras` against `model_family` before a job runs
 /// (Python `validate_lora_compatibility`). Errors on a declared family the model
-/// cannot load, or — for a base-model-gated family (Wan) — a recorded base model
+/// cannot load, or — for a base-model-gated family (Wan or LTX) — a recorded base model
 /// that differs from `model_id`. A LoRA that declares no family is skipped (the
 /// user vouches for it). Returns the user-facing message as `Err`.
 pub fn validate_lora_compatibility(
@@ -2620,37 +2647,66 @@ pub fn validate_lora_compatibility(
 ) -> Result<(), String> {
     let normalized_model_family = model_family.map(normalize_model_family).unwrap_or_default();
     let accepted = model_family.map(accepted_lora_families).unwrap_or_default();
-    if loras.is_empty() || accepted.is_empty() {
+    if loras.is_empty() {
         return Ok(());
     }
     for (index, lora) in loras.iter().enumerate() {
+        let lora_id = lora_display_id(lora, index);
+        let declared_model_ids = lora_declared_model_ids(lora);
+        if let Some(model_id) = model_id {
+            if !declared_model_ids.is_empty()
+                && !declared_model_ids
+                    .iter()
+                    .any(|declared| *declared == model_id)
+            {
+                return Err(format!(
+                    "LoRA {lora_id} is declared for model {}, not {model_id}.",
+                    declared_model_ids.join(" or ")
+                ));
+            }
+        }
         let families = lora_declared_families(lora);
-        if families.is_empty() {
+        if families.is_empty() || accepted.is_empty() {
             continue;
         }
-        let lora_id = lora_display_id(lora, index);
         // Accept when any declared family is one the model can load.
         if !families.iter().any(|family| accepted.contains(family)) {
             return Err(format!(
                 "LoRA {lora_id} is not compatible with model family {normalized_model_family} for {adapter_id}."
             ));
         }
-        // Base-model gating (Wan 5B vs 14B): a LoRA that records its trained base
+        // Base-model gating (Wan 5B vs 14B; LTX-2.3 vs LTX-2.5): a LoRA that records its trained base
         // model only applies to that exact model; one without falls back to family.
         if let Some(model_id) = model_id {
             if families
                 .iter()
                 .any(|family| is_base_model_gated_family(family))
             {
-                if let Some(base) = lora_base_model(lora) {
+                let base = lora_base_model(lora);
+                if families.iter().any(|family| family == "ltx-video")
+                    && model_id == "ltx_2_5"
+                    && base.is_none()
+                    && declared_model_ids.is_empty()
+                {
+                    return Err(format!(
+                        "LoRA {lora_id} does not record which LTX base model it targets. \
+                         LTX-2.5 cannot safely load a family-only adapter; re-import it and choose \
+                         LTX-2.5 as the base model."
+                    ));
+                }
+                if let Some(base) = base {
                     // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
                     // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
                     // (sc-15017) — its base can never equal that model's own id.
                     if !base_model_satisfies_gate(model_family.unwrap_or_default(), model_id, &base)
                     {
+                        let detail = if families.iter().any(|family| family == "ltx-video") {
+                            "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable."
+                        } else {
+                            "Wan 5B and 14B LoRAs are not interchangeable."
+                        };
                         return Err(format!(
-                            "LoRA {lora_id} was trained for base model {base}, not {model_id}; \
-                             Wan 5B and 14B LoRAs are not interchangeable."
+                            "LoRA {lora_id} was trained for base model {base}, not {model_id}; {detail}"
                         ));
                     }
                 }
@@ -5794,6 +5850,87 @@ mod tests {
             Some("wan_2_2"),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn validate_lora_compatibility_partitions_ltx_2_3_and_2_5() {
+        let trained_23 = json!({
+            "id": "ltx23",
+            "family": "ltx-video",
+            "baseModel": "ltx_2_3"
+        });
+        let trained_25 = json!({
+            "id": "ltx25",
+            "family": "ltx-video",
+            "baseModel": "ltx_2_5"
+        });
+
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&trained_23),
+            Some("ltx-video"),
+            "ltx_video",
+            Some("ltx_2_3_eros"),
+        )
+        .is_ok());
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&trained_25),
+            Some("ltx-video"),
+            "ltx_video",
+            Some("ltx_2_5"),
+        )
+        .is_ok());
+
+        for (lora, model) in [(trained_23, "ltx_2_5"), (trained_25, "ltx_2_3")] {
+            let err =
+                validate_lora_compatibility(&[lora], Some("ltx-video"), "ltx_video", Some(model))
+                    .unwrap_err();
+            assert!(err.contains("LTX-2.3 and LTX-2.5"), "got: {err}");
+        }
+
+        let family_only = json!({ "id": "legacy-ltx", "family": "ltx-video" });
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&family_only),
+            Some("ltx-video"),
+            "ltx_video",
+            Some("ltx_2_3"),
+        )
+        .is_ok());
+        let err = validate_lora_compatibility(
+            std::slice::from_ref(&family_only),
+            Some("ltx-video"),
+            "ltx_video",
+            Some("ltx_2_5"),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("does not record which LTX base model"),
+            "got: {err}"
+        );
+
+        assert!(validate_lora_compatibility(
+            &[json!({
+                "id": "declared-ltx25",
+                "family": "ltx-video",
+                "modelIds": ["ltx_2_5"]
+            })],
+            Some("ltx-video"),
+            "ltx_video",
+            Some("ltx_2_5"),
+        )
+        .is_ok());
+
+        let err = validate_lora_compatibility(
+            &[json!({
+                "id": "shipped-ltx23",
+                "family": "ltx-video",
+                "modelIds": ["ltx_2_3", "ltx_2_3_eros"]
+            })],
+            Some("ltx-video"),
+            "ltx_video",
+            Some("ltx_2_5"),
+        )
+        .unwrap_err();
+        assert!(err.contains("declared for model ltx_2_3 or ltx_2_3_eros"));
     }
 
     #[test]

@@ -21,7 +21,10 @@
 //! unsupported combinations remain queued. There is no Python/torch training fallback.
 
 use super::*;
+use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 
 // epic 3720 (sc-3724): the backend-neutral training contract types come from `gen_core`, which is
 // tensor-free and links on every target. The import is gated to the backends that actually run a
@@ -108,6 +111,17 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
         if !image_path.exists() {
             missing.push(image_path.display().to_string());
         }
+        let item_options =
+            resolve_training_item_model_options(settings, &plan.dataset.root_path, &item.extra)?;
+        if let Some(bundle_path) = item_options
+            .get("ltxPreparedBundlePath")
+            .and_then(Value::as_str)
+        {
+            let bundle_path = PathBuf::from(bundle_path);
+            if !bundle_path.exists() {
+                missing.push(bundle_path.display().to_string());
+            }
+        }
     }
     if !missing.is_empty() {
         let preview = missing
@@ -122,6 +136,101 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
         )));
     }
     Ok(())
+}
+
+/// Resolve the small model-specific per-item path surface under the same dataset-root confinement
+/// used for ordinary images and ControlNet sidecars. Non-path metadata is forwarded losslessly.
+/// A forged absolute path or symlink escape therefore fails in both dry-run validation and real
+/// execution before a native trainer opens the prepared bundle.
+fn resolve_training_item_model_options(
+    settings: &Settings,
+    dataset_root: &str,
+    options: &ExtraFields,
+) -> WorkerResult<JsonObject> {
+    let mut resolved = options
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<JsonObject>();
+    if let Some(value) = options.get("ltxPreparedBundlePath") {
+        let raw = value.as_str().ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Training item ltxPreparedBundlePath must be a string.".to_owned(),
+            )
+        })?;
+        let path = resolve_dataset_item_path(
+            settings,
+            dataset_root,
+            raw,
+            "Training item ltxPreparedBundlePath",
+        )?;
+        if !path.is_file() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Training item ltxPreparedBundlePath must resolve to a regular safetensors file: {}.",
+                path.display()
+            )));
+        }
+        let expected_size = options
+            .get("ltxPreparedBundleSize")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Training item ltxPreparedBundleSize must be an unsigned integer.".to_owned(),
+                )
+            })?;
+        let expected_sha256 = options
+            .get("ltxPreparedBundleSha256")
+            .and_then(Value::as_str)
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "Training item ltxPreparedBundleSha256 must be a lowercase SHA-256 digest."
+                        .to_owned(),
+                )
+            })?;
+        let (actual_size, actual_sha256) = prepared_bundle_receipt(&path)?;
+        if actual_size != expected_size || actual_sha256 != expected_sha256 {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
+                path.display()
+            )));
+        }
+        resolved.insert(
+            "ltxPreparedBundlePath".to_owned(),
+            Value::String(path.display().to_string()),
+        );
+    }
+    Ok(resolved)
+}
+
+fn prepared_bundle_receipt(path: &Path) -> WorkerResult<(u64, String)> {
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "Could not read LTX prepared bundle {}: {error}.",
+            path.display()
+        ))
+    })?;
+    let mut hash = Sha256::new();
+    let mut size = 0_u64;
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Could not read LTX prepared bundle {}: {error}.",
+                path.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        hash.update(&chunk[..read]);
+    }
+    Ok((size, format!("{:x}", hash.finalize())))
 }
 
 /// A fully mapped, weights-free training request. Both dry-run and real execution obtain this from
@@ -279,6 +388,11 @@ fn training_request_from_plan(
                         )
                     })
                     .transpose()?,
+                model_options: resolve_training_item_model_options(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.extra,
+                )?,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -316,6 +430,21 @@ fn validate_weights_free_training_request(
     gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
+
+    if plan.target.base_model == "ltx_2_5" {
+        #[cfg(target_os = "macos")]
+        mlx_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+            ))
+        })?;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        candle_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+            ))
+        })?;
+    }
 
     validate_new_family_request(plan, engine_id, request)?;
     Ok(())
@@ -627,7 +756,14 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "sd3_5_medium" => Some("sd3_5_medium"),
             _ => None,
         },
-        "ltx_mlx_lora" => Some("ltx_2_3"),
+        // LTX-2.3 and 2.5 share the routed kernel but not a trainer identity. The 2.5 engine path
+        // has a stricter adapter contract and a Gemma-4/self-contained base layout, so never alias
+        // it to the 2.3 trainer merely because both advertise `ltx-video`.
+        "ltx_mlx_lora" => match base_model {
+            "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3"),
+            "ltx_2_5" => Some(ltx_2_5_trainer_id()),
+            _ => None,
+        },
         // Dense Wan2.2-TI2V-5B.
         "wan_lora" => (base_model == "wan_2_2").then_some("wan2_2_ti2v_5b"),
         // A14B dual-expert MoE; the T2V/I2V base model picks the trainer.
@@ -663,6 +799,21 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// The exact registered backend identity for LTX-2.5 training. Generation and training preserve
+/// the R2 backend split: MLX registers the dev identity directly; Candle trains through its
+/// distilled-provider registration. Keeping this cfg-local prevents one platform's id from being
+/// advertised to the other registry.
+fn ltx_2_5_trainer_id() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "ltx_2_5"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "ltx_2_5_distilled"
     }
 }
 
@@ -831,6 +982,11 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         sample_every: advanced_u32(advanced, "sampleEvery", 0),
         sample_steps: advanced_u32(advanced, "sampleSteps", 20),
         sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
+        // Preserve the family-specific option surface instead of collapsing it into the common
+        // scalar fields above. Native trainers parse only the keys they own and fail closed on an
+        // unsupported requested mode. This is load-bearing for LTX-2.5's video/audio workflow,
+        // intrinsic/reference conditioning, and validation guidance contract.
+        model_options: advanced.clone(),
         // Preserve submitted resume intent. Each backend either implements it or the shared
         // dry/real preflight rejects it before any model load.
         resume: advanced_bool(advanced, "resume", false),
@@ -969,7 +1125,9 @@ enum TrainEvent {
 /// resolve the bundled sibling and thread it on, letting a self-contained install train without a
 /// separate `mlx-community/gemma-3-12b-it-bf16` download (sc-9989). `None` for every other family (TE
 /// lives inside the weights dir) and for a legacy LTX conversion with no sibling or an operator
-/// `$LTX_GEMMA_DIR`. The same resolver is used by MLX and candle so the turnkey layout is portable.
+/// `$LTX_GEMMA_DIR`. LTX-2.5's selected tier contains its Gemma-4 encoder, so it deliberately keeps
+/// the engine's own resolution. The same resolver is used by MLX and candle so the turnkey layout
+/// is portable.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2024,6 +2182,8 @@ mod tests {
         let bare = root.join("no_sibling").join("q4");
         std::fs::create_dir_all(&bare).unwrap();
         assert!(training_text_encoder("ltx_2_3", &bare).is_none());
+        // LTX-2.5 self-contains Gemma-4 in the selected tier and must never inherit the 2.3 sibling.
+        assert!(training_text_encoder("ltx_2_5", &tier).is_none());
     }
 
     fn test_settings(data_dir: &Path) -> Settings {
@@ -2050,6 +2210,64 @@ mod tests {
             gpu_memory_limit_bytes: 0,
             external_model_roots: Vec::new(),
         }
+    }
+
+    #[test]
+    fn ltx_prepared_bundle_path_is_resolved_under_the_dataset_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let prepared_dir = dataset_root.join("prepared");
+        std::fs::create_dir_all(&prepared_dir).expect("create prepared dir");
+        let bundle = prepared_dir.join("item-0001.safetensors");
+        std::fs::write(&bundle, b"stub").expect("write prepared bundle");
+        let mut options = ExtraFields::new();
+        options.insert(
+            "ltxPreparedBundlePath".to_owned(),
+            json!("prepared/item-0001.safetensors"),
+        );
+        let (size, sha256) = prepared_bundle_receipt(&bundle).expect("hash bundle");
+        options.insert("ltxPreparedBundleSize".to_owned(), json!(size));
+        options.insert("ltxPreparedBundleSha256".to_owned(), json!(sha256));
+
+        let resolved = resolve_training_item_model_options(
+            &settings,
+            &dataset_root.display().to_string(),
+            &options,
+        )
+        .expect("resolve confined prepared bundle");
+        assert_eq!(
+            resolved.get("ltxPreparedBundlePath"),
+            Some(&json!(bundle.display().to_string()))
+        );
+
+        std::fs::write(&bundle, b"tampered").expect("tamper prepared bundle");
+        let error = resolve_training_item_model_options(
+            &settings,
+            &dataset_root.display().to_string(),
+            &options,
+        )
+        .expect_err("tampered prepared bundle must be rejected");
+        assert!(
+            error.to_string().contains("integrity check"),
+            "got: {error}"
+        );
+        std::fs::write(&bundle, b"stub").expect("restore prepared bundle");
+
+        options.insert(
+            "ltxPreparedBundlePath".to_owned(),
+            json!("../../outside.safetensors"),
+        );
+        let error = resolve_training_item_model_options(
+            &settings,
+            &dataset_root.display().to_string(),
+            &options,
+        )
+        .expect_err("prepared bundle traversal must be rejected");
+        assert!(
+            error.to_string().contains("outside the allowed roots"),
+            "got: {error}"
+        );
     }
 
     /// A complete resolved plan as the API serializes it, parameterized by the
@@ -2235,6 +2453,10 @@ mod tests {
         assert!(
             finalized_checkpointing("ltx_mlx_lora", "ltx_2_3"),
             "LTX-2.3 22B forces gradient checkpointing on candle"
+        );
+        assert!(
+            finalized_checkpointing("ltx_mlx_lora", "ltx_2_5"),
+            "LTX-2.5 22B forces gradient checkpointing on candle"
         );
         let ltx_plan = parse(plan_json(
             dir.path(),
@@ -2584,6 +2806,11 @@ mod tests {
     ))]
     #[test]
     fn engine_trainer_id_maps_native_families_and_rejects_the_rest() {
+        let ltx_2_5_trainer = if cfg!(target_os = "macos") {
+            "ltx_2_5"
+        } else {
+            "ltx_2_5_distilled"
+        };
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("z_image_lora", "z_image_turbo", Some("z_image_turbo")),
             ("sdxl_lora", "sdxl", Some("sdxl")),
@@ -2593,6 +2820,8 @@ mod tests {
             ("sdxl_lora", "illustrious_xl_v1", Some("sdxl")),
             ("sdxl_lora", "illustrious_xl_v2", Some("sdxl")),
             ("ltx_mlx_lora", "ltx_2_3", Some("ltx_2_3")),
+            ("ltx_mlx_lora", "ltx_2_5", Some(ltx_2_5_trainer)),
+            ("ltx_mlx_lora", "ltx_2_3_eros", Some("ltx_2_3")),
             ("wan_lora", "wan_2_2", Some("wan2_2_ti2v_5b")),
             ("wan_moe_lora", "wan_2_2_t2v_14b", Some("wan2_2_t2v_14b")),
             ("wan_moe_lora", "wan_2_2_i2v_14b", Some("wan2_2_i2v_14b")),
@@ -3002,13 +3231,22 @@ mod tests {
     fn map_training_config_reads_advanced_and_passes_optimizer_verbatim() {
         let dir = tempfile::tempdir().expect("tempdir");
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
-        let plan = parse(plan_json(
+        let mut value = plan_json(
             dir.path(),
             "z_image_lora",
             "z_image_turbo",
             "lokr",
             &[&image.display().to_string()],
-        ));
+        );
+        value["config"]["advanced"]["ltxWorkflow"] = json!("t2v_lora");
+        value["config"]["advanced"]["ltxValidation"] = json!({
+            "width": 960,
+            "height": 544,
+            "frames": 89,
+            "fps": 24,
+            "steps": 30
+        });
+        let plan = parse(value);
         let cfg = map_training_config(&plan.config);
         assert_eq!(cfg.rank, 16);
         assert_eq!(cfg.alpha as u32, 32);
@@ -3029,6 +3267,16 @@ mod tests {
         );
         assert_eq!(cfg.timestep_bias, "high_noise");
         assert_eq!(cfg.trigger_word, None);
+        assert_eq!(
+            cfg.model_options.get("ltxWorkflow"),
+            Some(&json!("t2v_lora"))
+        );
+        assert_eq!(
+            cfg.model_options
+                .get("ltxValidation")
+                .and_then(|value| value.get("frames")),
+            Some(&json!(89))
+        );
     }
 
     /// sc-14056 / sc-14980 — the TRAINING seam must ask for the DENSE tier, by name.

@@ -632,6 +632,7 @@ pub(crate) async fn run_video_generate_job(
 ) -> WorkerResult<()> {
     let request = VideoRequest::from_payload(&job.payload);
     video_preflight(&request)?;
+    validate_video_lora_compatibility(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -1231,6 +1232,22 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
     Ok(())
+}
+
+/// Re-run the API's model/family partition gate at the worker trust boundary before heartbeat or
+/// any media/model work. LTX-2.3 and LTX-2.5 intentionally share `ltx-video`, so family equality
+/// alone cannot make an adapter safe; `modelIds` and `baseModel` are both enforced by core.
+fn validate_video_lora_compatibility(request: &VideoRequest) -> WorkerResult<()> {
+    if !is_ltx_model(&request.model) {
+        return Ok(());
+    }
+    sceneworks_core::lora_family::validate_lora_compatibility(
+        &request.loras,
+        Some("ltx-video"),
+        "ltx_video",
+        Some(&request.model),
+    )
+    .map_err(WorkerError::InvalidPayload)
 }
 
 /// Build the sanitized workflow envelope for this clip and write it beside the media as an

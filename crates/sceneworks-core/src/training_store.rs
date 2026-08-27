@@ -1,9 +1,11 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
@@ -109,6 +111,12 @@ pub struct TrainingDatasetItemInput {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    #[serde(default)]
+    pub control_image_path: Option<String>,
+    /// Forward-compatible per-item training inputs. LTX-2.5 uses
+    /// `ltxPreparedBundlePath`; ordinary image datasets leave this empty.
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 /// A trusted server-side source used to materialize bytes that do not yet live
@@ -392,6 +400,130 @@ impl TrainingDatasetStore {
         }
         dataset.updated_at = utc_now();
         self.save_dataset(&dataset)?;
+        Ok(dataset)
+    }
+
+    /// Install one LTX-2.5 prepared example beside its owning dataset and stamp the item with a
+    /// dataset-relative path. The upload contract is intentionally narrow: callers cannot choose
+    /// a destination, and neither the dataset id nor item id may escape the dataset root.
+    pub fn install_ltx_prepared_bundle(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        self.install_ltx_prepared_bundle_with_save(
+            project_id,
+            dataset_id,
+            item_id,
+            source_path,
+            |dataset| self.save_dataset(dataset),
+        )
+    }
+
+    fn install_ltx_prepared_bundle_with_save<F>(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+        save: F,
+    ) -> ProjectStoreResult<TrainingDataset>
+    where
+        F: FnOnce(&TrainingDataset) -> ProjectStoreResult<()>,
+    {
+        if !is_safe_id(dataset_id) || !is_safe_id(item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset or item ID".to_owned(),
+            ));
+        }
+        let metadata = fs::metadata(source_path)?;
+        if !metadata.is_file() {
+            return Err(ProjectStoreError::BadRequest(
+                "LTX prepared bundle upload must be a regular safetensors file".to_owned(),
+            ));
+        }
+        validate_ltx_prepared_bundle_header(source_path)?;
+
+        let original_dataset = self.read_dataset_by_id(dataset_id)?;
+        let mut dataset = original_dataset.clone();
+        ensure_dataset_project(project_id, &dataset)?;
+        let item = dataset
+            .items
+            .iter_mut()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        let prepared_dir = dataset_root(&self.project_path, dataset_id).join("prepared");
+        fs::create_dir_all(&prepared_dir)?;
+        let relative = format!("prepared/{item_id}.safetensors");
+        let destination = prepared_dir.join(format!("{item_id}.safetensors"));
+        let staged = prepared_dir.join(format!(".{item_id}.{}.tmp", random_hex(8)?));
+        fs::copy(source_path, &staged)?;
+        let receipt = match validate_ltx_prepared_bundle_header(&staged)
+            .and_then(|()| prepared_bundle_receipt(&staged))
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = fs::remove_file(&staged);
+                return Err(error);
+            }
+        };
+        let backup = if destination.exists() {
+            Some(prepared_dir.join(format!(".{item_id}.{}.previous", random_hex(8)?)))
+        } else {
+            None
+        };
+        if let Some(backup) = backup.as_ref() {
+            fs::rename(&destination, backup)?;
+        }
+        if let Err(error) = fs::rename(&staged, &destination) {
+            let _ = fs::remove_file(&staged);
+            if let Some(backup) = backup.as_ref() {
+                let _ = fs::rename(backup, &destination);
+            }
+            return Err(ProjectStoreError::Io(error));
+        }
+        item.extra
+            .insert("ltxPreparedBundlePath".to_owned(), Value::String(relative));
+        item.extra.insert(
+            "ltxPreparedBundleSize".to_owned(),
+            Value::from(receipt.size),
+        );
+        item.extra.insert(
+            "ltxPreparedBundleSha256".to_owned(),
+            Value::String(receipt.sha256),
+        );
+        dataset.version = dataset.version.saturating_add(1);
+        dataset.updated_at = utc_now();
+        if let Err(error) = save(&dataset) {
+            let mut rollback_errors = Vec::new();
+            if let Err(rollback_error) = fs::remove_file(&destination) {
+                if rollback_error.kind() != std::io::ErrorKind::NotFound {
+                    rollback_errors.push(format!("remove replacement: {rollback_error}"));
+                }
+            }
+            if let Some(backup) = backup.as_ref() {
+                if let Err(rollback_error) = fs::rename(backup, &destination) {
+                    rollback_errors.push(format!("restore prior bundle: {rollback_error}"));
+                }
+            }
+            if let Err(rollback_error) = self.save_dataset(&original_dataset) {
+                rollback_errors.push(format!("restore dataset record: {rollback_error}"));
+            }
+            if rollback_errors.is_empty() {
+                return Err(error);
+            }
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Prepared bundle save failed ({error}); rollback also failed: {}",
+                rollback_errors.join("; ")
+            )));
+        }
+        if let Some(backup) = backup {
+            let _ = fs::remove_file(backup);
+        }
         Ok(dataset)
     }
 
@@ -839,6 +971,271 @@ impl TrainingDatasetStore {
     }
 }
 
+/// Header-only admission check for uploaded prepared examples. Runtime-specific validators still
+/// validate the selected workflow and all referenced condition tensors at dry-run/execute time.
+fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
+    let header = crate::lora_family::read_safetensors_header(path).map_err(|error| {
+        ProjectStoreError::BadRequest(format!("Invalid LTX prepared safetensors bundle: {error}"))
+    })?;
+    let object = header.as_object().ok_or_else(|| {
+        ProjectStoreError::BadRequest(
+            "Invalid LTX prepared safetensors bundle: header must be an object".to_owned(),
+        )
+    })?;
+    let metadata = object
+        .get("__metadata__")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            ProjectStoreError::BadRequest(
+                "LTX prepared bundle must declare __metadata__.schemaVersion=ltx-prepared-v1"
+                    .to_owned(),
+            )
+        })?;
+    if metadata.get("schemaVersion").and_then(Value::as_str) != Some("ltx-prepared-v1") {
+        return Err(ProjectStoreError::BadRequest(
+            "LTX prepared bundle must declare __metadata__.schemaVersion=ltx-prepared-v1"
+                .to_owned(),
+        ));
+    }
+    if metadata.values().any(|value| !value.is_string()) {
+        return Err(invalid_prepared_bundle(
+            "all __metadata__ values must be strings",
+        ));
+    }
+    let video_shape = prepared_metadata_shape(metadata, "videoShape", 5)?;
+    let audio_shape = prepared_metadata_shape(metadata, "audioShape", 4)?;
+    if video_shape[0] != 1 || video_shape[1] != 128 {
+        return Err(invalid_prepared_bundle(
+            "videoShape must be [1,128,F,H,W] with positive dimensions",
+        ));
+    }
+    if audio_shape[0] != 1 || audio_shape[1].saturating_mul(audio_shape[3]) != 128 {
+        return Err(invalid_prepared_bundle(
+            "audioShape must be [1,C,T,F] with C*F=128 and positive dimensions",
+        ));
+    }
+    let fps = metadata
+        .get("fps")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_prepared_bundle("metadata fps is required"))?
+        .parse::<f64>()
+        .map_err(|_| invalid_prepared_bundle("metadata fps must be a finite positive number"))?;
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(invalid_prepared_bundle(
+            "metadata fps must be a finite positive number",
+        ));
+    }
+    let output_frames = video_shape[2]
+        .checked_sub(1)
+        .and_then(|value| value.checked_mul(8))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| invalid_prepared_bundle("videoShape duration overflows"))?;
+    let expected_audio_frames = python_round(output_frames as f64 / fps * 25.0) as usize;
+    if audio_shape[2] != expected_audio_frames {
+        return Err(invalid_prepared_bundle(&format!(
+            "audioShape duration must contain {expected_audio_frames} latent frames for videoShape/fps"
+        )));
+    }
+
+    let mut ranges = Vec::new();
+    for (name, tensor) in object
+        .iter()
+        .filter(|(name, _)| name.as_str() != "__metadata__")
+    {
+        ranges.push(validate_prepared_tensor_header(name, tensor)?);
+    }
+    ranges.sort_unstable_by_key(|range| range.0);
+    let mut next_offset = 0_u64;
+    for (start, end) in ranges {
+        if start != next_offset {
+            return Err(invalid_prepared_bundle(
+                "tensor data offsets must be contiguous and non-overlapping",
+            ));
+        }
+        next_offset = end;
+    }
+    validate_prepared_payload_length(path, next_offset)?;
+    require_prepared_float_tensor(object, "video_latents", &video_shape)?;
+    require_prepared_float_tensor(object, "audio_latents", &audio_shape)?;
+    Ok(())
+}
+
+fn validate_prepared_payload_length(
+    path: &Path,
+    declared_data_bytes: u64,
+) -> ProjectStoreResult<()> {
+    let physical_bytes = fs::metadata(path)?.len();
+    let mut file = fs::File::open(path)?;
+    let mut header_length_bytes = [0_u8; 8];
+    file.read_exact(&mut header_length_bytes).map_err(|_| {
+        invalid_prepared_bundle("file is missing its safetensors header-length prefix")
+    })?;
+    let header_bytes = u64::from_le_bytes(header_length_bytes);
+    let expected_bytes = 8_u64
+        .checked_add(header_bytes)
+        .and_then(|bytes| bytes.checked_add(declared_data_bytes))
+        .ok_or_else(|| invalid_prepared_bundle("declared payload length overflows"))?;
+    if physical_bytes != expected_bytes {
+        return Err(invalid_prepared_bundle(&format!(
+            "physical file length must exactly match its declared tensor payload ({physical_bytes} bytes present, {expected_bytes} declared)"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_prepared_bundle(detail: &str) -> ProjectStoreError {
+    ProjectStoreError::BadRequest(format!("Invalid LTX prepared safetensors bundle: {detail}"))
+}
+
+fn prepared_metadata_shape(
+    metadata: &serde_json::Map<String, Value>,
+    key: &str,
+    rank: usize,
+) -> ProjectStoreResult<Vec<usize>> {
+    let raw = metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("metadata {key} is required")))?;
+    let shape: Vec<usize> = serde_json::from_str(raw)
+        .map_err(|_| invalid_prepared_bundle(&format!("metadata {key} must be a JSON shape")))?;
+    if shape.len() != rank || shape.contains(&0) {
+        return Err(invalid_prepared_bundle(&format!(
+            "metadata {key} must be a non-zero {rank}-axis shape"
+        )));
+    }
+    Ok(shape)
+}
+
+fn validate_prepared_tensor_header(name: &str, value: &Value) -> ProjectStoreResult<(u64, u64)> {
+    let tensor = value.as_object().ok_or_else(|| {
+        invalid_prepared_bundle(&format!("tensor {name} header must be an object"))
+    })?;
+    let dtype = tensor
+        .get("dtype")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} dtype is required")))?;
+    let element_bytes = match dtype {
+        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" => 1_u64,
+        "U16" | "I16" | "F16" | "BF16" => 2,
+        "U32" | "I32" | "F32" => 4,
+        "U64" | "I64" | "F64" => 8,
+        _ => {
+            return Err(invalid_prepared_bundle(&format!(
+                "tensor {name} has unsupported dtype {dtype}"
+            )))
+        }
+    };
+    let shape = tensor
+        .get("shape")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} shape is required")))?;
+    if shape.is_empty()
+        || shape
+            .iter()
+            .any(|axis| axis.as_u64().is_none_or(|axis| axis == 0))
+    {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} shape must contain positive integer axes"
+        )));
+    }
+    let elements = shape.iter().try_fold(1_u64, |total, axis| {
+        total
+            .checked_mul(axis.as_u64().expect("validated axis"))
+            .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} shape overflows")))
+    })?;
+    let offsets = tensor
+        .get("data_offsets")
+        .and_then(Value::as_array)
+        .filter(|offsets| offsets.len() == 2)
+        .ok_or_else(|| {
+            invalid_prepared_bundle(&format!("tensor {name} data_offsets are required"))
+        })?;
+    let start = offsets[0].as_u64().ok_or_else(|| {
+        invalid_prepared_bundle(&format!("tensor {name} start offset is invalid"))
+    })?;
+    let end = offsets[1]
+        .as_u64()
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} end offset is invalid")))?;
+    let expected_bytes = elements
+        .checked_mul(element_bytes)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} byte size overflows")))?;
+    if end.checked_sub(start) != Some(expected_bytes) {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} byte range does not match its shape and dtype"
+        )));
+    }
+    Ok((start, end))
+}
+
+fn require_prepared_float_tensor(
+    object: &serde_json::Map<String, Value>,
+    name: &str,
+    expected_shape: &[usize],
+) -> ProjectStoreResult<()> {
+    let tensor = object
+        .get(name)
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid_prepared_bundle(&format!("bundle is missing {name}")))?;
+    if !matches!(
+        tensor.get("dtype").and_then(Value::as_str),
+        Some("F16" | "BF16" | "F32" | "F64")
+    ) {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} must use a floating dtype"
+        )));
+    }
+    let shape = tensor
+        .get("shape")
+        .and_then(Value::as_array)
+        .and_then(|axes| axes.iter().map(Value::as_u64).collect::<Option<Vec<_>>>())
+        .ok_or_else(|| invalid_prepared_bundle(&format!("tensor {name} shape is invalid")))?;
+    if shape
+        != expected_shape
+            .iter()
+            .map(|axis| *axis as u64)
+            .collect::<Vec<_>>()
+    {
+        return Err(invalid_prepared_bundle(&format!(
+            "tensor {name} shape disagrees with its metadata"
+        )));
+    }
+    Ok(())
+}
+
+fn python_round(value: f64) -> u64 {
+    let floor = value.floor();
+    let fraction = value - floor;
+    if fraction < 0.5 || (fraction == 0.5 && floor as u64 % 2 == 0) {
+        floor.max(0.0) as u64
+    } else {
+        floor.max(0.0) as u64 + 1
+    }
+}
+
+struct PreparedBundleReceipt {
+    size: u64,
+    sha256: String,
+}
+
+fn prepared_bundle_receipt(path: &Path) -> ProjectStoreResult<PreparedBundleReceipt> {
+    let mut file = fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut size = 0_u64;
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        hash.update(&chunk[..read]);
+    }
+    Ok(PreparedBundleReceipt {
+        size,
+        sha256: format!("{:x}", hash.finalize()),
+    })
+}
+
 #[derive(Debug, Clone)]
 struct RenamePlan {
     original_item_id: String,
@@ -1206,6 +1603,7 @@ fn materialize_external_item(
     let relative_path = format!("images/{item_id}{extension}");
     let target_path = media_dir.join(format!("{item_id}{extension}"));
     fs::copy(&source_path, &target_path)?;
+    let control_image_path = validated_control_image_path(item.control_image_path)?;
     let caption = item.caption.unwrap_or_default();
     let dimensions = crate::media_convert::image_dimensions(&target_path).ok_or_else(|| {
         ProjectStoreError::BadRequest(
@@ -1227,7 +1625,7 @@ fn materialize_external_item(
         id: item_id,
         asset_id: None,
         path: relative_path,
-        control_image_path: None,
+        control_image_path,
         display_name: item
             .display_name
             .unwrap_or_else(|| input_display_name(&source_path)),
@@ -1304,6 +1702,7 @@ fn materialize_item(
     } else {
         fs::copy(&source.path, &target_path)?;
     }
+    let control_image_path = validated_control_image_path(input.control_image_path)?;
     let caption = input.caption.unwrap_or_default();
     // sc-6531 (Dataset Doctor): every item must carry real pixel dimensions + a content hash —
     // the foundation Tier-0 checks (min-resolution, crop-loss, exact-dup) rely on. Prefer
@@ -1324,9 +1723,7 @@ fn materialize_item(
         id: item_id,
         asset_id: source.asset_id,
         path: relative_path,
-        // Fresh import → no control condition rendered yet (only a ControlNet-training prep pass
-        // writes one). epic 10159.
-        control_image_path: None,
+        control_image_path,
         display_name: input.display_name.unwrap_or(source.display_name),
         caption: Caption {
             text: caption.text,
@@ -1344,7 +1741,7 @@ fn materialize_item(
         // Fresh file → no dismissed findings yet (sc-6534).
         quality_ack: None,
         added_at: now.to_owned(),
-        extra: Default::default(),
+        extra: input.extra,
     })
 }
 
@@ -1406,6 +1803,18 @@ struct ItemSource {
     display_name: String,
     width: Option<u32>,
     height: Option<u32>,
+}
+
+fn validated_control_image_path(path: Option<String>) -> ProjectStoreResult<Option<String>> {
+    let Some(path) = path.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if !is_safe_relative_path(&path) {
+        return Err(ProjectStoreError::BadRequest(
+            "Invalid dataset item controlImagePath".to_owned(),
+        ));
+    }
+    Ok(Some(path))
 }
 
 fn resolve_item_source(
@@ -1880,6 +2289,7 @@ fn optional_u32(value: Option<&Value>) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::dataset_quality::Tier0Scalars;
+    use serde_json::json;
 
     fn item(id: &str, content_hash: &str) -> TrainingDatasetItem {
         TrainingDatasetItem {
@@ -1976,6 +2386,8 @@ mod tests {
                         caption: None,
                         width: None,
                         height: None,
+                        control_image_path: None,
+                        extra: Default::default(),
                     }],
                 },
             )
@@ -2458,6 +2870,182 @@ mod tests {
 
         // Metadata write: the dataset version is untouched (the pixels didn't change).
         assert_eq!(store.get_dataset("proj", "ds_test").unwrap().version, 1);
+    }
+
+    fn write_prepared_bundle(path: &Path, schema: &str) {
+        let mut header = serde_json::to_vec(&json!({
+            "__metadata__": {
+                "schemaVersion": schema,
+                "videoShape": "[1,128,1,1,1]",
+                "audioShape": "[1,8,1,16]",
+                "fps": "25"
+            },
+            "video_latents": {
+                "dtype": "F32",
+                "shape": [1,128,1,1,1],
+                "data_offsets": [0,512]
+            },
+            "audio_latents": {
+                "dtype": "F32",
+                "shape": [1,8,1,16],
+                "data_offsets": [512,1024]
+            }
+        }))
+        .unwrap();
+        while header.len() % 8 != 0 {
+            header.push(b' ');
+        }
+        let mut bytes = Vec::with_capacity(8 + header.len() + 1024);
+        bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&header);
+        bytes.resize(bytes.len() + 1024, 0);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn prepared_bundle_upload_is_confined_stamped_and_round_trips() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let upload = dir.path().join("upload.safetensors");
+        write_prepared_bundle(&upload, "ltx-prepared-v1");
+
+        let updated = store
+            .install_ltx_prepared_bundle("proj", "ds_test", "item_1", &upload)
+            .expect("install prepared bundle");
+        assert_eq!(updated.version, 2);
+        assert_eq!(
+            updated.items[0]
+                .extra
+                .get("ltxPreparedBundlePath")
+                .and_then(Value::as_str),
+            Some("prepared/item_1.safetensors")
+        );
+        assert!(updated.items[0]
+            .extra
+            .get("ltxPreparedBundleSize")
+            .and_then(Value::as_u64)
+            .is_some_and(|size| size > 1024));
+        assert_eq!(
+            updated.items[0]
+                .extra
+                .get("ltxPreparedBundleSha256")
+                .and_then(Value::as_str)
+                .map(str::len),
+            Some(64)
+        );
+        assert!(dataset_root(dir.path(), "ds_test")
+            .join("prepared/item_1.safetensors")
+            .is_file());
+        assert_eq!(
+            store.get_dataset("proj", "ds_test").unwrap().items[0]
+                .extra
+                .get("ltxPreparedBundlePath")
+                .and_then(Value::as_str),
+            Some("prepared/item_1.safetensors")
+        );
+
+        write_prepared_bundle(&upload, "wrong-schema");
+        let error = store
+            .install_ltx_prepared_bundle("proj", "ds_test", "item_2", &upload)
+            .unwrap_err();
+        assert!(error.to_string().contains("schemaVersion=ltx-prepared-v1"));
+        assert!(!dataset_root(dir.path(), "ds_test")
+            .join("prepared/item_2.safetensors")
+            .exists());
+    }
+
+    #[test]
+    fn prepared_bundle_replacement_rolls_back_file_and_record_when_save_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = saved_dataset(dir.path());
+        let upload = dir.path().join("upload.safetensors");
+        write_prepared_bundle(&upload, "ltx-prepared-v1");
+        let first = store
+            .install_ltx_prepared_bundle("proj", "ds_test", "item_1", &upload)
+            .expect("initial install");
+        let destination = dataset_root(dir.path(), "ds_test").join("prepared/item_1.safetensors");
+        let prior_bytes = fs::read(&destination).unwrap();
+        let prior_digest = first.items[0].extra["ltxPreparedBundleSha256"].clone();
+
+        let mut replacement = fs::read(&upload).unwrap();
+        *replacement.last_mut().unwrap() = 7;
+        fs::write(&upload, replacement).unwrap();
+        let manifest_path = dataset_manifest_path(dir.path(), "ds_test");
+        let error = store
+            .install_ltx_prepared_bundle_with_save(
+                "proj",
+                "ds_test",
+                "item_1",
+                &upload,
+                |dataset| {
+                    write_json(&manifest_path, dataset)?;
+                    Err(ProjectStoreError::BadRequest(
+                        "injected index failure".to_owned(),
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("injected index failure"));
+        assert_eq!(fs::read(&destination).unwrap(), prior_bytes);
+        let reopened = store.get_dataset("proj", "ds_test").unwrap();
+        assert_eq!(
+            reopened.items[0].extra["ltxPreparedBundleSha256"],
+            prior_digest
+        );
+        assert_eq!(reopened.version, first.version);
+    }
+
+    #[test]
+    fn prepared_bundle_rejects_missing_modalities_shape_mismatch_and_bad_dtype() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("bad.safetensors");
+        fs::write(&path, b"not-a-safetensors-header").unwrap();
+        assert!(validate_ltx_prepared_bundle_header(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid LTX prepared safetensors bundle"));
+        write_prepared_bundle(&path, "ltx-prepared-v1");
+        let mut appended = fs::read(&path).unwrap();
+        appended.push(0x7f);
+        fs::write(&path, appended).unwrap();
+        assert!(validate_ltx_prepared_bundle_header(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("physical file length must exactly match"));
+        let cases = [
+            json!({
+                "__metadata__": {"schemaVersion":"ltx-prepared-v1","videoShape":"[1,128,1,1,1]","audioShape":"[1,8,1,16]","fps":"25"},
+                "video_latents":{"dtype":"F32","shape":[1,128,1,1,1],"data_offsets":[0,512]}
+            }),
+            json!({
+                "__metadata__": {"schemaVersion":"ltx-prepared-v1","videoShape":"[1,128,1,1,1]","audioShape":"[1,8,1,16]","fps":"25"},
+                "video_latents":{"dtype":"F32","shape":[1,64,1,1,1],"data_offsets":[0,256]},
+                "audio_latents":{"dtype":"F32","shape":[1,8,1,16],"data_offsets":[256,768]}
+            }),
+            json!({
+                "__metadata__": {"schemaVersion":"ltx-prepared-v1","videoShape":"[1,128,1,1,1]","audioShape":"[1,8,1,16]","fps":"25"},
+                "video_latents":{"dtype":"U8","shape":[1,128,1,1,1],"data_offsets":[0,128]},
+                "audio_latents":{"dtype":"F32","shape":[1,8,1,16],"data_offsets":[128,640]}
+            }),
+        ];
+        for header in cases {
+            let mut encoded = serde_json::to_vec(&header).unwrap();
+            while encoded.len() % 8 != 0 {
+                encoded.push(b' ');
+            }
+            let data_end = header
+                .as_object()
+                .unwrap()
+                .values()
+                .filter_map(|value| value.get("data_offsets")?.as_array()?.get(1)?.as_u64())
+                .max()
+                .unwrap_or(0) as usize;
+            let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(&encoded);
+            bytes.resize(bytes.len() + data_end, 0);
+            fs::write(&path, bytes).unwrap();
+            assert!(validate_ltx_prepared_bundle_header(&path).is_err());
+        }
     }
 
     /// sc-11202 / F-026: the training path's project.db openers were raw
