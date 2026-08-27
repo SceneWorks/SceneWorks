@@ -14572,6 +14572,63 @@ mod candle_video_label_tests {
     }
 
     #[test]
+    fn candle_ltx25_resolver_uses_split_manifest_and_selects_every_exact_tier() {
+        let root = tempfile::tempdir().expect("ltx25 bundle");
+        for variant in ["distilled", "dev"] {
+            for tier in ["q4", "q8", "bf16"] {
+                let dir = root.path().join(variant).join(tier);
+                std::fs::create_dir_all(&dir).expect("tier dir");
+                std::fs::write(dir.join("transformer.safetensors"), "x")
+                    .expect("transformer marker");
+                std::fs::write(dir.join("split_model.json"), "{}")
+                    .expect("2.5 split manifest marker");
+            }
+        }
+
+        for (bits, tier) in [(4, "q4"), (8, "q8"), (0, "bf16"), (-1, "bf16")] {
+            for variant in ["distilled", "dev"] {
+                let request = request(json!({
+                    "projectId": "p",
+                    "model": "ltx_2_5",
+                    "advanced": {
+                        "mlxQuantize": bits,
+                        "transformerVariant": variant,
+                    }
+                }));
+                let (resolved, quant) =
+                    candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &request)
+                        .expect("exact LTX-2.5 variant/tier");
+                assert_eq!(resolved, root.path().join(variant).join(tier));
+                assert!(
+                    quant.is_none(),
+                    "the selected tier is already packed or dense"
+                );
+            }
+        }
+
+        let default = request(json!({ "projectId": "p", "model": "ltx_2_5" }));
+        assert_eq!(
+            candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &default,)
+                .map(|(dir, _)| dir),
+            Some(root.path().join("distilled/q4")),
+            "omitted selectors retain the distilled q4 default"
+        );
+
+        std::fs::remove_file(root.path().join("dev/bf16/split_model.json"))
+            .expect("tear exact tier");
+        let missing = request(json!({
+            "projectId": "p",
+            "model": "ltx_2_5",
+            "advanced": { "mlxQuantize": 0, "transformerVariant": "dev" }
+        }));
+        assert!(
+            candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &missing,)
+                .is_none(),
+            "a missing exact dev bf16 tier must not downgrade to another tier or variant"
+        );
+    }
+
+    #[test]
     fn candle_ltx_q8_fetch_is_on_demand_and_never_required_when_complete() {
         fn block_on<F: std::future::Future>(future: F) -> F::Output {
             tokio::runtime::Builder::new_multi_thread()
