@@ -36,6 +36,10 @@ pub const DEFAULT_REMOTE_PORT: u16 = 8787;
 /// the native source of truth; [`RemoteAccessStatus`] exposes it to the Settings
 /// UI so the webview does not carry an independent policy value.
 pub const MIN_REMOTE_PASSWORD_LENGTH: usize = 12;
+/// Versioned normalization/counting contract applied by both the desktop shell
+/// and Settings UI. V1 trims exactly Unicode's `White_Space` property at the
+/// boundary, then counts Unicode scalar values.
+pub const REMOTE_PASSWORD_POLICY: &str = "unicode-white-space-scalar-count-v1";
 
 /// How a stored credential is attached to a download request for its host.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -530,14 +534,40 @@ fn mark_remote_password(settings: &mut AppSettings, present: bool) {
     }
 }
 
+/// The explicit Unicode `White_Space` set used by
+/// [`REMOTE_PASSWORD_POLICY`]. Do not replace this with [`char::is_whitespace`]:
+/// the named contract must not drift with the Rust toolchain, and JavaScript's
+/// ambient `trim()` uses a different set (`U+0085`/`U+FEFF` discriminate them).
+fn is_remote_password_boundary_whitespace(value: char) -> bool {
+    matches!(
+        value,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{0085}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'..='\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+    )
+}
+
+/// Normalize a LAN password under [`REMOTE_PASSWORD_POLICY`]. Returning a slice
+/// ensures the exact normalized value validated can also be persisted/submitted.
+fn normalize_remote_password(password: &str) -> &str {
+    password.trim_matches(is_remote_password_boundary_whitespace)
+}
+
 /// Validate and normalize a LAN remote-access password. Length is counted in
 /// Unicode scalar values so the native command and the Settings UI can apply the
 /// same user-visible rule without treating a multi-byte character as several.
 pub(crate) fn validate_remote_password(password: &str) -> Result<&str, String> {
-    let password = password.trim();
+    let password = normalize_remote_password(password);
     if password.chars().count() < MIN_REMOTE_PASSWORD_LENGTH {
         return Err(format!(
-            "Use a password with at least {MIN_REMOTE_PASSWORD_LENGTH} characters after trimming surrounding whitespace."
+            "Use a password with at least {MIN_REMOTE_PASSWORD_LENGTH} characters after normalizing surrounding whitespace."
         ));
     }
     Ok(password)
@@ -556,7 +586,7 @@ pub fn read_remote_password() -> Option<String> {
     keyring::Entry::new(KEYRING_SERVICE, REMOTE_PASSWORD_ACCOUNT)
         .ok()
         .and_then(|entry| entry.get_password().ok())
-        .map(|secret| secret.trim().to_owned())
+        .map(|secret| normalize_remote_password(&secret).to_owned())
         .filter(|secret| !secret.is_empty())
 }
 
@@ -628,8 +658,10 @@ pub struct RemoteAccessStatus {
     url: Option<String>,
     /// The suggested default port, for the UI's initial value / reset.
     default_port: u16,
-    /// Native minimum password length after trimming surrounding whitespace.
+    /// Native minimum password length after applying [`REMOTE_PASSWORD_POLICY`].
     minimum_password_length: usize,
+    /// Versioned normalization and scalar-counting contract implemented by the UI.
+    password_policy: &'static str,
     /// Host OS (`macos`/`windows`/`linux`) for platform-conditional firewall copy.
     platform: &'static str,
 }
@@ -650,6 +682,7 @@ fn remote_access_status() -> RemoteAccessStatus {
         url,
         default_port: DEFAULT_REMOTE_PORT,
         minimum_password_length: MIN_REMOTE_PASSWORD_LENGTH,
+        password_policy: REMOTE_PASSWORD_POLICY,
         platform: host_platform(),
     }
 }
@@ -2257,16 +2290,23 @@ mod tests {
     }
 
     #[test]
-    fn remote_password_policy_trims_and_enforces_twelve_unicode_characters() {
-        let compliant = format!("  {}  ", "é".repeat(MIN_REMOTE_PASSWORD_LENGTH));
+    fn remote_password_policy_normalizes_and_enforces_twelve_unicode_scalars() {
+        let compliant = format!("\u{0085}{}\u{3000}", "é".repeat(MIN_REMOTE_PASSWORD_LENGTH));
         assert_eq!(
             validate_remote_password(&compliant).expect("twelve characters are compliant"),
             "é".repeat(MIN_REMOTE_PASSWORD_LENGTH)
         );
 
-        let error = validate_remote_password("  12345678901  ")
-            .expect_err("eleven trimmed characters must be rejected");
+        let error = validate_remote_password("\u{0085}12345678901")
+            .expect_err("U+0085 is boundary whitespace, leaving eleven characters");
         assert!(error.contains("at least 12 characters"), "{error}");
+
+        let byte_order_mark = "\u{FEFF}12345678901";
+        assert_eq!(
+            validate_remote_password(byte_order_mark)
+                .expect("U+FEFF is not Unicode White_Space and counts as one scalar"),
+            byte_order_mark
+        );
     }
 
     #[test]
@@ -2289,7 +2329,7 @@ mod tests {
 
         let mut persisted = None;
         set_remote_access_password_with(
-            "  lan-password  ",
+            "\u{0085}lan-password\u{3000}",
             || true,
             |password| {
                 persisted = Some(password.to_owned());
@@ -2336,10 +2376,12 @@ mod tests {
             url: None,
             default_port: DEFAULT_REMOTE_PORT,
             minimum_password_length: MIN_REMOTE_PASSWORD_LENGTH,
+            password_policy: REMOTE_PASSWORD_POLICY,
             platform: "macos",
         };
         let json = serde_json::to_value(status).expect("status serializes");
         assert_eq!(json["minimumPasswordLength"], MIN_REMOTE_PASSWORD_LENGTH);
+        assert_eq!(json["passwordPolicy"], REMOTE_PASSWORD_POLICY);
     }
 
     /// sc-13610: the native confirmation gates only *enabling* remote access. Disabling is

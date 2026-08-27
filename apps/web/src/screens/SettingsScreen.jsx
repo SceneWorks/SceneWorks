@@ -68,12 +68,58 @@ function bytesToGb(bytes) {
   return bytes / (1024 * 1024 * 1024);
 }
 
-function remotePasswordMeetsMinimum(password, minimumPasswordLength) {
+const REMOTE_PASSWORD_POLICY_V1 = "unicode-white-space-scalar-count-v1";
+
+// Exact Unicode White_Space code-point set named by the native V1 policy. Do
+// not use JavaScript trim(): it excludes U+0085 and includes U+FEFF, unlike this
+// contract and Rust's corresponding explicit predicate.
+function isRemotePasswordBoundaryWhitespaceV1(character) {
+  const value = character.codePointAt(0);
   return (
-    Number.isSafeInteger(minimumPasswordLength) &&
-    minimumPasswordLength > 0 &&
-    Array.from(password.trim()).length >= minimumPasswordLength
+    (value >= 0x0009 && value <= 0x000d) ||
+    value === 0x0020 ||
+    value === 0x0085 ||
+    value === 0x00a0 ||
+    value === 0x1680 ||
+    (value >= 0x2000 && value <= 0x200a) ||
+    (value >= 0x2028 && value <= 0x2029) ||
+    value === 0x202f ||
+    value === 0x205f ||
+    value === 0x3000
   );
+}
+
+function normalizeRemotePassword(password, policy) {
+  if (policy !== REMOTE_PASSWORD_POLICY_V1) return null;
+  const scalars = Array.from(password);
+  // Array.from combines valid surrogate pairs, but preserves an unpaired UTF-16
+  // surrogate as one element. Rust strings cannot contain those non-scalars, so
+  // fail closed instead of counting a value native validation cannot receive.
+  if (scalars.some((character) => {
+    const value = character.codePointAt(0);
+    return value >= 0xd800 && value <= 0xdfff;
+  })) return null;
+  let start = 0;
+  let end = scalars.length;
+  while (start < end && isRemotePasswordBoundaryWhitespaceV1(scalars[start])) start += 1;
+  while (end > start && isRemotePasswordBoundaryWhitespaceV1(scalars[end - 1])) end -= 1;
+  return scalars.slice(start, end).join("");
+}
+
+function remotePasswordCandidate(password, remoteAccessStatus) {
+  const normalized = normalizeRemotePassword(password, remoteAccessStatus?.passwordPolicy);
+  const minimumPasswordLength = remoteAccessStatus?.minimumPasswordLength;
+  if (
+    normalized === null ||
+    !Number.isSafeInteger(minimumPasswordLength) ||
+    minimumPasswordLength < 1
+  ) {
+    return null;
+  }
+  return {
+    normalized,
+    meetsMinimum: Array.from(normalized).length >= minimumPasswordLength,
+  };
 }
 
 const SCHEME_OPTIONS = [
@@ -505,20 +551,20 @@ export function SettingsScreen({
 
   // --- Remote access (LAN) handlers (epic 4484 story 4) ---
   async function saveRemotePassword() {
-    const minimumPasswordLength = remote?.minimumPasswordLength;
-    if (!Number.isSafeInteger(minimumPasswordLength) || minimumPasswordLength < 1) {
+    const candidate = remotePasswordCandidate(remotePassword, remote);
+    if (!candidate) {
       setStatus("Remote-access password policy is unavailable. Restart SceneWorks and try again.");
       return;
     }
-    if (!remotePasswordMeetsMinimum(remotePassword, minimumPasswordLength)) {
+    if (!candidate.meetsMinimum) {
       setStatus(
-        `Use a remote-access password with at least ${minimumPasswordLength} characters after trimming surrounding whitespace.`,
+        `Use a remote-access password with at least ${remote.minimumPasswordLength} characters after normalizing surrounding whitespace.`,
       );
       return;
     }
     try {
       const updated = await invoke("set_remote_access_password", {
-        password: remotePassword.trim(),
+        password: candidate.normalized,
       });
       setRemote(updated);
       setRemotePassword("");
@@ -1244,10 +1290,7 @@ export function SettingsScreen({
                   className="settings-btn"
                   type="button"
                   onClick={saveRemotePassword}
-                  disabled={!remotePasswordMeetsMinimum(
-                    remotePassword,
-                    remote.minimumPasswordLength,
-                  )}
+                  disabled={!remotePasswordCandidate(remotePassword, remote)?.meetsMinimum}
                 >
                   Save
                 </button>

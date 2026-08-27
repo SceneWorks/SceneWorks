@@ -451,6 +451,7 @@ describe("SettingsScreen remote access (desktop)", () => {
       url: "http://192.168.1.50:8787",
       defaultPort: 8787,
       minimumPasswordLength: 12,
+      passwordPolicy: "unicode-white-space-scalar-count-v1",
       platform: "macos",
     };
     invoke = vi.fn(async (command, args) => {
@@ -538,6 +539,47 @@ describe("SettingsScreen remote access (desktop)", () => {
     await click(save);
     expect(invoke.mock.calls.filter(([command]) => command === "set_remote_access_password"))
       .toHaveLength(0);
+  });
+
+  it("treats U+0085 as boundary whitespace exactly like the native policy", async () => {
+    await render();
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      `\u0085${"1".repeat(11)}`,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(true);
+    await click(save);
+    expect(invoke.mock.calls.filter(([command]) => command === "set_remote_access_password"))
+      .toHaveLength(0);
+  });
+
+  it("does not trim U+FEFF and submits the exact native-compliant value", async () => {
+    await render();
+    const password = `\uFEFF${"1".repeat(11)}`;
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      password,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(false);
+    await click(save);
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", { password });
+  });
+
+  it("counts Unicode scalars and submits the same explicitly normalized password", async () => {
+    await render();
+    const normalized = "🔐".repeat(12);
+    await changeField(
+      container.querySelector('[aria-label="Remote access password"]'),
+      `\u0085${normalized}\u3000`,
+    );
+    const save = buttonByText(container, "Save");
+    expect(save.disabled).toBe(false);
+    await click(save);
+    expect(invoke).toHaveBeenCalledWith("set_remote_access_password", {
+      password: normalized,
+    });
   });
 });
 
