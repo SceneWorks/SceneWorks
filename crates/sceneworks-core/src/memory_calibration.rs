@@ -3307,9 +3307,28 @@ mod tests {
             runtime_complete_count > 0,
             "the bundle must carry runtime-complete records"
         );
+        // sc-21715: the partition runs over ALL FOUR `RecordStatus` variants, not over the two
+        // certifying ones. This used to read `records.len() == complete + runtime_complete` — the
+        // same identity `summary.calibrationRunsByStatus` published as a two-key tally, and true
+        // only while the corpus had never carried a `gated` or `negative_complete` receipt.
+        // Admitting one (the sc-11045 five-rung capture is exactly such a receipt) would have
+        // reddened this line with nothing actually wrong. Both certifying populations must still
+        // be non-empty — asserted above; what the partition asserts is that no record falls
+        // outside the four, so a fifth variant cannot be added without landing here.
+        let gated_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::Gated)
+            .count();
+        let negative_complete_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::NegativeComplete)
+            .count();
         assert_eq!(
             bundle.records.len(),
-            complete_count + runtime_complete_count
+            complete_count + runtime_complete_count + gated_count + negative_complete_count,
+            "every record must carry one of the four RecordStatus variants"
         );
         // Same partition posture for the load shapes: both exist, and together they are the whole
         // bundle — a record with any third shape (or none) breaks the identity.

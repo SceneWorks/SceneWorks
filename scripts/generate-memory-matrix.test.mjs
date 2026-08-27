@@ -62,7 +62,7 @@ import {
   stagedResidencyIsAvailable,
   strategyStatus,
 } from "./generate-memory-matrix.mjs";
-import { logicalCaseId, recordId } from "./memory-calibration-harness.mjs";
+import { logicalCaseId, RECORD_STATUSES, recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
@@ -478,7 +478,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix({ publish: false });
-  assert.equal(matrix.schemaVersion, 8);
+  assert.equal(matrix.schemaVersion, 9);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -3770,6 +3770,32 @@ test("a survey edit rotates the source fingerprint", async () => {
   assert.equal(edited.generatedFrom.sources.rung4Survey.path, SOURCE_PATHS.rung4Survey);
 });
 
+test("the published status tally's key set is the bundle schema's status enum (sc-21715)", async () => {
+  // The generator derives `summary.calibrationRunsByStatus` from `RECORD_STATUSES`, so a status
+  // added to the bundle schema appears in the object automatically — but the matrix schema pins the
+  // key set with `additionalProperties: false` and a fixed `required`, so the artifact would then
+  // fail validation with an opaque "additional properties not allowed". Connecting the two is what
+  // turns that into a legible failure here, the same way the rung-4 vocabularies are connected
+  // below. Both `required` and `properties` are checked: either alone would let a key be admitted
+  // and not demanded, or demanded and not admitted.
+  const schema = JSON.parse(
+    await readFile(new URL("../packages/schemas/memory-matrix.schema.json", import.meta.url), "utf8"),
+  );
+  const tally = schema.properties.summary.properties.calibrationRunsByStatus;
+  const expected = RECORD_STATUSES.map((status) =>
+    status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()),
+  );
+  assert.deepEqual([...tally.required].sort(), [...expected].sort());
+  assert.deepEqual(Object.keys(tally.properties).sort(), [...expected].sort());
+  assert.equal(tally.additionalProperties, false);
+  // ...and the artifact carries exactly that key set, so the schema and the writer cannot agree
+  // with each other while the shipped document holds something else.
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(Object.keys(matrix.summary.calibrationRunsByStatus).sort(), [...expected].sort());
+});
+
 test("the survey vocabulary, the generator's enums and the published schema agree", async () => {
   // Three copies of the same vocabulary — the survey file documents it, the generator validates
   // against it, the schema constrains the artifact. Nothing connected them, so a value added to one
@@ -4960,13 +4986,29 @@ test("the published summary re-derives from the evidence bundle and the closure 
     await readFile(new URL("config/inference-provider-closures.json", root)),
   );
 
-  const tally = { complete: 0, runtimeComplete: 0 };
+  // sc-21715. Recomputed over EVERY status the bundle schema admits, not over a transcribed pair.
+  // This assertion used to read `complete + runtimeComplete` and agreed with the writer's
+  // `records.length` only because the corpus had never held anything else; the first `gated` receipt
+  // — the sc-11045 five-rung, kept outside the bundle for exactly this reason — made the two
+  // disagree. The keys are derived here rather than imported from the generator so a wrong
+  // snake_case -> camelCase mapping cannot agree with itself on both sides.
+  const statusKey = (status) => status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+  const tally = Object.fromEntries(RECORD_STATUSES.map((status) => [statusKey(status), 0]));
   for (const record of evidence.records) {
-    if (record.status === "complete") tally.complete += 1;
-    if (record.status === "runtime_complete") tally.runtimeComplete += 1;
+    assert.ok(
+      Object.hasOwn(tally, statusKey(record.status)),
+      `${record.id}: status ${record.status} is outside the schema's status enum`,
+    );
+    tally[statusKey(record.status)] += 1;
   }
   assert.deepEqual(matrix.summary.calibrationRunsByStatus, tally);
-  assert.equal(matrix.summary.calibrationRuns, tally.complete + tally.runtimeComplete);
+  // The whole is the bundle, and the parts partition it. Asserting BOTH is the point: either alone
+  // is satisfied by a writer that drops a non-certifying receipt from one of the two numbers.
+  assert.equal(matrix.summary.calibrationRuns, evidence.records.length);
+  assert.equal(
+    Object.values(tally).reduce((total, count) => total + count, 0),
+    matrix.summary.calibrationRuns,
+  );
 
   // `binding.eligible` is the generator's own coordinate match; everything else here is recomputed.
   const eligibleByRecord = new Map(
@@ -5322,6 +5364,86 @@ test("MiniMax-H3 has one legal measured-spanning grid per implemented tier/rung 
     /declares engaged rungs/,
     "the generator must reject an impossible declared engaged rung before terminal capture",
   );
+});
+
+test("a gated receipt keeps the summary and its recomputation in agreement (sc-21715)", async () => {
+  // The regression this story owns. `summary.calibrationRuns` counts the BUNDLE and
+  // `calibrationRunsByStatus` partitions it; before sc-21715 the tally named only the two certifying
+  // statuses, so the first non-certifying receipt made the writer say N while the sc-17774
+  // recomputation said N-1. Synthetic rather than the shipped sc-11045 five-rung capture, so the
+  // proof does not depend on that evidence file still being in the tree — and so it survives the
+  // capture being promoted.
+  const bundle = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url), "utf8"),
+  );
+  const donor = bundle.records.find(
+    (record) => record.status === "complete" && record.sourceProvenance === undefined,
+  );
+  assert.ok(donor, "the shipped bundle must carry a plain complete record to re-status");
+  // `status` is deliberately OUTSIDE `recordId`'s identity, so flipping it alone would collide with
+  // the donor's id. Perturb `hardware`, which is in the identity and which `calibrationBinding` never
+  // reads: the clone keeps the donor's coordinate and still binds.
+  const gated = JSON.parse(JSON.stringify(donor));
+  gated.status = "gated";
+  gated.hardware = { ...gated.hardware, osVersion: `${gated.hardware.osVersion}-sc21715` };
+  gated.logicalCaseId = logicalCaseId(gated);
+  gated.id = recordId(gated);
+  assert.notEqual(gated.id, donor.id, "the synthetic receipt must be a distinct record");
+
+  const withGated = JSON.parse(JSON.stringify(bundle));
+  withGated.records.push(gated);
+  const matrix = await buildMatrix({
+    publish: false,
+    sourceOverrides: { calibrationEvidence: JSON.stringify(withGated) },
+  });
+  const baseline = await buildMatrix({ publish: false });
+  assert.equal(
+    baseline.summary.calibrationRunsByStatus.gated,
+    0,
+    "the shipped corpus must still be gated-free, or this proves nothing about the first one",
+  );
+
+  // Exactly the two assertions the sc-17774 test makes, against a corpus that now holds a receipt
+  // certifying nothing.
+  const statusKey = (status) => status.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+  const tally = Object.fromEntries(RECORD_STATUSES.map((status) => [statusKey(status), 0]));
+  for (const record of withGated.records) tally[statusKey(record.status)] += 1;
+  assert.deepEqual(matrix.summary.calibrationRunsByStatus, tally);
+  assert.equal(matrix.summary.calibrationRuns, withGated.records.length);
+  assert.equal(
+    Object.values(tally).reduce((total, count) => total + count, 0),
+    matrix.summary.calibrationRuns,
+  );
+
+  // ...and the receipt is NAMED, not merely counted. `gated` moves by one while both certifying
+  // buckets stand still, so the extra record can never be read as a new certifying run — which a
+  // fix that only corrected the total would have left indistinguishable.
+  assert.equal(matrix.summary.calibrationRunsByStatus.gated, 1);
+  assert.equal(
+    matrix.summary.calibrationRunsByStatus.complete,
+    baseline.summary.calibrationRunsByStatus.complete,
+  );
+  assert.equal(
+    matrix.summary.calibrationRunsByStatus.runtimeComplete,
+    baseline.summary.calibrationRunsByStatus.runtimeComplete,
+  );
+
+  // The receipt binds to a coordinate and certifies nothing there: that ineligibility is what keeps
+  // `currentCalibrationRuns` from moving, and it is the property the counts above must not obscure.
+  const bound = matrix.calibrationRuns.find((run) => run.record.id === gated.id);
+  assert.ok(bound, "a gated receipt still binds to its coordinate");
+  assert.equal(bound.semantics, "gated");
+  // The donor binds ELIGIBLY, and the clone differs from it only in `status` (plus the `hardware`
+  // perturbation that rotates the id). Pinning the donor's empty reason set and the clone's exact
+  // one-reason set is what makes `gated` the cause: an already-ineligible donor would satisfy
+  // `eligible === false` while proving nothing, which is the drift a `.includes()` cannot see.
+  const donorBound = matrix.calibrationRuns.find((run) => run.record.id === donor.id);
+  assert.ok(donorBound, "the donor must still bind");
+  assert.deepEqual(donorBound.binding.reasons, []);
+  assert.equal(donorBound.binding.eligible, true);
+  assert.equal(bound.binding.eligible, false);
+  assert.deepEqual(bound.binding.reasons, ["record-not-complete"]);
+  assert.equal(matrix.summary.currentCalibrationRuns, baseline.summary.currentCalibrationRuns);
 });
 
 test("an out-of-matrix family's RECEIPT is unbound rather than fatal (sc-18663)", async () => {
