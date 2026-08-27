@@ -13530,19 +13530,26 @@ mod tests {
             )
             .expect("source-bound audit spec");
             let media = crate::inference_runtime::media();
-            let provider_footprint = media
-                .footprint(cell.provider_id, &spec)
-                .expect("source-bound provider footprint");
+            assert!(
+                !matches!(cell.provider_id, "lens" | "lens_turbo"),
+                "Lens materialization can change the resident total and must not enter the raw-source audit"
+            );
             let activation_anchor_bytes = media
                 .activation_memory_bytes_1024(cell.provider_id)
                 .expect("source-bound activation query");
+            // Every audited spec is directory-backed, and for these non-Lens providers the
+            // provider footprint can only refine the text-encoder split; it cannot change the
+            // total used by the Resident path below. Let the production planner derive that total
+            // from the sparse source sizes directly. Asking the provider registry for a redundant
+            // split would correctly content-pin and SHA-256 these synthetic multi-GiB sparse files,
+            // turning a metadata-only budget audit into tens of minutes of hashing.
             let plan = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
                 cell.provider_id,
                 &cell.manifest_id,
                 &spec,
                 None,
                 None,
-                provider_footprint,
+                None,
                 activation_anchor_bytes,
             );
             assert_eq!(
