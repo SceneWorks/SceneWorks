@@ -3331,11 +3331,14 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // sc-19751/sc-19758 removed elsewhere. The load-bearing assertion is `notEqual(revision, pin)`
   // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
   // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
-  const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  // The pinned revision is the current committed inference-main head. Keep this literal
-  // alongside the current generated receipt: the assertion below only means something while the
-  // pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "624fed20c1969b851b60265e3b9dac951068c1f5");
+  const pin = cargo.match(
+    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]{40})"/,
+  )?.[1];
+  assert.match(
+    pin ?? "",
+    /^[0-9a-f]{40}$/,
+    "the test must resolve the current full inference pin before comparing survey revisions",
+  );
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
