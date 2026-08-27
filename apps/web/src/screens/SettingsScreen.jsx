@@ -68,6 +68,14 @@ function bytesToGb(bytes) {
   return bytes / (1024 * 1024 * 1024);
 }
 
+function remotePasswordMeetsMinimum(password, minimumPasswordLength) {
+  return (
+    Number.isSafeInteger(minimumPasswordLength) &&
+    minimumPasswordLength > 0 &&
+    Array.from(password.trim()).length >= minimumPasswordLength
+  );
+}
+
 const SCHEME_OPTIONS = [
   ["bearer", "Bearer header"],
   ["query", "Query token"],
@@ -497,8 +505,21 @@ export function SettingsScreen({
 
   // --- Remote access (LAN) handlers (epic 4484 story 4) ---
   async function saveRemotePassword() {
+    const minimumPasswordLength = remote?.minimumPasswordLength;
+    if (!Number.isSafeInteger(minimumPasswordLength) || minimumPasswordLength < 1) {
+      setStatus("Remote-access password policy is unavailable. Restart SceneWorks and try again.");
+      return;
+    }
+    if (!remotePasswordMeetsMinimum(remotePassword, minimumPasswordLength)) {
+      setStatus(
+        `Use a remote-access password with at least ${minimumPasswordLength} characters after trimming surrounding whitespace.`,
+      );
+      return;
+    }
     try {
-      const updated = await invoke("set_remote_access_password", { password: remotePassword });
+      const updated = await invoke("set_remote_access_password", {
+        password: remotePassword.trim(),
+      });
       setRemote(updated);
       setRemotePassword("");
       setStatus("Remote access password saved.");
@@ -1223,7 +1244,10 @@ export function SettingsScreen({
                   className="settings-btn"
                   type="button"
                   onClick={saveRemotePassword}
-                  disabled={!remotePassword.trim()}
+                  disabled={!remotePasswordMeetsMinimum(
+                    remotePassword,
+                    remote.minimumPasswordLength,
+                  )}
                 >
                   Save
                 </button>
@@ -1239,6 +1263,7 @@ export function SettingsScreen({
               </div>
               <div className="settings-field-row">
                 <span className="settings-note settings-grow">
+                  Use at least {remote.minimumPasswordLength} characters.{" "}
                   {remote.passwordSet
                     ? "A password is set — remote browsers must enter it."
                     : "Set a password before enabling remote access."}

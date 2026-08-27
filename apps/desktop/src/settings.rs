@@ -32,6 +32,10 @@ const REMOTE_PASSWORD_ACCOUNT: &str = "remote-access-password";
 /// Suggested default LAN port the Settings UI pre-fills the first time remote access
 /// is enabled (story 4). Kept here so the launcher and UI agree on the suggestion.
 pub const DEFAULT_REMOTE_PORT: u16 = 8787;
+/// Minimum LAN password length after surrounding whitespace is trimmed. This is
+/// the native source of truth; [`RemoteAccessStatus`] exposes it to the Settings
+/// UI so the webview does not carry an independent policy value.
+pub const MIN_REMOTE_PASSWORD_LENGTH: usize = 12;
 
 /// How a stored credential is attached to a download request for its host.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,6 +530,19 @@ fn mark_remote_password(settings: &mut AppSettings, present: bool) {
     }
 }
 
+/// Validate and normalize a LAN remote-access password. Length is counted in
+/// Unicode scalar values so the native command and the Settings UI can apply the
+/// same user-visible rule without treating a multi-byte character as several.
+pub(crate) fn validate_remote_password(password: &str) -> Result<&str, String> {
+    let password = password.trim();
+    if password.chars().count() < MIN_REMOTE_PASSWORD_LENGTH {
+        return Err(format!(
+            "Use a password with at least {MIN_REMOTE_PASSWORD_LENGTH} characters after trimming surrounding whitespace."
+        ));
+    }
+    Ok(password)
+}
+
 /// The LAN remote-access password from the OS keychain, used as the API access token
 /// when the launcher binds non-loopback (story 2). Gated on the non-secret
 /// `settings.json` metadata first: if no password is recorded, returns `None`
@@ -548,10 +565,7 @@ pub fn read_remote_password() -> Option<String> {
 /// to the UI (only used as the sidecar access token). Rejects an empty password so a
 /// LAN bind can never end up with an empty token (story 3 backstop).
 pub fn set_remote_password(password: &str) -> Result<(), String> {
-    let password = password.trim();
-    if password.is_empty() {
-        return Err("A password is required.".to_owned());
-    }
+    let password = validate_remote_password(password)?;
     keyring::Entry::new(KEYRING_SERVICE, REMOTE_PASSWORD_ACCOUNT)
         .map_err(|error| error.to_string())?
         .set_password(password)
@@ -614,6 +628,8 @@ pub struct RemoteAccessStatus {
     url: Option<String>,
     /// The suggested default port, for the UI's initial value / reset.
     default_port: u16,
+    /// Native minimum password length after trimming surrounding whitespace.
+    minimum_password_length: usize,
     /// Host OS (`macos`/`windows`/`linux`) for platform-conditional firewall copy.
     platform: &'static str,
 }
@@ -633,6 +649,7 @@ fn remote_access_status() -> RemoteAccessStatus {
         lan_candidates: lan.candidates,
         url,
         default_port: DEFAULT_REMOTE_PORT,
+        minimum_password_length: MIN_REMOTE_PASSWORD_LENGTH,
         platform: host_platform(),
     }
 }
@@ -648,6 +665,41 @@ pub fn get_remote_access() -> RemoteAccessStatus {
 /// widens the attack surface; *disabling* is fail-safe and never needs confirmation.
 fn remote_access_change_needs_confirmation(enabled: bool) -> bool {
     enabled
+}
+
+/// Validate an enable/disable request without native UI or persistence. Enabling
+/// checks the actual stored secret, not only the non-secret metadata flag, so a
+/// legacy short, missing, or unreadable keychain value cannot authorize a LAN
+/// bind. Disabling remains unconditional and fail-safe.
+fn validate_remote_access_change(
+    enabled: bool,
+    port: u16,
+    password_recorded: bool,
+    stored_password: Option<&str>,
+) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+    if !password_recorded {
+        return Err("Set a password before enabling remote access.".to_owned());
+    }
+    let password = stored_password.ok_or_else(|| {
+        format!(
+            "The saved remote-access password is unavailable. Replace it in Settings with at least {MIN_REMOTE_PASSWORD_LENGTH} characters before enabling remote access."
+        )
+    })?;
+    validate_remote_password(password).map_err(|_| {
+        format!(
+            "The saved remote-access password does not meet the {MIN_REMOTE_PASSWORD_LENGTH}-character minimum. Replace it in Settings before enabling remote access."
+        )
+    })?;
+    if port < 1024 {
+        return Err(
+            "Choose a port between 1024 and 65535 — lower ports need administrator privileges."
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Show a native OS confirmation for a deliberate remote-access admin action (sc-13610).
@@ -669,6 +721,21 @@ fn confirm_remote_access_action(app: &AppHandle, title: &str, body: &str) -> boo
         .blocking_show()
 }
 
+/// Apply the password-command ordering through injectable confirmation and
+/// persistence seams. Validation is deliberately first so invalid input cannot
+/// summon a native dialog or reach the keychain.
+fn set_remote_access_password_with(
+    password: &str,
+    confirm: impl FnOnce() -> bool,
+    persist: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let password = validate_remote_password(password)?;
+    if !confirm() {
+        return Err("Password was not changed — confirmation was declined.".to_owned());
+    }
+    persist(password)
+}
+
 /// Enable/disable LAN remote access and set the port (story 4). Fail-closed: enabling
 /// is rejected unless a password is already set (mirrors the launcher guard, story 3),
 /// and a privileged/low port the app can't bind is rejected up front rather than
@@ -685,15 +752,15 @@ pub async fn set_remote_access(
     port: u16,
 ) -> Result<RemoteAccessStatus, String> {
     let mut settings = load_settings();
-    if enabled && !settings.remote_password_set {
-        return Err("Set a password before enabling remote access.".to_owned());
-    }
-    if enabled && port < 1024 {
-        return Err(
-            "Choose a port between 1024 and 65535 — lower ports need administrator privileges."
-                .to_owned(),
-        );
-    }
+    let stored_password = (enabled && settings.remote_password_set)
+        .then(read_remote_password)
+        .flatten();
+    validate_remote_access_change(
+        enabled,
+        port,
+        settings.remote_password_set,
+        stored_password.as_deref(),
+    )?;
     if remote_access_change_needs_confirmation(enabled)
         && !confirm_remote_access_action(
             &app,
@@ -724,15 +791,18 @@ pub async fn set_remote_access_password(
     app: AppHandle,
     password: String,
 ) -> Result<RemoteAccessStatus, String> {
-    if !confirm_remote_access_action(
-        &app,
-        "Set remote-access password?",
-        "This sets the password that protects LAN access to SceneWorks. Continue only if \
-         you started this from Settings.",
-    ) {
-        return Err("Password was not changed — confirmation was declined.".to_owned());
-    }
-    set_remote_password(&password)?;
+    set_remote_access_password_with(
+        &password,
+        || {
+            confirm_remote_access_action(
+                &app,
+                "Set remote-access password?",
+                "This sets the password that protects LAN access to SceneWorks. Continue only if \
+                 you started this from Settings.",
+            )
+        },
+        set_remote_password,
+    )?;
     Ok(remote_access_status())
 }
 
@@ -2184,6 +2254,92 @@ mod tests {
         assert!(!settings.remote_access_enabled);
         // Port choice is preserved across a clear (the user's preference persists).
         assert_eq!(settings.remote_port, Some(DEFAULT_REMOTE_PORT));
+    }
+
+    #[test]
+    fn remote_password_policy_trims_and_enforces_twelve_unicode_characters() {
+        let compliant = format!("  {}  ", "é".repeat(MIN_REMOTE_PASSWORD_LENGTH));
+        assert_eq!(
+            validate_remote_password(&compliant).expect("twelve characters are compliant"),
+            "é".repeat(MIN_REMOTE_PASSWORD_LENGTH)
+        );
+
+        let error = validate_remote_password("  12345678901  ")
+            .expect_err("eleven trimmed characters must be rejected");
+        assert!(error.contains("at least 12 characters"), "{error}");
+    }
+
+    #[test]
+    fn remote_password_command_rejects_before_confirmation_or_persistence() {
+        let error = set_remote_access_password_with(
+            "short",
+            || panic!("short input must not request native confirmation"),
+            |_| panic!("short input must not reach persistence"),
+        )
+        .expect_err("short input must be rejected");
+        assert!(error.contains("at least 12 characters"), "{error}");
+
+        let declined = set_remote_access_password_with(
+            "lan-password",
+            || false,
+            |_| panic!("declined confirmation must not reach persistence"),
+        )
+        .expect_err("declined confirmation must reject the change");
+        assert!(declined.contains("confirmation was declined"), "{declined}");
+
+        let mut persisted = None;
+        set_remote_access_password_with(
+            "  lan-password  ",
+            || true,
+            |password| {
+                persisted = Some(password.to_owned());
+                Ok(())
+            },
+        )
+        .expect("a confirmed compliant password is persisted");
+        assert_eq!(persisted.as_deref(), Some("lan-password"));
+    }
+
+    #[test]
+    fn remote_access_enable_validates_the_stored_secret_before_confirmation() {
+        let short = validate_remote_access_change(true, DEFAULT_REMOTE_PORT, true, Some("legacy"))
+            .expect_err("a legacy short password must fail closed");
+        assert!(short.contains("12-character minimum"), "{short}");
+        assert!(short.contains("Replace it in Settings"), "{short}");
+
+        let missing = validate_remote_access_change(true, DEFAULT_REMOTE_PORT, true, None)
+            .expect_err("missing keychain secret must fail closed");
+        assert!(missing.contains("unavailable"), "{missing}");
+        assert!(missing.contains("Replace it in Settings"), "{missing}");
+
+        assert!(validate_remote_access_change(
+            true,
+            DEFAULT_REMOTE_PORT,
+            true,
+            Some("  lan-password  ")
+        )
+        .is_ok());
+        assert!(
+            validate_remote_access_change(false, 80, false, Some("short")).is_ok(),
+            "disabling must remain unconditional and fail-safe"
+        );
+    }
+
+    #[test]
+    fn remote_access_status_exposes_the_native_password_minimum() {
+        let status = RemoteAccessStatus {
+            enabled: false,
+            port: DEFAULT_REMOTE_PORT,
+            password_set: false,
+            lan_address: None,
+            lan_candidates: Vec::new(),
+            url: None,
+            default_port: DEFAULT_REMOTE_PORT,
+            minimum_password_length: MIN_REMOTE_PASSWORD_LENGTH,
+            platform: "macos",
+        };
+        let json = serde_json::to_value(status).expect("status serializes");
+        assert_eq!(json["minimumPasswordLength"], MIN_REMOTE_PASSWORD_LENGTH);
     }
 
     /// sc-13610: the native confirmation gates only *enabling* remote access. Disabling is
