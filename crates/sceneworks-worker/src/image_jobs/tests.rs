@@ -3484,12 +3484,21 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
             && qwen_stream.contains("model.generate_with_memory_context("),
         "Qwen admission context and its exact tier/load receipt must remain provider-owned across load and generation"
     );
+    let qwen_adapter_setup = between(
+        qwen_stream,
+        "let user_adapters = resolve_adapters(request, settings)?;",
+        "\n    // Request-scoped admission for the Qwen-Image-Edit lane.",
+    );
     assert!(
-        qwen_stream.contains("let mut prepared_provider_spec =")
-            && qwen_stream.contains(".prepare_file_sources()")
-            && qwen_stream.contains("qwen_edit_adapter_stack(")
-            && !qwen_stream.contains("lightning && !user_adapters.is_empty()"),
-        "Qwen adapter files must be pinned once and Lightning must preserve built-in + user stacks"
+        qwen_adapter_setup.contains("let adapters = qwen_edit_adapter_stack(")
+            && qwen_adapter_setup
+                .contains("let mut attached_provider_spec = attach_manifest_text_encoder(")
+            && qwen_adapter_setup.matches(".prepare_file_sources()").count() == 1
+            && qwen_adapter_setup.contains(
+                "let prepared_provider_spec = attached_provider_spec.into_load_spec();"
+            )
+            && !qwen_adapter_setup.contains("lightning && !user_adapters.is_empty()"),
+        "Qwen's attached provider spec must pin adapter files once, and Lightning must preserve built-in + user stacks"
     );
     assert!(
         qwen_stream.contains("memoryArtifactCertified")
