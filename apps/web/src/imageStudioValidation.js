@@ -13,12 +13,17 @@ import { MAX_IMAGE_DIMENSION, MIN_IMAGE_DIMENSION } from "./resolutionOverride.j
 import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
-export function batchPromptBudgetOverages(composedPrompts = []) {
+// `limit` lets a streaming caller stop after the first actionable violation instead
+// of retaining an entry for every member of a very large batch.
+export function batchPromptBudgetOverages(composedPrompts = [], limit = Infinity) {
   const overages = [];
   let index = 0;
   for (const prompt of composedPrompts) {
     const budget = promptBudget(prompt);
-    if (budget.over) overages.push({ item: index + 1, ...budget });
+    if (budget.over) {
+      overages.push({ item: index + 1, ...budget });
+      if (overages.length >= limit) break;
+    }
     index += 1;
   }
   return overages;

@@ -8,6 +8,7 @@ import {
   batchItemStatusForItem,
   batchItemResultAsset,
   summarizeBatchProgress,
+  settlePromptBatchRun,
   summarizeBatchRun,
 } from "./batchOps.js";
 
@@ -173,22 +174,26 @@ describe("batch ops (sc-6112)", () => {
 
 describe("summarizeBatchRun (sc-9980)", () => {
   it("counts an unstreamed suffix as pending when the run total is known", () => {
-    const summary = summarizeBatchRun([{ jobId: "j1" }], [{ id: "j1", status: "queued" }], undefined, 4);
+    const summary = summarizeBatchRun(
+      { total: 4, submitted: 1, completed: 0, failed: 0, activeJobIds: ["j1"] },
+      [{ id: "j1", status: "queued" }],
+    );
     expect(summary).toMatchObject({ total: 4, pending: 3, queued: 1, failed: 0, done: 0, allDone: false });
   });
 
-  it("counts not-yet-submitted items as pending, not failed", () => {
+  it("counts not-yet-submitted prompts as pending, not failed", () => {
     const summary = summarizeBatchRun(
-      [{ jobId: "j1" }, { jobId: null }, { jobId: null }],
+      { total: 3, submitted: 1, completed: 0, failed: 0, activeJobIds: ["j1"] },
       [{ id: "j1", status: "queued" }],
     );
     expect(summary).toMatchObject({ total: 3, pending: 2, queued: 1, failed: 0, done: 0, allDone: false });
   });
 
-  it("marks a thrown submission as failed via the error flag", () => {
-    const summary = summarizeBatchRun([{ jobId: null, error: true }, { jobId: "j1" }], [
-      { id: "j1", status: "completed" },
-    ]);
+  it("counts a failed submission without retaining its prompt", () => {
+    const summary = summarizeBatchRun(
+      { total: 2, submitted: 2, completed: 0, failed: 1, activeJobIds: ["j1"] },
+      [{ id: "j1", status: "completed" }],
+    );
     expect(summary).toMatchObject({ total: 2, failed: 1, completed: 1, pending: 0, done: 2 });
   });
 
@@ -197,9 +202,26 @@ describe("summarizeBatchRun (sc-9980)", () => {
       { id: "j1", status: "completed" },
       { id: "j2", status: "running" },
     ];
-    const mid = summarizeBatchRun([{ jobId: "j1" }, { jobId: "j2" }], jobs);
+    const mid = summarizeBatchRun(
+      { total: 2, submitted: 2, completed: 0, failed: 0, activeJobIds: ["j1", "j2"] },
+      jobs,
+    );
     expect(mid).toMatchObject({ completed: 1, running: 1, active: 1, allDone: false });
-    const doneAll = summarizeBatchRun([{ jobId: "j1" }], [{ id: "j1", status: "completed" }]);
+    const doneAll = summarizeBatchRun(
+      { total: 1, submitted: 1, completed: 0, failed: 0, activeJobIds: ["j1"] },
+      [{ id: "j1", status: "completed" }],
+    );
     expect(doneAll).toMatchObject({ done: 1, active: 0, allDone: true });
+  });
+
+  it("settles terminal jobs into scalar totals and drops their ids", () => {
+    const observed = new Map([["j1", "observed"]]);
+    const settled = settlePromptBatchRun(
+      { total: 3, submitted: 3, completed: 0, failed: 1, activeJobIds: ["j1", "j2"] },
+      [{ id: "j1", status: "completed" }, { id: "j2", status: "running" }],
+      observed,
+    );
+    expect(settled).toEqual({ total: 3, submitted: 3, completed: 1, failed: 1, activeJobIds: ["j2"] });
+    expect(observed.has("j1")).toBe(false);
   });
 });
