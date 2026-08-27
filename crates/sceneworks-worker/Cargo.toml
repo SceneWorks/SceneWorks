@@ -117,5 +117,12 @@ candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "13038877c
 # have a dylib to stage.
 ort = { workspace = true, features = ["cuda"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Cache-only SDXL component publication must replace an existing verified entry in
+# one filesystem operation. `std::fs::rename` cannot replace on Windows, while
+# `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` preserves the same publish-by-rename
+# contract used on Unix (sc-21689).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [lints]
 workspace = true

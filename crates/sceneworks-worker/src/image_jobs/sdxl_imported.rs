@@ -427,6 +427,26 @@ fn mirror_cached_sdxl_component_file(
     file: &str,
     destination_dir: &Path,
 ) -> WorkerResult<()> {
+    mirror_cached_sdxl_component_file_with_copy(
+        settings,
+        checkpoint_id,
+        repo,
+        revision,
+        file,
+        destination_dir,
+        |source, staging| std::fs::copy(source, staging).map(|_| ()),
+    )
+}
+
+fn mirror_cached_sdxl_component_file_with_copy(
+    settings: &Settings,
+    checkpoint_id: &str,
+    repo: &str,
+    revision: &str,
+    file: &str,
+    destination_dir: &Path,
+    copy_source: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> WorkerResult<()> {
     let destination = destination_dir.join(file);
     let staging_failed = |path: &Path, error: std::io::Error| {
         WorkerError::Engine(format!(
@@ -444,6 +464,14 @@ fn mirror_cached_sdxl_component_file(
                  model-agnostic CLIP tokenizer vocabulary comes from outside it."
             ))
         })?;
+
+    // Resolve first so a missing app-managed source reports the existing actionable
+    // diagnostic without creating cache state. From this point through validation
+    // and publication, one target-scoped lock serializes every process and every
+    // async task in a worker. A PID-only staging name is not task-unique: concurrent
+    // jobs in one process could otherwise copy into the same inode and let one job
+    // publish it while the other was still writing (sc-21689 review).
+    let _target_lock = crate::downloads::DownloadLock::acquire(&destination)?;
     if destination.is_file()
         && sdxl_component_files_match(&cached, &destination)
             .map_err(|error| staging_failed(&destination, error))?
@@ -452,13 +480,25 @@ fn mirror_cached_sdxl_component_file(
     }
     std::fs::create_dir_all(destination_dir)
         .map_err(|error| staging_failed(destination_dir, error))?;
-    // Copy to a sibling then rename, so a cache-only plan resolver never observes a
-    // half-written component. Existing destination bytes are compared to the pinned
-    // HF-cache source above; `is_file()` alone is never a cache-validity signal.
-    let staging = destination_dir.join(format!("{file}.{}.partial", std::process::id()));
-    std::fs::copy(&cached, &staging)
+    // Keep task-local staging collision-free even though the lock is the primary
+    // correctness boundary. This also makes stale scratch from a killed worker
+    // incapable of becoming a later task's live write target.
+    let staging = destination_dir.join(format!("{file}.{}.partial", Uuid::new_v4().simple()));
+    copy_source(&cached, &staging)
         .and_then(|_| std::fs::File::open(&staging))
         .and_then(|file| file.sync_all())
+        .and_then(|_| {
+            sdxl_component_files_match(&cached, &staging).and_then(|matches| {
+                if matches {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "staged component does not match its pinned cache source",
+                    ))
+                }
+            })
+        })
         .and_then(|_| promote_cached_sdxl_component(&staging, &destination))
         .map_err(|error| {
             let _ = std::fs::remove_file(&staging);
@@ -468,26 +508,40 @@ fn mirror_cached_sdxl_component_file(
 }
 
 fn promote_cached_sdxl_component(staging: &Path, destination: &Path) -> std::io::Result<()> {
-    // On macOS and Linux this is an atomic replacement: readers see either the
-    // prior complete component or the newly copied one. Windows requires removal
-    // before `rename` can replace a file, but only reaches that fallback after the
-    // staging copy has finished and been synced.
+    // Readers see either the prior complete component or the newly copied one. The
+    // platform operations below both replace in one call; never unlink the visible
+    // destination before the staged file takes its place.
     #[cfg(not(windows))]
     {
         std::fs::rename(staging, destination)
     }
     #[cfg(windows)]
     {
-        match std::fs::symlink_metadata(destination) {
-            Ok(metadata) if metadata.is_dir() => Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "component destination is a directory",
-            )),
-            Ok(_) => std::fs::remove_file(destination),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }?;
-        std::fs::rename(staging, destination)
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let staging: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both buffers are owned, NUL-terminated UTF-16 paths and remain
+        // alive for the duration of this synchronous Win32 call.
+        let replaced = unsafe {
+            MoveFileExW(
+                staging.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 }
 

@@ -85,7 +85,7 @@ fn download_stall_timeout() -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
-use download_lock::DownloadLock;
+pub(crate) use download_lock::DownloadLock;
 
 mod download_lock {
     use super::{task_join_error, WorkerError, WorkerResult};

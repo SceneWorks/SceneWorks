@@ -10976,11 +10976,242 @@ fn cache_only_sdxl_mirror_replaces_a_corrupt_existing_destination() {
         expected
     );
     assert!(
-        !destination_dir
-            .join(format!("vocab.json.{}.partial", std::process::id()))
-            .exists(),
+        std::fs::read_dir(&destination_dir)
+            .expect("destination entries")
+            .all(|entry| !entry
+                .expect("destination entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")),
         "a successful cache-only promotion leaves no staging artifact"
     );
+}
+
+/// sc-21689 review regression: two jobs in one worker share a PID. Hold the
+/// first publisher in the middle of its copy and prove the second job cannot
+/// even enter its copy closure until publication completes. Once it acquires
+/// the target lock, it must validate the first result and reuse it instead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn cache_only_sdxl_mirror_serializes_concurrent_same_process_publishers() {
+    use std::io::Write as _;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let source =
+        sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), SDXL_CLIP_L_REPO)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(SDXL_CLIP_L_REVISION)
+            .join("vocab.json");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source parent");
+    let expected = b"pinned tokenizer vocabulary with enough bytes for a split write".to_vec();
+    std::fs::write(&source, &expected).expect("pinned source");
+    let destination_dir = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components")
+        .join("tokenizer");
+
+    let (first_copy_started_tx, first_copy_started_rx) = mpsc::sync_channel(0);
+    let (release_first_copy_tx, release_first_copy_rx) = mpsc::sync_channel(0);
+    let first_settings = settings.clone();
+    let first_destination_dir = destination_dir.clone();
+    let first = std::thread::spawn(move || {
+        mirror_cached_sdxl_component_file_with_copy(
+            &first_settings,
+            "checkpoint-sc-21689-first",
+            SDXL_CLIP_L_REPO,
+            SDXL_CLIP_L_REVISION,
+            "vocab.json",
+            &first_destination_dir,
+            move |source, staging| {
+                let bytes = std::fs::read(source)?;
+                let split = bytes.len() / 2;
+                let mut staged = std::fs::File::create(staging)?;
+                staged.write_all(&bytes[..split])?;
+                staged.flush()?;
+                first_copy_started_tx
+                    .send(())
+                    .expect("announce partial staging write");
+                release_first_copy_rx
+                    .recv()
+                    .expect("release partial staging write");
+                staged.write_all(&bytes[split..])?;
+                Ok(())
+            },
+        )
+    });
+    first_copy_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first publisher reaches partial write");
+
+    let (second_copy_entered_tx, second_copy_entered_rx) = mpsc::sync_channel(0);
+    let second_settings = settings.clone();
+    let second_destination_dir = destination_dir.clone();
+    let second = std::thread::spawn(move || {
+        mirror_cached_sdxl_component_file_with_copy(
+            &second_settings,
+            "checkpoint-sc-21689-second",
+            SDXL_CLIP_L_REPO,
+            SDXL_CLIP_L_REVISION,
+            "vocab.json",
+            &second_destination_dir,
+            move |source, staging| {
+                second_copy_entered_tx
+                    .send(())
+                    .expect("announce second copy");
+                std::fs::copy(source, staging).map(|_| ())
+            },
+        )
+    });
+
+    assert!(
+        second_copy_entered_rx
+            .recv_timeout(Duration::from_millis(500))
+            .is_err(),
+        "a same-process peer must not share or publish the first task's staging inode"
+    );
+    assert!(
+        !destination_dir.join("vocab.json").exists(),
+        "the half-written staging file must remain invisible"
+    );
+
+    release_first_copy_tx
+        .send(())
+        .expect("complete first staging write");
+    first
+        .join()
+        .expect("first publisher thread")
+        .expect("first publisher succeeds");
+    second
+        .join()
+        .expect("second publisher thread")
+        .expect("second publisher reuses verified result");
+    assert!(
+        second_copy_entered_rx.try_recv().is_err(),
+        "the second publisher must validate and reuse the first result without copying"
+    );
+    assert_eq!(
+        std::fs::read(destination_dir.join("vocab.json")).expect("published component"),
+        expected
+    );
+}
+
+/// Mutation guard: even under the target lock, a copier that returns success
+/// after writing the wrong bytes must not replace the caller-visible entry.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn cache_only_sdxl_mirror_rejects_unverified_staging_before_publication() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let source =
+        sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), SDXL_CLIP_L_REPO)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(SDXL_CLIP_L_REVISION)
+            .join("vocab.json");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source parent");
+    let expected = b"verified tokenizer vocabulary";
+    std::fs::write(&source, expected).expect("pinned source");
+
+    let destination_dir = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components")
+        .join("tokenizer");
+    std::fs::create_dir_all(&destination_dir).expect("destination dir");
+    let destination = destination_dir.join("vocab.json");
+    let prior = vec![b'p'; expected.len()];
+    std::fs::write(&destination, &prior).expect("prior caller-visible entry");
+
+    let error = mirror_cached_sdxl_component_file_with_copy(
+        &settings,
+        "checkpoint-sc-21689-mutation",
+        SDXL_CLIP_L_REPO,
+        SDXL_CLIP_L_REVISION,
+        "vocab.json",
+        &destination_dir,
+        |_source, staging| std::fs::write(staging, vec![b'x'; expected.len()]),
+    )
+    .expect_err("a false-success copy must fail verification");
+    assert!(error.to_string().contains("does not match"), "{error}");
+    assert_eq!(
+        std::fs::read(&destination).expect("prior destination survives"),
+        prior,
+        "failed verification must not remove or replace the visible entry"
+    );
+    assert!(
+        std::fs::read_dir(&destination_dir)
+            .expect("destination entries")
+            .all(|entry| !entry
+                .expect("destination entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")),
+        "failed staging is cleaned without touching the destination"
+    );
+}
+
+/// Cross-platform mutation guard for the Windows branch. The executable test
+/// below runs on Windows CI; this source contract also fails on every host if
+/// unlink-then-rename is reintroduced where macOS cannot execute that branch.
+#[test]
+fn cache_only_sdxl_windows_promotion_contract_never_unlinks_destination() {
+    let source = include_str!("sdxl_imported.rs");
+    let promotion = source
+        .split("fn promote_cached_sdxl_component")
+        .nth(1)
+        .expect("promotion helper")
+        .split("/// Compare the staged copy")
+        .next()
+        .expect("promotion helper body");
+
+    assert!(promotion.contains("MOVEFILE_REPLACE_EXISTING"));
+    assert!(promotion.contains("MoveFileExW"));
+    assert!(
+        !promotion.contains("remove_file(destination)"),
+        "Windows publication must never expose an unlink gap"
+    );
+}
+
+/// Windows' standard rename cannot replace an existing destination. This runs
+/// the real Win32 replacement path and prevents the old unlink-then-rename gap
+/// from returning under the platform that needed the fallback.
+#[cfg(all(windows, feature = "backend-candle"))]
+#[test]
+fn cache_only_sdxl_windows_promotion_replaces_existing_destination() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let destination = root.path().join("vocab.json");
+    let staging = root.path().join("vocab.json.test.partial");
+    std::fs::write(&destination, b"old verified bytes").expect("old destination");
+    std::fs::write(&staging, b"new verified bytes").expect("staged replacement");
+
+    promote_cached_sdxl_component(&staging, &destination)
+        .expect("replace existing destination in one platform operation");
+    assert_eq!(
+        std::fs::read(&destination).expect("replacement destination"),
+        b"new verified bytes"
+    );
+    assert!(!staging.exists(), "successful replacement consumes staging");
 }
 
 /// sc-16453: strict-pose routing must preserve the selected ConvRot DiT identity even before the
