@@ -232,7 +232,7 @@ fn decoder_substitution_profile(
 /// `sceneworks-core`'s `EXPECTED_SHIPPED_VIDEO_COUNT` and `pinned_engine_geometry`'s
 /// `EXPECTED_VIDEO_IDS`. Adding a video model without updating it trips
 /// [`core_transcribes_the_pinned_vae_write_bounds`].
-const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 12;
+const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 13;
 
 /// Every video model id in the shipped manifest. The ONE list the transcription pin is driven
 /// from, so a newly shipped family cannot be transcribed in core and left unpinned here.
@@ -286,7 +286,7 @@ fn shipped_video_model_ids() -> Vec<String> {
 /// the citations and for what these tests do NOT pin (sc-19117).
 fn expected_vae_tiling(id: &str, lane: VideoLane) -> Option<VaeTiling> {
     match id {
-        "ltx_2_3" | "ltx_2_3_eros" => Some(VaeTiling::LTX),
+        "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5" => Some(VaeTiling::LTX),
         // The dense TI2V-5B is welded to the z48 vae22 (`mlx-gen-wan/src/pipeline.rs:235`).
         "wan_2_2" => Some(VaeTiling::WAN22),
         // The A14B grid and every Wan-derived renderer decode through the Wan2.1 z16 VAE.

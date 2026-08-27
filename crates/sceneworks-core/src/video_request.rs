@@ -2167,7 +2167,7 @@ mod tests {
         // --- 64: ltx hard-errors below ÷64 (stage-1 runs at //2//32) and svd's UNet needs
         // VAE 8× × 8×. A declared 32 was too LOOSE — 736 is ÷32 but the engine rejects it.
         // 64 floors it onto the lattice the engine actually accepts.
-        for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
+        for model in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5", "svd"] {
             let req = VideoRequest::from_payload(&payload(json!({
                 "projectId": "p", "model": model, "width": 1280, "height": 736,
                 "modelManifestEntry": { "limits": { "requiresDimensionsMultipleOf": 64 } }
@@ -2205,6 +2205,11 @@ mod tests {
             ),
             (
                 "ltx_2_3",
+                64,
+                vec![(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)],
+            ),
+            (
+                "ltx_2_5",
                 64,
                 vec![(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)],
             ),
@@ -2255,7 +2260,8 @@ mod tests {
     /// refit** (1280×720 → 1264×704, off every advertised bucket), and candle **hard-errored**
     /// — except candle's own 5B, which had no area check at all and ran to an opaque OOM. The
     /// values themselves were wrong too: the whole 14B family carried the TI2V-5B's 901,120.
-    /// * `ltx_2_3` / `ltx_2_3_eros` / `svd` / `mochi_1` — no `maxPixels`-expressible area cap in
+    /// * `ltx_2_3` / `ltx_2_3_eros` / `ltx_2_5` / `svd` / `mochi_1` — no
+    ///   `maxPixels`-expressible area cap in
     ///   either backend, so no cap is declared. Not literally "no checks": candle-LTX caps
     ///   **latent tokens** through `config::max_latent_tokens` (`t_lat·h_lat·w_lat > 131_072`), which
     ///   is proportional to `frames × w × h`. That is a frames×area constraint and therefore
@@ -2269,6 +2275,7 @@ mod tests {
     const ENGINE_GEOMETRY: &[(&str, Option<u32>, Option<u64>)] = &[
         ("ltx_2_3", Some(64), None),
         ("ltx_2_3_eros", Some(64), None),
+        ("ltx_2_5", Some(64), None),
         ("svd", Some(64), None),
         // The 5B keeps 901,120 — upstream gives `ti2v-5B` exactly `1280*704` / `704*1280`, and its
         // z48 VAE's 32-px grid is why 704, not 720, is its real 720p.
@@ -2444,6 +2451,7 @@ mod tests {
     const DURATION_LIMITS: &[(&str, f32)] = &[
         ("ltx_2_3", 15.0),
         ("ltx_2_3_eros", 15.0),
+        ("ltx_2_5", 15.0),
         ("svd", 4.0),
         ("wan_2_2", 8.0),
         ("wan_2_2_t2v_14b", 5.0),
@@ -2900,6 +2908,7 @@ mod tests {
     const DURATION_FLOORS: &[(&str, Option<f32>)] = &[
         ("ltx_2_3", None),
         ("ltx_2_3_eros", None),
+        ("ltx_2_5", None),
         ("svd", None),
         ("wan_2_2", None),
         ("wan_2_2_t2v_14b", None),
@@ -3104,6 +3113,8 @@ mod tests {
         // (sc-19502). A menu, not a floor — 30 is as unrenderable as 1.
         ("ltx_2_3", None, Some(&[8])),
         ("ltx_2_3_eros", None, Some(&[8])),
+        // LTX-2.5 ships both the 8-step CFG-free distilled recipe and the guided 30-step dev recipe.
+        ("ltx_2_5", None, Some(&[8, 30])),
         ("svd", None, None),
         ("wan_2_2", None, None),
         ("wan_2_2_t2v_14b", None, None),
@@ -4231,6 +4242,7 @@ mod tests {
     const FPS_MENUS: &[(&str, &[u32], u32)] = &[
         ("ltx_2_3", &[24, 25, 30], 25),
         ("ltx_2_3_eros", &[24, 25, 30], 25),
+        ("ltx_2_5", &[24, 25, 30], 25),
         ("svd", &[6, 7, 8, 10, 12, 25], 7),
         ("wan_2_2", &[16, 24], 24),
         ("wan_2_2_t2v_14b", &[16], 16),
@@ -4266,6 +4278,7 @@ mod tests {
     const DEFAULT_RESOLUTIONS: &[(&str, u32, u32)] = &[
         ("ltx_2_3", 768, 512),
         ("ltx_2_3_eros", 768, 512),
+        ("ltx_2_5", 768, 512),
         ("svd", 1024, 576),
         ("wan_2_2", 832, 480),
         // 720, not 704: sc-12308 (#1581) restored TRUE 720p to the A14B pair by lifting maxPixels
@@ -5204,9 +5217,9 @@ mod tests {
     /// count guard (`shipped_video_limits`, sc-12409) — and deliberately not a second hand-written
     /// id list beside it, which is what let `wan_2_2_vace_fun_14b` fall out of this module's
     /// coverage entirely (sc-18814 review).
-    /// 12 = the ten pre-17137 families plus the MiniMax-H3 pair (`minimax_h3`,
-    /// `minimax_h3_ref`) the epic's manifest entries added (sc-17158).
-    const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 12;
+    /// 13 = the ten pre-17137 families plus the MiniMax-H3 pair (`minimax_h3`,
+    /// `minimax_h3_ref`) and LTX-2.5.
+    const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 13;
 
     /// Every video model id plus its declared generation modes in the shipped manifest. Keeping the
     /// modes beside the id is load-bearing for the routing-surface check: probing arbitrary generic

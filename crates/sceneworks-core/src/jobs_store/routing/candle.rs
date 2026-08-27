@@ -34,6 +34,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
     "wan_2_2_t2v_14b",
     "wan_2_2_i2v_14b",
     "ltx_2_3",
+    "ltx_2_5",
     "bernini",
     "minimax_h3",
     "minimax_h3_ref",
@@ -830,7 +831,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     if candle_request_wants_torch_quantization(payload) {
         return false;
     }
-    if matches!(model, "ltx_2_3" | "ltx_2_3_eros") {
+    if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5") {
         match payload.get("mode").and_then(Value::as_str) {
             Some("text_to_video") => {
                 if has_nonempty_string(payload, "sourceAssetId")
@@ -1017,10 +1018,10 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
-    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; terminal
-    // acceptance proves its exact q4/q8 product packages. Other video providers remain dense and
+    // LTX's packed Candle turnkeys. LTX-2.3 intentionally has no dense/bf16 Candle tier, while
+    // LTX-2.5 publishes exact q4/q8/bf16 product packages. Other video providers remain dense and
     // fail closed for positive tier requests.
-    if (candle_request_wants_quant(payload) || model == "ltx_2_3")
+    if (candle_request_wants_quant(payload) || matches!(model, "ltx_2_3" | "ltx_2_5"))
         && !candle_video_tier_select_eligible(model, payload)
     {
         return false;
@@ -1030,6 +1031,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleLtxTier {
+    Bf16,
     Q4,
     Q8,
 }
@@ -1047,6 +1049,7 @@ fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTi
         .as_i64()
         .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?
     {
+        i64::MIN..=0 => Some(CandleLtxTier::Bf16),
         4 => Some(CandleLtxTier::Q4),
         8 => Some(CandleLtxTier::Q8),
         _ => None,
@@ -1054,17 +1057,22 @@ fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTi
 }
 
 fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<String, Value>) -> bool {
-    model == "ltx_2_3"
-        && matches!(
-            mode,
-            "text_to_video"
-                | "image_to_video"
-                | "first_last_frame"
-                | "extend_clip"
-                | "video_bridge"
-                | "replace_person"
-        )
-        && candle_ltx_requested_tier(payload).is_some()
+    matches!(
+        (model, candle_ltx_requested_tier(payload)),
+        ("ltx_2_3", Some(CandleLtxTier::Q4 | CandleLtxTier::Q8))
+            | (
+                "ltx_2_5",
+                Some(CandleLtxTier::Bf16 | CandleLtxTier::Q4 | CandleLtxTier::Q8)
+            )
+    ) && matches!(
+        mode,
+        "text_to_video"
+            | "image_to_video"
+            | "first_last_frame"
+            | "extend_clip"
+            | "video_bridge"
+            | "replace_person"
+    )
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -1087,7 +1095,7 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
     // SC-18902 withdrew the Eros Candle route after the exact-head CUDA render proved that its
     // undistilled checkpoint is not compatible with Candle's single-pass distilled recipe. Keep
     // this newer advanced-mode route aligned with the same product decision as the base lane.
-    if model != "ltx_2_3"
+    if !matches!(model, "ltx_2_3" | "ltx_2_5")
         || !has_nonempty_string(payload, "sourceClipAssetId")
         || !has_nonempty_string(payload, "personTrackId")
         || !has_nonempty_string(payload, "characterId")

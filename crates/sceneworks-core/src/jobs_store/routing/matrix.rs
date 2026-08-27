@@ -4627,7 +4627,7 @@ mod tests {
         // operation matrix must evaluate that complete runnable shape, not rebuild a bare payload
         // that both production routers correctly reject. SC-18902's failed exact-head CUDA render
         // withdrew Eros from every Candle lane; the newer advanced routes must not restore it.
-        for model_id in ["ltx_2_3", "ltx_2_3_eros"] {
+        for model_id in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"] {
             let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
                 let cell = row
@@ -4637,10 +4637,10 @@ mod tests {
                     .unwrap_or_else(|| panic!("{model_id}/{mode} is represented"));
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(model_id == "ltx_2_3")),
+                    (Some(true), Some(model_id != "ltx_2_3_eros")),
                     "{model_id}/{mode} uses the complete IC-LoRA probe while honoring the Eros withdrawal"
                 );
-                if model_id == "ltx_2_3" {
+                if model_id != "ltx_2_3_eros" {
                     assert!(cell.parity_obligation.is_none());
                 }
             }

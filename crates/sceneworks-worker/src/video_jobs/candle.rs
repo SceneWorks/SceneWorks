@@ -1210,8 +1210,9 @@ pub(super) async fn generate_candle_video_using(
     let ltx_tier = candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model, request);
     if is_ltx && ltx_tier.is_none() {
         return Err(WorkerError::InvalidPayload(format!(
-            "{} requires a complete Candle LTX q4 or q8 packed tier matching advanced.mlxQuantize \
-             from an approved immutable bundle revision; repair this model in Model Manager",
+            "{} requires a complete Candle LTX packed tier matching advanced.mlxQuantize \
+             (LTX-2.3: q4/q8; LTX-2.5: q4/q8/bf16) from an approved immutable bundle revision; \
+             repair this model in Model Manager",
             request.model
         )));
     }
