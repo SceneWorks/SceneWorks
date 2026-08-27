@@ -202,6 +202,154 @@ describe("TrainingStudio dataset draft guard (sc-11970)", () => {
     expect(nameInput(container).value).toBe("Mira Set edited during reload");
   });
 
+  it("does not replace a rename made while a completed Parquet import refreshes", async () => {
+    const refresh = deferred();
+    const refreshTrainingDatasets = vi.fn(() => refresh.promise);
+    const context = baseContext({ refreshTrainingDatasets });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={context}>{<TrainingDataSetsLibrary />}</AppContext.Provider>);
+    });
+    await settle();
+
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{
+          ...context,
+          jobs: [{
+            id: "job-parquet",
+            type: "dataset_parquet_import",
+            status: "completed",
+            payload: { datasetId: "dataset-1" },
+            result: { importedItemCount: 1 },
+          }],
+        }}>{<TrainingDataSetsLibrary />}</AppContext.Provider>,
+      );
+    });
+    await vi.waitFor(() => expect(refreshTrainingDatasets).toHaveBeenCalledTimes(1));
+
+    await typeName(container, "Mira Set renamed during import refresh");
+    await act(async () => {
+      refresh.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nameInput(container).value).toBe("Mira Set renamed during import refresh");
+    expect(context.loadTrainingDataset).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replace a rename made while a completed Parquet import reloads", async () => {
+    const reload = deferred();
+    let loadCalls = 0;
+    const context = baseContext({
+      refreshTrainingDatasets: vi.fn(async () => {}),
+      loadTrainingDataset: vi.fn(() => {
+        loadCalls += 1;
+        return loadCalls === 1 ? Promise.resolve(datasetOne) : reload.promise;
+      }),
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={context}>{<TrainingDataSetsLibrary />}</AppContext.Provider>);
+    });
+    await settle();
+
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{
+          ...context,
+          jobs: [{
+            id: "job-parquet",
+            type: "dataset_parquet_import",
+            status: "completed",
+            payload: { datasetId: "dataset-1" },
+            result: { importedItemCount: 1 },
+          }],
+        }}>{<TrainingDataSetsLibrary />}</AppContext.Provider>,
+      );
+    });
+    await vi.waitFor(() => expect(context.loadTrainingDataset).toHaveBeenCalledTimes(2));
+
+    await typeName(container, "Mira Set renamed during import reload");
+    await act(async () => {
+      reload.resolve(datasetOne);
+      await Promise.resolve();
+    });
+
+    expect(nameInput(container).value).toBe("Mira Set renamed during import reload");
+  });
+
+  it("does not commit a completed Parquet import reload after the effect is superseded", async () => {
+    const firstReload = deferred();
+    const secondRefresh = deferred();
+    let refreshCalls = 0;
+    let loadCalls = 0;
+    const reloadedDataset = {
+      ...datasetOne,
+      version: 3,
+      items: [{ id: "parquet-item", path: "images/parquet.jpg", displayName: "parquet.jpg" }],
+    };
+    const context = baseContext({
+      refreshTrainingDatasets: vi.fn(() => {
+        refreshCalls += 1;
+        return refreshCalls === 1 ? Promise.resolve() : secondRefresh.promise;
+      }),
+      loadTrainingDataset: vi.fn(() => {
+        loadCalls += 1;
+        return loadCalls === 1 ? Promise.resolve(datasetOne) : firstReload.promise;
+      }),
+    });
+    const completedJob = (importedItemCount) => ({
+      id: "job-parquet",
+      type: "dataset_parquet_import",
+      status: "completed",
+      payload: { datasetId: "dataset-1" },
+      result: { importedItemCount },
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={context}>{<TrainingDataSetsLibrary />}</AppContext.Provider>);
+    });
+    await settle();
+
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ ...context, jobs: [completedJob(1)] }}>
+          {<TrainingDataSetsLibrary />}
+        </AppContext.Provider>,
+      );
+    });
+    await vi.waitFor(() => expect(context.loadTrainingDataset).toHaveBeenCalledTimes(2));
+
+    // Updating the completion supersedes the first effect while its nested dataset load
+    // is still pending. Keep the replacement effect in its refresh await, so only the
+    // stale nested load could commit this fetched item.
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ ...context, jobs: [completedJob(2)] }}>
+          {<TrainingDataSetsLibrary />}
+        </AppContext.Provider>,
+      );
+    });
+    await vi.waitFor(() => expect(context.refreshTrainingDatasets).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      firstReload.resolve(reloadedDataset);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelectorAll(".training-caption-card")).toHaveLength(0);
+    expect(container.textContent).not.toContain("Parquet import completed");
+
+    // The replacement effect is intentionally still awaiting here. Unmount before
+    // settling it so this regression leaves no background promise between tests.
+    await act(async () => {
+      root.unmount();
+      root = null;
+      secondRefresh.resolve();
+      await Promise.resolve();
+    });
+  });
+
   it("opens another dataset when the discard prompt is confirmed", async () => {
     appConfirmMock.mockResolvedValue(true);
     const context = baseContext();
