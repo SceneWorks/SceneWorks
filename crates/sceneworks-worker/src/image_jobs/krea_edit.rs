@@ -257,7 +257,9 @@ async fn generate_krea_edit_stream(
         request,
         settings,
     )?;
-    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let unattached_spec = spec;
+    let attached_spec =
+        attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
     let resolved_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
     let route_mode = crate::memory_route_registry::MemoryRouteMode::EditImage;
     let spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(

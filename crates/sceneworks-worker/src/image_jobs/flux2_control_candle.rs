@@ -507,8 +507,9 @@ pub(super) async fn generate_candle_flux2_control_stream(
         strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
     let strategy_spec = apply_candle_image_load_shape("flux2_dev", strategy_spec);
+    let unattached_strategy_spec = strategy_spec;
     let attached_strategy_spec = attach_manifest_text_encoder(
-        strategy_spec,
+        unattached_strategy_spec,
         FLUX2_CONTROL_CANDLE_ENGINE_ID,
         request,
         settings,

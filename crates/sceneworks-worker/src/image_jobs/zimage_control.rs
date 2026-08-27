@@ -578,8 +578,9 @@ pub(super) async fn generate_candle_zimage_control_stream(
     if let Some(pid) = pid_weights.as_ref() {
         selected_spec = selected_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
+    let unattached_selected_spec = selected_spec;
     let attached_selected_spec =
-        attach_manifest_text_encoder(selected_spec, engine_id, request, settings)?;
+        attach_manifest_text_encoder(unattached_selected_spec, engine_id, request, settings)?;
     let mut selected_spec = attached_selected_spec.into_load_spec();
     let tier = candle_resolved_tier_key(request, &base, false);
     selected_spec = crate::memory_route_registry::evaluate_declared_candle_load_shape(

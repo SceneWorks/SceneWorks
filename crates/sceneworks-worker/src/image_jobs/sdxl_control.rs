@@ -640,8 +640,9 @@ async fn generate_sdxl_control_stream(
         &request.model_manifest_entry,
         settings,
     )?;
+    let unattached_spec = spec;
     let attached_spec =
-        attach_manifest_text_encoder(spec, SDXL_CONTROL_ENGINE_ID, request, settings)?;
+        attach_manifest_text_encoder(unattached_spec, SDXL_CONTROL_ENGINE_ID, request, settings)?;
     let mut spec = attached_spec.into_load_spec();
     spec = spec.with_resolved_route(request.model.clone());
 

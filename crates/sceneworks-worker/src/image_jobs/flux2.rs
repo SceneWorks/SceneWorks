@@ -781,7 +781,9 @@ async fn generate_flux2_edit_stream(
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
         spec = attach_selected_decoder(spec, engine_id, request, settings)?;
     }
-    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let unattached_spec = spec;
+    let attached_spec =
+        attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
     let mut spec = attached_spec.into_load_spec();
     let resolved_tier =
         resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);

@@ -742,8 +742,13 @@ pub(super) async fn generate_candle_krea_control_stream(
 
     let mut memory_spec = krea_control_memory_spec(&base, tier, convrot_dit.as_deref(), &adapters);
     memory_spec = memory_spec.with_control(gen_core::WeightsSource::File(control.clone()));
-    let attached_memory_spec =
-        attach_manifest_text_encoder(memory_spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
+    let unattached_memory_spec = memory_spec;
+    let attached_memory_spec = attach_manifest_text_encoder(
+        unattached_memory_spec,
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
     let memory_spec = attached_memory_spec.into_load_spec();
     let selected_text_encoder = memory_spec.text_encoder.clone();
     let admitted_text_encoder = selected_text_encoder

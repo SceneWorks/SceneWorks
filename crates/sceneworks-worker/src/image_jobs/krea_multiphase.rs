@@ -557,7 +557,9 @@ async fn generate_krea_multiphase_stream(
         &request.model_manifest_entry,
         settings,
     )?;
-    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let unattached_spec = spec;
+    let attached_spec =
+        attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
     let spec = attached_spec.into_load_spec();
     #[cfg(target_os = "macos")]
     let spec = {

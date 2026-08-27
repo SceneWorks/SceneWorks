@@ -8724,7 +8724,9 @@ async fn generate_stream(
     // Finalize caller-selected text-encoder state before asking the provider about the real
     // candidate. Chroma must see and reject an external encoder rather than being admitted against
     // an incomplete LoadSpec which is mutated afterward.
-    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let unattached_spec = spec;
+    let attached_spec =
+        attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
     let mut spec = attached_spec.into_load_spec();
     // SC-18457: provider adoption is an exact three-way intersection. A route-local BTR entry owns
     // the decision: the typed registry enforces mode/overlay/source semantics and the linked
@@ -11331,8 +11333,13 @@ async fn generate_candle_stream(
     }
     // Export the selected encoder receipt only after the entire load shape is complete; this exact
     // prepared spec is reused by the selector and eventual provider/cache load.
-    let attached_shared_contract_spec =
-        attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
+    let unattached_shared_contract_spec = shared_contract_spec;
+    let attached_shared_contract_spec = attach_manifest_text_encoder(
+        unattached_shared_contract_spec,
+        engine_id,
+        request,
+        settings,
+    )?;
     let mut shared_contract_spec = attached_shared_contract_spec.into_load_spec();
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
     // A supported Hires refinement is a fresh one-reference image-to-image request even when the
