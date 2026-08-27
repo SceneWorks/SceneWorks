@@ -21,6 +21,15 @@ import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.j
 // collide with a real character id.
 export const LIBRARY_MOVE_TARGET = "__sceneworks_library__";
 
+function moveFailureMessage(reason) {
+  const message = reason && typeof reason === "object" ? reason.message : reason;
+  if (typeof message === "string" && message) return message;
+  if (typeof message === "number" || typeof message === "boolean" || typeof message === "bigint" || typeof message === "symbol") {
+    return String(message);
+  }
+  return "Could not move this asset.";
+}
+
 // Shared multi-asset batch selection (sc-6112) — selection state, the upscale/detail/edit
 // fan-out, and the bulk Discard / Move-to-character actions. Lifted out of LibraryScreen so
 // the Assets page and the Character Assets page drive the identical toolbar from one source.
@@ -58,6 +67,7 @@ export function useAssetBatch() {
   // A failed move must remain visible until the user clears the selection or dismisses it;
   // a later successful move must never rewrite that truthful outcome as total success.
   const [moveOutcome, setMoveOutcome] = useState(null);
+  const moveOutcomeEpochRef = useRef(0);
   const selectionEpochsRef = useRef(new Map());
   // When a discard selection contains folded upscales, hold the pending choice here:
   // { targets: Asset[] (the selection snapshot), sources: Asset[] (their source originals) }.
@@ -129,6 +139,7 @@ export function useAssetBatch() {
   const clearSelection = () => {
     setSelectedAssetIds(new Set());
     setMoveOpen(false);
+    moveOutcomeEpochRef.current += 1;
     setMoveOutcome(null);
   };
 
@@ -257,6 +268,7 @@ export function useAssetBatch() {
     // only remove targets that have not been reselected while the fan-out was in flight.
     const targets = movableSelected;
     const targetEpochs = new Map(targets.map((asset) => [asset.id, selectionEpochsRef.current.get(asset.id) ?? 0]));
+    const moveOutcomeEpoch = moveOutcomeEpochRef.current;
     setBulkAction("move");
     try {
       const outcomes = await Promise.allSettled(
@@ -268,8 +280,7 @@ export function useAssetBatch() {
         if (outcome.status === "fulfilled") {
           successfulIds.add(targets[index].id);
         } else {
-          const reason = outcome.reason;
-          failures.push({ asset: targets[index], message: reason?.message ?? String(reason || "Could not move this asset.") });
+          failures.push({ asset: targets[index], message: moveFailureMessage(outcome.reason) });
         }
       });
       setSelectedAssetIds((current) => {
@@ -280,7 +291,7 @@ export function useAssetBatch() {
         return next;
       });
       setMoveOpen(false);
-      if (failures.length) {
+      if (failures.length && moveOutcomeEpochRef.current === moveOutcomeEpoch) {
         setMoveOutcome({ succeeded: successfulIds.size, failures });
       }
     } finally {
@@ -306,7 +317,10 @@ export function useAssetBatch() {
     closeBatch,
     bulkAction,
     moveOutcome,
-    dismissMoveOutcome: () => setMoveOutcome(null),
+    dismissMoveOutcome: () => {
+      moveOutcomeEpochRef.current += 1;
+      setMoveOutcome(null);
+    },
     discardSelected,
     discardPrompt,
     resolveDiscardPrompt,
@@ -360,7 +374,26 @@ export function AssetSelectionBar({ batch, showDiscard = true, allowLibraryTarge
     />
   ) : null;
 
-  if (selectedAssetIds.size === 0) return discardDialog;
+  const moveOutcomeAlert = moveOutcome ? (
+    <div className="batch-move-outcome" role="alert">
+      <span>
+        Moved {moveOutcome.succeeded}; {moveOutcome.failures.length} failed. Failed assets remain selected.
+        {moveOutcome.failures[0]?.message ? ` ${moveOutcome.failures[0].message}` : ""}
+      </span>
+      <button aria-label="Dismiss move result" onClick={dismissMoveOutcome} type="button">
+        Dismiss
+      </button>
+    </div>
+  ) : null;
+
+  if (selectedAssetIds.size === 0) {
+    return (
+      <>
+        {moveOutcomeAlert}
+        {discardDialog}
+      </>
+    );
+  }
 
   // Move destinations: the Main Library (optional) followed by every non-archived character.
   const moveTargets = [
@@ -406,17 +439,7 @@ export function AssetSelectionBar({ batch, showDiscard = true, allowLibraryTarge
       <button onClick={clearSelection} type="button">
         Clear
       </button>
-      {moveOutcome ? (
-        <div className="batch-move-outcome" role="alert">
-          <span>
-            Moved {moveOutcome.succeeded}; {moveOutcome.failures.length} failed. Failed assets remain selected.
-            {moveOutcome.failures[0]?.message ? ` ${moveOutcome.failures[0].message}` : ""}
-          </span>
-          <button aria-label="Dismiss move result" onClick={dismissMoveOutcome} type="button">
-            Dismiss
-          </button>
-        </div>
-      ) : null}
+      {moveOutcomeAlert}
       {moveOpen && moveTargets.length ? (
         <div className="batch-move-picker">
           <select

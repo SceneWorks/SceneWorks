@@ -33,6 +33,16 @@ function AssetBatchProbe({ onReady }) {
   return null;
 }
 
+function AssetBatchToolbarProbe({ onReady }) {
+  const batch = useAssetBatch();
+  React.useEffect(() => {
+    batch.toggleSelect("a1");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  onReady(batch);
+  return <AssetSelectionBar batch={batch} />;
+}
+
 function render(ui) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -126,6 +136,16 @@ describe("useAssetBatch truthful bulk move outcomes (sc-21901)", () => {
     return () => latest;
   }
 
+  function mountToolbar(overrides = {}) {
+    let latest;
+    harness = render(
+      <AppContext.Provider value={{ assets, characters, imageModels: [], jobs: [], ...overrides }}>
+        <AssetBatchToolbarProbe onReady={(batch) => { latest = batch; }} />
+      </AppContext.Provider>,
+    );
+    return () => latest;
+  }
+
   it("keeps failed and newly selected assets actionable after mixed character-move outcomes", async () => {
     const first = deferred();
     const second = deferred();
@@ -167,6 +187,72 @@ describe("useAssetBatch truthful bulk move outcomes (sc-21901)", () => {
 
     expect(batch().selectedAssetList.map((asset) => asset.id)).toEqual(["a2"]);
     expect(batch().moveOutcome).toMatchObject({ succeeded: 1, failures: [{ asset: { id: "a2" }, message: "library is read-only" }] });
+  });
+
+  it("keeps a deferred mixed move failure visible after concurrent deselection empties the selection", async () => {
+    const first = deferred();
+    const second = deferred();
+    const moveAssetToCharacter = vi.fn((asset) => (asset.id === "a1" ? first.promise : second.promise));
+    const batch = mountToolbar({ moveAssetToCharacter });
+    await act(async () => {
+      batch().toggleSelect("a2");
+      batch().setMoveCharacterId("c1");
+    });
+
+    let moving;
+    act(() => {
+      moving = batch().moveSelectedToCharacter();
+    });
+    await act(async () => {
+      batch().toggleSelect("a1");
+      batch().toggleSelect("a2");
+      first.resolve({ id: "a1" });
+      second.reject(new Error("destination unavailable"));
+      await moving;
+    });
+
+    expect(document.body.querySelector('[role="alert"]').textContent).toContain("Moved 1; 1 failed. Failed assets remain selected. destination unavailable");
+  });
+
+  it("does not restore an in-flight move result after an explicit clear", async () => {
+    const first = deferred();
+    const second = deferred();
+    const moveAssetToCharacter = vi.fn((asset) => (asset.id === "a1" ? first.promise : second.promise));
+    const batch = mount({ moveAssetToCharacter });
+    await act(async () => {
+      batch().toggleSelect("a2");
+      batch().setMoveCharacterId("c1");
+    });
+
+    let moving;
+    act(() => {
+      moving = batch().moveSelectedToCharacter();
+      batch().clearSelection();
+    });
+    await act(async () => {
+      first.resolve({ id: "a1" });
+      second.reject(new Error("destination unavailable"));
+      await moving;
+    });
+
+    expect(batch().moveOutcome).toBeNull();
+  });
+
+  it("normalizes object-valued rejection messages into a stable move failure", async () => {
+    const moveAssetToCharacter = vi.fn(async (asset) => {
+      if (asset.id === "a2") throw { message: { code: "destination_unavailable" } };
+      return { id: asset.id };
+    });
+    const batch = mount({ moveAssetToCharacter });
+    await act(async () => {
+      batch().toggleSelect("a2");
+      batch().setMoveCharacterId("c1");
+    });
+    await act(async () => {
+      await batch().moveSelectedToCharacter();
+    });
+
+    expect(batch().moveOutcome).toMatchObject({ failures: [{ asset: { id: "a2" }, message: "Could not move this asset." }] });
   });
 
   it("renders a partial move outcome as an alert", () => {
