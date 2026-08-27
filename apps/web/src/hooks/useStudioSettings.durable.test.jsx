@@ -71,6 +71,18 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     expect(persistNavigationPreferences).not.toHaveBeenCalled();
   });
 
+  it("persists an absent empty snapshot but skips a cached empty snapshot", async () => {
+    await render(<Harness settings={{}} />);
+    expect(lastSentMap()["ws-1"].image).toEqual({});
+
+    await act(async () => root.unmount());
+    persistNavigationPreferences.mockClear();
+    window.localStorage.setItem("sceneworks-studio-image-ws-1", JSON.stringify({}));
+    root = createRoot(container);
+    await render(<Harness settings={{}} />);
+    expect(persistNavigationPreferences).not.toHaveBeenCalled();
+  });
+
   it("still writes when a cached snapshot changes or readiness resumes", async () => {
     window.localStorage.setItem("sceneworks-studio-image-ws-1", JSON.stringify({ prompt: "old" }));
     await render(<Harness settings={{ prompt: "new" }} />);

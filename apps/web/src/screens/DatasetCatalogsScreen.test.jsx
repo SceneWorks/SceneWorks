@@ -377,6 +377,29 @@ describe("DatasetCatalogsScreen", () => {
     expect(requests.filter((item) => item.path.endsWith("/status"))).toHaveLength(0);
   });
 
+  it("clears an already-scheduled poll when the active screen becomes inactive", async () => {
+    await act(async () => root.unmount());
+    vi.useFakeTimers();
+    root = createRoot(container);
+    const renderScreen = async (active) => {
+      await act(async () => {
+        root.render(
+          <ScreenActiveContext.Provider value={active}>
+            <AppContext.Provider value={{ token: "token" }}>
+              <DatasetCatalogsScreen />
+              <ConfirmHost />
+            </AppContext.Provider>
+          </ScreenActiveContext.Provider>,
+        );
+      });
+      await flush();
+    };
+    await renderScreen(true);
+    await renderScreen(false);
+    await act(async () => vi.advanceTimersByTime(9000));
+    expect(requests.filter((item) => item.path.endsWith("/status"))).toHaveLength(0);
+  });
+
   it("stops after a terminal status response", async () => {
     await remountWithFakeTimers();
     const original = fetch.getMockImplementation();

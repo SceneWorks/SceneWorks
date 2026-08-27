@@ -44,6 +44,18 @@ export function loadStudioSettings(studio, workspaceId) {
   }
 }
 
+// `loadStudioSettings()` intentionally treats an absent entry like an empty snapshot
+// for callers that just need defaults. The writer additionally needs to know whether
+// an empty snapshot is actually cached: an absent cache must still establish the
+// durable copy on its first ready mount.
+function hasCachedStudioSettings(studio, workspaceId) {
+  try {
+    return window.localStorage.getItem(storageKey(studio, workspaceId)) !== null;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Seed the localStorage cache from the durable server copy on launch (App.jsx, after
  * GET /api/v1/ui-preferences).
@@ -164,6 +176,7 @@ export function useStudioSettingsWriter(studio, workspaceId, settings, ready = t
       return undefined;
     }
     const unchangedInitialSnapshot = !initializedRef.current
+      && hasCachedStudioSettings(studio, workspaceId)
       && JSON.stringify(loadStudioSettings(studio, workspaceId)) === serialized;
     initializedRef.current = true;
     if (unchangedInitialSnapshot) {
