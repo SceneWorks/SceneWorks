@@ -64,6 +64,36 @@ let pendingNavigationPatch = null;
 let navigationDrainPromise = null;
 let navigationDrainScheduled = false;
 
+const NAVIGATION_WRITE_MAX_ATTEMPTS = 3;
+
+function isAbort(error) {
+  return error && typeof error === "object" && error.name === "AbortError";
+}
+
+function shouldRetryNavigationWrite(error) {
+  if (isAbort(error)) {
+    return false;
+  }
+  const status = error && typeof error === "object" ? error.status : undefined;
+  if (!Number.isInteger(status)) {
+    return true;
+  }
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status < 600);
+}
+
+async function putNavigationPreferencesWithRetry(patch) {
+  for (let attempt = 1; attempt <= NAVIGATION_WRITE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await putUiPreferences(patch);
+      return;
+    } catch (error) {
+      if (attempt === NAVIGATION_WRITE_MAX_ATTEMPTS || !shouldRetryNavigationWrite(error)) {
+        return;
+      }
+    }
+  }
+}
+
 async function drainNavigationPreferences() {
   navigationDrainScheduled = false;
   while (pendingNavigationPatch) {
@@ -71,7 +101,7 @@ async function drainNavigationPreferences() {
     pendingNavigationPatch = null;
     // Read the access token when this request starts, not when the patch was
     // enqueued. A token can be promoted or rotated while an earlier PUT is in flight.
-    await putUiPreferences(patch).catch(() => {});
+    await putNavigationPreferencesWithRetry(patch);
   }
   navigationDrainPromise = null;
 }

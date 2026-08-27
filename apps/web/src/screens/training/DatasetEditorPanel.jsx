@@ -5,6 +5,7 @@ import { CompactSelector } from "../../components/CompactSelector.jsx";
 import { DatasetAddDialog } from "../../components/DatasetAddDialog.jsx";
 import { DatasetCaptionDialog } from "../../components/DatasetCaptionDialog.jsx";
 import { DatasetParquetImportDialog } from "../../components/DatasetParquetImportDialog.jsx";
+import { errorMessage } from "../../errorMessage.js";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { ValidationSummary } from "../../validation/Validation.jsx";
@@ -115,14 +116,18 @@ export function DatasetEditorPanel({
   const [captionFilter, setCaptionFilter] = React.useState("all");
   const [parquetDialogOpen, setParquetDialogOpen] = React.useState(false);
   const [parquetImporting, setParquetImporting] = React.useState(false);
+  const [parquetError, setParquetError] = React.useState("");
   const parquetImportDisabled = !draftName.trim() || memberAssets.length > 0 || parquetImporting;
 
   async function runParquetImport(settings) {
     if (typeof onImportParquet !== "function" || parquetImporting) return;
     setParquetImporting(true);
+    setParquetError("");
     try {
       await onImportParquet(settings);
       setParquetDialogOpen(false);
+    } catch (error) {
+      setParquetError(errorMessage(error, "Could not start the Parquet import."));
     } finally {
       setParquetImporting(false);
     }
@@ -314,7 +319,10 @@ export function DatasetEditorPanel({
             <button
               className="secondary-action"
               disabled={parquetImportDisabled}
-              onClick={() => setParquetDialogOpen(true)}
+              onClick={() => {
+                setParquetError("");
+                setParquetDialogOpen(true);
+              }}
               title={
                 !draftName.trim()
                   ? "Name the dataset before importing"
@@ -572,11 +580,14 @@ export function DatasetEditorPanel({
         />
       ) : null}
       {parquetDialogOpen ? (
-        <DatasetParquetImportDialog
-          onClose={() => !parquetImporting && setParquetDialogOpen(false)}
-          onRun={runParquetImport}
-          running={parquetImporting}
-        />
+        <>
+          {parquetError ? <p className="inline-warning">{parquetError}</p> : null}
+          <DatasetParquetImportDialog
+            onClose={() => !parquetImporting && setParquetDialogOpen(false)}
+            onRun={runParquetImport}
+            running={parquetImporting}
+          />
+        </>
       ) : null}
     </>
   );

@@ -86,6 +86,44 @@ describe("putUiPreferences", () => {
 });
 
 describe("persistNavigationPreferences", () => {
+  it("retries transient network and HTTP failures at the queued-write seam", async () => {
+    apiFetch
+      .mockRejectedValueOnce(new Error("network unavailable"))
+      .mockRejectedValueOnce(Object.assign(new Error("busy"), { status: 503 }))
+      .mockResolvedValueOnce({});
+
+    await persistNavigationPreferences({ activeView: "Library" });
+
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries established transient HTTP statuses but not permanent client failures", async () => {
+    for (const status of [408, 425, 429, 500]) {
+      apiFetch.mockReset();
+      apiFetch
+        .mockRejectedValueOnce(Object.assign(new Error(`HTTP ${status}`), { status }))
+        .mockResolvedValueOnce({});
+
+      await persistNavigationPreferences({ activeView: `retry-${status}` });
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+    }
+
+    for (const status of [400, 401, 403, 404]) {
+      apiFetch.mockReset();
+      apiFetch.mockRejectedValueOnce(Object.assign(new Error(`HTTP ${status}`), { status }));
+      await persistNavigationPreferences({ activeView: `no-retry-${status}` });
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("does not retry an aborted navigation write", async () => {
+    apiFetch.mockRejectedValueOnce(Object.assign(new Error("aborted"), { name: "AbortError" }));
+
+    await persistNavigationPreferences({ activeView: "Library" });
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("serializes writes, coalesces the latest intent, and reads the token at request time", async () => {
     const first = deferred();
     const second = deferred();
