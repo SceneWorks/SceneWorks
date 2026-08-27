@@ -4,12 +4,12 @@ import { parseStyleCatalog, PROMPT_TEMPLATE } from "./parseStyleCatalog.js";
 import { catalogToStylesManifest } from "./styleManifest.js";
 import styles from "./styles.json";
 // Raw source text (Vite `?raw`) so the test derives from the same bytes the
-// generator reads. documents/style.txt lives outside the web root — see the
-// server.fs.allow entry in vite.config.js (mirrors the license-corpus import).
+// generator reads. This test-only import is never placed on the dev server's
+// /@fs allow-list.
 import styleSource from "../../../../documents/style.txt?raw";
 // sc-13134: the backend/MCP catalog. Read as ?raw + JSON.parse so the drift guard derives
-// from the exact committed bytes. config/ is under the workspace root (searchForWorkspaceRoot
-// in vite.config.js), so vite's server.fs.allow permits it like documents/.
+// from the exact committed bytes. Like style.txt, this test-only input is not
+// readable from the dev server's /@fs endpoint.
 import stylesManifestRaw from "../../../../config/manifests/builtin.styles.jsonc?raw";
 
 // Guards sc-13127: styles.json must stay a mechanical derivation of

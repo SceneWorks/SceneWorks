@@ -12,9 +12,8 @@ import {
   PREVIEW_SUPPORT_GENERATOR,
 } from "./previewSupportDerivation.js";
 import previewSupport from "./previewSupport.json";
-// Raw source text (Vite `?raw`) so the guard derives from the same bytes the generator reads. Both
-// live outside the web root — see the server.fs.allow entries in vite.config.js (mirrors the
-// style.txt / builtin.styles.jsonc pair).
+// Raw source text (Vite `?raw`) so the guard derives from the same bytes the generator reads. These
+// test-only inputs are not included in the dev server's /@fs allow-list.
 import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
 import qwenEditCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs?raw";
 import pulidMlxSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid.rs?raw";

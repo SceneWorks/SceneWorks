@@ -9,7 +9,8 @@ import {
 } from "./styleComposer.js";
 // sc-13134 cross-language golden fixtures. The SAME file drives the Rust port's parity test
 // (crates/sceneworks-core/src/style_composer.rs), so a headless/MCP server-side fold and this
-// client composer stay byte-identical. Imported as ?raw (documents/ is on vite's server.fs.allow)
+// client composer stay byte-identical. Imported as ?raw by Vitest only; documents/ is not on the
+// dev server's /@fs allow-list.
 // and JSON.parsed so both languages read the exact same bytes.
 import composerFixturesRaw from "../../../documents/style-composer.fixtures.json?raw";
 
