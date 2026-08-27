@@ -974,7 +974,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     return registerProjectSwitchGuard(() => confirmDiscardUnsavedDraft());
   }, [datasetLibraryMode, registerProjectSwitchGuard]);
 
-  async function openDataset(datasetId, { preserveCurrentDraft = false } = {}) {
+  async function openDataset(
+    datasetId,
+    { preserveCurrentDraft = false, expectedDraftRevision, canCommit } = {},
+  ) {
     const loadGeneration = ++datasetLoadGenerationRef.current;
     // Opening a DIFFERENT dataset re-seeds the whole editor; confirm before discarding an
     // unsaved draft (sc-11970). Re-opening the SAME dataset (internal reloads after a save)
@@ -1000,13 +1003,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetError("");
     setDatasetMessage("");
     try {
-      const draftRevision = datasetDraftRevisionRef.current;
+      const draftRevision = expectedDraftRevision ?? datasetDraftRevisionRef.current;
       const dataset = await loadDataset(datasetId);
       // A refresh has already checked its first await. Check again at the actual
       // state commit: a rename, membership/caption edit, or a different open while
       // this load was pending must win over stale fetched data.
       if (
         loadGeneration !== datasetLoadGenerationRef.current ||
+        (canCommit && !canCommit()) ||
         (preserveCurrentDraft && (
           activeDatasetIdRef.current !== datasetId ||
           dirtyRef.current ||
@@ -1103,14 +1107,25 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     const jobId = completedParquetImportId;
     const datasetId = activeDataset.id;
+    const draftRevision = datasetDraftRevisionRef.current;
     const handledJobs = handledParquetImportJobsRef.current;
     handledJobs.add(jobId);
     let canceled = false;
     let settled = false;
+    const canCommit = () => (
+      !canceled &&
+      activeDatasetIdRef.current === datasetId &&
+      datasetDraftRevisionRef.current === draftRevision
+    );
     void (async () => {
       try {
         await refreshTrainingDatasets(activeProject?.id);
-        const dataset = await openDatasetRef.current?.(datasetId);
+        if (!canCommit()) return;
+        const dataset = await openDatasetRef.current?.(datasetId, {
+          preserveCurrentDraft: true,
+          expectedDraftRevision: draftRevision,
+          canCommit,
+        });
         if (canceled || !dataset) return;
         const imported = completedParquetImportCount;
         setDatasetMessage(
