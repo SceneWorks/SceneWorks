@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,10 +12,12 @@ import {
 } from "./styleComposer.js";
 // sc-13134 cross-language golden fixtures. The SAME file drives the Rust port's parity test
 // (crates/sceneworks-core/src/style_composer.rs), so a headless/MCP server-side fold and this
-// client composer stay byte-identical. Imported as ?raw by Vitest only; documents/ is not on the
-// dev server's /@fs allow-list.
-// and JSON.parsed so both languages read the exact same bytes.
-import composerFixturesRaw from "../../../documents/style-composer.fixtures.json?raw";
+// client composer stay byte-identical. This non-listening test reads the exact
+// file directly, without putting documents/ on a Vite server's /@fs allow-list.
+const composerFixturesRaw = readFileSync(
+  resolve(process.cwd(), "../..", "documents/style-composer.fixtures.json"),
+  "utf8",
+);
 
 // sc-13129: the style composer wraps an already-preset-folded userPrompt in a Subject/Style
 // template — the user's prose leads, the catalog style trails it — splicing around any directive

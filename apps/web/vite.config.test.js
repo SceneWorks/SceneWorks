@@ -14,8 +14,7 @@ describe("Vite safe development boundary", () => {
   });
 
   it("rejects sensitive /@fs reads from a LAN-bound Vite process", () => {
-    const env = { ...process.env };
-    delete env.VITEST;
+    const env = { ...process.env, VITEST: "1" };
     const result = spawnSync(process.execPath, ["scripts/vite-safe-dev-smoke.mjs"], {
       cwd: webRoot,
       encoding: "utf8",

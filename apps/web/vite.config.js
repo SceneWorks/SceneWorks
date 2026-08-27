@@ -26,12 +26,6 @@ const bundleBudgets = JSON.parse(
 // build resolves these via rollup and isn't gated by this.)
 const licensesDir = fileURLToPath(new URL("../desktop/licenses", import.meta.url));
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
-const documentsDir = fileURLToPath(new URL("../../documents", import.meta.url));
-const configDir = fileURLToPath(new URL("../../config", import.meta.url));
-const cratesDir = fileURLToPath(new URL("../../crates", import.meta.url));
-const testOnlyFsAllow = process.env.VITEST
-  ? [documentsDir, configDir, cratesDir]
-  : [];
 
 export default defineConfig({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
@@ -64,13 +58,11 @@ export default defineConfig({
       // Do not use Vite's default workspace-root allowance: a LAN-opted dev
       // server must not turn the checkout into an /@fs/ download surface. The
       // web root and production license corpus are the only exposed roots.
-      // Vitest's in-memory module loader needs its raw drift-guard inputs. It
-      // identifies itself with VITEST and never listens for HTTP requests, so
-      // a developer cannot enable those paths with a Vite --mode argument.
+      // Drift guards read their repository inputs directly with Node rather
+      // than widening the configuration shared by every Vite server.
       allow: [
         webRoot,
         licensesDir,
-        ...testOnlyFsAllow,
       ],
     },
   },
