@@ -5933,9 +5933,9 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
 /// never reaches the filesystem, so it never needs to be on this list.
 const SAFE_UPLOAD_EXTENSIONS: &[&str] = &[
     // Raster images (SVG deliberately omitted — it is script-capable).
-    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic",
-    "heif", // Scene-linear HDR frames (sc-18790) — stored as-is, previewed as a derivative.
-    "exr",  // Video.
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic", "heif",
+    // Scene-linear HDR frames (sc-18790) — stored as-is, previewed as a derivative.
+    "exr", // Video.
     "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp",
     "3g2", // Audio: the single canonical stored form.
     "wav",

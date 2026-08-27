@@ -85,6 +85,19 @@ export function assetDisplayUrl(asset) {
   return assetIsHdrSource(asset) ? thumbnailUrl(asset) : assetUrl(asset);
 }
 
+// Native pixel size as the SERVER recorded it, or null.
+//
+// Deliberately not "decode the display URL and read naturalWidth". For an HDR source the display
+// URL is the bounded 384px derivative: its aspect ratio is right but its absolute size is not, so
+// a consumer that needs true dimensions — an edit job sizes its output from them — would silently
+// submit a downscaled job. The server sizes EXR from the file header at import (`imagesize`
+// handles OpenEXR), so the recorded value is both authoritative and free.
+export function assetNativeSize(asset) {
+  const width = Number(asset?.file?.width);
+  const height = Number(asset?.file?.height);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
 // Audio outputs (SceneWorks Audio Studio, epic 13400 A5). A `type:"audio"` asset
 // (or any file whose mimeType is audio/*) is playable via an <audio> element —
 // there is no poster/thumbnail frame, so the shared results zone renders a

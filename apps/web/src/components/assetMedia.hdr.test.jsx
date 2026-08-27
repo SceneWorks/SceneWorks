@@ -13,6 +13,7 @@ import {
   AssetMedia,
   assetDisplayUrl,
   assetIsHdrSource,
+  assetNativeSize,
   assetUrl,
 } from "./assetMedia.jsx";
 
@@ -89,5 +90,22 @@ describe("HDR (OpenEXR) asset media", () => {
     expect(img).not.toBeNull();
     expect(img.getAttribute("src")).not.toContain("thumbnail=");
     expect(img.getAttribute("title")).toBeNull();
+  });
+});
+
+describe("HDR native dimensions", () => {
+  it("prefers the server-recorded size over decoding a bounded derivative", () => {
+    // The derivative is capped at 384px, so reading ITS naturalWidth would size an edit job from a
+    // thumbnail. The recorded value is the only correct source for a format the browser cannot
+    // decode at all.
+    expect(
+      assetNativeSize({ file: { path: "a.exr", mimeType: "image/x-exr", width: 1920, height: 1080 } }),
+    ).toEqual({ width: 1920, height: 1080 });
+  });
+
+  it("returns null when no size was recorded, rather than inventing one", () => {
+    expect(assetNativeSize(exrAsset)).toBeNull();
+    expect(assetNativeSize({ file: { width: 0, height: 0 } })).toBeNull();
+    expect(assetNativeSize(null)).toBeNull();
   });
 });

@@ -9,7 +9,7 @@ import {
 import { terminalStatuses } from "./constants.js";
 import { upscaledFromAssetId } from "./assetVariants.js";
 import { assetSupportsCharacterLink } from "./components/assetPanels.jsx";
-import { assetUrl } from "./components/assetMedia.jsx";
+import { assetIsHdrSource, assetNativeSize, assetUrl } from "./components/assetMedia.jsx";
 import { BatchOperationsPanel } from "./components/BatchOperationsPanel.jsx";
 import { Modal } from "./components/Modal.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
@@ -124,6 +124,19 @@ export function useAssetBatch() {
   // Decode an asset's native pixel size (needed for an edit job — the worker fits the
   // source to width×height). Resolves null on a load failure so that item fails alone.
   function loadImageDims(asset) {
+    // The server records the native size at import (including for OpenEXR, which `imagesize`
+    // reads from the header) — prefer it. Decoding is the fallback for assets that predate it.
+    const recorded = assetNativeSize(asset);
+    if (recorded) {
+      return Promise.resolve(recorded);
+    }
+    // An HDR source cannot be decoded here at all: no browser reads OpenEXR, and the paintable
+    // derivative is bounded to 384px, so reading ITS naturalWidth would size the edit job from a
+    // thumbnail. Resolving null surfaces the per-item "could not read dimensions" error instead of
+    // silently submitting a downscaled job.
+    if (assetIsHdrSource(asset)) {
+      return Promise.resolve(null);
+    }
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });

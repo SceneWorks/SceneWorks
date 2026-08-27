@@ -242,6 +242,14 @@ impl std::error::Error for TranscodeError {}
 /// `ffmpeg` (resolved via `SCENEWORKS_FFMPEG`, else `ffmpeg` on PATH — the same binary the worker's
 /// video path uses).
 pub fn transcode_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
+    // Scene-linear HDR needs an explicit tone-map, not a platform decoder (sc-18790). Both
+    // platform paths below merely CLIP at linear 1.0 — and they disagree about what they clip
+    // (`sips` sRGB-encodes first, ffmpeg writes near-raw linear), so the same EXR previews
+    // differently on macOS and Linux and every highlight above diffuse white collapses onto one
+    // flat value. Route it to the explicit mapper instead.
+    if sniff_image_kind_at(src).is_some_and(|kind| kind.png_transcode_is_lossy()) {
+        return transcode_hdr_to_png(src, dst);
+    }
     #[cfg(target_os = "macos")]
     {
         match run_sips_to_png(src, dst) {
@@ -259,6 +267,98 @@ pub fn transcode_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
     {
         run_ffmpeg_to_png(src, dst)
     }
+}
+
+/// Reinhard tone-map an unbounded scene-linear channel into display-referred `[0, 1]`.
+///
+/// `x / (1 + x)` is monotonic over the whole positive range: it maps 0 to 0, diffuse white (1.0)
+/// to 0.5, and approaches — never reaches — 1.0. That is the property a preview needs and clipping
+/// destroys: two different super-white values stay *distinguishable* instead of both becoming 255.
+fn reinhard(x: f32) -> f32 {
+    let x = if x.is_finite() { x.max(0.0) } else { 0.0 };
+    x / (1.0 + x)
+}
+
+/// sRGB OETF (IEC 61966-2-1), linear `[0, 1]` → display-encoded `[0, 1]`.
+fn linear_to_srgb(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    if x <= 0.0031308 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Tone-map a scene-linear HDR image to a display-referred PNG preview (sc-18790).
+///
+/// ffmpeg is used **only to decode** — every mapping decision is made here, in Rust, so the
+/// derivative is byte-identical on macOS and Linux. That is the point: the platform decoders
+/// disagree about how they flatten HDR, and a preview that differs by host is a preview you cannot
+/// reason about.
+///
+/// The pipeline is: decode to planar `f32` → per-channel Reinhard → sRGB OETF → 8-bit RGB → PNG.
+/// Per-channel (rather than luminance-based) Reinhard can desaturate a strongly-coloured highlight
+/// slightly; it is chosen because it is monotonic per channel, which is exactly what keeps
+/// super-white values apart in the output.
+pub fn transcode_hdr_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
+    let (width, height) = image_dimensions(src).ok_or_else(|| {
+        TranscodeError(format!(
+            "could not read HDR image dimensions from {}",
+            src.display()
+        ))
+    })?;
+    let (w, h) = (width as usize, height as usize);
+
+    let configured = ffmpeg_program();
+    let program = resolve_ffmpeg_program(&configured);
+    let output = Command::new(program.as_ref())
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(src)
+        .args(["-f", "rawvideo", "-pix_fmt", "gbrpf32le", "-"])
+        .output()
+        .map_err(|error| {
+            TranscodeError(format!(
+                "failed to run ffmpeg ({configured}); ensure ffmpeg is installed: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(TranscodeError(format!(
+            "ffmpeg failed to decode the HDR image: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let plane = w * h;
+    let want = plane * 3 * 4;
+    if output.stdout.len() < want {
+        return Err(TranscodeError(format!(
+            "ffmpeg returned {} bytes for a {width}x{height} HDR image (need {want})",
+            output.stdout.len()
+        )));
+    }
+    let sample = |plane_index: usize, i: usize| -> f32 {
+        let at = (plane_index * plane + i) * 4;
+        f32::from_le_bytes([
+            output.stdout[at],
+            output.stdout[at + 1],
+            output.stdout[at + 2],
+            output.stdout[at + 3],
+        ])
+    };
+
+    let mut rgb = Vec::with_capacity(plane * 3);
+    for i in 0..plane {
+        // gbrp: plane 0 is G, plane 1 is B, plane 2 is R.
+        for linear in [sample(2, i), sample(0, i), sample(1, i)] {
+            let mapped = linear_to_srgb(reinhard(linear));
+            rgb.push((mapped * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
+        }
+    }
+    let buffer = image::RgbImage::from_raw(width, height, rgb)
+        .ok_or_else(|| TranscodeError("tone-mapped buffer did not match the image size".into()))?;
+    buffer
+        .save_with_format(dst, image::ImageFormat::Png)
+        .map_err(|error| TranscodeError(format!("could not write the HDR preview PNG: {error}")))?;
+    ensure_nonempty_output(dst)
 }
 
 #[cfg(target_os = "macos")]
@@ -607,6 +707,100 @@ mod tests {
             sniff_image_kind(&rendered[..32.min(rendered.len())]),
             Some(ImageKind::Png),
             "the preview derivative must be a real PNG"
+        );
+    }
+
+    /// The tone-map curve itself: highlights above diffuse white stay below 255 AND stay apart.
+    ///
+    /// Pure-Rust, so it runs everywhere and pins the property clipping destroys. A clipping
+    /// preview maps every super-white value onto the same 255, which is what made the previous
+    /// "tone-mapped proxy" label untrue.
+    #[test]
+    fn tone_map_keeps_highlights_below_clipping_and_distinguishable() {
+        let code = |linear: f32| (linear_to_srgb(reinhard(linear)) * 255.0 + 0.5) as u8;
+
+        assert_eq!(code(0.0), 0, "black must stay black");
+        // Diffuse white is mapped WELL below 255, which is what reserves the headroom.
+        let white = code(1.0);
+        assert!(
+            (150..=220).contains(&white),
+            "diffuse white should sit mid-high, got {white}"
+        );
+
+        // Every highlight above diffuse white stays below the clipping point...
+        let ladder: Vec<u8> = [2.0f32, 4.0, 8.0, 16.0, 64.0]
+            .iter()
+            .map(|v| code(*v))
+            .collect();
+        for (linear, got) in [2.0f32, 4.0, 8.0, 16.0, 64.0].iter().zip(&ladder) {
+            assert!(
+                *got < 255,
+                "linear {linear} clipped to {got} — highlights must not saturate"
+            );
+        }
+        // ...and stays strictly ordered, so two different super-white values remain readable.
+        for pair in ladder.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "super-white values collapsed onto the same code: {ladder:?}"
+            );
+        }
+    }
+
+    /// EXTERNAL — an end-to-end HDR preview: ffmpeg builds a real EXR carrying a 0 → 8.0 ramp, our
+    /// mapper renders it, and the decoded PNG must show the super-white end unclipped and ordered.
+    ///
+    /// The unit test above pins the curve; this pins the whole path (decode → map → encode),
+    /// which is where a plane-order or stride mistake would hide.
+    #[test]
+    fn hdr_preview_renders_a_super_white_ramp_without_clipping() {
+        let ffmpeg = std::env::var("SCENEWORKS_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_owned());
+        match Command::new(&ffmpeg).arg("-version").output() {
+            Ok(out) if out.status.success() => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!(
+                    "SKIPPED (external): hdr_preview_renders_a_super_white_ramp_without_clipping \
+                     — `{ffmpeg}` is not reachable."
+                );
+                return;
+            }
+            other => panic!("failed to probe {ffmpeg}: {other:?}"),
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let exr = dir.path().join("ramp.exr");
+        let png = dir.path().join("ramp.png");
+
+        // A horizontal 0 → 8.0 linear ramp: `geq` writes raw values, so the right-hand half is
+        // genuinely above diffuse white rather than merely bright.
+        let built = Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi"])
+            .args(["-i", "color=c=black:s=64x8:r=1", "-frames:v", "1"])
+            .args(["-vf", "format=gbrpf32le,geq=r='8*X/W':g='8*X/W':b='8*X/W'"])
+            .args(["-y"])
+            .arg(&exr)
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            built.status.success(),
+            "could not build the HDR ramp fixture: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+
+        transcode_hdr_to_png(&exr, &png).expect("tone-map the HDR ramp");
+        let decoded = image::open(&png).expect("open preview").to_rgb8();
+        assert_eq!(decoded.dimensions(), (64, 8));
+
+        let row: Vec<u8> = (0..64u32).map(|x| decoded.get_pixel(x, 0)[0]).collect();
+        assert!(
+            *row.last().unwrap() < 255,
+            "the 8.0 end of the ramp clipped to 255: {:?}",
+            &row[56..]
+        );
+        // Sample points well inside the super-white region must differ from each other.
+        let (mid, high) = (row[40], row[62]);
+        assert!(
+            high > mid,
+            "super-white samples collapsed: linear ~5 -> {mid}, linear ~7.75 -> {high}"
         );
     }
 
