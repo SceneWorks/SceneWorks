@@ -37,6 +37,10 @@ pub enum ImageKind {
     Avif,
     /// HEIF container family — covers HEIC (iPhone photos) and plain HEIF.
     Heif,
+    /// OpenEXR — scene-linear high-dynamic-range float frames (sc-18790). Unlike every other
+    /// member here, its PNG rendition is a **lossy proxy**, not a faithful substitute; see
+    /// [`ImageKind::png_transcode_is_lossy`].
+    OpenExr,
 }
 
 impl ImageKind {
@@ -48,6 +52,23 @@ impl ImageKind {
     /// assets stay in three formats. Do not "fix" this list to match the feature union.
     pub fn is_natively_supported(self) -> bool {
         matches!(self, ImageKind::Png | ImageKind::Jpeg | ImageKind::WebP)
+    }
+
+    /// True when converting this format to PNG **destroys information the file exists to carry**,
+    /// so the original must be stored rather than replaced (sc-18790).
+    ///
+    /// This is the distinction that separates OpenEXR from every other transcoded format here.
+    /// AVIF/HEIC/TIFF/BMP/GIF are 8-bit-per-channel display-referred images: PNG holds their
+    /// pixels exactly, so import can convert once and keep only the PNG. OpenEXR is scene-linear
+    /// **float** — a specular highlight at 50.0 and diffuse white at 1.0 both land on 255 in an
+    /// 8-bit PNG, which is precisely the latitude a grading or VFX pipeline needs. Converting and
+    /// discarding would leave the user with a tone-mapped proxy and no way back.
+    ///
+    /// So a lossy-to-transcode format is stored as-is and its PNG rendition is generated as a
+    /// **preview derivative** on demand (the `?thumbnail=` route), never as the stored asset.
+    /// Download therefore always serves the original bytes.
+    pub fn png_transcode_is_lossy(self) -> bool {
+        matches!(self, ImageKind::OpenExr)
     }
 
     /// Canonical `(extension, mime)` for this format — the values to record for a stored asset,
@@ -62,6 +83,9 @@ impl ImageKind {
             ImageKind::Tiff => ("tiff", "image/tiff"),
             ImageKind::Avif => ("avif", "image/avif"),
             ImageKind::Heif => ("heic", "image/heic"),
+            // `image/x-exr` is the conventional spelling and, critically, an inert
+            // `image/` type — the property SAFE_UPLOAD_EXTENSIONS relies on.
+            ImageKind::OpenExr => ("exr", "image/x-exr"),
         }
     }
 
@@ -76,6 +100,7 @@ impl ImageKind {
             ImageKind::Tiff => "TIFF",
             ImageKind::Avif => "AVIF",
             ImageKind::Heif => "HEIC/HEIF",
+            ImageKind::OpenExr => "OpenEXR",
         }
     }
 }
@@ -96,6 +121,10 @@ pub fn sniff_image_kind(header: &[u8]) -> Option<ImageKind> {
     }
     if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
         return Some(ImageKind::Gif);
+    }
+    // OpenEXR magic number 20000630 (0x01312F76), little-endian on disk.
+    if header.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
+        return Some(ImageKind::OpenExr);
     }
     if header.starts_with(b"BM") {
         return Some(ImageKind::Bmp);
@@ -484,6 +513,101 @@ mod tests {
         for kind in [ImageKind::Gif, ImageKind::Bmp, ImageKind::Tiff] {
             assert!(!kind.is_natively_supported());
         }
+    }
+
+    /// OpenEXR is recognized by magic, is not browser-renderable, and — unlike every other
+    /// transcoded format — is flagged lossy-to-transcode so import keeps the original bytes.
+    ///
+    /// The last assertion is the load-bearing one for sc-18790: if OpenEXR ever joined the
+    /// convert-and-discard set, an HDR frame would be silently replaced by an 8-bit tone-mapped
+    /// PNG and the scene-linear original would be unrecoverable.
+    #[test]
+    fn sniffs_openexr_and_marks_it_lossy_to_transcode() {
+        // EXR magic number 20000630 (0x01312F76), little-endian, then the version field.
+        let exr = [0x76u8, 0x2F, 0x31, 0x01, 0x02, 0x00, 0x00, 0x00];
+        assert_eq!(sniff_image_kind(&exr), Some(ImageKind::OpenExr));
+        assert!(
+            !ImageKind::OpenExr.is_natively_supported(),
+            "no browser decodes OpenEXR — it must never be treated as directly renderable"
+        );
+        assert!(
+            ImageKind::OpenExr.png_transcode_is_lossy(),
+            "OpenEXR must be stored as-is; a PNG rendition is a proxy, not a substitute"
+        );
+        assert_eq!(ImageKind::OpenExr.canonical(), ("exr", "image/x-exr"));
+
+        // Every OTHER transcoded format is lossless to convert, so import may keep only the PNG.
+        // Asserting this keeps the flag a real distinction rather than a field nothing reads.
+        for kind in [
+            ImageKind::Gif,
+            ImageKind::Bmp,
+            ImageKind::Tiff,
+            ImageKind::Avif,
+            ImageKind::Heif,
+        ] {
+            assert!(
+                !kind.png_transcode_is_lossy(),
+                "{} is 8-bit and converts losslessly to PNG",
+                kind.label()
+            );
+        }
+    }
+
+    /// EXTERNAL — ffmpeg renders a real OpenEXR file to PNG through the shared transcoder, which is
+    /// what the `?thumbnail=` derivative route relies on to preview an HDR asset.
+    ///
+    /// Uses ffmpeg to BUILD the fixture as well as to consume it, so no binary blob is checked in
+    /// (this repo synthesizes image fixtures in code rather than committing them). Skips loudly
+    /// when ffmpeg is unreachable.
+    #[test]
+    fn transcodes_a_real_openexr_to_png_via_the_platform_decoder() {
+        let ffmpeg = std::env::var("SCENEWORKS_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_owned());
+        match Command::new(&ffmpeg).arg("-version").output() {
+            Ok(out) if out.status.success() => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!(
+                    "SKIPPED (external): transcodes_a_real_openexr_to_png_via_the_platform_decoder \
+                     — `{ffmpeg}` is not reachable."
+                );
+                return;
+            }
+            other => panic!("failed to probe {ffmpeg}: {other:?}"),
+        }
+
+        let dir = std::env::temp_dir().join(format!("sc18790-exr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let exr = dir.join("frame.exr");
+        let png = dir.join("frame.png");
+
+        let built = Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi"])
+            .args(["-i", "testsrc=size=32x32:rate=1", "-frames:v", "1"])
+            .args(["-pix_fmt", "gbrpf32le", "-y"])
+            .arg(&exr)
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            built.status.success(),
+            "could not build the EXR fixture: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+
+        // The bytes ffmpeg wrote must be what our own sniffer calls an OpenEXR.
+        let header = std::fs::read(&exr).expect("read exr");
+        assert_eq!(
+            sniff_image_kind(&header[..32.min(header.len())]),
+            Some(ImageKind::OpenExr),
+            "a real ffmpeg-written EXR must sniff as OpenEXR"
+        );
+
+        transcode_to_png(&exr, &png).expect("transcode EXR to PNG");
+        let rendered = std::fs::read(&png).expect("read png");
+        assert_eq!(
+            sniff_image_kind(&rendered[..32.min(rendered.len())]),
+            Some(ImageKind::Png),
+            "the preview derivative must be a real PNG"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
