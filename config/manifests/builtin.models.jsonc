@@ -19432,7 +19432,8 @@
     },
     {
       "id": "ltx_2_5",
-      "recommended": true,
+      // The 2.5 workflow is a high-control opt-in; LTX-2.3 remains the recommended/default LTX route.
+      "recommended": false,
       "autoDownload": false,
       "name": "LTX-2.5",
       "family": "ltx-video",
@@ -19508,7 +19509,17 @@
         "label": "LTX-2.5",
         "description": "Text and image video with the distilled default or the 30-step guided dev transformer.",
         "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
-        "durationHint": "Distilled is the default. Dev runs the guided 30-step recipe and its bundled stage-two refinement."
+        "durationHint": "Distilled is the default. Dev runs the guided 30-step recipe and its bundled stage-two refinement.",
+        "promptGuide": {
+          "title": "LTX-2.5 Gemma 4 Prompt Guide",
+          "path": "/prompt-guides/ltx-2-5.md",
+          "sources": [
+            { "label": "Lightricks LTX-2.5 model card", "url": "https://huggingface.co/Lightricks/LTX-2.5" },
+            { "label": "Lightricks LTX-2.5 Diffusers model card", "url": "https://huggingface.co/Lightricks/LTX-2.5-Diffusers" },
+            { "label": "Lightricks Gemma 4 text-to-video prompt contract", "url": "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_t2v_system_prompt.txt" },
+            { "label": "Lightricks Gemma 4 image-to-video prompt contract", "url": "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_i2v_system_prompt.txt" }
+          ]
+        }
       }
     },
     {

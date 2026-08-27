@@ -2325,6 +2325,115 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     training: { supportedKernels: [], lokrOnWanSupported: false },
   };
 
+  it("declares LTX-2.5 as opt-in with its Gemma 4 prompt guide while LTX-2.3 stays recommended", () => {
+    const manifestPath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../../config/manifests/builtin.models.jsonc",
+    );
+    const models = JSON5.parse(readFileSync(manifestPath, "utf8")).models;
+    const ltx25 = models.find((entry) => entry.id === "ltx_2_5");
+    const ltx23 = models.find((entry) => entry.id === "ltx_2_3");
+
+    expect(ltx25?.recommended).toBe(false);
+    expect(ltx25?.ui?.recommendedFor).toEqual([
+      "image_to_video",
+      "text_to_video",
+      "first_last_frame",
+      "extend_clip",
+      "video_bridge",
+      "replace_person",
+    ]);
+    expect(ltx25?.ui?.promptGuide).toEqual({
+      title: "LTX-2.5 Gemma 4 Prompt Guide",
+      path: "/prompt-guides/ltx-2-5.md",
+      sources: [
+        {
+          label: "Lightricks LTX-2.5 model card",
+          url: "https://huggingface.co/Lightricks/LTX-2.5",
+        },
+        {
+          label: "Lightricks LTX-2.5 Diffusers model card",
+          url: "https://huggingface.co/Lightricks/LTX-2.5-Diffusers",
+        },
+        {
+          label: "Lightricks Gemma 4 text-to-video prompt contract",
+          url: "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_t2v_system_prompt.txt",
+        },
+        {
+          label: "Lightricks Gemma 4 image-to-video prompt contract",
+          url: "https://github.com/Lightricks/LTX-2/blob/fd4ded7f2d88d3da713abcdd4ad41ecc4a9314ca/packages/ltx-core/src/ltx_core/text_encoders/gemma/encoders/prompts/gemma4_i2v_system_prompt.txt",
+        },
+      ],
+    });
+    expect(ltx23?.recommended).toBe(true);
+  });
+
+  it("keeps LTX-2.3 as the default and confines LTX-2.5 execution controls to its Advanced panel", async () => {
+    const context = baseContext({
+      videoModels: [LTX25, DISTILLED_LTX],
+      macCapabilities: LTX25_MAC_CAPS,
+    });
+    await render(context);
+
+    expect(container.querySelector(".settings-field-model select").value).toBe("ltx_2_3");
+    await openAdvanced();
+    expect(container.querySelector('[aria-label="LTX-2.5 VAE decoder"]')).toBeNull();
+    expect(container.querySelector('[aria-label="LTX-2.5 auto duration"]')).toBeNull();
+    expect(container.querySelector('[aria-label="LTX-2.5 temporal upsampling"]')).toBeNull();
+  });
+
+  it("submits LTX-2.5 decoder, duration-head bounds, and temporal upsampling without a manual duration", async () => {
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
+    await render(context);
+    await openAdvanced();
+
+    const decoder = container.querySelector('[aria-label="LTX-2.5 VAE decoder"]');
+    const autoDuration = container.querySelector('[aria-label="LTX-2.5 auto duration"]');
+    const minDuration = container.querySelector('[aria-label="LTX-2.5 auto duration minimum"]');
+    const maxDuration = container.querySelector('[aria-label="LTX-2.5 auto duration maximum"]');
+    const temporal = container.querySelector('[aria-label="LTX-2.5 temporal upsampling"]');
+
+    expect(decoder.value).toBe("conv");
+    expect(autoDuration.checked).toBe(false);
+    expect(minDuration.disabled).toBe(true);
+    expect(maxDuration.disabled).toBe(true);
+    expect(temporal.value).toBe("0");
+
+    await act(async () => setSelect(decoder, "diffusion"));
+    await act(async () => autoDuration.click());
+    expect(minDuration.disabled).toBe(false);
+    expect(maxDuration.disabled).toBe(false);
+    await act(async () => setInput(minDuration, "5"));
+    await act(async () => setInput(maxDuration, "12"));
+    await act(async () => setSelect(temporal, "2"));
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).not.toHaveProperty("duration");
+    expect(payload.advanced).toMatchObject({
+      vaeDecoder: "diffusion",
+      autoDuration: true,
+      autoDurationMinSeconds: 5,
+      autoDurationMaxSeconds: 12,
+      temporalUpsampleRounds: 2,
+    });
+  });
+
+  it("returns LTX-2.5 to an explicit duration when the duration picker changes", async () => {
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
+    await render(context);
+    await openAdvanced();
+    await act(async () => container.querySelector('[aria-label="LTX-2.5 auto duration"]').click());
+
+    const durationPicker = container.querySelector(".settings-field-count select");
+    await act(async () => setSelect(durationPicker, "8"));
+    await click(buttonWithText(container, "Render clip"));
+
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.duration).toBe(8);
+    expect(payload.advanced.autoDuration).toBe(false);
+  });
+
   it("routes the LTX-2.5 dev selector into the request and pins its 30-step row", async () => {
     const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
     await render(context);

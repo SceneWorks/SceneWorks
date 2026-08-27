@@ -135,6 +135,9 @@ function humanizedNumberMenu(menu) {
 
 const ltxVideoModelId = "ltx_2_3";
 const ltx25VideoModelId = "ltx_2_5";
+const LTX25_AUTO_DURATION_MIN_SECONDS = 4;
+const LTX25_AUTO_DURATION_MAX_SECONDS = 15;
+const LTX25_TEMPORAL_UPSAMPLE_MAX_ROUNDS = 2;
 const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros", ltx25VideoModelId]);
 // Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
 // picker only enables entries whose individual install is complete (`installedTiers`); in particular,
@@ -176,6 +179,21 @@ function videoExecutionTierModel(model, backend) {
       ? model.mlxTierStates.filter((state) => accepted(state?.tier))
       : model.mlxTierStates,
   };
+}
+
+function clampLtx25AutoDurationSeconds(value, fallback) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return fallback;
+  return Math.min(
+    LTX25_AUTO_DURATION_MAX_SECONDS,
+    Math.max(LTX25_AUTO_DURATION_MIN_SECONDS, Math.round(seconds)),
+  );
+}
+
+function clampLtx25TemporalUpsampleRounds(value) {
+  const rounds = Number(value);
+  if (!Number.isFinite(rounds)) return 0;
+  return Math.min(LTX25_TEMPORAL_UPSAMPLE_MAX_ROUNDS, Math.max(0, Math.round(rounds)));
 }
 
 function unavailableRecipeTierMessage(model, backend, tier) {
@@ -282,6 +300,25 @@ export function VideoStudio() {
   const [ltxPipeline, setLtxPipeline] = useState(saved.ltxPipeline ?? "auto");
   const [distilledVariant, setDistilledVariant] = useState(saved.distilledVariant ?? "1.1");
   const [transformerVariant, setTransformerVariant] = useState(saved.transformerVariant ?? "distilled");
+  const [vaeDecoder, setVaeDecoder] = useState(
+    saved.vaeDecoder === "diffusion" ? "diffusion" : "conv",
+  );
+  const [autoDuration, setAutoDuration] = useState(saved.autoDuration === true);
+  const [autoDurationMinSeconds, setAutoDurationMinSeconds] = useState(() =>
+    clampLtx25AutoDurationSeconds(
+      saved.autoDurationMinSeconds,
+      LTX25_AUTO_DURATION_MIN_SECONDS,
+    ),
+  );
+  const [autoDurationMaxSeconds, setAutoDurationMaxSeconds] = useState(() =>
+    clampLtx25AutoDurationSeconds(
+      saved.autoDurationMaxSeconds,
+      LTX25_AUTO_DURATION_MAX_SECONDS,
+    ),
+  );
+  const [temporalUpsampleRounds, setTemporalUpsampleRounds] = useState(() =>
+    clampLtx25TemporalUpsampleRounds(saved.temporalUpsampleRounds),
+  );
   const [precision, setPrecision] = useState(saved.precision ?? "fp8");
   const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
   const [textEncoderSelection, setTextEncoderSelection] = useState({
@@ -300,7 +337,13 @@ export function VideoStudio() {
   // installed tier the current model would normally seed.
   const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
-  const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
+  // LTX-2.3 remains the default video route. LTX-2.5 is deliberately opt-in even though its
+  // catalog entry can arrive first (the manifest groups the shared LTX family together).
+  const defaultVideoModelId =
+    videoModels.find((item) => item.id === ltxVideoModelId)?.id ??
+    videoModels[0]?.id ??
+    ltxVideoModelId;
+  const [model, setModel] = useState(saved.model ?? defaultVideoModelId);
   // Every USER model picker must retire replay-only state. Automatic catalog/mode/recipe snaps use
   // the raw state setter below and preserve the replay while its target model becomes active.
   const setUserModel = useCallback((nextModel) => {
@@ -337,6 +380,7 @@ export function VideoStudio() {
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   const ltx25Dev = model === ltx25VideoModelId && transformerVariant === "dev";
+  const ltx25AutoDurationEnabled = model === ltx25VideoModelId && autoDuration;
   // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
   // behind the descriptor-derived manifest flag: the currently pinned engine descriptor does not
   // advertise the paired contract yet, so a normal catalog remains on the existing single picker
@@ -1237,6 +1281,23 @@ export function VideoStudio() {
     setLtxPipeline(rawSettings.ltxPipeline ?? "auto");
     setDistilledVariant(rawSettings.distilledVariant ?? "1.1");
     setTransformerVariant(rawSettings.transformerVariant ?? "distilled");
+    setVaeDecoder(rawSettings.vaeDecoder === "diffusion" ? "diffusion" : "conv");
+    setAutoDuration(rawSettings.autoDuration === true);
+    setAutoDurationMinSeconds(
+      clampLtx25AutoDurationSeconds(
+        rawSettings.autoDurationMinSeconds,
+        LTX25_AUTO_DURATION_MIN_SECONDS,
+      ),
+    );
+    setAutoDurationMaxSeconds(
+      clampLtx25AutoDurationSeconds(
+        rawSettings.autoDurationMaxSeconds,
+        LTX25_AUTO_DURATION_MAX_SECONDS,
+      ),
+    );
+    setTemporalUpsampleRounds(
+      clampLtx25TemporalUpsampleRounds(rawSettings.temporalUpsampleRounds),
+    );
     setPrecision(rawSettings.precision ?? "fp8");
     setEnhancePrompt(rawSettings.enhancePrompt === true);
     setTextEncoderModel(
@@ -1358,6 +1419,11 @@ export function VideoStudio() {
       ["ltxPipeline", setLtxPipeline],
       ["distilledVariant", setDistilledVariant],
       ["transformerVariant", setTransformerVariant],
+      ["vaeDecoder", setVaeDecoder],
+      ["autoDuration", setAutoDuration],
+      ["autoDurationMinSeconds", setAutoDurationMinSeconds],
+      ["autoDurationMaxSeconds", setAutoDurationMaxSeconds],
+      ["temporalUpsampleRounds", setTemporalUpsampleRounds],
       ["enhancePrompt", setEnhancePrompt],
       ["textEncoderModel", setTextEncoderModel],
       ["motion", setMotion],
@@ -1390,6 +1456,15 @@ export function VideoStudio() {
       ltxPipeline,
       distilledVariant,
       transformerVariant,
+      ...(model === ltx25VideoModelId
+        ? {
+            vaeDecoder,
+            autoDuration,
+            autoDurationMinSeconds,
+            autoDurationMaxSeconds,
+            temporalUpsampleRounds,
+          }
+        : {}),
       ...(supportsPromptEnhancement ? { enhancePrompt } : {}),
       ...(supportsTextEncoderSelection ? { textEncoderModel: selectedTextEncoderModel } : {}),
       motion,
@@ -1412,6 +1487,11 @@ export function VideoStudio() {
     ltxPipeline,
     distilledVariant,
     transformerVariant,
+    vaeDecoder,
+    autoDuration,
+    autoDurationMinSeconds,
+    autoDurationMaxSeconds,
+    temporalUpsampleRounds,
     precision,
     enhancePrompt,
     textEncoderModel,
@@ -1789,7 +1869,10 @@ export function VideoStudio() {
         // (and the worker discards anyway) would be a ghost input on the recipe.
         negativePrompt: supportsNegativePrompt ? (stackActive ? composedStack.negativePrompt : negativePrompt) : "",
         model,
-        duration: Number(duration),
+        // The duration head chooses a legal duration only when the user explicitly opts in. Do not
+        // send the visible manual-picker value alongside it: provider precedence is intentionally
+        // represented by absence, so an explicit duration always wins by switching this toggle off.
+        ...(ltx25AutoDurationEnabled ? {} : { duration: Number(duration) }),
         fps: Number(fps),
         width: stackResolution?.width ?? width,
         height: stackResolution?.height ?? height,
@@ -1868,7 +1951,16 @@ export function VideoStudio() {
           // stay byte-identical.
           ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
-          ...(model === ltx25VideoModelId ? { transformerVariant } : {}),
+          ...(model === ltx25VideoModelId
+            ? {
+                transformerVariant,
+                vaeDecoder,
+                autoDuration,
+                autoDurationMinSeconds,
+                autoDurationMaxSeconds,
+                temporalUpsampleRounds,
+              }
+            : {}),
           ...(supportsPromptEnhancement && enhancePrompt
             ? { enhancePrompt: true }
             : {}),
@@ -2356,7 +2448,15 @@ export function VideoStudio() {
                     slider would emit durations the engine refuses (15.0s among them, which its own
                     docs advertise and which sits between the last rung and the next). The label
                     carries the frame count because that is what the lattice is counting. */}
-                <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
+                <select
+                  onChange={(event) => {
+                    setDuration(Number(event.target.value));
+                    // A manual selection is an explicit duration request. Disable duration-head
+                    // selection immediately so the visible value and the submitted payload agree.
+                    if (model === ltx25VideoModelId) setAutoDuration(false);
+                  }}
+                  value={duration}
+                >
                   {durationOptions.map((value) => (
                     <option key={value} value={value}>
                       {formatDurationOption(value, fps)}
@@ -2555,22 +2655,108 @@ export function VideoStudio() {
                 </>
               ) : null}
               {model === ltx25VideoModelId ? (
-                <label>
-                  Transformer
-                  <select
-                    aria-label="LTX-2.5 transformer"
-                    onChange={(event) => setTransformerVariant(event.target.value)}
-                    value={transformerVariant}
-                  >
-                    <option value="distilled">Distilled (default, 8 steps)</option>
-                    <option value="dev">Dev (guided, 30 steps)</option>
-                  </select>
-                  <p className="helper-copy">
-                    {ltx25Dev
-                      ? "Dev uses the guided 30-step transformer and the bundled stage-two distilled refinement."
-                      : "Distilled is the default packed transformer and does not apply the refinement adapter twice."}
-                  </p>
-                </label>
+                <>
+                  <label>
+                    Transformer
+                    <select
+                      aria-label="LTX-2.5 transformer"
+                      onChange={(event) => setTransformerVariant(event.target.value)}
+                      value={transformerVariant}
+                    >
+                      <option value="distilled">Distilled (default, 8 steps)</option>
+                      <option value="dev">Dev (guided, 30 steps)</option>
+                    </select>
+                    <p className="helper-copy">
+                      {ltx25Dev
+                        ? "Dev uses the guided 30-step transformer and the bundled stage-two distilled refinement."
+                        : "Distilled is the default packed transformer and does not apply the refinement adapter twice."}
+                    </p>
+                  </label>
+                  <label>
+                    VAE decoder
+                    <select
+                      aria-label="LTX-2.5 VAE decoder"
+                      onChange={(event) => setVaeDecoder(event.target.value)}
+                      value={vaeDecoder}
+                    >
+                      <option value="conv">Conv VAE (default, faster)</option>
+                      <option value="diffusion">DiffVAE (higher fidelity, slower)</option>
+                    </select>
+                    <p className="helper-copy">
+                      Conv is the fast default. DiffVAE performs a separate diffusion decode for
+                      finer faces, textures, and on-screen detail.
+                    </p>
+                  </label>
+                  <div className="lightning-toggle">
+                    <label className="checkline">
+                      <input
+                        aria-label="LTX-2.5 auto duration"
+                        checked={autoDuration}
+                        onChange={(event) => setAutoDuration(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Choose duration from the prompt
+                    </label>
+                    <p className="helper-copy">
+                      Uses LTX-2.5's optional duration head. Choose a manual duration above to
+                      turn this off and send that explicit duration instead.
+                    </p>
+                  </div>
+                  <label>
+                    Auto duration minimum (seconds)
+                    <input
+                      aria-label="LTX-2.5 auto duration minimum"
+                      disabled={!autoDuration}
+                      max={LTX25_AUTO_DURATION_MAX_SECONDS}
+                      min={LTX25_AUTO_DURATION_MIN_SECONDS}
+                      onChange={(event) => {
+                        const next = clampLtx25AutoDurationSeconds(
+                          event.target.value,
+                          LTX25_AUTO_DURATION_MIN_SECONDS,
+                        );
+                        setAutoDurationMinSeconds(next);
+                        setAutoDurationMaxSeconds((current) => Math.max(current, next));
+                      }}
+                      step="1"
+                      type="number"
+                      value={autoDurationMinSeconds}
+                    />
+                  </label>
+                  <label>
+                    Auto duration maximum (seconds)
+                    <input
+                      aria-label="LTX-2.5 auto duration maximum"
+                      disabled={!autoDuration}
+                      max={LTX25_AUTO_DURATION_MAX_SECONDS}
+                      min={LTX25_AUTO_DURATION_MIN_SECONDS}
+                      onChange={(event) => {
+                        const next = clampLtx25AutoDurationSeconds(
+                          event.target.value,
+                          LTX25_AUTO_DURATION_MAX_SECONDS,
+                        );
+                        setAutoDurationMaxSeconds(next);
+                        setAutoDurationMinSeconds((current) => Math.min(current, next));
+                      }}
+                      step="1"
+                      type="number"
+                      value={autoDurationMaxSeconds}
+                    />
+                  </label>
+                  <label>
+                    Temporal upsampling
+                    <select
+                      aria-label="LTX-2.5 temporal upsampling"
+                      onChange={(event) =>
+                        setTemporalUpsampleRounds(clampLtx25TemporalUpsampleRounds(event.target.value))
+                      }
+                      value={temporalUpsampleRounds}
+                    >
+                      <option value={0}>Off (default)</option>
+                      <option value={1}>1 round (2× frames)</option>
+                      <option value={2}>2 rounds (4× frames)</option>
+                    </select>
+                  </label>
+                </>
               ) : null}
               {supportsPromptEnhancement ? (
                 <>

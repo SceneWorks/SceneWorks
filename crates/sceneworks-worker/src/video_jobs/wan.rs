@@ -1298,6 +1298,13 @@ pub(super) struct VideoGenInput {
     pub(super) height: u32,
     pub(super) frames: u32,
     pub(super) fps: u32,
+    /// LTX-2.5's opt-in duration predictor. `Some` makes the provider own the frame count, while
+    /// `frames` remains the conservative max-window planning count used by admission.
+    pub(super) auto_duration: Option<gen_core::duration_head::AutoDurationRange>,
+    /// LTX-2.5 DFR temporal x2 refinement rounds. `None`/0 is the established plain pipeline.
+    pub(super) temporal_upsample_rounds: Option<u32>,
+    /// Stage the tier's alternate diffusion decoder instead of the default Conv VAE.
+    pub(super) use_diffusion_decoder: bool,
     pub(super) steps: Option<u32>,
     pub(super) guidance: Option<f32>,
     /// Flow-matching scheduler shift (`req.scheduler_shift`); `None` ⇒ the engine default. Set by the
@@ -1413,6 +1420,9 @@ impl Default for VideoGenInput {
             height: 0,
             frames: 0,
             fps: 0,
+            auto_duration: None,
+            temporal_upsample_rounds: None,
+            use_diffusion_decoder: false,
             steps: None,
             guidance: None,
             scheduler_shift: None,
@@ -1477,8 +1487,11 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     //   the whole engine crate, so staging there would resolve nothing and hard-error inside
     //   the engine at the `config.json` probe.
     //
+    // * LTX-2.5's alternate DiffVAE (`"diffusion_video_vae"`): the provider deliberately selects
+    //   it only when this explicit component is staged; omission keeps the faster Conv decoder.
+    //
     // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
-    // branched so adding a fourth cannot silently drop one.
+    // branched so adding another cannot silently drop one.
     let ltx25_stock_enhancer = (input.engine_id == "ltx_2_5")
         .then(|| {
             input
@@ -1502,6 +1515,12 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
             .text_encoder_component_dir
             .clone()
             .map(|dir| ("text_encoder".to_owned(), WeightsSource::Dir(dir))),
+        input.use_diffusion_decoder.then(|| {
+            (
+                "diffusion_video_vae".to_owned(),
+                WeightsSource::File(input.model_dir.join("vae_diffusion_decoder.safetensors")),
+            )
+        }),
     ]
     .into_iter()
     .flatten()
@@ -1564,6 +1583,19 @@ pub(super) fn video_admission_overlay(
     }
     if let Some(video_mode) = input.video_mode.as_deref() {
         overlays.push(format!("provider_video_mode:{video_mode}"));
+    }
+    if input.use_diffusion_decoder {
+        overlays.push("decoder:diffusion_vae".to_owned());
+    }
+    if let Some(range) = input.auto_duration {
+        overlays.push(format!(
+            "auto_duration:min:{:08x}:max:{:08x}",
+            range.min_seconds.to_bits(),
+            range.max_seconds.to_bits()
+        ));
+    }
+    if let Some(rounds) = input.temporal_upsample_rounds.filter(|rounds| *rounds > 0) {
+        overlays.push(format!("temporal_upsample_rounds:{rounds}"));
     }
     if input.engine_id == "bernini" && matches!(input.video_mode.as_deref(), Some("r2v" | "rv2v")) {
         overlays.push(
@@ -2066,8 +2098,12 @@ pub(super) fn run_loaded_video_generation(
         negative_prompt: input.negative_prompt,
         width: input.width,
         height: input.height,
-        frames: Some(input.frames),
+        // An explicit frame count wins over auto-duration in gen-core. Leave it absent only for an
+        // opted-in LTX-2.5 request so the duration head is actually reached.
+        frames: input.auto_duration.is_none().then_some(input.frames),
         fps: Some(input.fps),
+        auto_duration: input.auto_duration,
+        temporal_upsample_rounds: input.temporal_upsample_rounds,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,

@@ -39,6 +39,100 @@ const DEFAULT_REPLACEMENT_MODE: &str = "face_only";
 /// payload ceiling; callers must reject rather than silently discard a seventh character.
 pub const MAX_SCAIL2_REFERENCE_CHARACTERS: usize = 6;
 
+/// LTX-2.5's user-selectable decoder names on the Video Studio wire contract.
+pub const LTX25_VAE_DECODER_CONV: &str = "conv";
+pub const LTX25_VAE_DECODER_DIFFUSION: &str = "diffusion";
+
+/// LTX-2.5 exposes at most two temporal x2 refinement rounds.
+pub const LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS: u32 = 2;
+
+/// Validated seconds window for LTX-2.5's opt-in duration predictor.
+///
+/// This lives in core rather than gen-core so the API can reject malformed requests before a job
+/// exists without taking a provider dependency. The worker converts it to gen-core's identically
+/// shaped `AutoDurationRange` only after the model-specific capability gate has passed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoAutoDurationRange {
+    pub min_seconds: f32,
+    pub max_seconds: f32,
+}
+
+/// Parse the Video Studio's scalar auto-duration keys. Omission and an explicit `false` are both
+/// off; opting in requires a finite, positive, ordered min/max window.
+pub fn requested_auto_duration(
+    advanced: &JsonObject,
+) -> Result<Option<VideoAutoDurationRange>, String> {
+    let Some(enabled) = advanced.get("autoDuration") else {
+        return Ok(None);
+    };
+    let Some(enabled) = enabled.as_bool() else {
+        return Err("advanced.autoDuration must be a boolean when present".to_owned());
+    };
+    if !enabled {
+        return Ok(None);
+    }
+    let number = |key: &str| {
+        advanced
+            .get(key)
+            .and_then(Value::as_f64)
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                format!("advanced.{key} must be a finite number when auto-duration is enabled")
+            })
+    };
+    let min_seconds = number("autoDurationMinSeconds")?;
+    let max_seconds = number("autoDurationMaxSeconds")?;
+    if min_seconds <= 0.0 || max_seconds <= 0.0 {
+        return Err("advanced auto-duration min/max seconds must both be positive".to_owned());
+    }
+    if min_seconds > max_seconds {
+        return Err(format!(
+            "advanced.autoDurationMinSeconds {min_seconds} exceeds advanced.autoDurationMaxSeconds {max_seconds}"
+        ));
+    }
+    Ok(Some(VideoAutoDurationRange {
+        min_seconds,
+        max_seconds,
+    }))
+}
+
+/// Parse LTX-2.5's decoder selector. Omission is the fast Conv decoder product default.
+pub fn requested_ltx25_vae_decoder(advanced: &JsonObject) -> Result<&str, String> {
+    match advanced.get("vaeDecoder") {
+        None => Ok(LTX25_VAE_DECODER_CONV),
+        Some(Value::String(value))
+            if matches!(
+                value.as_str(),
+                LTX25_VAE_DECODER_CONV | LTX25_VAE_DECODER_DIFFUSION
+            ) =>
+        {
+            Ok(value)
+        }
+        Some(_) => {
+            Err("advanced.vaeDecoder must be \"conv\" or \"diffusion\" when present".to_owned())
+        }
+    }
+}
+
+/// Parse LTX-2.5's temporal-refinement count. Omission and zero are both off.
+pub fn requested_temporal_upsample_rounds(advanced: &JsonObject) -> Result<u32, String> {
+    let Some(value) = advanced.get("temporalUpsampleRounds") else {
+        return Ok(0);
+    };
+    let rounds = value.as_u64().ok_or_else(|| {
+        format!(
+            "advanced.temporalUpsampleRounds must be an integer from 0 to {LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS}"
+        )
+    })?;
+    if rounds > u64::from(LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS) {
+        return Err(format!(
+            "advanced.temporalUpsampleRounds must be from 0 to {LTX25_MAX_TEMPORAL_UPSAMPLE_ROUNDS}, got {rounds}"
+        ));
+    }
+    Ok(rounds as u32)
+}
+
 /// Whether a selected LoRA stack contains the LTX in-context conditioning adapter required by
 /// extend, bridge, and native replacement. Routing and execution share this predicate so a job
 /// cannot be claimed and then rejected by a stricter worker-side spelling of the contract.
@@ -118,6 +212,10 @@ pub struct VideoRequest {
     /// [`duration_limit_error`] at the API and worker gates rather than clamped here — see
     /// that function for why this parse is the wrong home for it (sc-12297).
     pub duration: f32,
+    /// Whether the job payload named `duration`. LTX-2.5's duration predictor is opt-in and an
+    /// explicit duration always wins, including for legacy/replayed jobs that bypass the API's
+    /// enqueue-time normalization.
+    pub duration_was_explicit: bool,
     /// Frames per second, clamped to 1..=60 (Python `safe_int`).
     ///
     /// An **omitted** fps resolves to the model's declared `defaults.fps` rather than the blanket
@@ -215,6 +313,7 @@ impl VideoRequest {
             negative_prompt: nonempty_string_or(payload, "negativePrompt", ""),
             model: payload_model_id(payload),
             duration: resolve_duration(payload.get("duration"), &model_manifest_entry),
+            duration_was_explicit: payload.get("duration").and_then(Value::as_f64).is_some(),
             fps: resolve_fps(payload.get("fps"), &model_manifest_entry),
             width,
             height,
@@ -1886,6 +1985,71 @@ mod tests {
     }
 
     #[test]
+    fn ltx25_advanced_generation_controls_are_typed_and_fail_closed() {
+        assert_eq!(requested_auto_duration(&JsonObject::new()).unwrap(), None);
+        assert_eq!(
+            requested_auto_duration(&payload(json!({ "autoDuration": false }))).unwrap(),
+            None
+        );
+        assert_eq!(
+            requested_auto_duration(&payload(json!({
+                "autoDuration": true,
+                "autoDurationMinSeconds": 2,
+                "autoDurationMaxSeconds": 12.5
+            })))
+            .unwrap(),
+            Some(VideoAutoDurationRange {
+                min_seconds: 2.0,
+                max_seconds: 12.5,
+            })
+        );
+        for invalid in [
+            json!({ "autoDuration": "yes" }),
+            json!({ "autoDuration": true }),
+            json!({
+                "autoDuration": true,
+                "autoDurationMinSeconds": 8,
+                "autoDurationMaxSeconds": 4
+            }),
+            json!({
+                "autoDuration": true,
+                "autoDurationMinSeconds": 0,
+                "autoDurationMaxSeconds": 4
+            }),
+        ] {
+            assert!(requested_auto_duration(&payload(invalid)).is_err());
+        }
+
+        assert_eq!(
+            requested_ltx25_vae_decoder(&JsonObject::new()).unwrap(),
+            LTX25_VAE_DECODER_CONV
+        );
+        assert_eq!(
+            requested_ltx25_vae_decoder(&payload(json!({ "vaeDecoder": "diffusion" }))).unwrap(),
+            LTX25_VAE_DECODER_DIFFUSION
+        );
+        assert!(requested_ltx25_vae_decoder(&payload(json!({ "vaeDecoder": "fast" }))).is_err());
+
+        assert_eq!(
+            requested_temporal_upsample_rounds(&JsonObject::new()).unwrap(),
+            0
+        );
+        assert_eq!(
+            requested_temporal_upsample_rounds(&payload(json!({
+                "temporalUpsampleRounds": 2
+            })))
+            .unwrap(),
+            2
+        );
+        for invalid in [json!(3), json!(1.5), json!("1")] {
+            assert!(requested_temporal_upsample_rounds(&payload(json!({
+                "temporalUpsampleRounds": invalid
+            })))
+            .is_err());
+        }
+    }
+
+    #[test]
     fn ltx_ic_lora_predicate_accepts_metadata_and_canonical_markers_only() {
         for lora in [
             json!({ "icLora": true }),
@@ -1912,6 +2076,7 @@ mod tests {
         assert_eq!(request.mode, "image_to_video");
         assert_eq!(request.model, "ltx_2_3");
         assert_eq!(request.duration, 6.0);
+        assert!(!request.duration_was_explicit);
         assert_eq!(request.fps, 25);
         assert_eq!(request.width, 768);
         assert_eq!(request.height, 512);
@@ -1923,6 +2088,16 @@ mod tests {
         assert!(request.source_asset_id.is_none());
         // sc-6139: starting-image fit defaults to crop (never stretch), like images.
         assert_eq!(request.fit_mode, "crop");
+    }
+
+    #[test]
+    fn video_request_records_whether_duration_was_explicit() {
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "proj_1",
+            "duration": 7.5
+        })));
+        assert_eq!(request.duration, 7.5);
+        assert!(request.duration_was_explicit);
     }
 
     /// The worker's video admission funnel reads the catalog model id **before** the request is

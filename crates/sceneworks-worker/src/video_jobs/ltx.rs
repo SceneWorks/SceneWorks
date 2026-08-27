@@ -61,6 +61,124 @@ pub(super) fn ltx25_transformer_variant(
     }
 }
 
+/// Provider-bound LTX-2.5 controls after model scoping, type validation, and explicit-duration
+/// precedence. The planning frame count is conservative when the duration head owns the real count
+/// so admission never sizes the request below the user's selected maximum.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Ltx25GenerationOptions {
+    pub(super) planning_frames: u32,
+    pub(super) auto_duration: Option<gen_core::duration_head::AutoDurationRange>,
+    pub(super) temporal_upsample_rounds: Option<u32>,
+    pub(super) use_diffusion_decoder: bool,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn ltx25_generation_options(
+    request: &VideoRequest,
+) -> WorkerResult<Ltx25GenerationOptions> {
+    const KEYS: [&str; 5] = [
+        "vaeDecoder",
+        "autoDuration",
+        "autoDurationMinSeconds",
+        "autoDurationMaxSeconds",
+        "temporalUpsampleRounds",
+    ];
+    if request.model != "ltx_2_5" {
+        if KEYS.iter().any(|key| request.advanced.contains_key(*key)) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "LTX-2.5 decoder, auto-duration, and temporal-upsample controls are not supported by {}",
+                request.model
+            )));
+        }
+        return Ok(Ltx25GenerationOptions {
+            planning_frames: ltx_frame_count(request.raw_frame_count()),
+            auto_duration: None,
+            temporal_upsample_rounds: None,
+            use_diffusion_decoder: false,
+        });
+    }
+
+    let decoder = sceneworks_core::video_request::requested_ltx25_vae_decoder(&request.advanced)
+        .map_err(WorkerError::InvalidPayload)?;
+    let temporal_upsample_rounds =
+        sceneworks_core::video_request::requested_temporal_upsample_rounds(&request.advanced)
+            .map_err(WorkerError::InvalidPayload)?;
+
+    // The API removes these keys when an explicit duration is present. This duplicate precedence
+    // is intentional: replayed jobs and any future non-HTTP producer must reach the same contract.
+    let auto_range = if request.duration_was_explicit {
+        match request.advanced.get("autoDuration") {
+            Some(Value::Bool(_)) | None => None,
+            Some(_) => {
+                return Err(WorkerError::InvalidPayload(
+                    "advanced.autoDuration must be a boolean when present".to_owned(),
+                ))
+            }
+        }
+    } else {
+        sceneworks_core::video_request::requested_auto_duration(&request.advanced)
+            .map_err(WorkerError::InvalidPayload)?
+    };
+    if let Some(range) = auto_range {
+        if range.min_seconds < 1.0 || range.max_seconds > 30.0 {
+            return Err(WorkerError::InvalidPayload(
+                "advanced auto-duration min/max seconds must stay between 1 and 30".to_owned(),
+            ));
+        }
+        if let Some(message) = sceneworks_core::video_request::duration_limit_error(
+            &request.model,
+            range.min_seconds,
+            &request.model_manifest_entry,
+        )
+        .or_else(|| {
+            sceneworks_core::video_request::duration_limit_error(
+                &request.model,
+                range.max_seconds,
+                &request.model_manifest_entry,
+            )
+        }) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Auto-duration range is outside the model's supported duration window. {message}"
+            )));
+        }
+    }
+    let auto_duration = auto_range
+        .map(|range| {
+            gen_core::duration_head::AutoDurationRange::new(range.min_seconds, range.max_seconds)
+        })
+        .transpose()
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let planning_frames = auto_range.map_or_else(
+        || ltx_frame_count(request.raw_frame_count()),
+        |range| {
+            // Round the maximum UP and then align UP to the next 8k+1 rung. This value is for
+            // admission only; gen-core resolves and snaps the predictor's actual value itself.
+            let raw = (range.max_seconds * request.fps as f32).ceil().max(1.0) as u32;
+            let remainder = raw.saturating_sub(1) % 8;
+            if remainder == 0 {
+                raw
+            } else {
+                raw.saturating_add(8 - remainder)
+            }
+        },
+    );
+    Ok(Ltx25GenerationOptions {
+        planning_frames,
+        auto_duration,
+        temporal_upsample_rounds: (temporal_upsample_rounds > 0)
+            .then_some(temporal_upsample_rounds),
+        use_diffusion_decoder: decoder
+            == sceneworks_core::video_request::LTX25_VAE_DECODER_DIFFUSION,
+    })
+}
+
 /// SceneWorks LTX model id → mlx-gen registry id (one engine model serves both), or
 /// `None` if not an LTX family id.
 #[cfg(target_os = "macos")]
@@ -1685,6 +1803,7 @@ pub(super) async fn generate_ltx(
         .get("enhanceTemperature")
         .and_then(|v| v.as_f64())
         .map(|v| v as f32);
+    let ltx25_options = ltx25_generation_options(request)?;
     // extend_clip / video_bridge build in-context VideoClip conditioning from decoded source
     // clips (async ffmpeg extraction); every other mode resolves keyframe/reference conditioning
     // synchronously from images.
@@ -1744,8 +1863,11 @@ pub(super) async fn generate_ltx(
         negative_prompt: ltx25_dev.then(|| request.negative_prompt.clone()),
         width: request.width,
         height: request.height,
-        frames: ltx_frame_count(request.raw_frame_count()),
+        frames: ltx25_options.planning_frames,
         fps: request.fps,
+        auto_duration: ltx25_options.auto_duration,
+        temporal_upsample_rounds: ltx25_options.temporal_upsample_rounds,
+        use_diffusion_decoder: ltx25_options.use_diffusion_decoder,
         // The dev checkpoint's SC-18759 schedule is a fixed 30-transition
         // contract. A forged advanced request must not turn it into the
         // distilled eight-step schedule.

@@ -3,8 +3,8 @@ use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{
     ltx::{
-        ltx25_dir_is_complete, ltx25_transformer_variant, resolve_ltx_adapters,
-        resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
+        ltx25_dir_is_complete, ltx25_generation_options, ltx25_transformer_variant,
+        resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
         resolve_video_clip_conditioning, LTX25_BUNDLE_REPO, LTX_BUNDLE_PRE_BF16_REVISION,
         LTX_BUNDLE_REPO, LTX_BUNDLE_REVISION,
     },
@@ -1190,18 +1190,24 @@ pub(super) async fn generate_candle_video_using(
     } else {
         candle_video_snapshot_dir(settings, &repo)?
     };
+    let is_ltx = matches!(engine_id, "ltx_2_3_distilled" | "ltx_2_5_distilled");
+    let ltx25_options = is_ltx
+        .then(|| ltx25_generation_options(request))
+        .transpose()?;
     // Coerce the requested frame count onto the engine's temporal stride — the ONE shared ladder both
     // lanes use (sc-11992), so the candle stride can never drift from the MLX one. Computed HERE, above
     // the tier binding, because Mochi's fit gate (sc-12306) needs the coerced count: the decode peak is
     // linear in frames, so gating on the raw request would size the check against a length that never
     // renders. (The SVD arm below returns before this is read; it derives its own model-fixed burst.)
-    let frames = video_frame_count(&request.model, request.raw_frame_count());
+    let frames = ltx25_options.map_or_else(
+        || video_frame_count(&request.model, request.raw_frame_count()),
+        |options| options.planning_frames,
+    );
     // Packed-tier select: base LTX QLoRA/inference shares the turnkey `q4/` tier on every native
     // backend; Wan quant-matrix repos select q4/q8/bf16 below.
     // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
-    let is_ltx = matches!(engine_id, "ltx_2_3_distilled" | "ltx_2_5_distilled");
     if engine_id == "ltx_2_5_distilled" {
         // Reject an unknown/type-mismatched selector before a cache probe can
         // disguise it as an ordinary missing-model error.
@@ -1418,6 +1424,10 @@ pub(super) async fn generate_candle_video_using(
         height: request.height,
         frames,
         fps: request.fps,
+        auto_duration: ltx25_options.and_then(|options| options.auto_duration),
+        temporal_upsample_rounds: ltx25_options
+            .and_then(|options| options.temporal_upsample_rounds),
+        use_diffusion_decoder: ltx25_options.is_some_and(|options| options.use_diffusion_decoder),
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,

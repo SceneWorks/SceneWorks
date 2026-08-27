@@ -65,7 +65,8 @@ use sceneworks_core::training_store::{
 };
 use sceneworks_core::video_request::{
     classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
-    reference_limit_error, requested_steps, resolve_duration, resolve_fps, steps_limit_error,
+    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder, requested_steps,
+    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, steps_limit_error,
     ReferenceSetVerdict,
 };
 use serde::de::DeserializeOwned;

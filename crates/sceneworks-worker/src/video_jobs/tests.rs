@@ -3905,6 +3905,52 @@ impl Generator for ProbeGenerator {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn shared_video_funnel_reaches_auto_duration_and_temporal_provider_fields() {
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let generator = ProbeGenerator {
+        descriptor: gen_core::ModelDescriptor {
+            id: "ltx_2_5",
+            family: "ltx",
+            backend: "test",
+            modality: gen_core::Modality::Video,
+            capabilities: Default::default(),
+            required_components: &[],
+            control_kinds: None,
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
+        },
+        request: captured.clone(),
+        adapter_reports: Default::default(),
+        audio: None,
+    };
+    let range = gen_core::duration_head::AutoDurationRange::new(2.0, 15.0).unwrap();
+    let input = VideoGenInput {
+        engine_id: "ltx_2_5",
+        prompt: "a fox".to_owned(),
+        width: 768,
+        height: 512,
+        frames: 377,
+        fps: 25,
+        auto_duration: Some(range),
+        temporal_upsample_rounds: Some(2),
+        ..VideoGenInput::default()
+    };
+    run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
+        .expect("probe generation");
+    let request = captured.lock().unwrap().clone().expect("captured request");
+    assert_eq!(
+        request.frames, None,
+        "a frame count would override the opted-in duration head"
+    );
+    assert_eq!(request.auto_duration, Some(range));
+    assert_eq!(request.temporal_upsample_rounds, Some(2));
+}
+
 /// A `JobSnapshot` for a Mochi video job. `payload.model` is what the completion metrics read.
 #[cfg(any(
     target_os = "macos",
@@ -11043,6 +11089,65 @@ fn ltx25_transformer_variant_defaults_and_refuses_unknown_values() {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ltx25_generation_controls_reach_typed_provider_options_and_explicit_duration_wins() {
+    let automatic = request(json!({
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "prompt": "a fox",
+        "fps": 25,
+        "modelManifestEntry": { "limits": { "hardMaxDuration": 15 } },
+        "advanced": {
+            "vaeDecoder": "diffusion",
+            "autoDuration": true,
+            "autoDurationMinSeconds": 2,
+            "autoDurationMaxSeconds": 15,
+            "temporalUpsampleRounds": 2
+        }
+    }));
+    let options = ltx25_generation_options(&automatic).expect("valid LTX-2.5 controls");
+    assert!(options.use_diffusion_decoder);
+    assert_eq!(options.temporal_upsample_rounds, Some(2));
+    assert_eq!(
+        options.auto_duration,
+        Some(gen_core::duration_head::AutoDurationRange {
+            min_seconds: 2.0,
+            max_seconds: 15.0,
+        })
+    );
+    assert_eq!(
+        options.planning_frames, 377,
+        "admission plans against the max range aligned up to 8k+1"
+    );
+
+    let explicit = request(json!({
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "prompt": "a fox",
+        "duration": 7,
+        "fps": 25,
+        "advanced": {
+            "autoDuration": true,
+            "autoDurationMinSeconds": "ignored",
+            "autoDurationMaxSeconds": -1
+        }
+    }));
+    let options = ltx25_generation_options(&explicit).expect("explicit duration wins");
+    assert_eq!(options.auto_duration, None);
+    assert_eq!(options.planning_frames, 177);
+
+    let wrong_model = request(json!({
+        "projectId": "p",
+        "model": "ltx_2_3",
+        "advanced": { "temporalUpsampleRounds": 1 }
+    }));
+    assert!(ltx25_generation_options(&wrong_model).is_err());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx25_tier_completeness_pins_the_real_split_component_surface() {
@@ -11995,6 +12100,23 @@ fn video_load_spec_threads_text_encoder_dir() {
     assert!(
         video_load_spec(&candle_ltx25).components.is_empty(),
         "the Candle provider must not receive the MLX-only enhancer component"
+    );
+
+    let diffvae = VideoGenInput {
+        engine_id: "ltx_2_5_distilled",
+        model_dir: PathBuf::from("/models/ltx-2.5-mlx/distilled/q8"),
+        use_diffusion_decoder: true,
+        ..VideoGenInput::default()
+    };
+    assert!(
+        matches!(
+            video_load_spec(&diffvae).components.get("diffusion_video_vae"),
+            Some(WeightsSource::File(path))
+                if path == &PathBuf::from(
+                    "/models/ltx-2.5-mlx/distilled/q8/vae_diffusion_decoder.safetensors"
+                )
+        ),
+        "the DiffVAE selector stages the exact selected tier component"
     );
 }
 
