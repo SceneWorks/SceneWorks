@@ -978,19 +978,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
     datasetId,
     { preserveCurrentDraft = false, expectedDraftRevision, canCommit } = {},
   ) {
-    const loadGeneration = ++datasetLoadGenerationRef.current;
     // Opening a DIFFERENT dataset re-seeds the whole editor; confirm before discarding an
     // unsaved draft (sc-11970). Re-opening the SAME dataset (internal reloads after a save)
-    // never prompts — the ids match and the draft is already persisted.
+    // never prompts — the ids match and the draft is already persisted. A declined request
+    // must not take load ownership: an already-pending reload still owns busyDatasetId and
+    // must be able to clear it when it settles.
     if (datasetId && datasetId !== activeDataset?.id) {
       const proceed = await confirmDiscardUnsavedDraft();
       if (!proceed) {
         return;
       }
     }
-    if (loadGeneration !== datasetLoadGenerationRef.current) {
-      return;
-    }
+    const loadGeneration = ++datasetLoadGenerationRef.current;
     if (!datasetId) {
       setActiveDataset(null);
       setDraftName("");

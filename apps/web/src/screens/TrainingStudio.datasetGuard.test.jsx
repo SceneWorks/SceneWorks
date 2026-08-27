@@ -149,6 +149,54 @@ describe("TrainingStudio dataset draft guard (sc-11970)", () => {
     expect(context.loadTrainingDataset).not.toHaveBeenCalledWith("dataset-2");
   });
 
+  it("clears the refresh owner when a different dataset open is declined", async () => {
+    const reload = deferred();
+    let loadCalls = 0;
+    appConfirmMock.mockResolvedValue(false);
+    const context = baseContext({
+      refreshTrainingDatasets: vi.fn(async () => {}),
+      loadTrainingDataset: vi.fn(() => {
+        loadCalls += 1;
+        return loadCalls === 1 ? Promise.resolve(datasetOne) : reload.promise;
+      }),
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={context}>{<TrainingDataSetsLibrary />}</AppContext.Provider>);
+    });
+    await settle();
+
+    const refreshButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Refresh");
+    await act(async () => {
+      refreshButton.click();
+    });
+    await vi.waitFor(() => expect(context.loadTrainingDataset).toHaveBeenCalledTimes(2));
+
+    await typeName(container, "Mira Set edited while refresh reloads");
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{
+          ...context,
+          studioLaunch: { id: "launch-2", view: "LibraryDataSets", datasetId: "dataset-2" },
+        }}>{<TrainingDataSetsLibrary />}</AppContext.Provider>,
+      );
+    });
+    await vi.waitFor(() => expect(appConfirmMock).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      reload.resolve(datasetOne);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      container.querySelector(".compact-selector-pill").click();
+    });
+    const datasetOneOption = [...container.querySelectorAll(".compact-selector-item")]
+      .find((button) => button.textContent.includes("Mira Set"));
+    expect(datasetOneOption.disabled).toBe(false);
+    expect(datasetOneOption.textContent).not.toContain("Opening…");
+  });
+
   it("does not replace a rename started while dataset refresh is in flight", async () => {
     const refresh = deferred();
     const context = baseContext({ refreshTrainingDatasets: vi.fn(() => refresh.promise) });
