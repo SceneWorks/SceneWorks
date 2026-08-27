@@ -1006,6 +1006,7 @@ export function ImageStudio() {
     tierOptions,
     autoTier,
     useGenerationQuality: true,
+    preferencesHydrated,
   });
   const possibleTiers = useMemo(
     () => allPossibleTiers(selectedModel, tierOptions),

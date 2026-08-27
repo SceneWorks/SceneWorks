@@ -48,6 +48,7 @@ export function useQuantTierPicker({
   autoTier = null,
   useGenerationQuality = false,
   reseedOnModelChange = false,
+  preferencesHydrated = true,
 }) {
   const [quantTier, setQuantTier] = useState("");
   const [tierSwitching, setTierSwitching] = useState("");
@@ -56,6 +57,15 @@ export function useQuantTierPicker({
   const availableTiersKey = availableTiers.join(",");
 
   useEffect(() => {
+    // The desktop webview gets a different localStorage origin on every launch. Its durable
+    // per-model tier therefore arrives asynchronously from GET /ui-preferences and is seeded into
+    // lastTierStore by App. If the model catalog wins that startup race, selecting a tier now would
+    // lock in the derived default (usually Q8); seeding the saved sticky later does not otherwise
+    // change any dependency of this effect. Wait for that authoritative seed, then re-run on the
+    // hydration edge so an already-quantized imported checkpoint does not get needlessly folded to
+    // Q8 — including its dense text encoder — merely because catalog loading happened to finish
+    // first.
+    if (!preferencesHydrated) return;
     const modelChanged = modelRef.current !== model;
     modelRef.current = model;
     if (skipReseedRef.current) {
@@ -74,7 +84,7 @@ export function useQuantTierPicker({
     // Install-state is intentionally represented by the stable key; the other values belong
     // to the render which produced it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, availableTiersKey, autoTier]);
+  }, [model, availableTiersKey, autoTier, preferencesHydrated]);
 
   const timerRef = useRef(null);
   useEffect(() => () => clearTimeout(timerRef.current), []);
