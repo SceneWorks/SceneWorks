@@ -144,9 +144,17 @@ export function summarizeBatchProgress(items, jobs, observedJobs) {
 // before posting, so enqueueing can be slow. An item with no jobId and no `error` is
 // therefore PENDING submission (NOT failed); `error: true` marks a submission that threw.
 // `active` = queued + running (jobs that Cancel can still stop).
-export function summarizeBatchRun(items, jobs, observedJobs) {
-  const summary = { total: items?.length ?? 0, pending: 0, queued: 0, running: 0, completed: 0, failed: 0 };
-  for (const item of items ?? []) {
+export function summarizeBatchRun(items, jobs, observedJobs, total = items?.length ?? 0) {
+  const listedItems = items ?? [];
+  const summary = {
+    total: Math.max(total, listedItems.length),
+    pending: Math.max(total - listedItems.length, 0),
+    queued: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+  };
+  for (const item of listedItems) {
     if (item.error) {
       summary.failed += 1;
       continue;

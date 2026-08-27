@@ -201,6 +201,54 @@ describe("ImageStudio Save as Preset", () => {
   });
 });
 
+describe("Image Studio batch cardinality admission", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("confirms an enormous batch from cardinality without materializing its combinations", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        batchMode: true,
+        batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+
+    expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 40000000 images");
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+});
+
 describe("ImageStudio advanced model defaults", () => {
   let container;
   let root;

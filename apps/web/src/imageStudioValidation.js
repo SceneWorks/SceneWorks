@@ -14,10 +14,14 @@ import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
 export function batchPromptBudgetOverages(composedPrompts = []) {
-  return composedPrompts.flatMap((prompt, index) => {
+  const overages = [];
+  let index = 0;
+  for (const prompt of composedPrompts) {
     const budget = promptBudget(prompt);
-    return budget.over ? [{ item: index + 1, ...budget }] : [];
-  });
+    if (budget.over) overages.push({ item: index + 1, ...budget });
+    index += 1;
+  }
+  return overages;
 }
 
 export function batchPromptBudgetMessage(overages = []) {

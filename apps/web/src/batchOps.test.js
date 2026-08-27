@@ -172,6 +172,11 @@ describe("batch ops (sc-6112)", () => {
 });
 
 describe("summarizeBatchRun (sc-9980)", () => {
+  it("counts an unstreamed suffix as pending when the run total is known", () => {
+    const summary = summarizeBatchRun([{ jobId: "j1" }], [{ id: "j1", status: "queued" }], undefined, 4);
+    expect(summary).toMatchObject({ total: 4, pending: 3, queued: 1, failed: 0, done: 0, allDone: false });
+  });
+
   it("counts not-yet-submitted items as pending, not failed", () => {
     const summary = summarizeBatchRun(
       [{ jobId: "j1" }, { jobId: null }, { jobId: null }],

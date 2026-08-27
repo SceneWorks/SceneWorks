@@ -23,7 +23,7 @@ import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../com
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
-import { expandBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
+import { iterateBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
   dimensionConstraintMessage,
   evaluateModelDimensions,
@@ -2479,16 +2479,23 @@ export function ImageStudio() {
       setBatchError("Waiting for engine capabilities before using the restored decoder.");
       return;
     }
-    const resolved = expandBatch(batchPrompts, batchVariables);
-    if (!resolved.length) {
+    // batchJobCount is cardinality(), so admission happens before any Cartesian expansion.
+    if (!batchJobCount) {
+      return;
+    }
+    // Soft cap: a large run must be confirmed once, showing the exact image count.
+    if (!confirmed && batchTotal > BATCH_RENDER_CAP) {
+      setBatchConfirmPending(true);
       return;
     }
     const promptBudgetOverages = batchPromptBudgetOverages(
       stylePreviewActive && !structuredPromptModel
-        ? resolved.map(({ prompt: resolvedPrompt }) => {
-            const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
-            return composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
-          })
+        ? (function* composedBatchPrompts() {
+            for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+              const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+              yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
+            }
+          })()
         : [],
     );
     if (promptBudgetOverages.length) {
@@ -2505,27 +2512,23 @@ export function ImageStudio() {
       return;
     }
     setBatchError("");
-    // Soft cap: a large run must be confirmed once, showing the exact image count.
-    if (!confirmed && resolved.length * batchImagesPerPrompt > BATCH_RENDER_CAP) {
-      setBatchConfirmPending(true);
-      return;
-    }
     setBatchConfirmPending(false);
     batchAbortRef.current = false;
     batchObservedJobsRef.current.clear();
-    // Items carry `error` so not-yet-submitted rows read as pending, not failed, while a
-    // (possibly slow, structured) enqueue is in flight. Updated after each post so progress
-    // ticks up live.
-    const items = resolved.map((entry) => ({ prompt: entry.prompt, jobId: null, error: false }));
-    setBatchRun({ submitting: true, items: items.map((item) => ({ ...item })) });
-    for (let i = 0; i < resolved.length; i += 1) {
+    // Keep only the submitted prefix while streaming. `total` represents the unvisited
+    // suffix as pending, so a confirmed large batch never starts with a full item list.
+    const items = [];
+    setBatchRun({ submitting: true, total: batchJobCount, items: [] });
+    for (const entry of iterateBatch(batchPrompts, batchVariables)) {
       if (batchAbortRef.current) {
         break;
       }
-      const entry = resolved[i];
       // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
       // gets that per-prompt resolution.
       const { prompt: cleanPrompt, resolution } = parsePromptResolution(entry.prompt);
+      const item = { prompt: cleanPrompt, jobId: null, error: false };
+      items.push(item);
+      setBatchRun({ submitting: true, total: batchJobCount, items });
       try {
         let request;
         if (structuredPromptModel) {
@@ -2547,13 +2550,13 @@ export function ImageStudio() {
           request = buildBatchJobRequest(cleanPrompt, { resolution });
         }
         const job = await createImageJob(request);
-        items[i] = { prompt: cleanPrompt, jobId: job?.id ?? null, error: !job?.id };
+        Object.assign(item, { jobId: job?.id ?? null, error: !job?.id });
       } catch {
-        items[i] = { prompt: cleanPrompt, jobId: null, error: true };
+        item.error = true;
       }
-      setBatchRun({ submitting: true, items: items.map((item) => ({ ...item })) });
+      setBatchRun({ submitting: true, total: batchJobCount, items });
     }
-    setBatchRun({ submitting: false, items });
+    setBatchRun({ submitting: false, total: batchJobCount, items });
   }
 
   // Stop the enqueue loop (if still running) and cancel every still-pending job in the run;
@@ -2579,7 +2582,7 @@ export function ImageStudio() {
   }
 
   const batchRunProgress = batchRun
-    ? summarizeBatchRun(batchRun.items, jobs, batchObservedJobsRef.current)
+    ? summarizeBatchRun(batchRun.items, jobs, batchObservedJobsRef.current, batchRun.total)
     : null;
   useEffect(() => {
     if (!batchRun) return;
