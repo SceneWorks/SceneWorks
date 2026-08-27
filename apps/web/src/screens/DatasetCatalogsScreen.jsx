@@ -6,6 +6,7 @@ import { RequiredModelsNotice } from "../components/RequiredModelsNotice.jsx";
 import { PERSON_DETECT_MODEL_ID, POSE_DETECT_MODEL_ID } from "../constants.js";
 import { missingRequiredModels } from "../modelEligibility.js";
 import { useAppStatic } from "../context/AppContext.js";
+import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { formatBytes } from "../formatting.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { persistNavigationPreferences } from "../uiPreferences.js";
@@ -727,6 +728,7 @@ export function DatasetCatalogsScreen() {
   // re-render on every SSE job tick (sc-8855). That is why the required-model notice below is
   // given no `downloadJobs` — it falls back to its local "Queued" state, which needs no live jobs.
   const { token = "", models = [], createModelDownloadJob, setActiveView } = useAppStatic();
+  const screenActive = useScreenActive();
   // The two cache-only preprocessors structured analysis resolves before it can run
   // (catalog_semantic_jobs.rs). Declaration order is display order.
   const missingStructuredModels = useMemo(
@@ -748,6 +750,10 @@ export function DatasetCatalogsScreen() {
   const pollAbortRef = useRef(null);
   const mutationAbortRef = useRef(null);
   const selected = catalogs.find((catalog) => catalog.id === selectedId) ?? null;
+  // Status changes only while a processor is actively making progress. A terminal or
+  // paused catalog has no useful periodic work, and a kept-alive screen must not keep
+  // its poller alive behind another route.
+  const shouldPollSelected = screenActive && selected?.processing?.state === "running";
 
   useEffect(() => {
     const version = selected
@@ -809,7 +815,7 @@ export function DatasetCatalogsScreen() {
   }, [refresh, token]);
 
   useEffect(() => {
-    if (!selectedId) return undefined;
+    if (!selectedId || !shouldPollSelected) return undefined;
     const generation = ++generationRef.current;
     let timer = null;
     let stopped = false;
@@ -830,6 +836,10 @@ export function DatasetCatalogsScreen() {
             : catalog
         )));
         setError("");
+        // Do not arm another timer after the response itself reaches a terminal or
+        // paused state. The render triggered above will also tear this effect down,
+        // but this closes the small interval before that cleanup runs.
+        if (updated.processing?.state !== "running") stopped = true;
       } catch (err) {
         if (isAbortError(err) || stopped || generation !== generationRef.current) return;
         if (err.status === 404) {
@@ -851,7 +861,7 @@ export function DatasetCatalogsScreen() {
       if (timer !== null) window.clearTimeout(timer);
       pollAbortRef.current?.abort();
     };
-  }, [pollEpoch, refresh, selectedId, token]);
+  }, [pollEpoch, refresh, selectedId, shouldPollSelected, token]);
 
   async function chooseFolder(setter) {
     if (!isDesktop) return;
