@@ -400,6 +400,47 @@ describe("DatasetCatalogsScreen", () => {
     expect(requests.filter((item) => item.path.endsWith("/status"))).toHaveLength(0);
   });
 
+  it("settles a catalog mutation across inactive and active poll lifecycles", async () => {
+    await act(async () => root.unmount());
+    vi.useFakeTimers();
+    root = createRoot(container);
+    const mutation = deferred();
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, options = {}) => {
+      if (new URL(url).pathname.endsWith("/pause")) return mutation.promise;
+      return original(url, options);
+    });
+    const renderScreen = async (active) => {
+      await act(async () => {
+        root.render(
+          <ScreenActiveContext.Provider value={active}>
+            <AppContext.Provider value={{ token: "token" }}>
+              <DatasetCatalogsScreen />
+              <ConfirmHost />
+            </AppContext.Provider>
+          </ScreenActiveContext.Provider>,
+        );
+      });
+      await flush();
+    };
+    await renderScreen(true);
+
+    const pauseButton = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Pause"));
+    await act(async () => pauseButton.click());
+    expect(pauseButton.disabled).toBe(true);
+
+    await renderScreen(false);
+    await renderScreen(true);
+    await act(async () => {
+      mutation.resolve(response(catalog()));
+      await Promise.resolve();
+    });
+    await flush();
+
+    const recoveredPauseButton = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Pause"));
+    expect(recoveredPauseButton.disabled).toBe(false);
+  });
+
   it("stops after a terminal status response", async () => {
     await remountWithFakeTimers();
     const original = fetch.getMockImplementation();

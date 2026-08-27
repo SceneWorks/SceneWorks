@@ -236,6 +236,10 @@ const BATCH_RENDER_CAP = 100;
 // ordinary (at-or-under-cap) runs. The worker remains serial; this is client-side
 // backpressure for confirmed large runs only.
 const BATCH_ACTIVE_JOB_LIMIT = BATCH_RENDER_CAP;
+// A styled Cartesian batch can be enormous even though its queue state remains bounded.
+// Yield after this many preflight prompts so the run state commits and Stop can interrupt
+// a clean (no-overage) stream before we ever reach its Cartesian suffix.
+const BATCH_PREFLIGHT_YIELD_INTERVAL = BATCH_RENDER_CAP;
 
 function preferredOption(defaultValue, options) {
   return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
@@ -2512,24 +2516,6 @@ export function ImageStudio() {
       setBatchConfirmPending(true);
       return;
     }
-    const promptBudgetOverages = batchPromptBudgetOverages(
-      stylePreviewActive && !structuredPromptModel
-        ? (function* composedBatchPrompts() {
-            for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-              const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
-              yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
-            }
-          })()
-        : [],
-      // Preserve the detailed item list for ordinary runs; a high-cardinality stream
-      // needs only the first actionable violation and must not retain them all.
-      batchJobCount > BATCH_RENDER_CAP ? 1 : Infinity,
-    );
-    if (promptBudgetOverages.length) {
-      setBatchError(batchPromptBudgetMessage(promptBudgetOverages));
-      setBatchConfirmPending(false);
-      return;
-    }
     if (dimensionsInvalid || hiresFixTargetInvalid) {
       setBatchError(
         hiresFixTargetMessage ||
@@ -2537,6 +2523,21 @@ export function ImageStudio() {
           "Width and height must each be between 256 and 4096.",
       );
       return;
+    }
+    const styledBatchPrompts = () => (function* composedBatchPrompts() {
+      for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
+      }
+    })();
+    // An ordinary batch remains eager so its warning retains every actionable item.
+    // Only a confirmed high-cardinality product needs the cancelable streaming path below.
+    if (stylePreviewActive && !structuredPromptModel && batchJobCount <= BATCH_RENDER_CAP) {
+      const promptBudgetOverages = batchPromptBudgetOverages(styledBatchPrompts());
+      if (promptBudgetOverages.length) {
+        setBatchError(batchPromptBudgetMessage(promptBudgetOverages));
+        return;
+      }
     }
     setBatchError("");
     setBatchConfirmPending(false);
@@ -2552,6 +2553,37 @@ export function ImageStudio() {
       failed: 0,
       activeJobIds: [],
     });
+    // Validate styled prompts before any job is admitted. This is deliberately a stream:
+    // a high-cardinality all-under-cap Cartesian product used to synchronously exhaust here,
+    // before React could paint the run and make Stop usable. The state above establishes the
+    // cancel owner first; bounded cooperative yields preserve truthful preflight enforcement
+    // without retaining every prompt or letting any job through before validation completes.
+    if (stylePreviewActive && !structuredPromptModel && batchJobCount > BATCH_RENDER_CAP) {
+      let inspected = 0;
+      for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+        if (batchAbortRef.current) {
+          const current = batchRunRef.current;
+          if (current) replaceBatchRun({ ...current, submitting: false });
+          return;
+        }
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const promptBudgetOverages = batchPromptBudgetOverages(
+          [composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt],
+          1,
+        );
+        if (promptBudgetOverages.length) {
+          const [{ item: _item, ...budget }] = promptBudgetOverages;
+          replaceBatchRun(null);
+          setBatchError(batchPromptBudgetMessage([{ item: inspected + 1, ...budget }]));
+          return;
+        }
+        inspected += 1;
+        if (batchJobCount > BATCH_RENDER_CAP && inspected % BATCH_PREFLIGHT_YIELD_INTERVAL === 0) {
+          // A macrotask, rather than a microtask, gives the browser an event turn to deliver Stop.
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+        }
+      }
+    }
     for (const entry of iterateBatch(batchPrompts, batchVariables)) {
       await waitForBatchSlot();
       if (batchAbortRef.current) {

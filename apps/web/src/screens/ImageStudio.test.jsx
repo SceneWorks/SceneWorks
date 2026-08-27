@@ -283,6 +283,37 @@ describe("Image Studio batch cardinality admission", () => {
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
+  it("makes a no-overage styled Cartesian preflight cancelable before inspecting its full product", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        styleId: "ghibli-style",
+        batchMode: true,
+        batchPromptsText: `under budget ${keys.map((key) => `{{${key}}}`).join(" ")}`,
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+
+    // The first bounded preflight slice has yielded with the run rendered; the old
+    // synchronous walk could not expose Stop until all ten million prompts were read.
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 0/10000000"));
+    expect(container.querySelector(".batch-run-progress button")?.textContent).toBe("Stop");
+    expect(createImageJob).not.toHaveBeenCalled();
+
+    await click(container.querySelector(".batch-run-progress button"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/10000000 done"));
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
   it("keeps a confirmed run's active queue bounded while preserving its submitted count", async () => {
     const values = Array.from({ length: 101 }, (_, index) => String(index));
     window.localStorage.setItem(
