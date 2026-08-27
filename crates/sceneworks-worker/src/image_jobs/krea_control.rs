@@ -554,13 +554,14 @@ async fn generate_krea_control_stream(
         request,
         settings,
     )?;
-    let spec = attach_manifest_text_encoder(spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
+    let attached_spec =
+        attach_manifest_text_encoder(spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
     let calibration_provenance = krea_control_calibration_provenance(
-        match &spec.weights {
+        match &attached_spec.weights {
             WeightsSource::Dir(path) => path,
             WeightsSource::File(_) => unreachable!("Krea control base is a directory"),
         },
-        match spec.control.as_ref() {
+        match attached_spec.control.as_ref() {
             Some(WeightsSource::File(path)) => path,
             _ => unreachable!("Krea control overlay is a file"),
         },
@@ -569,11 +570,12 @@ async fn generate_krea_control_stream(
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         KREA_CONTROL_ENGINE_ID,
         &request.model,
-        &spec,
+        &attached_spec,
         Some(&request.model_manifest_entry),
         calibration_provenance,
     );
     let memory_inputs = krea_control_memory_inputs(width, height, &request.mode, adapter_count);
+    let spec = attached_spec.into_load_spec();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         KREA_CONTROL_ENGINE_ID,

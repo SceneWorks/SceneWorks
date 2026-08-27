@@ -640,7 +640,9 @@ async fn generate_sdxl_control_stream(
         &request.model_manifest_entry,
         settings,
     )?;
-    spec = attach_manifest_text_encoder(spec, SDXL_CONTROL_ENGINE_ID, request, settings)?;
+    let attached_spec =
+        attach_manifest_text_encoder(spec, SDXL_CONTROL_ENGINE_ID, request, settings)?;
+    let mut spec = attached_spec.into_load_spec();
     spec = spec.with_resolved_route(request.model.clone());
 
     // This bespoke route bypasses the generator cache, so apply the same provider-derived MLX

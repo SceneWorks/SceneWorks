@@ -781,7 +781,8 @@ async fn generate_flux2_edit_stream(
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
         spec = attach_selected_decoder(spec, engine_id, request, settings)?;
     }
-    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let mut spec = attached_spec.into_load_spec();
     let resolved_tier =
         resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
     let route_mode = crate::memory_route_registry::MemoryRouteMode::from_request(&request.mode)
@@ -1343,12 +1344,13 @@ async fn generate_flux2_dev_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
     let resolved_tier = resolved_mlx_artifact_tier_for_model("flux2_dev", &weights_dir, quant_bits);
-    let mut spec = attach_manifest_text_encoder(
+    let attached_spec = attach_manifest_text_encoder(
         flux2_control_spec(weights_dir, control_weights, quant, adapters),
         FLUX2_DEV_CONTROL_ENGINE_ID,
         request,
         settings,
     )?;
+    let mut spec = attached_spec.into_load_spec();
     // sc-20799 request-scoped admission, mirroring the FLUX.1-dev strict-control lane.
     //
     // The declared route coordinate is `TextToImage` with exactly ONE reference — NOT the public

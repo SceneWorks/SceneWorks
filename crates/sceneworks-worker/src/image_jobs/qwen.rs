@@ -341,7 +341,9 @@ async fn generate_qwen_control_stream(
     }
     spec = attach_selected_decoder(spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
     spec = apply_measured_mlx_load_shape(QWEN_CONTROL_ENGINE_ID, spec);
-    spec = attach_manifest_text_encoder(spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
+    let attached_spec =
+        attach_manifest_text_encoder(spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
+    let spec = attached_spec.into_load_spec();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         QWEN_CONTROL_ENGINE_ID,
@@ -850,7 +852,8 @@ async fn generate_qwen_edit_stream(
     }
     spec = attach_selected_decoder(spec, engine_id, request, settings)?;
     spec = apply_measured_mlx_load_shape(engine_id, spec);
-    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let spec = attached_spec.into_load_spec();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,

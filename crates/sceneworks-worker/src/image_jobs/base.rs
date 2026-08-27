@@ -5104,12 +5104,40 @@ fn fixed_mlx_artifact_tier(model_id: &str) -> Option<&'static str> {
 /// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
 /// the exact prepared source receipt before any planner, fit gate, or provider loader sees the spec.
 /// Default/absent selection is an exact no-op.
+///
+/// The wrapper is intentional typestate: production routes must explicitly consume the attached
+/// spec before handing it to a planner or provider. This keeps route wiring compile-enforced while
+/// behavior tests exercise the real resolution seam, without source-text assertions.
+#[must_use = "a manifest text-encoder attachment must be consumed by the production route"]
+#[derive(Debug)]
+pub(super) struct ManifestTextEncoderAttachedSpec(LoadSpec);
+
+impl ManifestTextEncoderAttachedSpec {
+    pub(super) fn into_load_spec(self) -> LoadSpec {
+        self.0
+    }
+}
+
+impl std::ops::Deref for ManifestTextEncoderAttachedSpec {
+    type Target = LoadSpec;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ManifestTextEncoderAttachedSpec {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 pub(super) fn attach_manifest_text_encoder(
     spec: LoadSpec,
     engine_id: &str,
     request: &ImageRequest,
     settings: &Settings,
-) -> WorkerResult<LoadSpec> {
+) -> WorkerResult<ManifestTextEncoderAttachedSpec> {
     crate::text_encoder_selection::prepare_selected_text_encoder(
         spec,
         engine_id,
@@ -5117,6 +5145,7 @@ pub(super) fn attach_manifest_text_encoder(
         &request.model_manifest_entry,
         settings,
     )
+    .map(ManifestTextEncoderAttachedSpec)
 }
 
 /// Whether the request carries a non-default authored encoder id. Kept beside the attachment seam
@@ -5138,7 +5167,7 @@ pub(super) fn has_authored_text_encoder(request: &ImageRequest) -> WorkerResult<
 /// the route's existing explicit tokens. Pre-resolved route tokens are compared against the
 /// contract-prepared set so a mutation between dispatch resolution and attachment fails closed.
 pub(super) fn prepare_manifest_text_encoder_with_file_pins(
-    mut spec: LoadSpec,
+    spec: LoadSpec,
     engine_id: &str,
     request: &ImageRequest,
     settings: &Settings,
@@ -5147,17 +5176,17 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
 ) -> WorkerResult<LoadSpec> {
     let selected = has_authored_text_encoder(request)?;
     let pins = pins.into_iter().collect::<Vec<_>>();
-    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let mut attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     if !selected {
-        crate::paths::prepare_load_spec_with_file_pins(&mut spec, pins, label)?;
-        return Ok(spec);
+        crate::paths::prepare_load_spec_with_file_pins(&mut attached_spec, pins, label)?;
+        return Ok(attached_spec.into_load_spec());
     }
 
     for expected in pins {
         expected
             .ensure_unchanged()
             .map_err(|error| crate::classify_engine_error(label, error))?;
-        let received = spec
+        let received = attached_spec
             .prepared_file_pin_for(expected.loader_path())
             .map_err(|error| crate::classify_engine_error(label, error))?;
         if received != Some(&expected) {
@@ -5167,7 +5196,7 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
             )));
         }
     }
-    Ok(spec)
+    Ok(attached_spec.into_load_spec())
 }
 
 /// Select deferred materialization for the native Candle/CUDA Qwen routes. Only the uniform
@@ -8695,7 +8724,8 @@ async fn generate_stream(
     // Finalize caller-selected text-encoder state before asking the provider about the real
     // candidate. Chroma must see and reject an external encoder rather than being admitted against
     // an incomplete LoadSpec which is mutated afterward.
-    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let mut spec = attached_spec.into_load_spec();
     // SC-18457: provider adoption is an exact three-way intersection. A route-local BTR entry owns
     // the decision: the typed registry enforces mode/overlay/source semantics and the linked
     // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
@@ -11301,8 +11331,9 @@ async fn generate_candle_stream(
     }
     // Export the selected encoder receipt only after the entire load shape is complete; this exact
     // prepared spec is reused by the selector and eventual provider/cache load.
-    shared_contract_spec =
+    let attached_shared_contract_spec =
         attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
+    let mut shared_contract_spec = attached_shared_contract_spec.into_load_spec();
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
     // A supported Hires refinement is a fresh one-reference image-to-image request even when the
     // caller's first pass was Edit or Inpaint. Admit that final-pass identity independently; the

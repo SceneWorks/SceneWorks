@@ -557,7 +557,8 @@ async fn generate_krea_multiphase_stream(
         &request.model_manifest_entry,
         settings,
     )?;
-    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let spec = attached_spec.into_load_spec();
     #[cfg(target_os = "macos")]
     let spec = {
         let resolved_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);

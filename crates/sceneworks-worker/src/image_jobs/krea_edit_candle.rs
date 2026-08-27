@@ -339,7 +339,9 @@ pub(super) async fn generate_candle_krea_edit_stream(
         settings,
     )?;
     strategy_spec = attach_selected_decoder(strategy_spec, descriptor_id, request, settings)?;
-    strategy_spec = attach_manifest_text_encoder(strategy_spec, descriptor_id, request, settings)?;
+    let attached_strategy_spec =
+        attach_manifest_text_encoder(strategy_spec, descriptor_id, request, settings)?;
+    let strategy_spec = attached_strategy_spec.into_load_spec();
     let selected_text_encoder_bytes = strategy_spec.text_encoder.as_ref().map_or(0, |source| {
         let path = match source {
             gen_core::WeightsSource::File(path) | gen_core::WeightsSource::Dir(path) => path,

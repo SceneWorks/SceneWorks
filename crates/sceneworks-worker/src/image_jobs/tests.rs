@@ -14503,7 +14503,7 @@ fn sdxl_control_bespoke_load_applies_fit_and_flash_state_before_allocation() {
     // prove their shared final-spec-before-allocation ordering in one host-side test.
     let source = include_str!("sdxl_control.rs");
     let finalized = source
-        .find("spec = attach_manifest_text_encoder(")
+        .find("let attached_spec =")
         .expect("selected text encoder is attached to the final spec");
     let mlx_gate = source
         .find("let spec = apply_sdxl_control_mlx_residency(spec)?;")

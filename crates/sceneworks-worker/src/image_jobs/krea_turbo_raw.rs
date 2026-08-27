@@ -247,7 +247,8 @@ async fn generate_krea_turbo_on_raw_stream(
         request,
         settings,
     )?;
-    let spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let spec = attached_spec.into_load_spec();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
 
