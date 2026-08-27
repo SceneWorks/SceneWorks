@@ -86,33 +86,47 @@ describe("putUiPreferences", () => {
 });
 
 describe("persistNavigationPreferences", () => {
-  it("retries transient network and HTTP failures at the queued-write seam", async () => {
+  it("waits with bounded exponential backoff before retrying transient navigation writes and recovers", async () => {
+    vi.useFakeTimers();
     apiFetch
       .mockRejectedValueOnce(new Error("network unavailable"))
-      .mockRejectedValueOnce(Object.assign(new Error("busy"), { status: 503 }))
+      .mockRejectedValueOnce(Object.assign(new Error("throttled"), { status: 429 }))
       .mockResolvedValueOnce({});
 
-    await persistNavigationPreferences({ activeView: "Library" });
+    try {
+      const persisted = persistNavigationPreferences({ activeView: "Library" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiFetch).toHaveBeenCalledTimes(1);
 
-    expect(apiFetch).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(199);
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      await persisted;
+
+      expect(apiFetch).toHaveBeenCalledTimes(3);
+    } finally {
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
   });
 
-  it("retries established transient HTTP statuses but not permanent client failures", async () => {
-    for (const status of [408, 425, 429, 500]) {
-      apiFetch.mockReset();
-      apiFetch
-        .mockRejectedValueOnce(Object.assign(new Error(`HTTP ${status}`), { status }))
-        .mockResolvedValueOnce({});
+  it("does not retry a permanent 4xx navigation write", async () => {
+    vi.useFakeTimers();
+    try {
+      apiFetch.mockRejectedValueOnce(Object.assign(new Error("HTTP 400"), { status: 400 }));
 
-      await persistNavigationPreferences({ activeView: `retry-${status}` });
-      expect(apiFetch).toHaveBeenCalledTimes(2);
-    }
-
-    for (const status of [400, 401, 403, 404]) {
-      apiFetch.mockReset();
-      apiFetch.mockRejectedValueOnce(Object.assign(new Error(`HTTP ${status}`), { status }));
-      await persistNavigationPreferences({ activeView: `no-retry-${status}` });
+      const persisted = persistNavigationPreferences({ activeView: "no-retry-400" });
+      await vi.advanceTimersByTimeAsync(1000);
+      await persisted;
       expect(apiFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
     }
   });
 

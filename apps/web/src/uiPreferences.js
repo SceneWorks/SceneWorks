@@ -65,6 +65,21 @@ let navigationDrainPromise = null;
 let navigationDrainScheduled = false;
 
 const NAVIGATION_WRITE_MAX_ATTEMPTS = 3;
+const NAVIGATION_WRITE_RETRY_BASE_DELAY_MS = 100;
+const NAVIGATION_WRITE_RETRY_MAX_DELAY_MS = 1000;
+
+function navigationWriteRetryDelay(attempt) {
+  return Math.min(
+    NAVIGATION_WRITE_RETRY_MAX_DELAY_MS,
+    NAVIGATION_WRITE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+  );
+}
+
+function waitForNavigationWriteRetry(attempt) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, navigationWriteRetryDelay(attempt));
+  });
+}
 
 function isAbort(error) {
   return error && typeof error === "object" && error.name === "AbortError";
@@ -90,6 +105,7 @@ async function putNavigationPreferencesWithRetry(patch) {
       if (attempt === NAVIGATION_WRITE_MAX_ATTEMPTS || !shouldRetryNavigationWrite(error)) {
         return;
       }
+      await waitForNavigationWriteRetry(attempt);
     }
   }
 }
