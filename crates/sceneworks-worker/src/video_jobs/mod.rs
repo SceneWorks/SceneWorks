@@ -478,7 +478,11 @@ fn resolve_candle_video_route(
             None if request.model == "wan_2_2_vace_fun_14b" => {
                 CandleVideoRoute::ReplacePersonWanVaceFun
             }
-            None if candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled") => {
+            None if matches!(
+                candle::candle_video_engine_id(&request.model),
+                Some("ltx_2_3_distilled" | "ltx_2_5_distilled")
+            ) =>
+            {
                 CandleVideoRoute::CandleVideo
             }
             None => CandleVideoRoute::ReplacePersonWanVace,
@@ -487,7 +491,10 @@ fn resolve_candle_video_route(
         let engine_id = scail2_engine_id(&request.model).expect("scail2 model");
         CandleVideoRoute::AnimateScail2(engine_id)
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-        && candle::candle_video_engine_id(&request.model) == Some("ltx_2_3_distilled")
+        && matches!(
+            candle::candle_video_engine_id(&request.model),
+            Some("ltx_2_3_distilled" | "ltx_2_5_distilled")
+        )
     {
         CandleVideoRoute::CandleVideo
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
@@ -2233,8 +2240,9 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     if mode == "replace_person" {
         return vec![scail2_engine_id(model)
             .or_else(|| {
-                candle::candle_video_engine_id(model)
-                    .filter(|engine_id| *engine_id == "ltx_2_3_distilled")
+                candle::candle_video_engine_id(model).filter(|engine_id| {
+                    matches!(*engine_id, "ltx_2_3_distilled" | "ltx_2_5_distilled")
+                })
             })
             .unwrap_or("wan_vace")];
     }
@@ -2243,7 +2251,7 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
     }
     if matches!(mode, "extend_clip" | "video_bridge") {
         return vec![candle::candle_video_engine_id(model)
-            .filter(|id| *id == "ltx_2_3_distilled")
+            .filter(|id| matches!(*id, "ltx_2_3_distilled" | "ltx_2_5_distilled"))
             .unwrap_or("wan_vace")];
     }
     bernini_engine_id(model)

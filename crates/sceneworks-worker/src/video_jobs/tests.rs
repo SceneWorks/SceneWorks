@@ -9612,6 +9612,7 @@ fn wan_moe_sibling_pairs_high_and_low() {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn write_lora_fixture(path: &Path, network_type: Option<&str>) {
+    std::fs::create_dir_all(path.parent().expect("LoRA fixture has a parent")).unwrap();
     let mut meta = serde_json::Map::new();
     meta.insert("format".to_owned(), json!("pt"));
     if let Some(nt) = network_type {
@@ -11010,8 +11011,36 @@ fn wan_5b_timing() {
 fn ltx_engine_id_maps_base_and_eros() {
     assert_eq!(ltx_engine_id("ltx_2_3"), Some("ltx_2_3"));
     assert_eq!(ltx_engine_id("ltx_2_3_eros"), Some("ltx_2_3"));
+    assert_eq!(ltx_engine_id("ltx_2_5"), Some("ltx_2_5"));
     assert_eq!(ltx_engine_id("wan_2_2"), None);
     assert_eq!(ltx_engine_id("z_image_turbo"), None);
+}
+
+/// SC-21578: omission is the product default, but an explicit unknown/type-mismatched selector
+/// must never become the distilled component by accident.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx25_transformer_variant_defaults_and_refuses_unknown_values() {
+    let base = request(json!({ "projectId": "p", "model": "ltx_2_5", "prompt": "a fox" }));
+    assert_eq!(
+        ltx25_transformer_variant(&base).unwrap(),
+        Ltx25TransformerVariant::Distilled
+    );
+    let dev = request(json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+        "advanced": { "transformerVariant": "dev" }
+    }));
+    assert_eq!(
+        ltx25_transformer_variant(&dev).unwrap(),
+        Ltx25TransformerVariant::Dev
+    );
+    for invalid in [json!("turbo"), json!(30), json!(false)] {
+        let invalid = request(json!({
+            "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+            "advanced": { "transformerVariant": invalid }
+        }));
+        assert!(ltx25_transformer_variant(&invalid).is_err());
+    }
 }
 
 /// SceneWorks bundle resolution (sc-5608): `ltx_bundle_subdir` picks the requested quant subdir,
@@ -12804,6 +12833,90 @@ fn ltx_eros_auto_injects_distill_lora_per_pass() {
     assert!(resolve_ltx_adapters(&settings, &req_off)
         .unwrap()
         .is_empty());
+}
+
+/// Dev is a raw stage-one transformer: the shipped refinement adapter must arrive with `[0, 1]`
+/// scales. Distilled is already refined and must not install that same adapter a second time.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx25_dev_attaches_stage_two_refinement_and_distilled_does_not() {
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_ltx25_distill_")
+        .tempdir()
+        .unwrap();
+    let dir = dir_guard.path();
+    let _env = EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        fake_hf_hub_dir(dir).to_str().expect("utf-8 fixture hub"),
+    )]);
+    let repo = "SceneWorks/ltx-2.5-mlx";
+    let file = "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors";
+    let adapter = write_fake_hf_lora(dir, repo, file);
+    let settings = Settings {
+        data_dir: dir.to_path_buf(),
+        ..Settings::from_env()
+    };
+    let manifest = json!({
+        "mlx": { "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 } },
+        "resources": { "distilledLora": { "repo": repo, "file": file } }
+    });
+    let dev = request(json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+        "advanced": { "transformerVariant": "dev", "useDistillLora": false },
+        "modelManifestEntry": manifest,
+    }));
+    let specs = resolve_ltx_adapters(&settings, &dev).expect("dev refinement adapter");
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].path, adapter);
+    assert_eq!(specs[0].pass_scales, Some(vec![0.0, 1.0]));
+
+    // The dev contract must not allow a request to reactivate the refinement
+    // adapter during raw stage one or weaken it during stage two.
+    let override_scales = request(json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+        "advanced": {
+            "transformerVariant": "dev",
+            "distillStage1Strength": 1.0,
+            "distillStage2Strength": 0.0
+        },
+        "modelManifestEntry": manifest,
+    }));
+    assert!(resolve_ltx_adapters(&settings, &override_scales).is_err());
+
+    let invalid_contract = request(json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+        "advanced": { "transformerVariant": "dev" },
+        "modelManifestEntry": {
+            "mlx": { "autoDistillLora": { "stage1Strength": 1.0, "stage2Strength": 0.4 } },
+            "resources": { "distilledLora": { "repo": repo, "file": file } }
+        }
+    }));
+    assert!(resolve_ltx_adapters(&settings, &invalid_contract).is_err());
+
+    let missing_contract = request(json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+        "advanced": { "transformerVariant": "dev" },
+        "modelManifestEntry": { "resources": { "distilledLora": { "repo": repo, "file": file } } }
+    }));
+    assert!(resolve_ltx_adapters(&settings, &missing_contract).is_err());
+
+    let distilled = request(json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+        "modelManifestEntry": manifest,
+    }));
+    assert!(resolve_ltx_adapters(&settings, &distilled)
+        .unwrap()
+        .is_empty());
+
+    let missing = request(json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "a fox",
+        "advanced": { "transformerVariant": "dev" },
+        "modelManifestEntry": {
+            "mlx": { "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 } },
+            "resources": { "distilledLora": { "repo": repo, "file": "distilled_lora/missing.safetensors" } }
+        }
+    }));
+    assert!(resolve_ltx_adapters(&settings, &missing).is_err());
 }
 
 /// A model that declares `mlx.autoDistillLora` but whose co-requisite distill LoRA is not installed

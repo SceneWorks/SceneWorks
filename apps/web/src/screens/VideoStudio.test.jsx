@@ -2265,6 +2265,42 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     limits: { steps: [8] },
     ui: { label: "LTX-2.3" },
   };
+  const LTX25 = {
+    ...NON_WAN,
+    id: "ltx_2_5",
+    name: "LTX-2.5",
+    defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
+    limits: { steps: [8, 30] },
+    ui: { label: "LTX-2.5" },
+  };
+
+  it("routes the LTX-2.5 dev selector into the request and pins its 30-step row", async () => {
+    const context = baseContext({ videoModels: [LTX25] });
+    await render(context);
+    await openAdvanced();
+
+    const variant = container.querySelector('select[aria-label="LTX-2.5 transformer"]');
+    expect(variant.value).toBe("distilled");
+    await act(async () => setSelect(variant, "dev"));
+    const steps = labeledInput("Steps");
+    expect(steps.disabled).toBe(true);
+    expect(steps.placeholder).toBe("30 (fixed schedule)");
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      model: "ltx_2_5",
+      advanced: { transformerVariant: "dev" },
+    });
+    expect(payload.advanced.steps).toBeUndefined();
+  });
+
+  it("keeps omitted/default LTX-2.5 selection distilled", async () => {
+    const context = baseContext({ videoModels: [LTX25] });
+    await render(context);
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced.transformerVariant).toBe("distilled");
+  });
 
   it("pins the Steps control for a model that declares a single legal step count", async () => {
     const context = baseContext({ videoModels: [DISTILLED_LTX] });
@@ -3174,12 +3210,12 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     // Both MiniMax-H3 partitions joined in sc-17158: the sc-17242 spike enumerated the reference
     // pipeline's complete 19-parameter input surface and neither `guidance_scale` nor
     // `negative_prompt` is on it, so the axes genuinely do not exist. The non-declaring count is
-    // deliberately asserted separately and did NOT move — a new video entry that keeps both
-    // controls has to be a conscious decision, not a side effect of the list growing.
+    // deliberately asserted separately. LTX-2.5 is the additional non-declaring entry: its dev
+    // variant exposes both axes and its distilled default retains the LTX controls.
     const videoEntries = models.filter((entry) => entry.type === "video");
     const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
     expect(declaring).toEqual(["krea_realtime_14b", "minimax_h3", "minimax_h3_ref", "svd"]);
-    expect(videoEntries.length - declaring.length).toBe(8);
+    expect(videoEntries.length - declaring.length).toBe(9);
 
     const context = baseContext({ videoModels: [SVD] });
     await render(context);

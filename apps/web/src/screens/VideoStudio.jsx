@@ -134,6 +134,7 @@ function humanizedNumberMenu(menu) {
 }
 
 const ltxVideoModelId = "ltx_2_3";
+const ltx25VideoModelId = "ltx_2_5";
 const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
 // Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
 // picker only enables entries whose individual install is complete (`installedTiers`); in particular,
@@ -274,6 +275,7 @@ export function VideoStudio() {
   const [quality, setQuality] = useState(saved.quality ?? "balanced");
   const [ltxPipeline, setLtxPipeline] = useState(saved.ltxPipeline ?? "auto");
   const [distilledVariant, setDistilledVariant] = useState(saved.distilledVariant ?? "1.1");
+  const [transformerVariant, setTransformerVariant] = useState(saved.transformerVariant ?? "distilled");
   const [precision, setPrecision] = useState(saved.precision ?? "fp8");
   const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
   const [textEncoderSelection, setTextEncoderSelection] = useState({
@@ -328,6 +330,7 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  const ltx25Dev = model === ltx25VideoModelId && transformerVariant === "dev";
   // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
   // behind the descriptor-derived manifest flag: the currently pinned engine descriptor does not
   // advertise the paired contract yet, so a normal catalog remains on the existing single picker
@@ -565,7 +568,7 @@ export function VideoStudio() {
   // control?" with nothing, and leaving it editable would be the silently-ignored knob this story
   // exists to remove.
   const stepsMenu = stepsMenuFromModel(selectedModel);
-  const stepsPinnedValue = stepsMenu?.length === 1 ? stepsMenu[0] : null;
+  const stepsPinnedValue = ltx25Dev ? 30 : stepsMenu?.length === 1 ? stepsMenu[0] : null;
   const stepsPinned = stepsPinnedValue !== null;
   // A menu with MORE than one entry is a CHOICE, not a pin — but the gate refuses off-menu counts
   // exactly as hard there, so a free-text box would be the same "UI looser than the gate" desync in
@@ -1192,6 +1195,7 @@ export function VideoStudio() {
     setMotion(rawSettings.motion ?? DEFAULT_MOTION);
     setLtxPipeline(rawSettings.ltxPipeline ?? "auto");
     setDistilledVariant(rawSettings.distilledVariant ?? "1.1");
+    setTransformerVariant(rawSettings.transformerVariant ?? "distilled");
     setPrecision(rawSettings.precision ?? "fp8");
     setEnhancePrompt(rawSettings.enhancePrompt === true);
     setTextEncoderModel(
@@ -1312,6 +1316,7 @@ export function VideoStudio() {
       ["quantization", setQuantization],
       ["ltxPipeline", setLtxPipeline],
       ["distilledVariant", setDistilledVariant],
+      ["transformerVariant", setTransformerVariant],
       ["enhancePrompt", setEnhancePrompt],
       ["textEncoderModel", setTextEncoderModel],
       ["motion", setMotion],
@@ -1343,6 +1348,7 @@ export function VideoStudio() {
       quantization,
       ltxPipeline,
       distilledVariant,
+      transformerVariant,
       ...(supportsTextEncoderSelection
         ? { enhancePrompt, textEncoderModel: selectedTextEncoderModel }
         : {}),
@@ -1361,6 +1367,7 @@ export function VideoStudio() {
     quality,
     ltxPipeline,
     distilledVariant,
+    transformerVariant,
     precision,
     enhancePrompt,
     textEncoderModel,
@@ -1817,6 +1824,7 @@ export function VideoStudio() {
           // stay byte-identical.
           ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
+          ...(model === ltx25VideoModelId ? { transformerVariant } : {}),
           ...(supportsTextEncoderSelection && enhancePrompt
             ? { enhancePrompt: true }
             : {}),
@@ -2502,6 +2510,24 @@ export function VideoStudio() {
                   </label>
                 </>
               ) : null}
+              {model === ltx25VideoModelId ? (
+                <label>
+                  Transformer
+                  <select
+                    aria-label="LTX-2.5 transformer"
+                    onChange={(event) => setTransformerVariant(event.target.value)}
+                    value={transformerVariant}
+                  >
+                    <option value="distilled">Distilled (default, 8 steps)</option>
+                    <option value="dev">Dev (guided, 30 steps)</option>
+                  </select>
+                  <p className="helper-copy">
+                    {ltx25Dev
+                      ? "Dev uses the guided 30-step transformer and the bundled stage-two distilled refinement."
+                      : "Distilled is the default packed transformer and does not apply the refinement adapter twice."}
+                  </p>
+                </label>
+              ) : null}
               {supportsTextEncoderSelection ? (
                 <>
                   <div className="lightning-toggle">
@@ -2707,7 +2733,7 @@ export function VideoStudio() {
               ) : null}
               <label>
                 Steps
-                {stepsChoice ? (
+                {stepsChoice && !ltx25Dev ? (
                   <select
                     disabled={lightningActive}
                     onChange={(event) => setStepsOverride(event.target.value)}

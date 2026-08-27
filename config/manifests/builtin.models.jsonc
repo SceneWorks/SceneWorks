@@ -19431,6 +19431,93 @@
       }
     },
     {
+      "id": "ltx_2_5",
+      "recommended": true,
+      "autoDownload": false,
+      "name": "LTX-2.5",
+      "family": "ltx-video",
+      "type": "video",
+      "adapter": "ltx_video",
+      "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+      // One rehost, two transformer identities. Every selected quant tier downloads both nested
+      // variants and the worker selects exactly one root; no size/revision is claimed until SC-18780.
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "coRequisite": true,
+          "files": ["gemma/*"]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "coRequisite": true,
+          "files": ["enhancer/*"]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "coRequisite": true,
+          "files": ["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["distilled/q4/*", "dev/q4/*"]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "variant": "q8",
+          "files": ["distilled/q8/*", "dev/q8/*"]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "variant": "bf16",
+          "files": ["distilled/bf16/*", "dev/bf16/*"]
+        }
+      ],
+      "paths": { "model": "${HF_CACHE}/SceneWorks/ltx-2.5-mlx" },
+      "resources": {
+        "distilledLora": {
+          "repo": "SceneWorks/ltx-2.5-mlx",
+          "file": "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+        }
+      },
+      "defaults": {
+        "duration": 6,
+        "fps": 25,
+        "resolution": "768x512",
+        "quality": "balanced",
+        "steps": 8
+      },
+      "limits": {
+        "durations": [4, 6, 8, 10, 12, 15],
+        "recommendedMaxDuration": 10,
+        "hardMaxDuration": 15,
+        "fps": [24, 25, 30],
+        "steps": [8, 30],
+        "resolutions": ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
+        "requiresDimensionsMultipleOf": 64,
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
+      },
+      "loraCompatibility": { "families": ["ltx-video"], "types": ["style", "motion", "character", "enhance"] },
+      "mlx": {
+        "minMemoryGb": 31,
+        "repo": "SceneWorks/ltx-2.5-mlx",
+        "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 }
+      },
+      "ui": {
+        "label": "LTX-2.5",
+        "description": "Text and image video with the distilled default or the 30-step guided dev transformer.",
+        "recommendedFor": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+        "durationHint": "Distilled is the default. Dev runs the guided 30-step recipe and its bundled stage-two refinement."
+      }
+    },
+    {
       "id": "ltx_2_3",
       // Recommended headline video model, but ~146 GB — keep it badged yet unchecked in
       // the wizard so the big download is a deliberate opt-in.

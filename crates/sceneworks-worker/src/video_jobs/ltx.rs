@@ -24,11 +24,52 @@ use super::wan::{generate_video, VideoGenInput};
 #[cfg(target_os = "macos")]
 pub(super) const LTX_ADAPTER: &str = "mlx_ltx";
 
+/// LTX-2.5 has two independently packed transformer components under the
+/// single SceneWorks rehost.  The selector is part of the request contract, not
+/// a display-only model label: absent requests retain the shipped distilled
+/// default and every explicit value is fail-closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Ltx25TransformerVariant {
+    Distilled,
+    Dev,
+}
+
+impl Ltx25TransformerVariant {
+    pub(super) const fn component_dir(self) -> &'static str {
+        match self {
+            Self::Distilled => "distilled",
+            Self::Dev => "dev",
+        }
+    }
+}
+
+pub(super) fn ltx25_transformer_variant(
+    request: &VideoRequest,
+) -> WorkerResult<Ltx25TransformerVariant> {
+    match request.advanced.get("transformerVariant") {
+        None => Ok(Ltx25TransformerVariant::Distilled),
+        Some(Value::String(value)) if value == "distilled" => {
+            Ok(Ltx25TransformerVariant::Distilled)
+        }
+        Some(Value::String(value)) if value == "dev" => Ok(Ltx25TransformerVariant::Dev),
+        Some(Value::String(value)) => Err(WorkerError::InvalidPayload(format!(
+            "unsupported LTX-2.5 transformerVariant {value:?}; choose \"distilled\" or \"dev\""
+        ))),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.transformerVariant must be \"distilled\" or \"dev\" when present".to_owned(),
+        )),
+    }
+}
+
 /// SceneWorks LTX model id → mlx-gen registry id (one engine model serves both), or
 /// `None` if not an LTX family id.
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_engine_id(model: &str) -> Option<&'static str> {
-    matches!(model, "ltx_2_3" | "ltx_2_3_eros").then_some("ltx_2_3")
+    match model {
+        "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3"),
+        "ltx_2_5" => Some("ltx_2_5"),
+        _ => None,
+    }
 }
 
 /// Whether the linked LTX engine can serve this request now (resolvable weights).
@@ -46,6 +87,15 @@ pub(super) fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
+/// The LTX-2.5 rehost contains shared Gemma-4/enhancer components plus nested
+/// `distilled/{q4,q8,bf16}` and `dev/{q4,q8,bf16}` packed transformer roots.
+/// A publishing revision and measured byte receipts are deliberately owned by
+/// SC-18780; this source contract does not manufacture either fact.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const LTX25_BUNDLE_REPO: &str = "SceneWorks/ltx-2.5-mlx";
 /// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
 /// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
@@ -207,6 +257,27 @@ pub(super) fn resolve_ltx_model_dir(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<PathBuf> {
+    if request.model == "ltx_2_5" {
+        let variant = ltx25_transformer_variant(request)?;
+        let tier = ltx_bundle_tier_order(request)
+            .first()
+            .expect("LTX tier order is non-empty");
+        let root =
+            huggingface_snapshot_dir(&settings.data_dir, LTX25_BUNDLE_REPO).ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "LTX-2.5 bundle not found; install {LTX25_BUNDLE_REPO} with {} / {tier} first",
+                    variant.component_dir()
+                ))
+            })?;
+        let dir = root.join(variant.component_dir()).join(tier);
+        return ltx_dir_is_complete(&dir).then_some(dir).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LTX-2.5 {} packed {tier} component is incomplete in {}; reinstall that exact variant",
+                variant.component_dir(),
+                root.display()
+            ))
+        });
+    }
     let eros = request.model == "ltx_2_3_eros";
     let env = if eros {
         "SCENEWORKS_MLX_LTX_EROS_DIR"
@@ -341,6 +412,19 @@ fn ltx_gemma_env_override() -> Option<PathBuf> {
 ))]
 pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     ltx_gemma_env_override().or_else(|| bundled_ltx_gemma_dir(model_dir))
+}
+
+/// The LTX-2.5 Gemma-4 component is a sibling of the nested variant/tier
+/// roots, not of the tier itself.  Keep this separate from the LTX-2.3 helper
+/// so a dev request cannot accidentally bind the wrong bundle's encoder.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn resolve_bundled_ltx25_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
+    let root = model_dir.parent()?.parent()?;
+    let dir = root.join("gemma");
+    ltx_gemma_dir_is_complete(&dir).then_some(dir)
 }
 
 /// Resolve the Gemma-3 text encoder for an **eros** generation. Unlike the base model — whose turnkey
@@ -564,7 +648,7 @@ pub(super) async fn ensure_ltx_q8_present(
     job: &JobSnapshot,
     request: &VideoRequest,
 ) -> WorkerResult<()> {
-    if request.model == "ltx_2_3_eros" || !ltx_wants_q8(request) {
+    if request.model != "ltx_2_3" || !ltx_wants_q8(request) {
         return Ok(());
     }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
@@ -600,7 +684,7 @@ pub(super) async fn ensure_ltx_bf16_present(
     job: &JobSnapshot,
     request: &VideoRequest,
 ) -> WorkerResult<()> {
-    if request.model == "ltx_2_3_eros" || !ltx_wants_bf16(request) {
+    if request.model != "ltx_2_3" || !ltx_wants_bf16(request) {
         return Ok(());
     }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
@@ -754,10 +838,11 @@ pub(super) fn resolve_ltx_user_adapters(
 /// The LoRA is the `coRequisite` `resources.distilledLora` (the cond_safe variant, sc-9696), so it
 /// installs alongside the checkpoint and is resolved from the HF cache here. Strengths come from
 /// `mlx.autoDistillLora` (`stage1Strength` full first pass / `stage2Strength` reduced spatial-upscale
-/// pass — TenStrip's guidance for rank<=72 cond_safe LoRAs), overridable via
-/// `advanced.distillStage1Strength` / `distillStage2Strength`, and applied as
+/// pass — TenStrip's guidance for rank<=72 cond_safe LoRAs), and applied as
 /// `pass_scales = [stage1, stage2]` (the engine's LTX per-pass feature, sc-2687). Declared-but-missing
 /// fails with an actionable error rather than silently producing noise.
+/// LTX-2.5 dev is deliberately stricter: its raw stage-one transformer requires the manifest's exact
+/// `[0, 1]` stage contract and refuses request-level scale overrides.
 ///
 /// Ported from the deleted Python `MlxVideoAdapter` (b821d74e): the injection was lost when video
 /// generation moved to the Rust worker in the sc-3037 cutover, which is why 10Eros regressed to noise.
@@ -769,6 +854,15 @@ pub(super) fn resolve_ltx_distill_adapter(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Option<AdapterSpec>> {
+    // LTX-2.5's distilled checkpoint already contains the refinement.  Its dev
+    // checkpoint, by contrast, needs the bundled adapter only for stage two;
+    // never let an absent selector double-apply it to the default path.
+    let ltx25_variant = (request.model == "ltx_2_5")
+        .then(|| ltx25_transformer_variant(request))
+        .transpose()?;
+    if ltx25_variant == Some(Ltx25TransformerVariant::Distilled) {
+        return Ok(None);
+    }
     let Some(auto) = request
         .model_manifest_entry
         .get("autoDistillLora")
@@ -781,6 +875,13 @@ pub(super) fn resolve_ltx_distill_adapter(
         })
         .and_then(Value::as_object)
     else {
+        if ltx25_variant == Some(Ltx25TransformerVariant::Dev) {
+            return Err(WorkerError::InvalidPayload(
+                "LTX-2.5 dev requires mlx.autoDistillLora with pass scales [0, 1]; the built-in \
+                 stage-two refinement contract is missing from the manifest."
+                    .to_owned(),
+            ));
+        }
         return Ok(None);
     };
     // Opt-out knob (default on): the distill LoRA is a required runtime component for these models.
@@ -789,23 +890,41 @@ pub(super) fn resolve_ltx_distill_adapter(
         .get("useDistillLora")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if !enabled {
+    if !enabled && request.model != "ltx_2_5" {
         return Ok(None);
     }
-    let stage1 = advanced::f32(
-        &request.advanced,
-        "distillStage1Strength",
-        auto.get("stage1Strength")
-            .and_then(Value::as_f64)
-            .unwrap_or(1.0) as f32,
-    );
-    let stage2 = advanced::f32(
-        &request.advanced,
-        "distillStage2Strength",
-        auto.get("stage2Strength")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.4) as f32,
-    );
+    let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
+    let manifest_stage1 = auto
+        .get("stage1Strength")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0) as f32;
+    let manifest_stage2 = auto
+        .get("stage2Strength")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.4) as f32;
+    let (stage1, stage2) = if ltx25_dev {
+        if request.advanced.contains_key("distillStage1Strength")
+            || request.advanced.contains_key("distillStage2Strength")
+        {
+            return Err(WorkerError::InvalidPayload(
+                "LTX-2.5 dev fixes the bundled refinement adapter to pass scales [0, 1]; \
+                 distillStage1Strength and distillStage2Strength cannot be overridden."
+                    .to_owned(),
+            ));
+        }
+        if manifest_stage1 != 0.0 || manifest_stage2 != 1.0 {
+            return Err(WorkerError::InvalidPayload(format!(
+                "LTX-2.5 dev requires mlx.autoDistillLora pass scales [0, 1], found \
+                 [{manifest_stage1}, {manifest_stage2}]."
+            )));
+        }
+        (manifest_stage1, manifest_stage2)
+    } else {
+        (
+            advanced::f32(&request.advanced, "distillStage1Strength", manifest_stage1),
+            advanced::f32(&request.advanced, "distillStage2Strength", manifest_stage2),
+        )
+    };
     // The distill LoRA repo/file live in `resources.distilledLora` (the recommended cond_safe variant).
     let (repo, file) = request
         .model_manifest_entry
@@ -1562,11 +1681,15 @@ pub(super) async fn generate_ltx(
     // SceneWorks bundle subdir's sibling `gemma/`. Eros: the separately-provisioned gemma
     // ([`ensure_ltx_gemma_present`]) — a `models/mlx/gemma` sibling or the bundle snapshot's `gemma/`.
     // `None` ⇒ the engine falls back to the HF-cache gemma snapshot.
-    let text_encoder_dir = if request.model == "ltx_2_3_eros" {
+    let text_encoder_dir = if request.model == "ltx_2_5" {
+        resolve_bundled_ltx25_gemma_dir(&model_dir)
+    } else if request.model == "ltx_2_3_eros" {
         resolve_ltx_eros_gemma_dir(settings, &model_dir)
     } else {
         resolve_bundled_ltx_gemma_dir(&model_dir)
     };
+    let ltx25_dev = request.model == "ltx_2_5"
+        && ltx25_transformer_variant(request)? == Ltx25TransformerVariant::Dev;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -1576,13 +1699,16 @@ pub(super) async fn generate_ltx(
         adapters: resolve_ltx_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),
-        negative_prompt: None,
+        negative_prompt: ltx25_dev.then(|| request.negative_prompt.clone()),
         width: request.width,
         height: request.height,
         frames: ltx_frame_count(request.raw_frame_count()),
         fps: request.fps,
-        steps: None,
-        guidance: None,
+        // The dev checkpoint's SC-18759 schedule is a fixed 30-transition
+        // contract. A forged advanced request must not turn it into the
+        // distilled eight-step schedule.
+        steps: ltx25_dev.then_some(30),
+        guidance: ltx25_dev.then(|| advanced::f32(&request.advanced, "guidanceScale", 3.0)),
         seed: resolve_video_seed(request) as u64,
         control_scale: None,
         video_mode,

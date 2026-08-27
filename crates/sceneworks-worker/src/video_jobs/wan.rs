@@ -1600,7 +1600,10 @@ pub(super) fn video_admission_overlay(
         );
     } else if mode == "replace_person"
         && !input.conditioning.is_empty()
-        && !matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled")
+        && !matches!(
+            input.engine_id,
+            "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+        )
     {
         overlays.push(
             crate::video_admission::wan_vace_replace_person_receipt(
@@ -1622,7 +1625,10 @@ pub(super) fn video_admission_overlay(
             .map_err(WorkerError::InvalidPayload)?,
         );
     }
-    if matches!(input.engine_id, "ltx_2_3" | "ltx_2_3_distilled") {
+    if matches!(
+        input.engine_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
         let mut references = input.conditioning.iter().filter_map(|conditioning| {
             let Conditioning::Reference { image, strength } = conditioning else {
                 return None;
@@ -1864,7 +1870,10 @@ pub(super) fn video_admission_reference_shape(
     {
         return "ads2v";
     }
-    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+    if matches!(
+        model_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
         return match mode {
             "image_to_video" => "image",
             "first_last_frame" => "keyframe",
@@ -1933,7 +1942,10 @@ pub(super) fn video_admission_reference_count(
     mode: &str,
     conditioning: &[Conditioning],
 ) -> u32 {
-    if matches!(model_id, "ltx_2_3" | "ltx_2_3_distilled") {
+    if matches!(
+        model_id,
+        "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
+    ) {
         return u32::try_from(
             conditioning
                 .iter()
