@@ -574,10 +574,11 @@ mod tests {
             other => panic!("failed to probe {ffmpeg}: {other:?}"),
         }
 
-        let dir = std::env::temp_dir().join(format!("sc18790-exr-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let exr = dir.join("frame.exr");
-        let png = dir.join("frame.png");
+        // A self-removing root: the guard IS the cleanup, so it stays bound for the whole test.
+        // A PID-named tree under env::temp_dir() would survive a panic and collide with a sibling.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let exr = dir.path().join("frame.exr");
+        let png = dir.path().join("frame.png");
 
         let built = Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi"])
@@ -607,7 +608,6 @@ mod tests {
             Some(ImageKind::Png),
             "the preview derivative must be a real PNG"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
