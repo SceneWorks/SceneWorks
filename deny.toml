@@ -8,8 +8,9 @@ targets = [
 
 [advisories]
 # Transitive unmaintained notices are maintenance signals rather than vulnerability exemptions.
-# Workspace unmaintained notices and vulnerability advisories still fail the gate.
+# Workspace unmaintained and unsound notices, plus vulnerabilities across the graph, still fail.
 unmaintained = "workspace"
+unsound = "workspace"
 yanked = "warn"
 ignore = [
     # Every ignored advisory must have current, expiring governance metadata in

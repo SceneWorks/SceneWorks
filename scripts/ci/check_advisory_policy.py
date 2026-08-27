@@ -7,7 +7,7 @@ import argparse
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -25,6 +25,19 @@ OWNER_RE = re.compile(
     r"@[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))?"
 )
 REQUIRED_FIELDS = frozenset({"advisory", "reason", "reachability", "owner", "expires"})
+REQUIRED_GRAPH_FIELDS = frozenset({"all-features", "targets"})
+REQUIRED_ADVISORY_FIELDS = frozenset({"ignore", "unmaintained", "unsound", "yanked"})
+FORBIDDEN_ROOT_GRAPH_FIELDS = frozenset(
+    {
+        "all-features",
+        "exclude",
+        "exclude-dev",
+        "exclude-unpublished",
+        "features",
+        "no-default-features",
+        "targets",
+    }
+)
 REQUIRED_TARGETS = frozenset(
     {
         "x86_64-unknown-linux-gnu",
@@ -33,6 +46,7 @@ REQUIRED_TARGETS = frozenset(
     }
 )
 MINIMUM_RATIONALE_LENGTH = 20
+MAXIMUM_EXCEPTION_LIFETIME_DAYS = 90
 PLACEHOLDERS = frozenset({"n/a", "none", "tbd", "todo", "unknown"})
 
 
@@ -85,8 +99,28 @@ def _load_toml(path: Path) -> Mapping[str, Any]:
         raise PolicyError(f"could not read {path}: {error}") from error
 
 
+def _require_exact_fields(
+    document: Mapping[str, Any],
+    required: frozenset[str],
+    field: str,
+) -> None:
+    missing = required - set(document)
+    unexpected = set(document) - required
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(sorted(missing)))
+        if unexpected:
+            details.append("noncanonical " + ", ".join(sorted(unexpected)))
+        raise PolicyError(
+            f"{field} must contain exactly the coverage-preserving settings: "
+            + "; ".join(details)
+        )
+
+
 def _validate_graph(deny_document: Mapping[str, Any]) -> None:
     graph = _mapping(deny_document.get("graph"), "deny.toml [graph]")
+    _require_exact_fields(graph, REQUIRED_GRAPH_FIELDS, "deny.toml [graph]")
     if graph.get("all-features") is not True:
         raise PolicyError("deny.toml [graph].all-features must be true")
     raw_targets = graph.get("targets")
@@ -95,10 +129,11 @@ def _validate_graph(deny_document: Mapping[str, Any]) -> None:
     targets = []
     for index, raw_target in enumerate(raw_targets):
         target = _mapping(raw_target, f"deny.toml [graph].targets[{index}]")
-        if set(target) != {"triple"}:
-            raise PolicyError(
-                f"deny.toml [graph].targets[{index}] must contain only the triple field"
-            )
+        _require_exact_fields(
+            target,
+            frozenset({"triple"}),
+            f"deny.toml [graph].targets[{index}]",
+        )
         targets.append(_string(target["triple"], f"deny.toml [graph].targets[{index}].triple"))
     if len(set(targets)) != len(targets):
         raise PolicyError("deny.toml [graph].targets contains a duplicate target")
@@ -110,7 +145,26 @@ def _validate_graph(deny_document: Mapping[str, Any]) -> None:
             details.append("missing " + ", ".join(missing))
         if unexpected:
             details.append("unexpected " + ", ".join(unexpected))
-        raise PolicyError("deny.toml [graph].targets must cover shipped platforms: " + "; ".join(details))
+        raise PolicyError(
+            "deny.toml [graph].targets must cover shipped platforms: " + "; ".join(details)
+        )
+
+
+def _validate_advisories(deny_document: Mapping[str, Any]) -> Mapping[str, Any]:
+    advisories = _mapping(deny_document.get("advisories"), "deny.toml [advisories]")
+    _require_exact_fields(advisories, REQUIRED_ADVISORY_FIELDS, "deny.toml [advisories]")
+    canonical = {
+        "unmaintained": "workspace",
+        "unsound": "workspace",
+        "yanked": "warn",
+    }
+    for setting, expected in canonical.items():
+        if advisories.get(setting) != expected:
+            raise PolicyError(
+                f"deny.toml [advisories].{setting} must be {expected!r}, "
+                f"found {advisories.get(setting)!r}"
+            )
+    return advisories
 
 
 def validate_documents(
@@ -123,8 +177,14 @@ def validate_documents(
 
     today = today or date.today()
     deny_document = _mapping(deny_document, "deny.toml")
+    forbidden_root = FORBIDDEN_ROOT_GRAPH_FIELDS & set(deny_document)
+    if forbidden_root:
+        raise PolicyError(
+            "deny.toml uses deprecated root graph settings that can override [graph]: "
+            + ", ".join(sorted(forbidden_root))
+        )
     _validate_graph(deny_document)
-    advisories = _mapping(deny_document.get("advisories"), "deny.toml [advisories]")
+    advisories = _validate_advisories(deny_document)
     raw_ignored = advisories.get("ignore")
     if not isinstance(raw_ignored, list):
         raise PolicyError("deny.toml [advisories].ignore must be an array")
@@ -170,6 +230,12 @@ def validate_documents(
         if expires <= today:
             raise PolicyError(
                 f"{field}.expires must be after {today.isoformat()}, found {expires.isoformat()}"
+            )
+        latest_expiry = today + timedelta(days=MAXIMUM_EXCEPTION_LIFETIME_DAYS)
+        if expires > latest_expiry:
+            raise PolicyError(
+                f"{field}.expires must be within {MAXIMUM_EXCEPTION_LIFETIME_DAYS} days of "
+                f"{today.isoformat()}, found {expires.isoformat()}"
             )
         entries.append(
             AdvisoryIgnore(
