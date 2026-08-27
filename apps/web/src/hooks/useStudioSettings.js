@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { persistNavigationPreferences } from "../uiPreferences.js";
 
 // Per-workspace "last used" settings for the Image / Video studios, so leaving a
@@ -148,8 +148,25 @@ function persistToServer(touchedWorkspace) {
 // had read it. Callers pass `preferencesHydrated && <their catalog gate>`.
 export function useStudioSettingsWriter(studio, workspaceId, settings, ready = true) {
   const serialized = JSON.stringify(settings);
+  // A studio normally mounts from the same cache it is about to write. Track that
+  // first settled pass so it does not issue a redundant durable PUT, while retaining
+  // the important ready=false -> true transition as a deliberate first persistence.
+  const scopeRef = useRef("");
+  const initializedRef = useRef(false);
   useEffect(() => {
+    const scope = `${studio}:${workspaceKey(workspaceId)}`;
+    if (scopeRef.current !== scope) {
+      scopeRef.current = scope;
+      initializedRef.current = false;
+    }
     if (!ready) {
+      initializedRef.current = true;
+      return undefined;
+    }
+    const unchangedInitialSnapshot = !initializedRef.current
+      && JSON.stringify(loadStudioSettings(studio, workspaceId)) === serialized;
+    initializedRef.current = true;
+    if (unchangedInitialSnapshot) {
       return undefined;
     }
     writeCache(studio, workspaceId, JSON.parse(serialized));
