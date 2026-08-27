@@ -836,21 +836,21 @@ fn analyze_record<A: CatalogAnalyzers>(
     });
 
     let rerun_person = !input_is_current
-        || previous.as_ref().map_or(true, |value| {
+        || previous.as_ref().is_none_or(|value| {
             !value
                 .person
                 .analyzer
                 .is_current(&config.person, &person_thresholds)
         });
     let rerun_face = !input_is_current
-        || previous.as_ref().map_or(true, |value| {
+        || previous.as_ref().is_none_or(|value| {
             !value
                 .face
                 .analyzer
                 .is_current(&config.face, &face_thresholds)
         });
     let rerun_pose = !input_is_current
-        || previous.as_ref().map_or(true, |value| {
+        || previous.as_ref().is_none_or(|value| {
             !value
                 .pose
                 .analyzer
@@ -858,7 +858,7 @@ fn analyze_record<A: CatalogAnalyzers>(
         });
     let rerun_derived = rerun_person
         || rerun_pose
-        || previous.as_ref().map_or(true, |value| {
+        || previous.as_ref().is_none_or(|value| {
             !value
                 .derived
                 .analyzer

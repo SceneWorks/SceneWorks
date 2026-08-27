@@ -4456,7 +4456,7 @@ fn normalize_timeline_items(timeline: &mut Value) -> ProjectStoreResult<()> {
             let needs_history = object
                 .get("versionHistory")
                 .and_then(Value::as_array)
-                .map_or(true, Vec::is_empty);
+                .is_none_or(Vec::is_empty);
             if needs_history {
                 object.insert(
                     "versionHistory".to_owned(),

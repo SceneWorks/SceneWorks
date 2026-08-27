@@ -3298,9 +3298,10 @@ fn evaluate_request_with_budget_using_bundle(
         .lower_alternative
         .as_ref()
         .is_some_and(|alternative| {
-            contract.calibration.as_ref().map_or(true, |identity| {
-                alternative.load_shape != identity.load_shape
-            })
+            contract
+                .calibration
+                .as_ref()
+                .is_none_or(|identity| alternative.load_shape != identity.load_shape)
         })
     {
         admission.lower_alternative = None;
@@ -3315,7 +3316,7 @@ fn evaluate_request_with_budget_using_bundle(
             }) && admission
                 .lower_alternative
                 .as_ref()
-                .map_or(true, |alternative| {
+                .is_none_or(|alternative| {
                     identity.abi == alternative.calibration_abi
                         && identity.fingerprint == alternative.calibration_fingerprint
                         && contract.engaged_composition_for_selection(&MemorySelection {

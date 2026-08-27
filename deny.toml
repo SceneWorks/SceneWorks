@@ -1,0 +1,17 @@
+[graph]
+all-features = true
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+# Transitive unmaintained notices are maintenance signals rather than vulnerability exemptions.
+# Workspace unmaintained notices and vulnerability advisories still fail the gate.
+unmaintained = "workspace"
+yanked = "warn"
+ignore = [
+    # Every ignored advisory must have current, expiring governance metadata in
+    # advisory-ignores.toml. scripts/ci/check_advisory_policy.py enforces the pairing.
+]

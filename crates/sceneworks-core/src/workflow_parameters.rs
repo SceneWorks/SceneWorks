@@ -365,7 +365,7 @@ fn lora_weight_is_fixed(share: &WorkflowShare, index: usize, weight: f64) -> boo
                         entry
                             .get("weight")
                             .filter(|value| !value.is_null())
-                            .map_or(true, |value| {
+                            .is_none_or(|value| {
                                 finite_number(value)
                                     .is_some_and(|phase_weight| phase_weight == weight)
                             })

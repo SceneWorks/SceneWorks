@@ -2997,7 +2997,7 @@ pub(crate) fn output_dimensions(aspect_ratio: &str, resolution: u32) -> (u32, u3
 }
 
 pub(crate) fn even(value: u32) -> u32 {
-    if value % 2 == 0 {
+    if value.is_multiple_of(2) {
         value
     } else {
         value + 1

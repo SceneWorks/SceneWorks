@@ -233,7 +233,7 @@ fn validate_sdxl_control_request(request: &ImageRequest) -> WorkerResult<Vec<Pos
         !value.is_null()
             && value
                 .as_str()
-                .map_or(true, |value| !matches!(value.trim(), "" | "native"))
+                .is_none_or(|value| !matches!(value.trim(), "" | "native"))
     }) {
         return Err(WorkerError::InvalidPayload(
             "advanced.decoder cannot be combined with SDXL pose control".to_owned(),

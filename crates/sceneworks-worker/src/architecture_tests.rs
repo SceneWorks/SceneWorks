@@ -257,9 +257,9 @@ pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
                     output.push(b'b');
                 }
                 output.push(b'r');
-                output.extend(std::iter::repeat(b'#').take(hashes));
+                output.extend(std::iter::repeat_n(b'#', hashes));
                 output.extend_from_slice(b"\"\"");
-                output.extend(std::iter::repeat(b'#').take(hashes));
+                output.extend(std::iter::repeat_n(b'#', hashes));
                 index = end.min(bytes.len());
                 continue;
             }

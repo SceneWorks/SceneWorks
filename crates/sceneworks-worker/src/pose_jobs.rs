@@ -889,9 +889,7 @@ pub(crate) fn detect_and_render_skeleton(
             min_conf,
         )
         .map_or(0.0, |b| (b[2] - b[0]) * (b[3] - b[1]));
-        // MSRV 1.80: `Option::is_none_or` is 1.82, so use `map_or(true, …)` (matches the
-        // repo-wide convention, e.g. `sceneworks-core::session_log`).
-        if best.as_ref().map_or(true, |(a, _)| area > *a) {
+        if best.as_ref().is_none_or(|(a, _)| area > *a) {
             best = Some((area, rec));
         }
     }

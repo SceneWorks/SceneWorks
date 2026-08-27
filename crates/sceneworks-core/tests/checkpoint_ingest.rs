@@ -177,18 +177,18 @@ struct FailingReader {
 impl Read for FailingReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if self.position >= self.fail_after {
-            // `ErrorKind::StorageFull` is stable only since 1.83 and the workspace MSRV is 1.80,
-            // so the ENOSPC message is carried rather than the kind. The ingest treats every
-            // transfer error the same way, and the assertion is on the message.
-            return Err(io::Error::other("No space left on device (ENOSPC)"));
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "No space left on device (ENOSPC)",
+            ));
         }
         let take = buffer.len().min(self.fail_after - self.position);
         let take = take.min(self.bytes.len() - self.position);
         if take == 0 {
-            // `ErrorKind::StorageFull` is stable only since 1.83 and the workspace MSRV is 1.80,
-            // so the ENOSPC message is carried rather than the kind. The ingest treats every
-            // transfer error the same way, and the assertion is on the message.
-            return Err(io::Error::other("No space left on device (ENOSPC)"));
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "No space left on device (ENOSPC)",
+            ));
         }
         buffer[..take].copy_from_slice(&self.bytes[self.position..self.position + take]);
         self.position += take;

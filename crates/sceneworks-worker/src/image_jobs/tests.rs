@@ -1238,10 +1238,10 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
         .unwrap_or_else(|error| panic!("{} production driver: {error}", case.name));
 
         let expected_states = std::iter::once(gen_core::MemoryCacheState::Cold)
-            .chain(
-                std::iter::repeat(gen_core::MemoryCacheState::Warm)
-                    .take(case.item_count.saturating_sub(1)),
-            )
+            .chain(std::iter::repeat_n(
+                gen_core::MemoryCacheState::Warm,
+                case.item_count.saturating_sub(1),
+            ))
             .collect::<Vec<_>>();
         assert_eq!(
             evaluated_states, expected_states,

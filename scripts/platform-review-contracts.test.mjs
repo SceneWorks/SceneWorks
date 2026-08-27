@@ -10,6 +10,111 @@ async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
 }
 
+function workflowJob(workflow, name) {
+  const marker = `  ${name}:\n`;
+  const at = workflow.indexOf(marker);
+  assert.ok(at >= 0, `workflow must keep a ${name} job`);
+  const remainder = workflow.slice(at + marker.length);
+  const next = remainder.search(/^  [A-Za-z0-9_-]+:\s*$/m);
+  return workflow.slice(at, next === -1 ? undefined : at + marker.length + next);
+}
+
+function workflowStep(job, name) {
+  const marker = `      - name: ${name}\n`;
+  const at = job.indexOf(marker);
+  assert.ok(at >= 0, `job must keep a step named ${name}`);
+  const next = job.indexOf("\n      - ", at + marker.length);
+  return job.slice(at, next === -1 ? undefined : next);
+}
+
+function pullRequestTrigger(workflow) {
+  const onStart = workflow.indexOf("on:\n");
+  const jobsStart = workflow.indexOf("\njobs:\n", onStart);
+  assert.ok(onStart >= 0 && jobsStart > onStart, "workflow must keep top-level on and jobs blocks");
+  const triggers = workflow.slice(onStart, jobsStart);
+  const marker = "  pull_request:\n";
+  const at = triggers.indexOf(marker);
+  assert.ok(at >= 0, "workflow must run on pull_request");
+  const remainder = triggers.slice(at + marker.length);
+  const next = remainder.search(/^  [A-Za-z0-9_-]+:\s*$/m);
+  return triggers.slice(at, next === -1 ? undefined : at + marker.length + next);
+}
+
+function assertAdvisoryGate(workflow) {
+  const pullRequest = pullRequestTrigger(workflow);
+  assert.deepEqual(
+    pullRequest
+      .split("\n")
+      .slice(1)
+      .filter((line) => /^ {4}\S/.test(line) && !/^\s*#/.test(line)),
+    [],
+    "pull_request must remain unfiltered so advisory checks cannot be path- or type-skipped",
+  );
+
+  const gate = workflowJob(workflow, "supply-chain");
+  assert.doesNotMatch(gate, /^    (?:if|needs|continue-on-error):/m);
+  assert.match(gate, /cargo install cargo-deny --locked --version 0\.19\.9/);
+
+  const governance = workflowStep(gate, "Validate advisory exception governance");
+  const audit = workflowStep(gate, "Audit Rust dependency advisories");
+  assert.doesNotMatch(governance, /^        (?:if|continue-on-error):/m);
+  assert.doesNotMatch(audit, /^        (?:if|continue-on-error):/m);
+  assert.match(governance, /^        run: python3 scripts\/ci\/check_advisory_policy\.py$/m);
+  assert.match(audit, /^        run: cargo deny --locked check advisories$/m);
+  assert.equal((gate.match(/python3 scripts\/ci\/check_advisory_policy\.py/g) ?? []).length, 1);
+  assert.equal((gate.match(/cargo deny --locked check advisories/g) ?? []).length, 1);
+  assert.ok(
+    gate.indexOf("python3 scripts/ci/check_advisory_policy.py") <
+      gate.indexOf("cargo deny --locked check advisories"),
+    "governance must be validated before cargo-deny consumes the ignore list",
+  );
+
+  const parity = workflowJob(workflow, "parity");
+  assert.match(parity, /needs: \[[^\]]*supply-chain[^\]]*\]/);
+  assert.match(parity, /if \[ "\$count" -lt 5 \]; then/);
+}
+
+test("required parity fails closed over an unconditional advisory gate", async () => {
+  assertAdvisoryGate(await source(".github/workflows/check.yml"));
+});
+
+test("advisory gate contracts reject skip paths and parity detachment", async () => {
+  const workflow = await source(".github/workflows/check.yml");
+  for (const filter of ["branches", "branches-ignore", "paths", "paths-ignore", "types"]) {
+    assert.throws(
+      () =>
+        assertAdvisoryGate(
+          workflow.replace("  pull_request:\n", `  pull_request:\n    ${filter}:\n      - main\n`),
+        ),
+      undefined,
+      `${filter} must not be able to narrow pull_request coverage`,
+    );
+  }
+
+  for (const mutation of [
+    workflow.replace("  supply-chain:\n", "  supply-chain:\n    if: github.actor != 'nobody'\n"),
+    workflow.replace(
+      "      - name: Validate advisory exception governance\n",
+      "      - name: Validate advisory exception governance\n        if: success()\n",
+    ),
+    workflow.replace(
+      "      - name: Audit Rust dependency advisories\n",
+      "      - name: Audit Rust dependency advisories\n        continue-on-error: true\n",
+    ),
+    workflow.replace(", supply-chain]", "]"),
+    workflow.replace(
+      "      - name: Audit Rust dependency advisories\n        run: cargo deny --locked check advisories\n",
+      "",
+    ),
+    workflow.replace(
+      "        run: cargo deny --locked check advisories\n",
+      "        run: cargo deny --locked check advisories || true\n",
+    ),
+  ]) {
+    assert.throws(() => assertAdvisoryGate(mutation));
+  }
+});
+
 // GitHub filter-pattern syntax: `*` matches any run of characters except `/`, `**` matches any
 // run including `/`. `**/` is treated as "zero or more directories", matching the convention
 // GitHub's own `**/README.md` example implies. That reading is also the SAFE one for every guard

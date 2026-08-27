@@ -1252,7 +1252,7 @@ fn apply_dataset_image_fix(
         .filter(|item| {
             target
                 .as_ref()
-                .map_or(true, |set| set.contains(item.id.as_str()))
+                .is_none_or(|set| set.contains(item.id.as_str()))
         })
         .map(|item| (item.id.clone(), item.path.clone()))
         .collect();

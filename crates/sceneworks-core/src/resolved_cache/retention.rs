@@ -1290,15 +1290,14 @@ fn entry_activity(metadata: &ResolvedCacheMetadata) -> u64 {
 
 fn selector_matches(selector: &SourceLifecycleSelector, metadata: &ResolvedCacheMetadata) -> bool {
     let identity = &metadata.artifact.identity;
-    // MSRV 1.80: `Option::is_none_or` is 1.82, so use `map_or(true, …)`.
     identity.repository == selector.repository
         && selector
             .revision
             .as_deref()
-            .map_or(true, |revision| identity.revision == revision)
+            .is_none_or(|revision| identity.revision == revision)
         // Tier labels reach this seam from routes that lowercase them, so match case-insensitively
         // rather than letting a "Q8"/"q8" mismatch silently strand an orphaned entry.
-        && selector.tier.as_deref().map_or(true, |tier| {
+        && selector.tier.as_deref().is_none_or(|tier| {
             metadata
                 .artifact
                 .provenance

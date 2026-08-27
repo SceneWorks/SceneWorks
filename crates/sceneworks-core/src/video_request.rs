@@ -2670,7 +2670,7 @@ mod tests {
             .copied()
             .filter(|duration| {
                 let frames = wan_frame_count((duration * 16.0).round() as u32);
-                ((frames - 1) / 4 + 1) % FRAMES_PER_BLOCK != 0
+                !((frames - 1) / 4 + 1).is_multiple_of(FRAMES_PER_BLOCK)
             })
             .count();
         assert!(

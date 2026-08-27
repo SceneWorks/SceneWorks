@@ -68,7 +68,7 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
             if payload
                 .get("model")
                 .and_then(Value::as_str)
-                .map_or(true, |model| model.trim().is_empty()) =>
+                .is_none_or(|model| model.trim().is_empty()) =>
         {
             vec!["realvisxl"]
         }
@@ -89,7 +89,7 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
             if payload
                 .get("model")
                 .and_then(Value::as_str)
-                .map_or(true, |model| model.trim().is_empty()) =>
+                .is_none_or(|model| model.trim().is_empty()) =>
         {
             vec!["prompt_refine_anubis_8b"]
         }
@@ -233,7 +233,7 @@ pub(crate) async fn ensure_runtime_model_sources(
             continue;
         }
         let entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
-        if entry.as_object().map_or(true, JsonObject::is_empty) {
+        if entry.as_object().is_none_or(JsonObject::is_empty) {
             return Err(ApiError::model_artifact_conflict(
                 format!("Runtime model '{model_id}' is not registered in the model catalog."),
                 "model_artifact_incomplete",
@@ -297,7 +297,7 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
         )
     })?;
     let entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
-    if entry.as_object().map_or(true, JsonObject::is_empty) {
+    if entry.as_object().is_none_or(JsonObject::is_empty) {
         return Err(ApiError::model_artifact_conflict(
             format!("Runtime model '{model_id}' is not registered in the model catalog."),
             "model_artifact_incomplete",
