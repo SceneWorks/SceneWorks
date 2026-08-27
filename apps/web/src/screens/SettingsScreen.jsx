@@ -62,10 +62,16 @@ function fractionToPercent(fraction) {
   return Math.min(100, Math.max(GPU_LIMIT_MIN_PERCENT, Math.round(fraction * 100)));
 }
 
-// GPU memory telemetry (epic 7819, sc-7825). The worker publishes byte counts; the readout is in GB.
-function bytesToGb(bytes) {
-  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return 0;
+// GPU memory telemetry (epic 7819, sc-7825). The worker publishes byte counts;
+// preserve a reported zero while distinguishing an absent reading from zero.
+function telemetryBytesToGib(bytes) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return null;
   return bytes / (1024 * 1024 * 1024);
+}
+
+function telemetryGibLabel(bytes, digits = 1) {
+  const gib = telemetryBytesToGib(bytes);
+  return gib === null ? "Unavailable" : `${gib.toFixed(digits)} GiB`;
 }
 
 const SCHEME_OPTIONS = [
@@ -574,7 +580,7 @@ export function SettingsScreen({
   const gpuTargetLabel =
     gpuLimitPercent >= 100
       ? "Use all available"
-      : `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GB of ${unifiedGb} GB (${gpuLimitPercent}%)`;
+      : `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GiB of ${unifiedGb} GiB (${gpuLimitPercent}%)`;
 
   return (
     <section className="page-frame settings-screen">
@@ -1050,9 +1056,9 @@ export function SettingsScreen({
                 <div className="settings-kv">
                   <span>Unified memory</span>
                   <span>
-                    {unifiedGb} GB
+                    {unifiedGb} GiB
                     {typeof gpu.wiredLimitMb === "number"
-                      ? ` · system cap ${Math.round(gpu.wiredLimitMb / 1024)} GB`
+                      ? ` · system cap ${Math.round(gpu.wiredLimitMb / 1024)} GiB`
                       : ""}
                   </span>
                 </div>
@@ -1098,20 +1104,20 @@ export function SettingsScreen({
                       <div className="settings-kv">
                         <span>Active</span>
                         <span className="settings-mono">
-                          {bytesToGb(gpuTelemetry.activeBytes).toFixed(1)} GB
+                          {telemetryGibLabel(gpuTelemetry.activeBytes)}
                         </span>
                       </div>
                       <div className="settings-kv">
                         <span>Peak</span>
                         <span className="settings-mono">
-                          {bytesToGb(gpuTelemetry.peakBytes).toFixed(1)} GB
+                          {telemetryGibLabel(gpuTelemetry.peakBytes)}
                         </span>
                       </div>
-                      {gpuTelemetry.limitBytes ? (
+                      {gpuTelemetry.limitBytes !== null && gpuTelemetry.limitBytes !== undefined ? (
                         <div className="settings-kv">
                           <span>Limit</span>
                           <span className="settings-mono">
-                            {Math.round(bytesToGb(gpuTelemetry.limitBytes))} GB
+                            {telemetryGibLabel(gpuTelemetry.limitBytes, 0)}
                           </span>
                         </div>
                       ) : null}

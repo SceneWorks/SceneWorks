@@ -199,6 +199,145 @@ describe("ImageStudio Save as Preset", () => {
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
   });
+
+  it("normalizes a rejected preset creation into a safe error message", async () => {
+    const context = baseContext({ createPreset: vi.fn(() => Promise.reject({ message: { detail: "not renderable" } })) });
+    await render(context);
+
+    await act(async () => setInput(nameInput(container), "Unavailable preset"));
+    await saveWithScope(container, "This project");
+
+    expect(container.textContent).toContain("Could not save this preset.");
+  });
+});
+
+describe("Image Studio batch cardinality admission", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("confirms an enormous batch from cardinality without materializing its combinations", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        batchMode: true,
+        batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+
+    expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 40000000 images");
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("stops styled high-cardinality preflight at the first actionable budget violation", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        styleId: "ghibli-style",
+        batchMode: true,
+        batchPromptsText: `${"x".repeat(3600)} ${keys.map((key) => `{{${key}}}`).join(" ")}`,
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 10000000 images");
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+
+    expect(container.querySelector(".batch-warning")?.textContent).toContain("Batch prompt 1");
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("makes a no-overage styled Cartesian preflight cancelable before inspecting its full product", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        styleId: "ghibli-style",
+        batchMode: true,
+        batchPromptsText: `under budget ${keys.map((key) => `{{${key}}}`).join(" ")}`,
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+
+    // The first bounded preflight slice has yielded with the run rendered; the old
+    // synchronous walk could not expose Stop until all ten million prompts were read.
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 0/10000000"));
+    expect(container.querySelector(".batch-run-progress button")?.textContent).toBe("Stop");
+    expect(createImageJob).not.toHaveBeenCalled();
+
+    await click(container.querySelector(".batch-run-progress button"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/10000000 done"));
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("keeps a confirmed run's active queue bounded while preserving its submitted count", async () => {
+    const values = Array.from({ length: 101 }, (_, index) => String(index));
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        batchMode: true,
+        batchPromptsText: "{{value}}",
+        batchVariableValues: { value: values },
+      }),
+    );
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `batch-${sequence++}` }));
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(100));
+
+    expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 100/101");
+    await click([...container.querySelectorAll(".batch-run-progress button")].find((button) => button.textContent === "Stop"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/101 done"));
+  });
 });
 
 describe("ImageStudio advanced model defaults", () => {

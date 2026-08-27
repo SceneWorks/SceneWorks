@@ -35,6 +35,7 @@ import { StylePicker } from "./StylePicker.jsx";
 import { defaultTierSelection } from "../quantTier.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
+import { errorMessage } from "../errorMessage.js";
 
 const completedResultFallbackMs = 30000;
 
@@ -797,7 +798,7 @@ export function useSavePreset({
         text: `Saved "${trimmed}" to ${scope === "project" ? "this project" : "all projects"}.`,
       });
     } catch (err) {
-      setPresetSaveMessage({ tone: "error", text: err.message });
+      setPresetSaveMessage({ tone: "error", text: errorMessage(err, "Could not save this preset.") });
     } finally {
       setSavingPreset(false);
     }

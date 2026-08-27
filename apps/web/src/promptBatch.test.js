@@ -5,6 +5,7 @@ import {
   expandBatch,
   extractKeys,
   firstResolvedPrompt,
+  iterateBatch,
   linkedGroupIssues,
   missingKeys,
   parsePromptResolution,
@@ -142,6 +143,31 @@ describe("expandBatch", () => {
 
   it("returns nothing for an all-blank prompt list", () => {
     expect(expandBatch(["", "   "], [{ key: "x", values: ["a"] }])).toEqual([]);
+  });
+});
+
+describe("iterateBatch", () => {
+  it("preserves expandBatch ordering while yielding one entry at a time", () => {
+    const prompts = ["{{name}}/{{hair}}", "{{name}} alone"];
+    const variables = [
+      { key: "name", values: ["Alice", "Bob"] },
+      { key: "hair", values: ["red", "blue"] },
+    ];
+    expect([...iterateBatch(prompts, variables)]).toEqual(expandBatch(prompts, variables));
+  });
+
+  it("can take a first result from an enormous Cartesian space without materializing it", () => {
+    const values = Array.from({ length: 1000 }, (_, index) => String(index));
+    const iterator = iterateBatch(["{{a}}/{{b}}/{{c}}"], [
+      { key: "a", values },
+      { key: "b", values },
+      { key: "c", values },
+    ]);
+
+    expect(iterator.next()).toEqual({
+      done: false,
+      value: { prompt: "0/0/0", values: { a: "0", b: "0", c: "0" } },
+    });
   });
 });
 
