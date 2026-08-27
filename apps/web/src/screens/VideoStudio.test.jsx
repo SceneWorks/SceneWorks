@@ -254,6 +254,26 @@ describe("VideoStudio Save as Preset", () => {
     expect(context.createPreset).not.toHaveBeenCalled();
     expect(container.textContent).toContain("already exists");
   });
+
+  it("shows a string preset-save rejection", async () => {
+    const context = baseContext({ createPreset: vi.fn(() => Promise.reject("Preset service is unavailable.")) });
+    await render(context);
+
+    await act(async () => setInput(nameInput(container), "Unavailable preset"));
+    await saveWithScope(container, "This project");
+
+    expect(container.textContent).toContain("Preset service is unavailable.");
+  });
+
+  it("normalizes an undefined preset-save rejection into a safe error message", async () => {
+    const context = baseContext({ createPreset: vi.fn(() => Promise.reject(undefined)) });
+    await render(context);
+
+    await act(async () => setInput(nameInput(container), "Unavailable preset"));
+    await saveWithScope(container, "This project");
+
+    expect(container.textContent).toContain("Could not save this preset.");
+  });
 });
 
 describe("VideoStudio video_bridge", () => {

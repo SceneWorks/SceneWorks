@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click, setInput } from "../../testUtils/dom.js";
 
 vi.mock("../generationStudio.jsx", () => ({
   LoraPickerSection: () => null,
@@ -101,5 +102,17 @@ describe("GenerationRail catalog axes (sc-15441)", () => {
     render(generationState({ supportsGuidance: false, supportsNegativePrompt: true }));
     expect(container.textContent).not.toContain("Guidance");
     expect(container.textContent).toContain("Negative prompt");
+  });
+
+  it("catches a rejected preset save and shows a safe fallback", async () => {
+    const savePreset = vi.fn(() => Promise.reject({ message: { detail: "not renderable" } }));
+    render(generationState({ savePreset }));
+
+    await click(container.querySelector('button[title="Save current settings as a preset"]'));
+    await act(async () => setInput(container.querySelector('input[placeholder="Preset name"]'), "Rail preset"));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Save"));
+
+    expect(savePreset).toHaveBeenCalledWith("Rail preset");
+    expect(container.textContent).toContain("Could not save preset.");
   });
 });

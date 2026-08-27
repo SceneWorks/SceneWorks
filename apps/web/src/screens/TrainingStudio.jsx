@@ -3,6 +3,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { API_BASE_URL, isAbortError } from "../api.js";
+import { errorMessage } from "../errorMessage.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
@@ -1469,7 +1470,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       );
       return job;
     } catch (err) {
-      setDatasetError(err.message);
+      setDatasetError(errorMessage(err, "Could not start the Parquet import."));
       throw err;
     }
   }

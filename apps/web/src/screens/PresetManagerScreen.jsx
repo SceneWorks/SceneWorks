@@ -30,6 +30,7 @@ import { ValidationSummary } from "../validation/Validation.jsx";
 import { useAppStatic } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { errorMessage } from "../errorMessage.js";
 
 // The Workflow segment a preset editor offers, and how each choice persists.
 //
@@ -639,7 +640,7 @@ export function PresetManagerScreen() {
         setMessage({ tone: "success", text: "Preset created." });
       }
     } catch (err) {
-      setMessage({ tone: "error", text: err.message });
+      setMessage({ tone: "error", text: errorMessage(err, "Could not save this preset.") });
     } finally {
       setSaving(false);
     }
@@ -653,7 +654,7 @@ export function PresetManagerScreen() {
       setSelectedPresetId(duplicated.id);
       setMessage({ tone: "success", text: `Duplicated "${preset.name ?? preset.id}".` });
     } catch (err) {
-      setMessage({ tone: "error", text: err.message });
+      setMessage({ tone: "error", text: errorMessage(err, "Could not duplicate this preset.") });
     } finally {
       setSaving(false);
     }
@@ -674,7 +675,7 @@ export function PresetManagerScreen() {
       }
       setMessage({ tone: "success", text: `Archived "${preset.name ?? preset.id}".` });
     } catch (err) {
-      setMessage({ tone: "error", text: err.message });
+      setMessage({ tone: "error", text: errorMessage(err, "Could not archive this preset.") });
     } finally {
       setSaving(false);
     }
