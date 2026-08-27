@@ -9699,40 +9699,20 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission() {
-        fn fixture_spec(root: &std::path::Path, policy: OffloadPolicy) -> LoadSpec {
-            let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
-                .expect("Krea owns an encoder contract");
-            gen_core_testkit::write_encoder_contract_fixture_with_quant(
-                &root.join("text_encoder"),
-                contract,
-                Some(4),
-            )
-            .expect("registry-owned Krea encoder fixture");
-            for component in ["transformer", "vae"] {
-                let directory = root.join(component);
-                std::fs::create_dir_all(&directory).unwrap();
-                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
-                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
-                bytes.extend_from_slice(header);
-                bytes.extend_from_slice(&0_f32.to_le_bytes());
-                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
-            }
-            std::fs::write(
-                root.join("transformer").join("config.json"),
-                r#"{"quantization":{"bits":4,"group_size":64}}"#,
-            )
-            .unwrap();
-            LoadSpec::new(WeightsSource::Dir(root.to_owned()))
-                .with_quant(gen_core::Quant::Q4)
-                .with_offload_policy(policy)
-                .with_load_shape(gen_core::LoadShape::DeferredMaterialization)
-        }
-
-        fn contract(root: &std::path::Path, policy: OffloadPolicy) -> MemoryProviderContract {
+        fn contract(policy: OffloadPolicy) -> MemoryProviderContract {
             let mut contract = crate::inference_runtime::media()
-                .memory_strategy_contract("krea_2_turbo", &fixture_spec(root, policy))
-                .unwrap()
-                .expect("the shipped plain Krea registry contract");
+                .memory_contract_surfaces()
+                .expect("the shipped weights-free contract inventory")
+                .into_iter()
+                .find(|surface| {
+                    surface.contract.provider_id == "krea_2_turbo"
+                        && surface.selector.tier == gen_core::MemoryContractSurfaceTier::Q4
+                        && surface.selector.offload_policy == policy
+                        && surface.selector.load_shape
+                            == gen_core::LoadShape::DeferredMaterialization
+                })
+                .expect("the shipped plain Krea q4/deferred contract surface")
+                .contract;
             // Preserve the shipped contract, composition, parameters and load shape while making
             // the pure selector arithmetic legible: a 6 GiB base consists of a 1 GiB conditioner
             // and 5 GiB DiT. With 6 GiB of request headroom, only the windowed composition fits an
@@ -9761,7 +9741,6 @@ mod tests {
             }
         }
 
-        let root = tempfile::tempdir().unwrap();
         let plan = MlxRequestPlan {
             engine_id: "krea_2_turbo",
             model_id: "krea_2_turbo".to_owned(),
@@ -9781,7 +9760,7 @@ mod tests {
         let inputs = fixture_inputs(1024, 1024);
 
         let resident = evaluate_request_with_budget(
-            &generator(contract(root.path(), OffloadPolicy::Resident)),
+            &generator(contract(OffloadPolicy::Resident)),
             &plan,
             &inputs,
             MemoryCacheState::Cold,
@@ -9802,7 +9781,7 @@ mod tests {
         );
 
         let constrained = evaluate_request_with_budget(
-            &generator(contract(root.path(), OffloadPolicy::Sequential)),
+            &generator(contract(OffloadPolicy::Sequential)),
             &plan,
             &inputs,
             MemoryCacheState::Cold,

@@ -5618,15 +5618,11 @@ fn apply_measured_mlx_load_shape_for_request(
 mod measured_mlx_load_shape_tests {
     use super::*;
     use gen_core::{
-        AdapterKind, AdapterSpec, MemoryStrategy, MemoryStrategySupport, OffloadPolicy, Quant,
-        TransformerComponent,
+        AdapterKind, AdapterSpec, MemoryContractSurfaceTier, MemoryProviderContract, MemoryStrategy,
+        MemoryStrategySupport, OffloadPolicy, Quant, TransformerComponent,
     };
 
-    fn fixture_spec(
-        root: &std::path::Path,
-        quant_bits: Option<u8>,
-        encoder: Option<(&str, Option<i32>)>,
-    ) -> LoadSpec {
+    fn fixture_spec(root: &std::path::Path, quant_bits: Option<u8>) -> LoadSpec {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
@@ -5639,38 +5635,14 @@ mod measured_mlx_load_shape_tests {
             bytes.extend_from_slice(&0f32.to_le_bytes());
             std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
         }
-        if let Some((engine_id, encoder_quant_bits)) = encoder {
-            let contract = crate::inference_runtime::media_encoder_contract(engine_id)
-                .unwrap_or_else(|| panic!("{engine_id} owns a text-encoder contract"));
-            let result = if engine_id == "qwen_image_edit" {
-                gen_core_testkit::write_multimodal_encoder_contract_fixture_with_quant(
-                    &root.join("text_encoder"),
-                    contract,
-                    runtime_macos::providers::qwen_image::VISION_ENCODER_CONTRACT,
-                    None,
-                )
-            } else {
-                gen_core_testkit::write_encoder_contract_fixture_with_quant(
-                    &root.join("text_encoder"),
-                    contract,
-                    encoder_quant_bits,
-                )
-            };
-            result.unwrap_or_else(|error| {
-                panic!("write registry-owned {engine_id} encoder fixture: {error}")
-            });
-        } else {
-            std::fs::write(
-                root.join("text_encoder/config.json"),
-                quant_bits.map_or_else(
-                    || r#"{"dtype":"bfloat16"}"#.to_owned(),
-                    |bits| {
-                        format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#)
-                    },
-                ),
-            )
-            .unwrap();
-        }
+        std::fs::write(
+            root.join("text_encoder/config.json"),
+            quant_bits.map_or_else(
+                || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+            ),
+        )
+        .unwrap();
         std::fs::write(
             root.join("transformer/config.json"),
             quant_bits.map_or_else(
@@ -5680,6 +5652,51 @@ mod measured_mlx_load_shape_tests {
         )
         .unwrap();
         LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+    }
+
+    /// Resolve the provider's shipped declaration fixture without traversing model assets.
+    ///
+    /// Production contract construction deliberately seals every selected encoder file. These
+    /// tests grade route declaration and capability shape, not file identity, so hashing sparse
+    /// production-sized encoder fixtures both duplicates the ArtifactSeal tests and turns a pure
+    /// contract check into minutes of I/O. The registry-owned surface resolver is the exact
+    /// weights-free seam for an already-resolved artifact tier. Route-local fields are copied from
+    /// the production-shaped spec so adapters and resolved catalog identity remain under test.
+    fn weights_free_contract(
+        provider_id: &str,
+        tier: MemoryContractSurfaceTier,
+        spec: &LoadSpec,
+    ) -> MemoryProviderContract {
+        let registry = crate::inference_runtime::media();
+        let fixture = registry
+            .memory_contract_fixture_registrations()
+            .find(|fixture| fixture.provider_id == provider_id)
+            .unwrap_or_else(|| panic!("{provider_id} weights-free contract fixture"));
+        let mut surface = (fixture.surface_specs)()
+            .into_iter()
+            .find(|surface| {
+                surface.selector.tier == tier
+                    && surface.selector.offload_policy == spec.offload_policy
+                    && surface.selector.load_shape == spec.load_shape
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{provider_id} weights-free {:?}/{:?}/{:?} surface",
+                    tier, spec.offload_policy, spec.load_shape
+                )
+            });
+        surface.spec.resolved_route = spec.resolved_route.clone();
+        surface.spec.adapters = spec.adapters.clone();
+        surface.spec.load_shape_declaration_result = spec.load_shape_declaration_result;
+
+        match registry
+            .memory_contract_surface_resolver_registrations()
+            .find(|resolver| resolver.provider_id == provider_id)
+        {
+            Some(resolver) => (resolver.contract)(&surface),
+            None => (fixture.contract)(&surface.spec),
+        }
+        .unwrap_or_else(|error| panic!("{provider_id} weights-free contract: {error}"))
     }
 
     fn rung_four_support(engine_id: &str, spec: &LoadSpec) -> MemoryStrategySupport {
@@ -5696,9 +5713,9 @@ mod measured_mlx_load_shape_tests {
     #[test]
     fn worker_lens_specs_reach_only_their_exact_measured_contracts() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path(), None, None);
+        let bf16 = fixture_spec(bf16_dir.path(), None);
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), Some(4), None).with_quant(Quant::Q4);
+        let q4 = fixture_spec(q4_dir.path(), Some(4)).with_quant(Quant::Q4);
 
         let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
         assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
@@ -5777,37 +5794,34 @@ mod measured_mlx_load_shape_tests {
 
     #[test]
     fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
-        let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(
-            bf16_dir.path(),
-            None,
-            Some(("qwen_image", None)),
-        );
-        let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), None, Some(("qwen_image_edit", None)));
-        std::fs::write(
-            q4_dir.path().join("transformer/config.json"),
-            r#"{"quantization":{"bits":4}}"#,
-        )
-        .unwrap();
+        let bf16_root = std::path::PathBuf::from("/__sceneworks_qwen_bf16_contract_fixture__");
+        let bf16 = LoadSpec::new(WeightsSource::Dir(bf16_root.clone()));
+        let q4_root = std::path::PathBuf::from("/__sceneworks_qwen_q4_contract_fixture__");
+        let q4 = LoadSpec::new(WeightsSource::Dir(q4_root.clone())).with_quant(Quant::Q4);
         let lightning_adapter = AdapterSpec::new(
-            q4_dir.path().join("lightning.safetensors"),
+            q4_root.join("lightning.safetensors"),
             1.0,
             AdapterKind::Lora,
         );
 
-        for (label, engine_id, spec) in [
-            ("qwen_image", "qwen_image", bf16.clone()),
+        for (label, engine_id, tier, spec) in [
+            (
+                "qwen_image",
+                "qwen_image",
+                MemoryContractSurfaceTier::Bf16,
+                bf16.clone(),
+            ),
             (
                 "qwen_image_edit_2511",
                 "qwen_image_edit",
-                q4.clone().with_quant(Quant::Q4),
+                MemoryContractSurfaceTier::Q4,
+                q4.clone(),
             ),
             (
                 "qwen_image_edit_2511_lightning",
                 "qwen_image_edit",
-                q4.with_quant(Quant::Q4)
-                    .with_adapters(vec![lightning_adapter]),
+                MemoryContractSurfaceTier::Q4,
+                q4.with_adapters(vec![lightning_adapter]),
             ),
         ] {
             let shaped = apply_measured_mlx_load_shape(engine_id, spec);
@@ -5816,13 +5830,8 @@ mod measured_mlx_load_shape_tests {
                 gen_core::LoadShape::DeferredMaterialization,
                 "{label} must resolve to the shared Qwen provider load shape"
             );
-            let contract = crate::inference_runtime::media()
-                .memory_strategy_contract(
-                    engine_id,
-                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
-                )
-                .unwrap()
-                .expect("Qwen contract");
+            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
+            let contract = weights_free_contract(engine_id, tier, &sequential);
             let rung = contract
                 .capability(MemoryStrategy::BoundedTransformerResidency)
                 .expect("rung 4");
@@ -5835,8 +5844,8 @@ mod measured_mlx_load_shape_tests {
         }
 
         let pid = bf16.clone().with_pid(
-            WeightsSource::File(bf16_dir.path().join("pid.safetensors")),
-            WeightsSource::Dir(bf16_dir.path().join("gemma")),
+            WeightsSource::File(bf16_root.join("pid.safetensors")),
+            WeightsSource::Dir(bf16_root.join("gemma")),
         );
         assert_eq!(
             apply_measured_mlx_load_shape("qwen_image", pid).load_shape,
@@ -5875,36 +5884,40 @@ mod measured_mlx_load_shape_tests {
             has_phases: false,
         };
 
-        for (tier, quant_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
+        for (tier, quant_bits, surface_tier) in [
+            ("bf16", None, MemoryContractSurfaceTier::Bf16),
+            ("q4", Some(4), MemoryContractSurfaceTier::Q4),
+            ("q8", Some(8), MemoryContractSurfaceTier::Q8),
+        ] {
+            // Declaration evaluation reads the tiny transformer marker; provider capability
+            // construction below remains weights-free and never seals the encoder payload.
             let root = tempfile::tempdir().unwrap();
-            let spec = fixture_spec(
-                root.path(),
-                quant_bits,
-                Some(("krea_2_turbo", quant_bits.map(i32::from))),
-            )
-            .with_resolved_route("krea_2_turbo");
+            let spec = fixture_spec(root.path(), quant_bits).with_resolved_route("krea_2_turbo");
             assert_eq!(spec.quantize, None, "{tier} is a prepacked artifact tier");
             let shaped =
-                crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+                crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request_with(
                     "krea_2_turbo",
                     Some(tier),
                     Some(context.mode),
                     turbo_manifest,
                     spec,
                     context,
+                    |candidate| {
+                        weights_free_contract("krea_2_turbo", surface_tier, candidate)
+                            .capability(MemoryStrategy::BoundedTransformerResidency)
+                            .is_some_and(|capability| {
+                                capability.support == MemoryStrategySupport::Implemented
+                            })
+                    },
                 );
             assert_eq!(
                 shaped.load_shape,
                 gen_core::LoadShape::DeferredMaterialization,
                 "plain Krea {tier} must use the production deferred load shape"
             );
-            let resident_contract = crate::inference_runtime::media()
-                .memory_strategy_contract(
-                    "krea_2_turbo",
-                    &shaped.clone().with_offload_policy(OffloadPolicy::Resident),
-                )
-                .unwrap()
-                .expect("plain Krea registers a resident/deferred memory-strategy contract");
+            let resident = shaped.clone().with_offload_policy(OffloadPolicy::Resident);
+            let resident_contract =
+                weights_free_contract("krea_2_turbo", surface_tier, &resident);
             assert_eq!(
                 resident_contract
                     .capability(MemoryStrategy::Resident)
@@ -5914,13 +5927,9 @@ mod measured_mlx_load_shape_tests {
                 "plain Krea {tier} must remain reachable on a roomy resident host"
             );
 
-            let sequential_contract = crate::inference_runtime::media()
-                .memory_strategy_contract(
-                    "krea_2_turbo",
-                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
-                )
-                .unwrap()
-                .expect("plain Krea registers a sequential/deferred memory-strategy contract");
+            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
+            let sequential_contract =
+                weights_free_contract("krea_2_turbo", surface_tier, &sequential);
             let rung = sequential_contract
                 .capability(MemoryStrategy::BoundedTransformerResidency)
                 .expect("Krea compatibility contract contains rung 4");
@@ -5933,14 +5942,9 @@ mod measured_mlx_load_shape_tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let base = fixture_spec(
-            root.path(),
-            Some(4),
-            Some(("krea_2_turbo", Some(4))),
-        )
-        .with_resolved_route("krea_2_turbo");
+        let base = fixture_spec(root.path(), Some(4)).with_resolved_route("krea_2_turbo");
         assert_eq!(
-            crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request_with(
                 "krea_2_turbo",
                 Some("q4"),
                 Some(crate::memory_route_registry::MemoryRouteMode::EditImage),
@@ -5952,19 +5956,21 @@ mod measured_mlx_load_shape_tests {
                     use_pid: false,
                     has_phases: false,
                 },
+                |_| true,
             )
             .load_shape,
             gen_core::LoadShape::EagerMaterialization,
             "native Turbo cannot consume the route-local edit declaration"
         );
         let control = base.with_control(WeightsSource::File(root.path().join("control.safetensors")));
-        let refused = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        let refused = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request_with(
             "krea_2_turbo",
             Some("q4"),
             Some(context.mode),
             turbo_manifest,
             control,
             context,
+            |_| true,
         );
         assert_eq!(refused.load_shape, gen_core::LoadShape::EagerMaterialization);
         assert_eq!(
