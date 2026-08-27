@@ -11043,6 +11043,26 @@ fn ltx25_transformer_variant_defaults_and_refuses_unknown_values() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx25_tier_completeness_pins_the_real_split_component_surface() {
+    let tier = tempfile::tempdir().expect("ltx25 tier");
+    for file in LTX25_TIER_REQUIRED_FILES {
+        std::fs::write(tier.path().join(file), "x").expect("tier component marker");
+    }
+    assert!(ltx25_dir_is_complete(tier.path()));
+
+    for file in LTX25_TIER_REQUIRED_FILES {
+        let path = tier.path().join(file);
+        std::fs::remove_file(&path).expect("remove one required component");
+        assert!(
+            !ltx25_dir_is_complete(tier.path()),
+            "a tier missing {file} must fail closed"
+        );
+        std::fs::write(path, "x").expect("restore required component");
+    }
+}
+
 /// SceneWorks bundle resolution (sc-5608): `ltx_bundle_subdir` picks the requested quant subdir,
 /// prefers a complete one over an incomplete sibling, and `bundled_ltx_gemma_dir` finds `gemma/`.
 #[cfg(target_os = "macos")]

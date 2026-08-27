@@ -141,6 +141,33 @@ pub(super) fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
+/// Files the ordinary LTX-2.5 split provider can reach from one selected tier. The 2.5 converter
+/// deliberately does not emit the legacy `upsampler.safetensors`/`quantize_config.json` markers
+/// used by 2.3, so sharing [`ltx_dir_is_complete`] would reject every published 2.5 tier.
+#[cfg(target_os = "macos")]
+pub(super) const LTX25_TIER_REQUIRED_FILES: &[&str] = &[
+    "split_model.json",
+    "transformer.safetensors",
+    "connector.safetensors",
+    "text_encoder.safetensors",
+    "vae_decoder.safetensors",
+    "vae_encoder.safetensors",
+    "diffusion_vae_encoder.safetensors",
+    "vae_diffusion_decoder.safetensors",
+    "audio_vae.safetensors",
+    "vocoder.safetensors",
+    "spatial_upsampler.safetensors",
+    "temporal_upsampler.safetensors",
+    "duration_head.safetensors",
+];
+
+#[cfg(target_os = "macos")]
+pub(super) fn ltx25_dir_is_complete(dir: &Path) -> bool {
+    LTX25_TIER_REQUIRED_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
+}
+
 /// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: parseable,
 /// non-empty config and tokenizer JSON, plus a structurally valid single safetensors file or every
 /// structurally valid, safely-relative shard mapped by a non-empty index. The API readiness gate uses
@@ -270,7 +297,7 @@ pub(super) fn resolve_ltx_model_dir(
                 ))
             })?;
         let dir = root.join(variant.component_dir()).join(tier);
-        return ltx_dir_is_complete(&dir).then_some(dir).ok_or_else(|| {
+        return ltx25_dir_is_complete(&dir).then_some(dir).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
                 "LTX-2.5 {} packed {tier} component is incomplete in {}; reinstall that exact variant",
                 variant.component_dir(),
