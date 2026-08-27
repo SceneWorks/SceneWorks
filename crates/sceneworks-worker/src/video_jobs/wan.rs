@@ -1457,11 +1457,16 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     // Never downgrade a Sequential policy selected by the candle A14B route.
     spec.offload_policy = input.offload_policy;
     // Named model components (epic 13657). Video providers advertise no `required_components`, so
-    // the map is empty by default. Three OPTIONAL components ride it:
+    // the map is empty by default. Four OPTIONAL components ride it:
     //
     // * LTX-2.3's `uncensored_enhancer` (sc-2845 / sc-13664): when a `useUncensoredEnhancer` job
     //   resolved the amoral 4-bit Gemma snapshot, stage it here so the provider loads it on demand
     //   instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan.
+    // * LTX-2.5's stock `enhancer` (sc-18764/sc-18780): the selected weights root is nested at
+    //   `<snapshot>/<variant>/<tier>`, while the separately licensed offline enhancer is the
+    //   snapshot-level `<snapshot>/enhancer`. Stage the exact sibling root so the provider never
+    //   falls back to the nonexistent `<tier>/enhancer`. Candle does not advertise this MLX-only
+    //   capability, so its distinct engine id deliberately receives no component.
     // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
     //   different repo from its shared components, and `weights` can only name one root.
     // * MiniMax-H3's per-tier PACKED text encoder (`"text_encoder"`, sc-19120 / sc-19506): the
@@ -1474,11 +1479,21 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     //
     // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
     // branched so adding a fourth cannot silently drop one.
+    let ltx25_stock_enhancer = (input.engine_id == "ltx_2_5")
+        .then(|| {
+            input
+                .model_dir
+                .parent()
+                .and_then(Path::parent)
+                .map(|root| root.join("enhancer"))
+        })
+        .flatten();
     spec.components = [
         input
             .uncensored_enhancer_dir
             .clone()
             .map(|dir| ("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))),
+        ltx25_stock_enhancer.map(|dir| ("enhancer".to_owned(), WeightsSource::Dir(dir))),
         input
             .dit_component_dir
             .clone()

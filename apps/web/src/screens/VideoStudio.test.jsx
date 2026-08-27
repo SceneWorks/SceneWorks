@@ -1585,6 +1585,38 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
+  it("routes the exact LTX-2.5 variant and q4/q8/bf16 tier through Candle", async () => {
+    const ltx25 = {
+      ...tieredVideoModel(["q4", "q8", "bf16"]),
+      id: "ltx_2_5",
+      name: "LTX-2.5",
+      family: "ltx-video",
+      adapter: "ltx_video",
+      defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
+      limits: { steps: [8, 30] },
+    };
+    const context = baseContext({ videoModels: [ltx25], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeTruthy();
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    setSelect(tierPicker(), "bf16");
+    await openAdvanced();
+    expect(
+      [...container.querySelectorAll("label")].find((label) =>
+        label.textContent.includes("Enhance prompt before generation"),
+      ),
+    ).toBeFalsy();
+    expect(container.querySelector('select[aria-label="Text encoder model"]')).toBeNull();
+    setSelect(container.querySelector('select[aria-label="LTX-2.5 transformer"]'), "dev");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({
+      mlxQuantize: 0,
+      transformerVariant: "dev",
+    });
+  });
+
   it("offers every admitted q4/q8/bf16 execution tier for Candle SCAIL-2", async () => {
     const scail = {
       ...tieredVideoModel(["q4", "q8", "bf16"]),
@@ -2269,13 +2301,32 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     ...NON_WAN,
     id: "ltx_2_5",
     name: "LTX-2.5",
+    adapter: "ltx_video",
     defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
     limits: { steps: [8, 30] },
+    hasVariantMatrix: true,
+    variants: ["q4", "q8", "bf16"].map((variant) => ({
+      variant,
+      installState: "installed",
+    })),
+    // Runtime discovery is adapter-wide today. The UI must not mistake these LTX-2.3 options for
+    // an LTX-2.5 capability merely because they appear on the enriched catalog entry.
+    textEncoderOptions: [
+      { id: "default", label: "Gemma 3 default", isDefault: true },
+      { id: "ltx_amoral_gemma_3_12b", label: "Amoral Gemma 3", isDefault: false },
+    ],
     ui: { label: "LTX-2.5" },
+  };
+  const LTX25_MAC_CAPS = {
+    macGatingActive: true,
+    candleGatingActive: false,
+    platform: "macos",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
   };
 
   it("routes the LTX-2.5 dev selector into the request and pins its 30-step row", async () => {
-    const context = baseContext({ videoModels: [LTX25] });
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
     await render(context);
     await openAdvanced();
 
@@ -2285,21 +2336,78 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     const steps = labeledInput("Steps");
     expect(steps.disabled).toBe(true);
     expect(steps.placeholder).toBe("30 (fixed schedule)");
+    expect(labeledInput("Guidance")).toBeTruthy();
+    expect(labeledInput("Video CFG")).toBeFalsy();
+    expect(labeledInput("Video STG")).toBeFalsy();
+    expect(labeledInput("Video rescale")).toBeFalsy();
 
-    await click(buttonWithText(container, "Render clip"));
+    await act(async () => setInput(labeledInput("Guidance"), "4.2"));
+    const negative = [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.trim().startsWith("Negative prompt"))
+      ?.querySelector("textarea");
+    expect(negative).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(negative, "washed out");
+      negative.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+
+    const renderButton = buttonWithText(container, "Render clip");
+    expect(renderButton.disabled, container.textContent).toBe(false);
+    await click(renderButton);
+    expect(context.createVideoJob, container.textContent).toHaveBeenCalledTimes(1);
     const payload = context.createVideoJob.mock.calls[0][0];
     expect(payload).toMatchObject({
       model: "ltx_2_5",
-      advanced: { transformerVariant: "dev" },
+      negativePrompt: "washed out",
+      advanced: { transformerVariant: "dev", guidanceScale: 4.2 },
     });
     expect(payload.advanced.steps).toBeUndefined();
   });
 
-  it("keeps omitted/default LTX-2.5 selection distilled", async () => {
-    const context = baseContext({ videoModels: [LTX25] });
+  it("keeps distilled LTX-2.5 sealed while exposing only its stock prompt enhancer", async () => {
+    const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
     await render(context);
+    await openAdvanced();
+
+    const steps = labeledInput("Steps");
+    expect(steps.disabled).toBe(true);
+    expect(steps.placeholder).toBe("8 (fixed schedule)");
+    expect(labeledInput("Guidance")).toBeFalsy();
+    expect(
+      [...container.querySelectorAll("label")].find((label) =>
+        label.textContent.trim().startsWith("Negative prompt"),
+      ),
+    ).toBeFalsy();
+    expect(labeledInput("Video CFG")).toBeFalsy();
+    expect(labeledInput("Video STG")).toBeFalsy();
+    expect(labeledInput("Video rescale")).toBeFalsy();
+    expect(container.querySelector('select[aria-label="Text encoder model"]')).toBeNull();
+
+    const enhance = [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.includes("Enhance prompt before generation"))
+      ?.querySelector('input[type="checkbox"]');
+    expect(enhance).toBeTruthy();
+    expect(container.textContent).toContain("stock Gemma-4 enhancer");
+    await act(async () => enhance.click());
+
     await click(buttonWithText(container, "Render clip"));
-    expect(context.createVideoJob.mock.calls[0][0].advanced.transformerVariant).toBe("distilled");
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.negativePrompt).toBe("");
+    expect(payload.advanced).toMatchObject({
+      transformerVariant: "distilled",
+      enhancePrompt: true,
+    });
+    for (const absent of [
+      "steps",
+      "guidanceScale",
+      "textEncoderModel",
+      "videoCfgGuidanceScale",
+      "videoStgGuidanceScale",
+      "videoRescaleScale",
+    ]) {
+      expect(payload.advanced).not.toHaveProperty(absent);
+    }
   });
 
   it("pins the Steps control for a model that declares a single legal step count", async () => {

@@ -144,7 +144,10 @@ pub(super) fn ltx_dir_is_complete(dir: &Path) -> bool {
 /// Files the ordinary LTX-2.5 split provider can reach from one selected tier. The 2.5 converter
 /// deliberately does not emit the legacy `upsampler.safetensors`/`quantize_config.json` markers
 /// used by 2.3, so sharing [`ltx_dir_is_complete`] would reject every published 2.5 tier.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const LTX25_TIER_REQUIRED_FILES: &[&str] = &[
     "split_model.json",
     "transformer.safetensors",
@@ -161,7 +164,10 @@ pub(super) const LTX25_TIER_REQUIRED_FILES: &[&str] = &[
     "duration_head.safetensors",
 ];
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn ltx25_dir_is_complete(dir: &Path) -> bool {
     LTX25_TIER_REQUIRED_FILES
         .iter()
@@ -638,6 +644,27 @@ pub(super) fn resolve_selected_ltx_text_encoder(
         None
     };
     Ok((use_alternate, dir))
+}
+
+/// Resolve the prompt-enhancer choice for one concrete LTX generation model. LTX-2.5 has a
+/// self-contained Gemma-4 generation encoder and exactly one separately staged stock enhancer; it
+/// must never inherit LTX-2.3's optional amoral Gemma-3 selection through the shared adapter id.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_ltx_text_encoder_for_model(
+    model: &str,
+    advanced: &JsonObject,
+    staged_alternate: Option<PathBuf>,
+) -> WorkerResult<(bool, Option<PathBuf>)> {
+    if model == "ltx_2_5" {
+        if selected_ltx_text_encoder(advanced)? != LtxTextEncoderSelection::Default {
+            return Err(WorkerError::InvalidPayload(
+                "LTX-2.5 does not support alternate textEncoderModel or uncensored enhancer selections; use its tier-local Gemma-4 encoder and stock prompt enhancer"
+                    .to_owned(),
+            ));
+        }
+        return Ok((false, None));
+    }
+    resolve_selected_ltx_text_encoder(advanced, staged_alternate)
 }
 
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
@@ -1641,7 +1668,8 @@ pub(super) async fn generate_ltx(
 ) -> WorkerResult<(DecodedVideo, Option<Value>)> {
     // Validate and resolve an explicit encoder choice before any clip decoding, model download, or
     // engine setup. A bad request must remain a cheap, actionable InvalidPayload.
-    let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_selected_ltx_text_encoder(
+    let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_ltx_text_encoder_for_model(
+        &request.model,
         &request.advanced,
         resolve_ltx_uncensored_enhancer_dir(&settings.data_dir),
     )?;

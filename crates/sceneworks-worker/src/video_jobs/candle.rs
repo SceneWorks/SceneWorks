@@ -3,9 +3,10 @@ use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{
     ltx::{
-        ltx25_transformer_variant, resolve_ltx_adapters, resolve_ltx_conditioning,
-        resolve_ltx_replace_conditioning, resolve_video_clip_conditioning, LTX25_BUNDLE_REPO,
-        LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO, LTX_BUNDLE_REVISION,
+        ltx25_dir_is_complete, ltx25_transformer_variant, resolve_ltx_adapters,
+        resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
+        resolve_video_clip_conditioning, LTX25_BUNDLE_REPO, LTX_BUNDLE_PRE_BF16_REVISION,
+        LTX_BUNDLE_REPO, LTX_BUNDLE_REVISION,
     },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
@@ -287,12 +288,13 @@ fn candle_ltx_tier_complete(dir: &Path) -> bool {
     dir.join("transformer.safetensors").is_file() && dir.join("quantize_config.json").is_file()
 }
 
-/// LTX-2.5's converter uses `split_model.json` as the authoritative tier marker for every
-/// precision, including dense bf16. It deliberately does not emit the legacy 2.3
-/// `quantize_config.json`; requiring that file would reject every real 2.5 tier.
+/// LTX-2.5's converter uses `split_model.json` rather than the legacy 2.3 quant marker, but that
+/// manifest alone is not a completeness receipt. Require the same full component surface as MLX so
+/// a partially downloaded tier — especially one missing its tier-local Gemma-4 encoder — fails at
+/// selection instead of reaching provider load.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_ltx25_tier_complete(dir: &Path) -> bool {
-    dir.join("transformer.safetensors").is_file() && dir.join("split_model.json").is_file()
+    ltx25_dir_is_complete(dir)
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

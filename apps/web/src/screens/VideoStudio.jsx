@@ -135,11 +135,17 @@ function humanizedNumberMenu(menu) {
 
 const ltxVideoModelId = "ltx_2_3";
 const ltx25VideoModelId = "ltx_2_5";
-const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
+const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros", ltx25VideoModelId]);
 // Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
 // picker only enables entries whose individual install is complete (`installedTiers`); in particular,
 // adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
-const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"]);
+const candleTierModelIds = new Set([
+  "wan_2_2",
+  "wan_2_2_t2v_14b",
+  "wan_2_2_i2v_14b",
+  "scail2_14b",
+  ltx25VideoModelId,
+]);
 // sc-20969 terminal acceptance admits exactly SCAIL-2's shipped q4/q8/bf16 Candle packages. Keep
 // this execution allowlist literal and local so an unrelated future catalog tier cannot become
 // runnable merely by appearing in the manifest. MLX continues to use the complete installed tier set.
@@ -340,7 +346,20 @@ export function VideoStudio() {
   // Runtime-curated selector surface (sc-13800). The API emits only complete encoders the worker can
   // resolve; Video Studio stays adapter-agnostic and future models can expose the same shape.
   const textEncoderOptions = selectedModel?.textEncoderOptions ?? [];
-  const supportsTextEncoderSelection = textEncoderOptions.length > 0;
+  // LTX-2.5's tier-local Gemma-4 generation encoder is not selectable. Runtime option discovery
+  // is shared by the `ltx_video` adapter and can therefore carry LTX-2.3's Gemma-3/amoral choices
+  // onto this catalog entry; exposing them would produce a request the 2.5 provider rejects.
+  const supportsTextEncoderSelection =
+    model !== ltx25VideoModelId && textEncoderOptions.length > 0;
+  // The separately downloaded stock Gemma-4 enhancer is an MLX-only 2.5 capability. Keep the
+  // simple opt-in checkbox while omitting the unrelated 2.3 encoder picker; off-Mac the Candle
+  // provider has no prompt-enhancement input, so the control and payload both disappear. Require
+  // a positive host identity: before capabilities load, showing a backend-specific control would
+  // risk briefly offering it to an off-Mac client.
+  const supportsStockPromptEnhancement =
+    model === ltx25VideoModelId && ["macos", "darwin"].includes(macCapabilities?.platform);
+  const supportsPromptEnhancement =
+    supportsTextEncoderSelection || supportsStockPromptEnhancement;
   const defaultTextEncoderId =
     textEncoderOptions.find((option) => option.isDefault)?.id ??
     textEncoderOptions[0]?.id ??
@@ -554,8 +573,16 @@ export function VideoStudio() {
   // inertness is TRANSIENT (turn Lightning off and the control works again). A missing axis is
   // permanent for the model, so a forever-dead input is just clutter — Audio Studio hides these two
   // for the same reason (`showGuidance` / `showNegative`).
-  const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
-  const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
+  // LTX-2.5's distilled path is CFG-free; only the dev transformer consumes these two fields.
+  // Other catalog entries retain the manifest-driven absent-means-true contract above.
+  const supportsGuidance =
+    model === ltx25VideoModelId
+      ? ltx25Dev
+      : selectedModel?.video?.supportsGuidance !== false;
+  const supportsNegativePrompt =
+    model === ltx25VideoModelId
+      ? ltx25Dev
+      : selectedModel?.video?.supportsNegativePrompt !== false;
   // `limits.steps` — the exact set of step counts the model can render (sc-19502). Distilled models
   // bake their sigma waypoints into training: LTX-2.3 runs 8 and nothing else, and BOTH backends now
   // refuse anything off the menu, so an unpinned Steps box here would let the user type a number the
@@ -568,7 +595,14 @@ export function VideoStudio() {
   // control?" with nothing, and leaving it editable would be the silently-ignored knob this story
   // exists to remove.
   const stepsMenu = stepsMenuFromModel(selectedModel);
-  const stepsPinnedValue = ltx25Dev ? 30 : stepsMenu?.length === 1 ? stepsMenu[0] : null;
+  const stepsPinnedValue =
+    model === ltx25VideoModelId
+      ? ltx25Dev
+        ? 30
+        : 8
+      : stepsMenu?.length === 1
+        ? stepsMenu[0]
+        : null;
   const stepsPinned = stepsPinnedValue !== null;
   // A menu with MORE than one entry is a CHOICE, not a pin — but the gate refuses off-menu counts
   // exactly as hard there, so a free-text box would be the same "UI looser than the gate" desync in
@@ -578,7 +612,14 @@ export function VideoStudio() {
   // `humanized_number_menu` in crates/sceneworks-core/src/video_request.rs, `stepsMenuFromModel`,
   // `checkInMenu` in PresetManagerScreen, gen-core's `supported_steps`) and leaving this one
   // singleton-only would make the studio the single seam that silently reopens the defect.
-  const stepsChoice = stepsMenu !== null && stepsMenu.length > 1 ? stepsMenu : null;
+  const stepsChoice =
+    model !== ltx25VideoModelId && stepsMenu !== null && stepsMenu.length > 1
+      ? stepsMenu
+      : null;
+  // The generic LTX-2.3 guider knobs map to MultiModalGuiderParams. LTX-2.5 has its own sealed
+  // distilled/dev sampling contracts, so retaining or emitting these values there would be inert.
+  const showsLegacyLtxGuidanceControls =
+    selectedModel?.adapter === "ltx_video" && model !== ltx25VideoModelId;
   // Whether the override currently held is something the selected model can actually render. A
   // number typed against a PREVIOUS model survives the switch (the same staleness `stepsPinned`
   // suppresses), and a `<select>` whose `value` matches no `<option>` displays its first one — which
@@ -1349,13 +1390,16 @@ export function VideoStudio() {
       ltxPipeline,
       distilledVariant,
       transformerVariant,
-      ...(supportsTextEncoderSelection
-        ? { enhancePrompt, textEncoderModel: selectedTextEncoderModel }
-        : {}),
+      ...(supportsPromptEnhancement ? { enhancePrompt } : {}),
+      ...(supportsTextEncoderSelection ? { textEncoderModel: selectedTextEncoderModel } : {}),
       motion,
-      videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
-      videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
-      videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
+      ...(showsLegacyLtxGuidanceControls
+        ? {
+            videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
+            videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
+            videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
+          }
+        : {}),
     }),
   });
 
@@ -1825,7 +1869,7 @@ export function VideoStudio() {
           ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
           ...(model === ltx25VideoModelId ? { transformerVariant } : {}),
-          ...(supportsTextEncoderSelection && enhancePrompt
+          ...(supportsPromptEnhancement && enhancePrompt
             ? { enhancePrompt: true }
             : {}),
           ...(supportsTextEncoderSelection &&
@@ -1879,13 +1923,13 @@ export function VideoStudio() {
           // LTX native guidance knobs (epic 1753 sc-1769). Only emitted for
           // the LTX adapter — the worker would silently ignore them on other
           // adapters but keeping the payload tight avoids surprise overrides.
-          ...(selectedModel?.adapter === "ltx_video" && ltxVideoCfg !== "" && Number.isFinite(Number(ltxVideoCfg))
+          ...(showsLegacyLtxGuidanceControls && ltxVideoCfg !== "" && Number.isFinite(Number(ltxVideoCfg))
             ? { videoCfgGuidanceScale: Number(ltxVideoCfg) }
             : {}),
-          ...(selectedModel?.adapter === "ltx_video" && ltxVideoStg !== "" && Number.isFinite(Number(ltxVideoStg))
+          ...(showsLegacyLtxGuidanceControls && ltxVideoStg !== "" && Number.isFinite(Number(ltxVideoStg))
             ? { videoStgGuidanceScale: Number(ltxVideoStg) }
             : {}),
-          ...(selectedModel?.adapter === "ltx_video" && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
+          ...(showsLegacyLtxGuidanceControls && ltxVideoRescale !== "" && Number.isFinite(Number(ltxVideoRescale))
             ? { videoRescaleScale: Number(ltxVideoRescale) }
             : {}),
           // Clip-conditioning strengths (sc-3522, sc-3755; sc-8445 for Krea Realtime v2v). The
@@ -2528,7 +2572,7 @@ export function VideoStudio() {
                   </p>
                 </label>
               ) : null}
-              {supportsTextEncoderSelection ? (
+              {supportsPromptEnhancement ? (
                 <>
                   <div className="lightning-toggle">
                     <label className="checkline">
@@ -2540,41 +2584,47 @@ export function VideoStudio() {
                       Enhance prompt before generation
                     </label>
                     <p className="helper-copy">
-                      Rewrites the prompt with the selected text encoder before the model encodes it.
+                      {supportsStockPromptEnhancement
+                        ? "Rewrites the prompt with LTX-2.5's separately downloaded stock Gemma-4 enhancer."
+                        : "Rewrites the prompt with the selected text encoder before the model encodes it."}
                     </p>
                   </div>
-                  <label>
-                    Text encoder model
-                    <select
-                      aria-label="Text encoder model"
-                      disabled={!enhancePrompt}
-                      onChange={(event) => setTextEncoderModel(event.target.value)}
-                      value={selectedTextEncoderModel}
-                    >
-                      {textEncoderOptions.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                      {!selectedTextEncoderAvailable &&
-                      selectedTextEncoderModel !== defaultTextEncoderId ? (
-                        <option disabled value={selectedTextEncoderModel}>
-                          Previously selected encoder (not staged)
-                        </option>
-                      ) : null}
-                    </select>
-                  </label>
-                  <p className="helper-copy">
-                    {!selectedTextEncoderAvailable &&
-                    selectedTextEncoderModel !== defaultTextEncoderId
-                      ? "The recorded encoder is not staged on this worker. Choose the shipped default or stage the alternate before rendering."
-                      : textEncoderOptions.length > 1
-                        ? "Only complete encoders already staged for this worker are listed."
-                        : "The shipped encoder is the default. Complete operator-staged alternates appear here after Models is refreshed."}
-                  </p>
+                  {supportsTextEncoderSelection ? (
+                    <>
+                      <label>
+                        Text encoder model
+                        <select
+                          aria-label="Text encoder model"
+                          disabled={!enhancePrompt}
+                          onChange={(event) => setTextEncoderModel(event.target.value)}
+                          value={selectedTextEncoderModel}
+                        >
+                          {textEncoderOptions.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                          {!selectedTextEncoderAvailable &&
+                          selectedTextEncoderModel !== defaultTextEncoderId ? (
+                            <option disabled value={selectedTextEncoderModel}>
+                              Previously selected encoder (not staged)
+                            </option>
+                          ) : null}
+                        </select>
+                      </label>
+                      <p className="helper-copy">
+                        {!selectedTextEncoderAvailable &&
+                        selectedTextEncoderModel !== defaultTextEncoderId
+                          ? "The recorded encoder is not staged on this worker. Choose the shipped default or stage the alternate before rendering."
+                          : textEncoderOptions.length > 1
+                            ? "Only complete encoders already staged for this worker are listed."
+                            : "The shipped encoder is the default. Complete operator-staged alternates appear here after Models is refreshed."}
+                      </p>
+                    </>
+                  ) : null}
                 </>
               ) : null}
-              {selectedModel?.adapter === "ltx_video" ? (
+              {showsLegacyLtxGuidanceControls ? (
                 <>
                   <label>
                     Video CFG

@@ -11531,6 +11531,35 @@ fn selected_ltx_text_encoder_fails_early_or_stages_exact_alternate() {
     assert!(resolved.is_none());
 }
 
+/// LTX-2.5 shares the adapter id used for runtime option discovery but not LTX-2.3's alternate
+/// Gemma-3 surface. The stock enhancer remains independently opt-in through `enhancePrompt`.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx25_rejects_inherited_alternate_text_encoder_selection() {
+    let stock = advanced_object(json!({ "enhancePrompt": true }));
+    let (use_alternate, staged) =
+        resolve_ltx_text_encoder_for_model("ltx_2_5", &stock, None).unwrap();
+    assert!(!use_alternate);
+    assert!(staged.is_none());
+
+    for alternate in [
+        json!({
+            "enhancePrompt": true,
+            "textEncoderModel": AMORAL_TEXT_ENCODER_ID
+        }),
+        json!({ "enhancePrompt": true, "useUncensoredEnhancer": true }),
+    ] {
+        let error = resolve_ltx_text_encoder_for_model(
+            "ltx_2_5",
+            &advanced_object(alternate),
+            Some(PathBuf::from("/operator/staged/amoral-gemma")),
+        )
+        .expect_err("LTX-2.5 must reject the inherited alternate encoder");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)));
+        assert!(error.to_string().contains("LTX-2.5"));
+    }
+}
+
 /// Keep selector rejection ahead of every expensive or externally visible phase, and keep the
 /// resolved directory wired into the engine input. This source-order guard complements the pure
 /// resolver tests because the async generation seam otherwise requires real LTX weights.
@@ -11942,6 +11971,30 @@ fn video_load_spec_threads_text_encoder_dir() {
         spec.components.len(),
         1,
         "only the enhancer component is staged"
+    );
+
+    let ltx25 = VideoGenInput {
+        engine_id: "ltx_2_5",
+        model_dir: PathBuf::from("/models/ltx-2.5-mlx/dev/q4"),
+        ..VideoGenInput::default()
+    };
+    let spec = video_load_spec(&ltx25);
+    assert!(
+        spec.text_encoder.is_none(),
+        "LTX-2.5 resolves its packed generation encoder from split_model.json"
+    );
+    assert!(
+        matches!(spec.components.get("enhancer"), Some(WeightsSource::Dir(path)) if path == &PathBuf::from("/models/ltx-2.5-mlx/enhancer")),
+        "the stock enhancer must resolve from the snapshot root, not the selected tier"
+    );
+    let candle_ltx25 = VideoGenInput {
+        engine_id: "ltx_2_5_distilled",
+        model_dir: PathBuf::from("/models/ltx-2.5-mlx/dev/q4"),
+        ..VideoGenInput::default()
+    };
+    assert!(
+        video_load_spec(&candle_ltx25).components.is_empty(),
+        "the Candle provider must not receive the MLX-only enhancer component"
     );
 }
 
@@ -14598,10 +14651,9 @@ mod candle_video_label_tests {
             for tier in ["q4", "q8", "bf16"] {
                 let dir = root.path().join(variant).join(tier);
                 std::fs::create_dir_all(&dir).expect("tier dir");
-                std::fs::write(dir.join("transformer.safetensors"), "x")
-                    .expect("transformer marker");
-                std::fs::write(dir.join("split_model.json"), "{}")
-                    .expect("2.5 split manifest marker");
+                for file in LTX25_TIER_REQUIRED_FILES {
+                    std::fs::write(dir.join(file), "x").expect("2.5 tier component marker");
+                }
             }
         }
 
@@ -14634,7 +14686,7 @@ mod candle_video_label_tests {
             "omitted selectors retain the distilled q4 default"
         );
 
-        std::fs::remove_file(root.path().join("dev/bf16/split_model.json"))
+        std::fs::remove_file(root.path().join("dev/bf16/text_encoder.safetensors"))
             .expect("tear exact tier");
         let missing = request(json!({
             "projectId": "p",
@@ -14644,7 +14696,7 @@ mod candle_video_label_tests {
         assert!(
             candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &missing,)
                 .is_none(),
-            "a missing exact dev bf16 tier must not downgrade to another tier or variant"
+            "a dev bf16 tier missing its self-contained text encoder must not downgrade to another tier or variant"
         );
     }
 
