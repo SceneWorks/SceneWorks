@@ -1151,6 +1151,16 @@ fn ffmpeg_runner_deadline_configuration_is_finite_and_fail_closed() {
     );
     assert_eq!(ffmpeg_execution_timeout_from(Some("0")), default);
     assert_eq!(ffmpeg_execution_timeout_from(Some("invalid")), default);
+
+    let huge = u64::MAX.to_string();
+    assert_eq!(
+        ffmpeg_execution_timeout_from(Some(&huge)),
+        FFMPEG_EXECUTION_TIMEOUT_MAX,
+        "an oversized environment value is capped instead of reaching Instant arithmetic"
+    );
+    let deadline = std::panic::catch_unwind(|| ffmpeg_execution_deadline(Duration::MAX));
+    let (_, effective) = deadline.expect("Duration::MAX deadline construction must not panic");
+    assert_eq!(effective, FFMPEG_EXECUTION_TIMEOUT_MAX);
 }
 
 #[tokio::test]
@@ -1285,6 +1295,68 @@ async fn ffmpeg_runner_heartbeat_failure_is_preserved_and_cleans_the_child() {
     ));
 }
 
+#[test]
+#[ignore = "subprocess helper invoked explicitly by the open-pipe lifecycle regression"]
+fn ffmpeg_open_pipe_parent_child() {
+    // The direct child exits immediately after launching a grandchild that inherits stderr. That is
+    // the exact pipe shape that used to leave `stderr_task.await` hanging after `child.wait()` had
+    // already succeeded.
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "tests::ffmpeg_open_pipe_holder_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(StdStdio::null())
+        .stdout(StdStdio::null())
+        .stderr(StdStdio::inherit())
+        .spawn()
+        .expect("spawn inherited-stderr holder");
+    drop(child);
+}
+
+#[test]
+#[ignore = "subprocess helper invoked explicitly by the open-pipe lifecycle regression"]
+fn ffmpeg_open_pipe_holder_child() {
+    std::thread::sleep(Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn ffmpeg_runner_deadline_covers_an_inherited_open_stderr_pipe_after_child_exit() {
+    let args = vec![
+        std::env::current_exe()
+            .expect("test binary")
+            .to_string_lossy()
+            .into_owned(),
+        "--exact".to_owned(),
+        "tests::ffmpeg_open_pipe_parent_child".to_owned(),
+        "--ignored".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    let started = std::time::Instant::now();
+    let error = run_ffmpeg_capture_stderr_with_timeout(args, None, Duration::from_secs(1))
+        .await
+        .expect_err("an inherited open stderr pipe must not outlive the execution deadline");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the stderr join must share the child execution deadline"
+    );
+    match error {
+        WorkerError::Io(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            assert!(
+                !error.to_string().contains("cleanup also failed"),
+                "an already-exited direct child is a safe race, not a cleanup failure: {error}"
+            );
+        }
+        other => panic!("expected a typed open-pipe timeout, got {other:?}"),
+    }
+    // Let the deliberately inherited holder exit before the regression itself returns, so the test
+    // suite never leaks its synthetic grandchild into a later test.
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+}
+
 const FFMPEG_TIMEOUT_HELPER_ENV: &str = "SCENEWORKS_FFMPEG_TIMEOUT_HELPER";
 const FFMPEG_TIMEOUT_HELPER_DIR_ENV: &str = "SCENEWORKS_FFMPEG_TIMEOUT_HELPER_DIR";
 
@@ -1344,4 +1416,42 @@ async fn ffmpeg_probe_timeout_kills_and_reaps_the_real_helper_process() {
     // was killed rather than merely having its wait future dropped.
     tokio::time::sleep(Duration::from_millis(2_200)).await;
     assert!(!temp.path().join("completed").exists());
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn ffmpeg_frame_count_probe_wrapper_preserves_timeout_but_not_ordinary_failure() {
+    let temp = tempdir().expect("tempdir creates");
+    let mut timeout_command =
+        tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+    timeout_command
+        .args([
+            "--exact",
+            "tests::ffmpeg_timeout_helper_child",
+            "--nocapture",
+        ])
+        .env(FFMPEG_TIMEOUT_HELPER_ENV, "1")
+        .env(FFMPEG_TIMEOUT_HELPER_DIR_ENV, temp.path());
+    let error = probe_source_frame_count_command_with_timeout(
+        timeout_command,
+        Duration::from_secs(1),
+    )
+    .await
+    .expect_err("the frame-count wrapper must not mutate TimedOut into unknown/None");
+    match error {
+        WorkerError::Io(error) => assert_eq!(error.kind(), std::io::ErrorKind::TimedOut),
+        other => panic!("expected a typed frame-count timeout, got {other:?}"),
+    }
+
+    let missing = temp.path().join("missing-ffmpeg");
+    let ordinary = probe_source_frame_count_command_with_timeout(
+        tokio::process::Command::new(missing),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("ordinary unavailable probe remains a safe per-frame fallback");
+    assert_eq!(ordinary, None);
 }
