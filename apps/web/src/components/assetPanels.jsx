@@ -978,6 +978,13 @@ function FullscreenPreviewComponent({
   const compareActive = canCompare && compareMode;
 
   const viewportRef = React.useRef(null);
+  // Compare mode replaces the zoom viewport instead of merely hiding it. Keep the
+  // mounted node in state so the native wheel listener follows that replacement.
+  const [viewportNode, setViewportNode] = React.useState(null);
+  const setViewportRef = React.useCallback((node) => {
+    viewportRef.current = node;
+    setViewportNode(node);
+  }, []);
   const [view, setView] = React.useState(PREVIEW_FIT_VIEW);
   const dragRef = React.useRef(null);
 
@@ -1009,7 +1016,7 @@ function FullscreenPreviewComponent({
   // Wheel-to-zoom anchored at the cursor. Native (non-passive) listener so we can
   // preventDefault the page scroll; React's onWheel is passive in some browsers.
   React.useEffect(() => {
-    const node = viewportRef.current;
+    const node = viewportNode;
     if (!node || isVideo) {
       return undefined;
     }
@@ -1022,7 +1029,7 @@ function FullscreenPreviewComponent({
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, [isVideo, displayedAsset?.id]);
+  }, [isVideo, displayedAsset?.id, viewportNode]);
 
   const onPointerDown = (event) => {
     if (view.scale <= PREVIEW_MIN_SCALE) {
@@ -1236,7 +1243,7 @@ function FullscreenPreviewComponent({
             <Icon.ArrowLeft size={18} />
           </button>
           {compareActive ? (
-            <div className="preview-compare" role="group" aria-label="Original and edited image side by side">
+            <div className="preview-compare" key="compare-viewport" role="group" aria-label="Original and edited image side by side">
               <figure className="preview-compare-pane">
                 <AssetMedia asset={sourceAsset} controls={false} />
                 <figcaption>Original</figcaption>
@@ -1251,11 +1258,12 @@ function FullscreenPreviewComponent({
           ) : (
             <div
               className={`preview-zoom-viewport${zoomed ? " zoomed" : ""}`}
+              key="zoom-viewport"
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
               onPointerCancel={endDrag}
-              ref={viewportRef}
+              ref={setViewportRef}
             >
               <div
                 className="preview-zoom-inner"
