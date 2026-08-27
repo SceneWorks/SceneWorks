@@ -1,16 +1,24 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { parseStyleCatalog, PROMPT_TEMPLATE } from "./parseStyleCatalog.js";
 import { catalogToStylesManifest } from "./styleManifest.js";
 import styles from "./styles.json";
-// Raw source text (Vite `?raw`) so the test derives from the same bytes the
-// generator reads. documents/style.txt lives outside the web root — see the
-// server.fs.allow entry in vite.config.js (mirrors the license-corpus import).
-import styleSource from "../../../../documents/style.txt?raw";
+// Read the exact generator inputs directly in this non-listening test process.
+// They are intentionally never put on a Vite server's /@fs allow-list.
+const styleSource = readFileSync(
+  resolve(process.cwd(), "../..", "documents/style.txt"),
+  "utf8",
+);
 // sc-13134: the backend/MCP catalog. Read as ?raw + JSON.parse so the drift guard derives
-// from the exact committed bytes. config/ is under the workspace root (searchForWorkspaceRoot
-// in vite.config.js), so vite's server.fs.allow permits it like documents/.
-import stylesManifestRaw from "../../../../config/manifests/builtin.styles.jsonc?raw";
+// from the exact committed bytes. Like style.txt, this test-only input is not
+// readable from the dev server's /@fs endpoint.
+const stylesManifestRaw = readFileSync(
+  resolve(process.cwd(), "../..", "config/manifests/builtin.styles.jsonc"),
+  "utf8",
+);
 
 // Guards sc-13127: styles.json must stay a mechanical derivation of
 // documents/style.txt — never hand-edited. If style.txt changes, re-run
