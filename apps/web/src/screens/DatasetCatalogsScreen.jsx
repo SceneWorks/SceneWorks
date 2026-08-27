@@ -513,7 +513,7 @@ function CatalogCuration({ catalogId, token }) {
           <input
             aria-label="Catalog text search"
             onChange={(event) => setQuery((current) => ({ ...current, text: event.target.value }))}
-            placeholder="red dress, full_bodyâ€¦"
+            placeholder="red dress, full_body…"
             value={query.text}
           />
         </label>
@@ -568,7 +568,7 @@ function CatalogCuration({ catalogId, token }) {
       {error ? <p className="notice error" role="alert">{error}</p> : null}
       <div className="catalog-facets" aria-label="Faceted counts">
         {facets.map((facet) => (
-          <span key={facet.field}><strong>{facet.field}</strong>{facet.values?.map((value) => `${value.value} (${count(value.count)})`).join(" Â· ")}</span>
+          <span key={facet.field}><strong>{facet.field}</strong>{facet.values?.map((value) => `${value.value} (${count(value.count)})`).join(" · ")}</span>
         ))}
       </div>
       <form className="catalog-saved-view-form" onSubmit={saveView}>
@@ -697,7 +697,7 @@ function CatalogCuration({ catalogId, token }) {
                 src={withMediaTicket(`${API_BASE_URL}/api/v1/catalogs/${encodeURIComponent(catalogId)}/records/${encodeURIComponent(record.id)}/thumbnail`)}
               />
               <span>{record.metadata?.caption ?? record.id}</span>
-              <small>{record.metadata?.analysis?.medium ?? record.metadata?.medium ?? "Unclassified"}{review ? ` Â· ${review.decision}` : ""}</small>
+              <small>{record.metadata?.analysis?.medium ?? record.metadata?.medium ?? "Unclassified"}{review ? ` · ${review.decision}` : ""}</small>
             </button>
           );
         })}

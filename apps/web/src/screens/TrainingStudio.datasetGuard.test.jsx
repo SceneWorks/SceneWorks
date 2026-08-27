@@ -22,6 +22,14 @@ import { KEEP_ALIVE_VIEWS } from "../App.jsx";
 const datasetOne = { id: "dataset-1", name: "Mira Set", version: 2, characterId: "", items: [] };
 const datasetTwo = { id: "dataset-2", name: "Other Set", version: 1, characterId: "", items: [] };
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 function baseContext(overrides = {}) {
   return {
     activeProject: { id: "project-a", name: "Project A" },
@@ -139,6 +147,29 @@ describe("TrainingStudio dataset draft guard (sc-11970)", () => {
     // Declined → dataset-2 was never loaded; only the original dataset-1 open happened.
     expect(context.loadTrainingDataset).toHaveBeenCalledTimes(1);
     expect(context.loadTrainingDataset).not.toHaveBeenCalledWith("dataset-2");
+  });
+
+  it("does not replace a rename started while dataset refresh is in flight", async () => {
+    const refresh = deferred();
+    const context = baseContext({ refreshTrainingDatasets: vi.fn(() => refresh.promise) });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={context}>{<TrainingDataSetsLibrary />}</AppContext.Provider>);
+    });
+    await settle();
+
+    const refreshButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Refresh");
+    await act(async () => {
+      refreshButton.click();
+    });
+    await typeName(container, "Mira Set renamed");
+    await act(async () => {
+      refresh.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nameInput(container).value).toBe("Mira Set renamed");
+    expect(context.loadTrainingDataset).toHaveBeenCalledTimes(1);
   });
 
   it("opens another dataset when the discard prompt is confirmed", async () => {

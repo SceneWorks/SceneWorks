@@ -361,6 +361,9 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.textContent).toContain("28 matches");
     expect(container.textContent).toContain("A full-body photograph outdoors");
     expect(container.textContent).toContain("photograph (28)");
+    expect(container.querySelector("input[aria-label='Catalog text search']").placeholder).toBe("red dress, full_body…");
+    expect(container.textContent).toContain("photograph · exclude");
+    expect(container.textContent).not.toMatch(/(?:Ã|Â|â€¦)/);
     const queryRequest = requests.find((item) => item.path.endsWith("/curation/query"));
     expect(queryRequest.body.filters).toEqual(expect.arrayContaining([
       { field: "medium", values: ["photograph"] },
