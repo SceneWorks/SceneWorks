@@ -211,6 +211,104 @@ describe("ImageStudio Save as Preset", () => {
   });
 });
 
+describe("Image Studio batch cardinality admission", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("confirms an enormous batch from cardinality without materializing its combinations", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        batchMode: true,
+        batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+
+    expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 40000000 images");
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("stops styled high-cardinality preflight at the first actionable budget violation", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        styleId: "ghibli-style",
+        batchMode: true,
+        batchPromptsText: `${"x".repeat(3600)} ${keys.map((key) => `{{${key}}}`).join(" ")}`,
+        batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+      }),
+    );
+    const createImageJob = vi.fn();
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 10000000 images");
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+
+    expect(container.querySelector(".batch-warning")?.textContent).toContain("Batch prompt 1");
+    expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("keeps a confirmed run's active queue bounded while preserving its submitted count", async () => {
+    const values = Array.from({ length: 101 }, (_, index) => String(index));
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        batchMode: true,
+        batchPromptsText: "{{value}}",
+        batchVariableValues: { value: values },
+      }),
+    );
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `batch-${sequence++}` }));
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(100));
+
+    expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 100/101");
+    await click([...container.querySelectorAll(".batch-run-progress button")].find((button) => button.textContent === "Stop"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/101 done"));
+  });
+});
+
 describe("ImageStudio advanced model defaults", () => {
   let container;
   let root;
