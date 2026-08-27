@@ -368,6 +368,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // double-click can't fire two DELETEs before `deletingDataset` disables the button.
   const deleteDatasetGuardRef = useRef(false);
   const openDatasetRef = useRef(null);
+  // Every open owns a monotonic generation. A refresh reload is allowed to commit only
+  // if the draft it started from is still current after its second await.
+  const datasetLoadGenerationRef = useRef(0);
+  const datasetDraftRevisionRef = useRef(0);
   const handledParquetImportJobsRef = useRef(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
@@ -495,6 +499,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   dirtyRef.current = dirty;
   const activeDatasetIdRef = useRef(activeDataset?.id ?? "");
   activeDatasetIdRef.current = activeDataset?.id ?? "";
+  useEffect(() => {
+    datasetDraftRevisionRef.current += 1;
+  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById]);
   const completedParquetImport = useMemo(
     () =>
       jobs.find(
@@ -967,7 +974,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     return registerProjectSwitchGuard(() => confirmDiscardUnsavedDraft());
   }, [datasetLibraryMode, registerProjectSwitchGuard]);
 
-  async function openDataset(datasetId) {
+  async function openDataset(datasetId, { preserveCurrentDraft = false } = {}) {
+    const loadGeneration = ++datasetLoadGenerationRef.current;
     // Opening a DIFFERENT dataset re-seeds the whole editor; confirm before discarding an
     // unsaved draft (sc-11970). Re-opening the SAME dataset (internal reloads after a save)
     // never prompts — the ids match and the draft is already persisted.
@@ -976,6 +984,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
       if (!proceed) {
         return;
       }
+    }
+    if (loadGeneration !== datasetLoadGenerationRef.current) {
+      return;
     }
     if (!datasetId) {
       setActiveDataset(null);
@@ -989,7 +1000,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetError("");
     setDatasetMessage("");
     try {
+      const draftRevision = datasetDraftRevisionRef.current;
       const dataset = await loadDataset(datasetId);
+      // A refresh has already checked its first await. Check again at the actual
+      // state commit: a rename, membership/caption edit, or a different open while
+      // this load was pending must win over stale fetched data.
+      if (
+        loadGeneration !== datasetLoadGenerationRef.current ||
+        (preserveCurrentDraft && (
+          activeDatasetIdRef.current !== datasetId ||
+          dirtyRef.current ||
+          datasetDraftRevisionRef.current !== draftRevision
+        ))
+      ) {
+        return null;
+      }
       setActiveDataset(dataset);
       setDraftName(dataset?.name ?? "");
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
@@ -1000,7 +1025,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDatasetError(err.message);
       return null;
     } finally {
-      setBusyDatasetId("");
+      if (loadGeneration === datasetLoadGenerationRef.current) setBusyDatasetId("");
     }
   }
   openDatasetRef.current = openDataset;
@@ -1015,7 +1040,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     ) {
       return;
     }
-    await openDataset(refreshDatasetId);
+    await openDataset(refreshDatasetId, { preserveCurrentDraft: true });
   }
 
   // Permanently delete the OPEN dataset — the backend wipes its on-disk root (images,

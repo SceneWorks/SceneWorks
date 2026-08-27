@@ -746,6 +746,10 @@ export function DatasetCatalogsScreen() {
   const [analyzerDraft, setAnalyzerDraft] = useState(DEFAULT_ANALYZER_SETTINGS);
   const [analysisGpu, setAnalysisGpu] = useState("auto");
   const generationRef = useRef(0);
+  // Poll invalidation and mutation ownership are intentionally independent. A hidden
+  // keep-alive screen tears down its poller, but that must not strand an owned mutation's
+  // busy state when the screen becomes active again.
+  const mutationGenerationRef = useRef(0);
   const analyzerDraftVersionRef = useRef("");
   const pollAbortRef = useRef(null);
   const mutationAbortRef = useRef(null);
@@ -768,6 +772,7 @@ export function DatasetCatalogsScreen() {
     generationRef.current += 1;
     pollAbortRef.current?.abort();
     mutationAbortRef.current?.abort();
+    mutationGenerationRef.current += 1;
     setBusy("");
     setSelectedId(id);
     persistNavigationPreferences({ selectedCatalogId: id });
@@ -811,6 +816,7 @@ export function DatasetCatalogsScreen() {
       controller.abort();
       pollAbortRef.current?.abort();
       mutationAbortRef.current?.abort();
+      mutationGenerationRef.current += 1;
     };
   }, [refresh, token]);
 
@@ -874,7 +880,7 @@ export function DatasetCatalogsScreen() {
   }
 
   async function mutate(action, request, success) {
-    const generation = ++generationRef.current;
+    const mutationGeneration = ++mutationGenerationRef.current;
     pollAbortRef.current?.abort();
     mutationAbortRef.current?.abort();
     const controller = new AbortController();
@@ -883,16 +889,16 @@ export function DatasetCatalogsScreen() {
     setError("");
     try {
       const result = await request(controller.signal);
-      if (controller.signal.aborted || generation !== generationRef.current) return;
-      const next = await refresh({ quiet: true, signal: controller.signal, generation });
-      if (controller.signal.aborted || generation !== generationRef.current) return;
+      if (controller.signal.aborted || mutationGeneration !== mutationGenerationRef.current) return;
+      const next = await refresh({ quiet: true, signal: controller.signal });
+      if (controller.signal.aborted || mutationGeneration !== mutationGenerationRef.current) return;
       success?.(result, next);
     } catch (err) {
-      if (!isAbortError(err) && generation === generationRef.current) {
+      if (!isAbortError(err) && mutationGeneration === mutationGenerationRef.current) {
         setError(safeCatalogError(err, action));
       }
     } finally {
-      if (generation === generationRef.current) {
+      if (mutationGeneration === mutationGenerationRef.current) {
         setBusy("");
         setPollEpoch((current) => current + 1);
       }

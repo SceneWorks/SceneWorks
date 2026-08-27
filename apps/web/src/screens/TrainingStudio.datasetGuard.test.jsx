@@ -172,6 +172,36 @@ describe("TrainingStudio dataset draft guard (sc-11970)", () => {
     expect(context.loadTrainingDataset).toHaveBeenCalledTimes(1);
   });
 
+  it("does not replace an edit made while the refresh reload is pending", async () => {
+    const reload = deferred();
+    let loadCalls = 0;
+    const context = baseContext({
+      refreshTrainingDatasets: vi.fn(async () => {}),
+      loadTrainingDataset: vi.fn(() => {
+        loadCalls += 1;
+        return loadCalls === 1 ? Promise.resolve(datasetOne) : reload.promise;
+      }),
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={context}>{<TrainingDataSetsLibrary />}</AppContext.Provider>);
+    });
+    await settle();
+
+    const refreshButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "Refresh");
+    await act(async () => {
+      refreshButton.click();
+    });
+    await vi.waitFor(() => expect(context.loadTrainingDataset).toHaveBeenCalledTimes(2));
+    await typeName(container, "Mira Set edited during reload");
+    await act(async () => {
+      reload.resolve(datasetOne);
+      await Promise.resolve();
+    });
+
+    expect(nameInput(container).value).toBe("Mira Set edited during reload");
+  });
+
   it("opens another dataset when the discard prompt is confirmed", async () => {
     appConfirmMock.mockResolvedValue(true);
     const context = baseContext();
