@@ -414,19 +414,6 @@ pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf>
     ltx_gemma_env_override().or_else(|| bundled_ltx_gemma_dir(model_dir))
 }
 
-/// The LTX-2.5 Gemma-4 component is a sibling of the nested variant/tier
-/// roots, not of the tier itself.  Keep this separate from the LTX-2.3 helper
-/// so a dev request cannot accidentally bind the wrong bundle's encoder.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(crate) fn resolve_bundled_ltx25_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
-    let root = model_dir.parent()?.parent()?;
-    let dir = root.join("gemma");
-    ltx_gemma_dir_is_complete(&dir).then_some(dir)
-}
-
 /// Resolve the Gemma-3 text encoder for an **eros** generation. Unlike the base model — whose turnkey
 /// bundle ships `gemma/` beside its checkpoint ([`resolve_bundled_ltx_gemma_dir`]) — the eros install
 /// is a bare local conversion under `models/mlx/ltx_2_3_eros/` with no bundled TE, so gemma is
@@ -1677,12 +1664,12 @@ pub(super) async fn generate_ltx(
     // the base model, which bundles gemma with its checkpoint). Self-heals installs that predate this.
     ensure_ltx_gemma_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
-    // Thread the Gemma-3 text encoder onto the LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`). Base: the
-    // SceneWorks bundle subdir's sibling `gemma/`. Eros: the separately-provisioned gemma
-    // ([`ensure_ltx_gemma_present`]) — a `models/mlx/gemma` sibling or the bundle snapshot's `gemma/`.
-    // `None` ⇒ the engine falls back to the HF-cache gemma snapshot.
+    // Thread the Gemma-3 text encoder onto the 2.3 LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`).
+    // LTX-2.5 deliberately leaves this slot empty: its self-contained Gemma-4 encoder is the
+    // `text_encoder` component inside the selected tier, resolved from `split_model.json` by the
+    // engine. The separate `enhancer/` directory is the stock prompt enhancer, not this slot.
     let text_encoder_dir = if request.model == "ltx_2_5" {
-        resolve_bundled_ltx25_gemma_dir(&model_dir)
+        None
     } else if request.model == "ltx_2_3_eros" {
         resolve_ltx_eros_gemma_dir(settings, &model_dir)
     } else {

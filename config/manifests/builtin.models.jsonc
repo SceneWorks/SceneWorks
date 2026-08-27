@@ -19446,12 +19446,6 @@
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
           "coRequisite": true,
-          "files": ["gemma/*"]
-        },
-        {
-          "provider": "huggingface",
-          "repo": "SceneWorks/ltx-2.5-mlx",
-          "coRequisite": true,
           "files": ["enhancer/*"]
         },
         {

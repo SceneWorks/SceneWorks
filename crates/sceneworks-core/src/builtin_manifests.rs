@@ -447,6 +447,44 @@ mod tests {
     }
 
     #[test]
+    fn ltx25_downloads_keep_the_generation_text_encoder_inside_each_tier() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let model = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("ltx_2_5"))
+            .expect("ltx_2_5 is present");
+        let files: Vec<&str> = model["downloads"]
+            .as_array()
+            .expect("ltx_2_5 has downloads")
+            .iter()
+            .flat_map(|download| {
+                download["files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+            })
+            .collect();
+
+        assert!(
+            !files.iter().any(|file| file.starts_with("gemma/")),
+            "the self-contained generation text encoder is a tier component, not a gemma/ co-requisite"
+        );
+        assert!(
+            files.contains(&"enhancer/*"),
+            "the stock prompt enhancer still ships offline"
+        );
+        for tier in ["q4", "q8", "bf16"] {
+            assert!(files.contains(&format!("distilled/{tier}/*").as_str()));
+            assert!(files.contains(&format!("dev/{tier}/*").as_str()));
+        }
+    }
+
+    #[test]
     fn krea_2_raw_declares_no_default_negative_and_low_guidance_with_raw_guide() {
         // sc-14203 (partially revises sc-13881): Raw's defaults fix. On-device render-validation showed the
         // "soft/over-warm" heat was driven by the guidance default (Krea's nominal 3.5 ≡ standard-CFG 4.5)

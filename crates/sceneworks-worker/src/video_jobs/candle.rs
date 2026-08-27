@@ -1239,10 +1239,11 @@ pub(super) async fn generate_candle_video_using(
         )?;
         (dir, quant)
     };
-    // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
-    // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
+    // LTX-2.3 needs the separate Gemma-3-12B encoder. LTX-2.5 instead carries its self-contained
+    // Gemma-4 encoder as the selected tier's `text_encoder` component; leave the typed override
+    // empty so the split manifest remains the sole component authority.
     let ltx_gemma_dir = if engine_id == "ltx_2_5_distilled" {
-        super::ltx::resolve_bundled_ltx25_gemma_dir(&model_dir)
+        None
     } else if is_ltx {
         super::ltx::resolve_bundled_ltx_gemma_dir(&model_dir)
             .or_else(|| resolve_ltx_gemma_dir(settings))
