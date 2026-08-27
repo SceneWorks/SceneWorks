@@ -339,6 +339,15 @@ describe("TrainingStudio dataset draft guard (sc-11970)", () => {
 
     expect(container.querySelectorAll(".training-caption-card")).toHaveLength(0);
     expect(container.textContent).not.toContain("Parquet import completed");
+
+    // The replacement effect is intentionally still awaiting here. Unmount before
+    // settling it so this regression leaves no background promise between tests.
+    await act(async () => {
+      root.unmount();
+      root = null;
+      secondRefresh.resolve();
+      await Promise.resolve();
+    });
   });
 
   it("opens another dataset when the discard prompt is confirmed", async () => {
