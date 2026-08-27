@@ -50,8 +50,9 @@ use super::gpu::{
     visible_gpu_ids, worker_capabilities_with_utility, GpuDiscoveryAttempt, GpuDiscoveryFailure,
 };
 use super::media_jobs::{
-    candidate_people, concat_file_contents, crossfade_duration, output_dimensions, plan_segments,
-    run_ffmpeg,
+    candidate_people, concat_file_contents, crossfade_duration, ffmpeg_execution_timeout_from,
+    output_dimensions, plan_segments, run_ffmpeg, run_ffmpeg_capture_stderr_with_timeout,
+    run_ffmpeg_probe_command_with_timeout, run_ffmpeg_with_stdin_chunks_and_timeout, FfmpegContext,
 };
 #[cfg(any(
     target_os = "macos",

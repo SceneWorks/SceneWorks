@@ -1,5 +1,31 @@
 use super::*;
 
+/// Maximum wall-clock lifetime of one FFmpeg child. Timeline exports and CPU transcodes can
+/// legitimately run much longer than model inference, so the default is deliberately generous;
+/// the important invariant is that a wedged child is finite. Operators can lower or raise it with
+/// `SCENEWORKS_FFMPEG_TIMEOUT_SECONDS`. Zero/invalid values fail closed to this bounded default
+/// rather than disabling the watchdog.
+const FFMPEG_EXECUTION_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
+const FFMPEG_TIMEOUT_SECONDS_ENV: &str = "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS";
+
+pub(crate) fn ffmpeg_execution_timeout_from(raw: Option<&str>) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(FFMPEG_EXECUTION_TIMEOUT)
+}
+
+fn ffmpeg_execution_timeout() -> Duration {
+    ffmpeg_execution_timeout_from(std::env::var(FFMPEG_TIMEOUT_SECONDS_ENV).ok().as_deref())
+}
+
+fn ffmpeg_timeout_io_error(timeout: Duration) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("FFmpeg execution exceeded its {timeout:?} deadline."),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TimelineExportRequest {
     project_id: String,
@@ -789,45 +815,43 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
     let program = resolve_probe_program(ffmpeg);
     let path = source_path.display().to_string();
 
-    let header = Command::new(&program)
-        .args(["-hide_banner", "-i", &path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|error| {
+    let mut header = Command::new(&program);
+    header.args(["-hide_banner", "-i", &path]);
+    let header = run_ffmpeg_probe_command(header).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            WorkerError::Io(error)
+        } else {
             WorkerError::InvalidPayload(format!(
                 "Could not run ffmpeg to measure the duration of {path}: {error}"
             ))
-        })?;
+        }
+    })?;
     let header_stderr = String::from_utf8_lossy(&header.stderr).into_owned();
     if let Some(duration) = parse_ffmpeg_header_duration(&header_stderr) {
         return Ok(duration);
     }
 
     // No usable header (`Duration: N/A`) — measure it by decoding.
-    let measured = Command::new(&program)
-        .args([
-            "-hide_banner",
-            "-i",
-            &path,
-            "-map",
-            "0:v:0",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|error| {
+    let mut measured = Command::new(&program);
+    measured.args([
+        "-hide_banner",
+        "-i",
+        &path,
+        "-map",
+        "0:v:0",
+        "-f",
+        "null",
+        "-",
+    ]);
+    let measured = run_ffmpeg_probe_command(measured).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            WorkerError::Io(error)
+        } else {
             WorkerError::InvalidPayload(format!(
                 "Could not run ffmpeg to measure the duration of {path}: {error}"
             ))
-        })?;
+        }
+    })?;
     let measured_stderr = String::from_utf8_lossy(&measured.stderr).into_owned();
     parse_ffmpeg_measured_time(&measured_stderr).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -2448,23 +2472,18 @@ fn frame_scale_pad_filter(width: u32, height: u32) -> String {
 ))]
 async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> Option<usize> {
     let program = resolve_probe_program(ffmpeg);
-    let output = Command::new(&program)
-        .args([
-            "-hide_banner",
-            "-i",
-            &source_path.display().to_string(),
-            "-map",
-            "0:v:0",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
+    let mut command = Command::new(&program);
+    command.args([
+        "-hide_banner",
+        "-i",
+        &source_path.display().to_string(),
+        "-map",
+        "0:v:0",
+        "-f",
+        "null",
+        "-",
+    ]);
+    let output = run_ffmpeg_probe_command(command).await.ok()?;
     // ffmpeg writes `frame=<N>` progress lines to stderr; the last one is the final decoded count.
     let stderr = String::from_utf8_lossy(&output.stderr);
     parse_ffmpeg_frame_count(&stderr)
@@ -3363,7 +3382,7 @@ pub(crate) async fn run_ffmpeg_with_stdin_chunks(
     chunks: Vec<Vec<u8>>,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
-    run_ffmpeg_capture_stderr_inner(args, context, Some(chunks))
+    run_ffmpeg_capture_stderr_inner(args, context, Some(chunks), ffmpeg_execution_timeout())
         .await
         .map(|_| ())
 }
@@ -3375,13 +3394,14 @@ pub(crate) async fn run_ffmpeg_capture_stderr(
     args: Vec<String>,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<String> {
-    run_ffmpeg_capture_stderr_inner(args, context, None).await
+    run_ffmpeg_capture_stderr_inner(args, context, None, ffmpeg_execution_timeout()).await
 }
 
 async fn run_ffmpeg_capture_stderr_inner(
     args: Vec<String>,
     context: Option<FfmpegContext<'_>>,
     stdin_chunks: Option<Vec<Vec<u8>>>,
+    execution_timeout: Duration,
 ) -> WorkerResult<String> {
     let Some((program, arguments)) = args.split_first() else {
         return Err(WorkerError::InvalidPayload(
@@ -3414,10 +3434,9 @@ async fn run_ffmpeg_capture_stderr_inner(
         command.stdin(Stdio::null());
     }
     let mut child = command
-        // sc-8804 (F-003): if the heartbeat/cancel `?` below returns early (a transient POST
-        // failure or a 409 stale-sweep reclaim), `child` is dropped without an explicit kill. A
-        // tokio child is not reaped on drop by default, so ffmpeg would keep running and writing a
-        // partial output file. `kill_on_drop` tears it down on any early return.
+        // sc-8804/sc-21742: every ordinary timeout/heartbeat/cancel return explicitly kills and
+        // reaps below. Keep kill-on-drop as the panic/unwind backstop: a Tokio child otherwise keeps
+        // running after its handle is dropped and could continue writing a partial output file.
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
@@ -3439,53 +3458,88 @@ async fn run_ffmpeg_capture_stderr_inner(
         })
     });
     let mut stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
+    let mut stderr_task = Some(tokio::spawn(async move {
         let mut bytes = Vec::new();
         if let Some(stderr) = stderr.as_mut() {
             let _ = stderr.read_to_end(&mut bytes).await;
         }
         bytes
-    });
+    }));
+
+    let deadline = tokio::time::Instant::now() + execution_timeout;
 
     let status = if let Some(context) = context {
         let mut interval = tokio::time::interval(progress_report_interval(context.settings));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                status = child.wait() => break status?,
-                _ = interval.tick() => {
-                    if let Err(error) = heartbeat(
-                        context.api,
-                        context.settings,
-                        WorkerStatus::Busy,
-                        Some(context.job_id),
-                    ).await {
-                        if let Some(task) = stdin_task.take() {
-                            task.abort();
-                            let _ = task.await;
-                        }
-                        return Err(error);
+                status = child.wait() => match status {
+                    Ok(status) => break status,
+                    Err(error) => {
+                        stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+                        return Err(WorkerError::Io(error));
                     }
-                    if cancel_requested_peek(context.api, context.job_id).await {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                        if let Some(task) = stdin_task.take() {
-                            task.abort();
-                            let _ = task.await;
+                },
+                _ = tokio::time::sleep_until(deadline) => {
+                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+                    return Err(WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)));
+                }
+                _ = interval.tick() => {
+                    let control = tokio::time::timeout_at(deadline, async {
+                        heartbeat(
+                            context.api,
+                            context.settings,
+                            WorkerStatus::Busy,
+                            Some(context.job_id),
+                        ).await?;
+                        Ok::<bool, WorkerError>(
+                            cancel_requested_peek(context.api, context.job_id).await,
+                        )
+                    }).await;
+                    match control {
+                        Err(_) => {
+                            stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+                            return Err(WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)));
                         }
-                        mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
-                        return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
+                        Ok(Err(error)) => {
+                            stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+                            return Err(error);
+                        }
+                        Ok(Ok(true)) => {
+                            stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+                            mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
+                            return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
+                        }
+                        Ok(Ok(false)) => {}
                     }
                 }
             }
         }
     } else {
-        child.wait().await?
+        match tokio::time::timeout_at(deadline, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+                return Err(WorkerError::Io(error));
+            }
+            Err(_) => {
+                stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+                return Err(WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)));
+            }
+        }
     };
 
-    let stderr = stderr_task
+    let stderr = match stderr_task
+        .take()
+        .expect("FFmpeg stderr reader exists until it is joined")
         .await
-        .map_err(|error| task_join_error("ffmpeg stderr reader task", error))?;
+    {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            abort_and_await_task(&mut stdin_task).await;
+            return Err(task_join_error("ffmpeg stderr reader task", error));
+        }
+    };
     let stderr = String::from_utf8_lossy(&stderr);
     if status.success() {
         if let Some(task) = stdin_task {
@@ -3507,6 +3561,97 @@ async fn run_ffmpeg_capture_stderr_inner(
     } else {
         Err(WorkerError::Engine(bounded))
     }
+}
+
+async fn abort_and_await_task<T>(task: &mut Option<tokio::task::JoinHandle<T>>) {
+    if let Some(task) = task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+/// Explicitly terminate and reap the child, then stand down both pipe tasks. `kill_on_drop` remains
+/// a panic/unwind backstop, but ordinary timeout/heartbeat/cancel paths never rely on drop semantics
+/// and never leave a detached stdin or stderr task behind.
+async fn stop_ffmpeg_child(
+    child: &mut Child,
+    stdin_task: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    stderr_task: &mut Option<tokio::task::JoinHandle<Vec<u8>>>,
+) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    abort_and_await_task(stdin_task).await;
+    abort_and_await_task(stderr_task).await;
+}
+
+async fn run_ffmpeg_probe_command(command: Command) -> std::io::Result<std::process::Output> {
+    run_ffmpeg_probe_command_with_timeout(command, ffmpeg_execution_timeout()).await
+}
+
+/// The duration/frame-count probes used to call `Command::output()` directly. Keep their output
+/// contract while exposing the same explicit timeout → kill → reap lifecycle as the shared runner.
+pub(crate) async fn run_ffmpeg_probe_command_with_timeout(
+    mut command: Command,
+    execution_timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let mut stdin_task = None;
+    let mut stderr = child.stderr.take();
+    let mut stderr_task = Some(tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_end(&mut bytes).await;
+        }
+        bytes
+    }));
+
+    let status = match tokio::time::timeout(execution_timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+            return Err(error);
+        }
+        Err(_) => {
+            stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
+            return Err(ffmpeg_timeout_io_error(execution_timeout));
+        }
+    };
+    let stderr = stderr_task
+        .take()
+        .expect("FFmpeg probe stderr reader exists until it is joined")
+        .await
+        .map_err(|error| std::io::Error::other(format!("ffmpeg stderr reader task: {error}")))?;
+    Ok(std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn run_ffmpeg_capture_stderr_with_timeout(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+    execution_timeout: Duration,
+) -> WorkerResult<String> {
+    run_ffmpeg_capture_stderr_inner(args, context, None, execution_timeout).await
+}
+
+#[cfg(test)]
+pub(crate) async fn run_ffmpeg_with_stdin_chunks_and_timeout(
+    args: Vec<String>,
+    chunks: Vec<Vec<u8>>,
+    context: Option<FfmpegContext<'_>>,
+    execution_timeout: Duration,
+) -> WorkerResult<()> {
+    run_ffmpeg_capture_stderr_inner(args, context, Some(chunks), execution_timeout)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(all(test, target_os = "macos"))]
