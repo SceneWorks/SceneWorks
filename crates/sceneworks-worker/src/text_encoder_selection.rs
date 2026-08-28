@@ -676,6 +676,38 @@ mod tests {
         use std::cell::Cell;
 
         const ENGINE_ID: &str = "qwen_image_control";
+        const CONTRACT_ROUTE_IDS: &[&str] = &["qwen_image", ENGINE_ID];
+
+        let production_contract = crate::inference_runtime::media_encoder_contract(ENGINE_ID)
+            .expect("the composed Qwen control route owns an encoder contract");
+        assert_eq!(
+            crate::inference_runtime::media_encoder_contract("qwen_image"),
+            Some(production_contract),
+            "the bespoke control route must retain the base Qwen encoder contract"
+        );
+        // This test owns receipt attachment and mutation rejection, not production geometry. Use
+        // the same bounded Qwen2.5-VL contract pattern as the provider's sealed-source tests so
+        // every file/dir/snapshot shape still crosses the production seal without hashing a
+        // multi-gigabyte sparse payload. The provider separately pins its production dimensions.
+        let bounded_contract = gen_core::EncoderContract {
+            hidden_size: 64,
+            intermediate_size: 128,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 32,
+            output_width: 64,
+            loaded_hidden_layers: 1,
+            max_position_embeddings: 512,
+            mrope_section: &[4, 6, 6],
+            selected_hidden_layers: &[1],
+            ..production_contract
+        };
+        let _contract_guard = crate::inference_runtime::scoped_test_media_encoder_contract(
+            CONTRACT_ROUTE_IDS,
+            bounded_contract,
+        );
+
         for shape in ["file", "dir", "snapshot"] {
             let fixture = tempfile::tempdir().unwrap();
             let base = fixture.path().join("base");
@@ -685,20 +717,15 @@ mod tests {
             std::fs::write(&control, b"synthetic control overlay").unwrap();
 
             let contract = crate::inference_runtime::media_encoder_contract(ENGINE_ID)
-                .expect("the composed Qwen control route owns an encoder contract");
+                .expect("the scoped Qwen control route owns an encoder contract");
             gen_core_testkit::write_encoder_contract_tokenizer_fixture(&base, contract).unwrap();
-            // The testkit's fixture ends with the encoder's dense multi-gigabyte `set_len`, which
-            // NTFS allocates in full — release the never-written tail after each write. Logical
-            // size and written bytes are unchanged; see `crate::test_fixture_disk`.
             let source = match shape {
                 "file" => {
                     gen_core_testkit::write_encoder_contract_fixture(&selected, contract).unwrap();
-                    crate::test_fixture_disk::sparsify_written_safetensors(&selected);
                     WeightsSource::File(selected.join("model.safetensors"))
                 }
                 "dir" => {
                     gen_core_testkit::write_encoder_contract_fixture(&selected, contract).unwrap();
-                    crate::test_fixture_disk::sparsify_written_safetensors(&selected);
                     WeightsSource::Dir(selected.clone())
                 }
                 "snapshot" => {
@@ -707,9 +734,6 @@ mod tests {
                         contract,
                     )
                     .unwrap();
-                    crate::test_fixture_disk::sparsify_written_safetensors(
-                        &selected.join("text_encoder"),
-                    );
                     gen_core_testkit::write_encoder_contract_tokenizer_fixture(&selected, contract)
                         .unwrap();
                     WeightsSource::Dir(selected.clone())
@@ -758,9 +782,8 @@ mod tests {
             match shape {
                 "file" => std::fs::write(selected.join("config.json"), b"{}").unwrap(),
                 "dir" => {
-                    // Inventory validation runs before shard parsing. Keep this addition tiny: the
-                    // sparse production-dimension fixture has a large logical length and must never
-                    // be materialized merely to prove that a new direct shard is rejected.
+                    // Inventory validation runs before shard parsing; a new direct shard must
+                    // invalidate the prepared directory receipt.
                     std::fs::write(selected.join("added.safetensors"), b"added shard sentinel")
                         .unwrap();
                 }

@@ -273,6 +273,37 @@ pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
         .find(|descriptor| descriptor.id == id)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_MEDIA_ENCODER_CONTRACT: std::cell::Cell<
+        Option<(&'static [&'static str], gen_core::EncoderContract)>
+    > = const { std::cell::Cell::new(None) };
+}
+
+/// Scoped compact contract override for tests that exercise the production sealed-source path.
+/// Production builds cannot install an override, and the guard restores a nested predecessor.
+#[cfg(test)]
+pub(crate) struct TestMediaEncoderContractGuard {
+    previous: Option<(&'static [&'static str], gen_core::EncoderContract)>,
+}
+
+#[cfg(test)]
+impl Drop for TestMediaEncoderContractGuard {
+    fn drop(&mut self) {
+        TEST_MEDIA_ENCODER_CONTRACT.set(self.previous);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_test_media_encoder_contract(
+    ids: &'static [&'static str],
+    contract: gen_core::EncoderContract,
+) -> TestMediaEncoderContractGuard {
+    TestMediaEncoderContractGuard {
+        previous: TEST_MEDIA_ENCODER_CONTRACT.replace(Some((ids, contract))),
+    }
+}
+
 /// Resolve the provider-owned text-encoder contract for an ordinary generator or an explicitly
 /// registered bespoke/composed route. Missing is fail-closed: consumers must never infer a sibling
 /// base id or hardcode a family contract.
@@ -281,7 +312,14 @@ pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn media_encoder_contract(id: &str) -> Option<gen_core::EncoderContract> {
-    media().provider_encoder_contract(id)
+    let production_contract = media().provider_encoder_contract(id)?;
+    #[cfg(test)]
+    if let Some((ids, contract)) = TEST_MEDIA_ENCODER_CONTRACT.get() {
+        if ids.contains(&id) {
+            return Some(contract);
+        }
+    }
+    Some(production_contract)
 }
 
 // Only the macOS prompt-refine tests iterate the TextLlm registry; on the Windows/candle build
@@ -394,6 +432,19 @@ pub(crate) fn load_for_model_with(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn test_encoder_contract_override_cannot_advertise_a_missing_route() {
+        let contract = super::media_encoder_contract("qwen_image")
+            .expect("the platform catalog registers Qwen Image");
+        let _guard = super::scoped_test_media_encoder_contract(&["missing-test-route"], contract);
+
+        assert_eq!(super::media_encoder_contract("missing-test-route"), None);
+    }
+
     #[test]
     fn composition_is_available_without_loading_weights() {
         let media_count = super::media().generators().len();
