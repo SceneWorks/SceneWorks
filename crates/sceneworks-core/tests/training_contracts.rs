@@ -849,6 +849,49 @@ fn ltx_video_target_resolves_image_dataset_into_plan() {
 }
 
 #[test]
+fn training_plan_preserves_model_specific_item_options() {
+    let mut dataset = dataset_fixture();
+    dataset.items[0].extra.insert(
+        "ltxPreparedBundlePath".to_owned(),
+        serde_json::json!("prepared/item-0001.safetensors"),
+    );
+    dataset.items[0].extra.insert(
+        "ltxPreparedBundleSize".to_owned(),
+        serde_json::json!(123_u64),
+    );
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_video_lora")
+        .expect("ltx_video_lora target present");
+
+    let plan = build_training_plan(BuildTrainingPlan {
+        job_id: "job_ltx_options",
+        target,
+        dataset: &dataset,
+        config: target.defaults.clone(),
+        preset: None,
+        lora_id: "lora_ltx_options",
+        base_model_path: "/models/ltx".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_ltx_options"),
+        file_name: "ltx_options.safetensors".to_owned(),
+        created_at: "2026-08-28T00:00:00Z".to_owned(),
+    })
+    .expect("ltx plan resolves");
+
+    assert_eq!(
+        plan.dataset.items[0].extra.get("ltxPreparedBundlePath"),
+        Some(&serde_json::json!("prepared/item-0001.safetensors"))
+    );
+    assert_eq!(
+        plan.dataset.items[0].extra.get("ltxPreparedBundleSize"),
+        Some(&serde_json::json!(123_u64))
+    );
+}
+
+#[test]
 fn builtin_registry_exposes_wan_target() {
     let registry = builtin_training_targets();
     let target = registry
