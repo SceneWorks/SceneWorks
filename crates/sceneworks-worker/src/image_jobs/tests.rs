@@ -9,6 +9,25 @@ use super::{
 use serde_json::json;
 
 #[cfg(target_os = "macos")]
+fn assert_route_retarget_artifact_seal_mismatch(
+    error: WorkerError,
+    context: &str,
+    sealed_path: &std::path::Path,
+) {
+    let WorkerError::InvalidPayload(reason) = error else {
+        panic!("expected a typed artifact-seal payload refusal, got: {error:?}")
+    };
+    assert_eq!(
+        reason,
+        format!(
+            "{context}: unsupported: artifact seal mismatch after load: {}",
+            sealed_path.display()
+        ),
+        "retargeting must fail through the retained acquisition-time seal"
+    );
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn every_mlx_text_encoder_route_resolves_from_the_runtime_registry() {
     for id in [
@@ -8409,8 +8428,8 @@ fn krea_imported_payload_control_overlay_pins_the_lexical_entry() {
     );
 }
 
-/// Production route preparation must own the imported DiT token across the scheduler/admission
-/// awaits. Retargeting the lexical entry after selection therefore invalidates the exact token moved
+/// Production route preparation must own the imported DiT seal across the scheduler/admission
+/// awaits. Retargeting the lexical entry after selection therefore invalidates the exact seal moved
 /// into dispatch; the handler may not silently pin the replacement.
 #[cfg(target_os = "macos")]
 #[test]
@@ -8458,6 +8477,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
         dit_pin,
         prepared_adapters,
     } = *sources;
+    let sealed_path = dit_pin.loader_path().to_path_buf();
     let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()));
     let error = crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
@@ -8465,10 +8485,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
         "test imported route",
     )
     .expect_err("dispatch rejects a retargeted prepared entry");
-    assert!(
-        error.to_string().contains("changed") || error.to_string().contains("identity"),
-        "unexpected validation error: {error}"
-    );
+    assert_route_retarget_artifact_seal_mismatch(error, "test imported route", &sealed_path);
 }
 
 /// The strict-pose imported route owns three independently mutable payload classes: the primary DiT,
@@ -19509,9 +19526,9 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
     }
 }
 
-/// Route preparation owns the exact fine-tuned transformer config/weights across the async worker
-/// preamble. Replacing either file after selection must invalidate the retained token rather than
-/// letting dispatch silently re-resolve and load different bytes.
+/// Route preparation owns the exact fine-tuned transformer config/weights seals across the async
+/// worker preamble. Replacing either file after selection must invalidate the retained seal rather
+/// than letting dispatch silently re-resolve and load different bytes.
 #[cfg(target_os = "macos")]
 #[test]
 fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
@@ -19539,6 +19556,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
     let PreparedImageRoute::MageFinetuned(transformer) = prepared else {
         panic!("prepared route lost its Mage transformer")
     };
+    let sealed_path = transformer.weights.loader_path().to_path_buf();
     let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.directory));
     let error = crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
@@ -19546,10 +19564,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
         "test Mage fine-tuned route",
     )
     .expect_err("dispatch rejects a retargeted prepared transformer");
-    assert!(
-        error.to_string().contains("changed") || error.to_string().contains("identity"),
-        "unexpected validation error: {error}"
-    );
+    assert_route_retarget_artifact_seal_mismatch(error, "test Mage fine-tuned route", &sealed_path);
 }
 
 /// The generated Mage base inherits the undistilled Base descriptor's true-CFG negative-prompt
