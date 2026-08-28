@@ -366,6 +366,10 @@ test("windows-candle captures and schema-checks the SC-21714 certifying Krea rec
   const upload = stepBody(workflow, "Upload raw schema-checked Candle Krea evidence");
   assert.match(upload, /name: sc-21714-krea-certifying-\$\{\{ github\.run_id \}\}/);
   assert.match(upload, /\$\{\{ runner\.temp \}\}\/sc-21714-candle-certifying\.json/);
+
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  assert.match(adapter, /StableIdleConfig::new\(2\.0, 5, 64, 200\)/);
+  assert.equal(adapter.match(/let mut vram = certifying_vram_probe\(\);/g)?.length, 2);
 });
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {

@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 compile_error!("memory-candle-adapter is supported only on CUDA hosts");
 
-use candle_gen::testkit::VramProbe;
+use candle_gen::testkit::{StableIdleConfig, VramProbe};
 use runtime_cuda::gen_core::{
     GenerationRequest, LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry,
     MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
@@ -32,6 +32,18 @@ const MIB: u64 = 1024 * 1024;
 // the promotion gate. The required broad mutation must still breach at least one envelope bound.
 const KREA_CANDLE_MAX_THRESHOLD: f64 = 1.0;
 const KREA_CANDLE_MEAN_THRESHOLD: f64 = 5.0 / 255.0;
+
+fn certifying_wddm_idle_config() -> StableIdleConfig {
+    // GPU 1's otherwise-idle WDDM graphics residency measured 1.6 GB in run 33188922159. The
+    // pinned testkit's stable-idle proof is deliberately stricter than a raised one-shot ceiling:
+    // it repeats the samples, bounds drift, and rejects any pure-compute process before allowing
+    // the device-level delta capture.
+    StableIdleConfig::new(2.0, 5, 64, 200)
+}
+
+fn certifying_vram_probe() -> VramProbe {
+    VramProbe::start_rendered().assert_stable_idle(certifying_wddm_idle_config())
+}
 
 #[derive(Clone)]
 struct NvidiaSmi {
@@ -803,7 +815,7 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
     };
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
-    let mut vram = VramProbe::start_rendered().assert_idle(1.0);
+    let mut vram = certifying_vram_probe();
     let load_sample = vram.phase();
     let generator = catalog
         .media()
@@ -1410,7 +1422,7 @@ fn run(request: &Value) -> Result<Value, String> {
         evidence_revision: format!("sc-21714-certifying@{}", protocol::INFERENCE_PIN),
     };
 
-    let mut vram = VramProbe::start_rendered().assert_idle(1.0);
+    let mut vram = certifying_vram_probe();
     let load_sample = vram.phase();
     let generator = catalog
         .media()
@@ -1844,6 +1856,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candle_krea_wddm_idle_proof_keeps_the_measured_strict_bounds() {
+        let config = certifying_wddm_idle_config();
+        assert_eq!(config.max_baseline_gb, 2.0);
+        assert_eq!(config.sample_count, 5);
+        assert_eq!(config.max_drift_mib, 64);
+        assert_eq!(config.sample_interval_ms, 200);
+    }
 
     #[test]
     fn candle_krea_quality_uses_normalized_channel_error_and_the_approved_mean_bound() {
