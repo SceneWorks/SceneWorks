@@ -18009,6 +18009,27 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     assert!(krea_imported_available(&edit_source, &settings));
     assert!(krea_imported_available(&edit_two_ref, &settings));
 
+    let native_nvfp4_lora = request(json!({
+        "projectId": "p", "model": "kreamania_variant7",
+        "loras": [{ "id": "adapter" }],
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "importQuantFormat": "nvfp4",
+            "modelPath": path_str,
+        }
+    }));
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert!(
+        krea_imported_available(&native_nvfp4_lora, &settings),
+        "Candle installs low-rank adapters as residuals over the packed NVFP4 base"
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        !krea_imported_available(&native_nvfp4_lora, &settings),
+        "MLX has no native NVFP4 consumer"
+    );
+
     // An `edit_image` job with NO conditioning image is rejected on every backend (defensive shape).
     let edit_no_ref = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",

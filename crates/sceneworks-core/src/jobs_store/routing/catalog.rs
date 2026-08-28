@@ -1602,10 +1602,14 @@ pub fn imported_image_request_provider_eligible(
     }
 
     let operation = imported_payload_operation(payload);
-    // The native prepacked loader intentionally starts with the proven generate surface only.
-    // Adapters mutate dense Linear weights and edit/pose/multi-phase lanes introduce companion
-    // modules that have not been validated against this source encoding.
-    if native_nvfp4 && (operation != "generate" || has_loras) {
+    // Native NVFP4 is proven only on the Generate surface. The Candle Krea loader additionally
+    // installs low-rank LoRA/LoKr adapters as residuals around packed Nvfp4Linear modules, so that
+    // exact provider/source combination does not mutate the packed base. Other families retain the
+    // fail-closed adapter guard until their native loaders prove the same contract. Unsupported Krea
+    // adapter forms are rejected by the loader's typed validation.
+    let native_nvfp4_adapters_supported = family == "krea_2" && backend == "candle";
+    if native_nvfp4 && (operation != "generate" || (has_loras && !native_nvfp4_adapters_supported))
+    {
         return false;
     }
     // An explicit user control map/mode is semantically material. It may only accompany a selected
@@ -2834,13 +2838,17 @@ mod tests {
             &payload(serde_json::json!({"referenceAssetId": "asset-1"})),
             "candle"
         ));
+        assert!(imported_image_request_provider_eligible(
+            imported_id,
+            &payload(serde_json::json!({"loras": [{"id": "adapter"}]})),
+            "candle"
+        ));
         assert!(!imported_image_request_provider_eligible(
             imported_id,
             &payload(serde_json::json!({"mode": "text_to_image"})),
             "mlx"
         ));
         for unsupported in [
-            serde_json::json!({"loras": [{"id": "adapter"}]}),
             serde_json::json!({"mode": "edit_image", "sourceAssetId": "asset-1"}),
             serde_json::json!({"advanced": {"poses": [{}]}}),
             serde_json::json!({"advanced": {"quantTier": "q8"}}),

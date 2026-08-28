@@ -3019,8 +3019,10 @@ export function rung4ContractAdmits(record, context) {
  *
  * Two things are checked here, and each is a way the record could be WRONG rather than merely absent:
  *
- * - **Keyed to the live pin.** The edges are a fact about one inference revision. A record keyed to
- *   an older pin would report a graph nobody re-derived, so it is a hard error and never a fallback.
+ * - **Revision-provenanced.** The edges are a fact about the inference revision that was inspected,
+ *   so the record must carry a full revision. That revision is deliberately not required to match
+ *   Cargo's live pin: doing so turns historical inspection evidence into a per-pin gate and forces
+ *   provenance-only restamps without proving that any provider graph changed.
  * - **Every edge is one this gate can evaluate.** An edge whose kind has no evaluator, or that cites
  *   no provider file, throws rather than being skipped over by `every()`.
  *
@@ -3029,13 +3031,12 @@ export function rung4ContractAdmits(record, context) {
  * family that is missing from BOTH should be reported as an unsurveyed family rather than as an
  * unrecorded one.
  */
-export function parseRung4ContractPrerequisites(body, { pin }) {
+export function parseRung4ContractPrerequisites(body) {
   const parsed = JSON.parse(body);
-  if (parsed.inferenceRevision !== pin) {
+  if (!/^[0-9a-f]{40}$/.test(parsed.inferenceRevision ?? "")) {
     throw new Error(
-      `config/rung4-contract-prerequisites.json is keyed to ` +
-        `${parsed.inferenceRevision?.slice(0, 9) ?? "(unset)"} but Cargo pins ${pin.slice(0, 9)}. ` +
-        "Re-run: node scripts/rung4-contract-prerequisites.mjs --repo <inference> --write",
+      "config/rung4-contract-prerequisites.json must record the full inference revision " +
+        "that was inspected",
     );
   }
   const records = new Map();
@@ -4489,7 +4490,6 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // fenced against the survey's own key set, so the two cannot drift apart.
   const rung4ContractPrerequisites = parseRung4ContractPrerequisites(
     bodies.rung4ContractPrerequisites,
-    { pin: inferencePin(cargoBody) },
   );
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's

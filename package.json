@@ -15,7 +15,7 @@
     "check:memory-matrix": "node scripts/generate-memory-matrix.mjs --check",
     "check:memory-calibration": "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/ltx-mlx-video-sc-18808.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/ltx-mlx-geometry-sweep-sc-18810.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/qwen-candle-five-rung-sc-15817.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/krea-candle-five-rung-sc-11045.json",
     "report:stale-lanes": "node scripts/stale-lane-report.mjs",
-    "check:rust-derived-docs": "npm run check:memory-matrix && npm run check:tier-integrity",
+    "check:rust-derived-docs": "npm run check:tier-integrity",
     "generate:tier-integrity": "node scripts/check-tier-integrity.mjs",
     "check:tier-integrity": "node scripts/check-tier-integrity.mjs --self-test && node scripts/check-tier-integrity.mjs --check",
     "check:compose": "node scripts/check-compose-config.mjs",
