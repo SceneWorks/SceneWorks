@@ -1451,7 +1451,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 Some(record),
                 anchor_geometry,
             )
-            .optimized_eligibility(&provider_contract)
+            .optimized_eligibility(provider_contract)
             .is_ok()
         };
         // FAIL CLOSED ON THE WHOLE TIER (sc-18097 review, major finding). The tier's phase curves
@@ -1579,7 +1579,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     }));
     let selection = memory_strategy::select_strategy(
         request,
-        &provider_contract,
+        provider_contract,
         Some(Budget {
             available_gb: budget.free_gb,
             reclaimable_gb: 0.0,
@@ -3419,7 +3419,7 @@ mod tests {
         };
 
         let decision = gen_core::standard_memory_strategy_safety_check(
-            &provider_contract,
+            provider_contract,
             &context,
             None,
             None,
