@@ -240,6 +240,46 @@ function auditCanonicalDigest(audit) {
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
 
+/**
+ * The structured audit is machine-derived, but `_comment` is the human review of what the pin
+ * advance actually contains. Keep that prose free-form while requiring it to identify the current
+ * population. Checking for the current values (rather than forbidding old ones) still allows an
+ * accurate comparison with a prior pin.
+ */
+function validateAuditSummary(audit) {
+  const summaryErrors = [];
+  const summary = typeof audit._comment === "string" ? audit._comment : "";
+  if (!summary) {
+    return ["inference source audit has no human `_comment` summary for the current pin."];
+  }
+
+  const shortRevision = audit.inferenceRevision?.slice(0, 8);
+  if (shortRevision && !new RegExp(`\\b${shortRevision}\\b`, "i").test(summary)) {
+    summaryErrors.push(
+      `inference source audit _comment does not name current pin ${shortRevision}.`,
+    );
+  }
+  const matchedFiles = audit.provenanceScan?.matchedFiles;
+  if (
+    Number.isInteger(matchedFiles) &&
+    !new RegExp(`\\b${matchedFiles}\\s+provenance candidates\\b`, "i").test(summary)
+  ) {
+    summaryErrors.push(
+      `inference source audit _comment does not name current population ${matchedFiles} provenance candidates.`,
+    );
+  }
+  const cratePrefixes = audit.crateCoverage?.cratePrefixes;
+  if (
+    Number.isInteger(cratePrefixes) &&
+    !new RegExp(`\\b${cratePrefixes}\\s+production-Rust crate prefixes\\b`, "i").test(summary)
+  ) {
+    summaryErrors.push(
+      `inference source audit _comment does not name current population ${cratePrefixes} production-Rust crate prefixes.`,
+    );
+  }
+  return summaryErrors;
+}
+
 function validateSourceAudit(audit, componentIndex, pinText, lockText, candidateText, crateText) {
   const auditErrors = [];
   const inferencePins = new Set(
@@ -253,6 +293,7 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText, candidate
       `inference source audit is for ${audit.inferenceRevision}, but Cargo pins ${[...inferencePins][0]}. Re-audit inference NOTICE, LICENSE-*, and production include_str!/include_bytes! sites, then update config/inference-third-party-source.json.`,
     );
   }
+  auditErrors.push(...validateAuditSummary(audit));
   // 🔴 The ported-source inventory has its OWN revision label, and until sc-15017 nothing compared
   // it to the pin. That is how the inventory went stale: a bump updated `inferenceRevision` (checked
   // above) and the scanner was re-run against a revision literal it kept internally, so the label
@@ -529,6 +570,7 @@ if (process.argv.includes("--derive-json")) {
       provenancePopulationSha256: populationSha256(candidates),
       cratePrefixes: crates.length,
       cratePopulationSha256: cratePopulationSha256(crates),
+      auditSummaryErrors: validateAuditSummary(sourceAudit),
     })}\n`,
   );
   process.exit(0);
@@ -551,6 +593,32 @@ if (process.argv.includes("--self-test")) {
   staleRevision.inferenceRevision = "0".repeat(40);
   if (!validateSourceAudit(staleRevision, components, pinSources, lock, provenanceCandidates, cratePrefixes).some((error) => error.includes("but Cargo pins"))) {
     console.error("self-test: stale inference revision did not fail closed");
+    process.exit(1);
+  }
+  const staleSummary = structuredClone(sourceAudit);
+  staleSummary._comment =
+    `Pin 26f172e7 records ${sourceAudit.provenanceScan.matchedFiles - 1} provenance candidates and ` +
+    `${sourceAudit.crateCoverage.cratePrefixes - 1} production-Rust crate prefixes.`;
+  const staleSummaryErrors = validateAuditSummary(staleSummary);
+  const currentShortRevision = sourceAudit.inferenceRevision.slice(0, 8);
+  if (
+    !staleSummaryErrors.some((error) => error.includes(`current pin ${currentShortRevision}`)) ||
+    !staleSummaryErrors.some((error) =>
+      error.includes(`${sourceAudit.provenanceScan.matchedFiles} provenance candidates`),
+    ) ||
+    !staleSummaryErrors.some((error) =>
+      error.includes(`${sourceAudit.crateCoverage.cratePrefixes} production-Rust crate prefixes`),
+    )
+  ) {
+    console.error(
+      "self-test: stale human audit summary did not fail closed on pin, candidate, and crate populations",
+    );
+    process.exit(1);
+  }
+  const comparativeSummary = structuredClone(sourceAudit);
+  comparativeSummary._comment += " Previous pin 26f172e7 had a smaller scanned population.";
+  if (validateAuditSummary(comparativeSummary).length !== 0) {
+    console.error("self-test: an accurate current summary was rejected for mentioning a prior pin");
     process.exit(1);
   }
   const candidateLines = provenanceCandidates.trimEnd().split("\n");

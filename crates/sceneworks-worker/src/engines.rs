@@ -2306,6 +2306,7 @@ mod tests {
             load: stub_textllm_load,
             can_load: stub_textllm_can_load,
             weightless_vision: None,
+            weightless_audio: None,
         };
 
     // A candle-backed stub `Trainer` (backend "candle") registered under an id that IS in TRAINER_IDS
