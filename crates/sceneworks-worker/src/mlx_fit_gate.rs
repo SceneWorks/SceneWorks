@@ -4444,18 +4444,62 @@ struct ResolvedTextEncoderSource {
     direct_shard_bytes: u64,
 }
 
-/// Resolve the selected encoder exactly as gen-core's loader does. In particular, a complete
-/// snapshot remains the requested `LoadSpec` source for identity/replay, while admission follows
-/// only its direct `text_encoder/` shards and never recursively prices sibling transformer/VAE
-/// trees.
+fn text_encoder_discovery_roots(source: &WeightsSource) -> gen_core::Result<Vec<PathBuf>> {
+    let entry = std::path::absolute(weights_source_path(source))?;
+    let lexical_root = match source {
+        WeightsSource::Dir(_) => entry.clone(),
+        WeightsSource::File(_) => entry.parent().map(Path::to_path_buf).ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "selected text-encoder file has no lexical parent directory".into(),
+            )
+        })?,
+    };
+    let canonical = std::fs::canonicalize(&entry)?;
+    let canonical_root = match source {
+        WeightsSource::Dir(_) => canonical,
+        WeightsSource::File(_) => canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "selected text-encoder file has no canonical parent directory".into(),
+            )
+        })?,
+    };
+    let mut roots = vec![lexical_root, canonical_root];
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+/// Resolve path-free planning facts exactly as gen-core's loader does. A prepared spec reuses its
+/// retained acquisition receipt; compatibility mode uses bounded metadata discovery. Neither path
+/// acquires or discards an executable artifact seal.
 fn resolved_text_encoder_source(
+    spec: &LoadSpec,
     source: &WeightsSource,
 ) -> gen_core::Result<ResolvedTextEncoderSource> {
-    gen_core::read_text_encoder_source_unchanged(source, |resolved| {
-        Ok(ResolvedTextEncoderSource {
-            path: weights_source_path(resolved).to_path_buf(),
-            direct_shard_bytes: gen_core::text_encoder_source_bytes(resolved)?,
-        })
+    let facts = match spec.prepared_text_encoder_planning_facts()? {
+        Some(facts) => facts,
+        None => gen_core::text_encoder_planning_facts_for_discovery(
+            source,
+            &text_encoder_discovery_roots(source)?,
+        )?,
+    };
+    let path = match (source, facts.source_layout()) {
+        (WeightsSource::File(path), gen_core::TextEncoderSourceLayout::File)
+        | (WeightsSource::Dir(path), gen_core::TextEncoderSourceLayout::DirectDirectory) => {
+            path.clone()
+        }
+        (WeightsSource::Dir(path), gen_core::TextEncoderSourceLayout::CompleteSnapshot) => {
+            path.join("text_encoder")
+        }
+        _ => {
+            return Err(gen_core::Error::Unsupported(
+                "selected text-encoder planning layout does not match its LoadSpec source".into(),
+            ));
+        }
+    };
+    Ok(ResolvedTextEncoderSource {
+        path,
+        direct_shard_bytes: facts.direct_shard_bytes(),
     })
 }
 
@@ -5213,7 +5257,7 @@ fn spec_component_bytes_with_provider_footprint(
     // resolve through gen-core; an invalid ad-hoc spec retains the old conservative recursive
     // estimate and will still fail contract validation before a real provider load.
     let selected_text_encoder = spec.text_encoder.as_ref().map(|source| {
-        resolved_text_encoder_source(source).unwrap_or_else(|_| ResolvedTextEncoderSource {
+        resolved_text_encoder_source(spec, source).unwrap_or_else(|_| ResolvedTextEncoderSource {
             path: weights_source_path(source).to_path_buf(),
             direct_shard_bytes: weights_source_bytes(source),
         })
@@ -5422,7 +5466,7 @@ fn spec_component_bytes_with_provider_footprint_checked(
     let selected_text_encoder = spec
         .text_encoder
         .as_ref()
-        .map(resolved_text_encoder_source)
+        .map(|source| resolved_text_encoder_source(spec, source))
         .transpose()?;
     // Fill a File slot the provider left EMPTY with the exact prepared target size — and only such a
     // slot. A non-zero value in a File slot is a provider fact about the assembly it will actually

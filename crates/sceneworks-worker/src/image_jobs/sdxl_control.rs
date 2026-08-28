@@ -978,7 +978,7 @@ mod sdxl_control_tests {
     fn mlx_fit_gate_refuses_the_complete_control_composition_under_a_small_cap() {
         use std::fs::OpenOptions;
 
-        const GIB: u64 = 1024 * 1024 * 1024;
+        const MIB: u64 = 1024 * 1024;
         let root = tempfile::tempdir().expect("tempdir");
         let sparse = |path: PathBuf, bytes: u64| {
             let file = OpenOptions::new()
@@ -992,11 +992,11 @@ mod sdxl_control_tests {
         };
         let base = root.path().join("base");
         std::fs::create_dir_all(&base).expect("base dir");
-        sparse(base.join("model.safetensors"), GIB);
-        let control = sparse(root.path().join("control.safetensors"), GIB / 8);
-        let adapter = sparse(root.path().join("adapter.safetensors"), GIB / 8);
-        let component = sparse(root.path().join("component.safetensors"), GIB / 4);
-        let selected_te = sparse(root.path().join("selected-te.safetensors"), 5 * GIB / 2);
+        sparse(base.join("model.safetensors"), MIB);
+        let control = sparse(root.path().join("control.safetensors"), MIB / 8);
+        let adapter = sparse(root.path().join("adapter.safetensors"), MIB / 8);
+        let component = sparse(root.path().join("component.safetensors"), MIB / 4);
+        let selected_te = sparse(root.path().join("selected-te.safetensors"), 5 * MIB / 2);
 
         let base_composition = sdxl_control_spec(
             base,
@@ -1011,7 +1011,10 @@ mod sdxl_control_tests {
 
         crate::test_env::temp_env_var(
             crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV,
-            "4",
+            // The gate keeps a fixed 2 GiB foreign-resident reserve. The remaining 2 MiB
+            // deliberately sits between the 1.5 MiB base composition and the selected encoder's
+            // 2.5 MiB staged side, preserving the production arithmetic without multi-GiB reads.
+            "2.001953125",
             || {
                 assert!(
                     apply_sdxl_control_mlx_residency(base_composition).is_ok(),
