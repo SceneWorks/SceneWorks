@@ -327,6 +327,9 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 ///   - **LoRAs** on t2i / img2img (sc-14111) and the **Kontext edit** surface (mode `edit_image` + a
 ///     conditioning image, sc-14119) on either native backend. This mirrors the scheduler's
 ///     `imported_image_request_family_eligible(adapters_supported)`, so claim and dispatch agree.
+///     Candle also accepts low-rank LoRA/LoKr adapters over native NVFP4: its loader installs them
+///     as additive residuals around packed `Nvfp4Linear` modules instead of folding them into the
+///     packed base.
 ///   - a **strict-pose set** (a non-empty `advanced.poses` outside edit mode) on either native backend
 ///     whose native loader can assemble the pose control branch around the file-loaded DiT
 ///     (reachability now comes from the registered provider descriptor, not a static per-backend
@@ -353,7 +356,7 @@ fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if operation != gen_core::ImportedModelOperation::Generate || !request.loras.is_empty() {
+            if operation != gen_core::ImportedModelOperation::Generate {
                 return false;
             }
         }
