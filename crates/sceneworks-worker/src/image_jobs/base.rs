@@ -126,6 +126,10 @@ fn mlx_available(request: &ImageRequest, settings: &Settings) -> bool {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageRoute {
+    /// FLUX.1's IP-Adapter and strict-control providers are separate graphs.  A reference plus
+    /// pose set must not be claimed by the control route, which would otherwise consume the pose
+    /// while treating the reference only as post-generation scoring input.
+    FluxIpAdapterPoseReject,
     ZImageControl,
     ZImageBaseControl,
     QwenControl,
@@ -236,6 +240,20 @@ const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
     "flux2_dev",
 ];
 
+/// FLUX.1-dev has independent IP-Adapter and strict-control providers, neither of which composes
+/// the other's conditioning. Keep this predicate at route selection so a combined request is
+/// refused before either provider can silently discard the other input.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn flux1_ipadapter_pose_combination(request: &ImageRequest) -> bool {
+    request.model == "flux_dev"
+        && request.mode != "edit_image"
+        && non_empty(&request.reference_asset_id)
+        && !pose_entries(request).is_empty()
+}
+
 /// The production FLUX strict-control router, expressed as the exact base-model → dedicated
 /// provider mapping used by the two `..._control_available` arms below. Keeping this pure seam next
 /// to [`prepare_image_route`] lets source-bound audits ask the router whether a model really has a
@@ -263,7 +281,9 @@ fn resolve_image_route_with_imported_availability(
     sdxl_imported_available: bool,
     mage_finetuned_available: bool,
 ) -> Option<ImageRoute> {
-    if zimage_control_available(request, settings) {
+    if flux1_ipadapter_pose_combination(request) {
+        Some(ImageRoute::FluxIpAdapterPoseReject)
+    } else if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
     } else if zimage_base_control_available(request, settings) {
         // Base (non-distilled, full-CFG) Z-Image strict control (advanced.poses on `z_image`) →
@@ -619,6 +639,7 @@ impl ImageRoute {
             // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
             // renders, each its own seed. No angle/pose grouping (the lane claims no conditioning).
             | ImageRoute::MageFinetuned
+            | ImageRoute::FluxIpAdapterPoseReject
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,
@@ -717,6 +738,8 @@ enum CandleImageRoute {
     KolorsIpAdapter,
     /// FLUX XLabs IP-Adapter reference conditioning (sc-5872).
     FluxIpAdapter,
+    /// FLUX.1's IP-Adapter and strict-control providers cannot compose one another's input.
+    FluxIpAdapterPoseReject,
     /// PuLID-FLUX face identity (sc-5492).
     Pulid,
     /// Qwen-Image strict-pose ControlNet (sc-5489).
@@ -958,7 +981,6 @@ impl CandleImageRoute {
             | CandleImageRoute::SdxlEdit
             | CandleImageRoute::SdxlIpAdapter
             | CandleImageRoute::KolorsIpAdapter
-            | CandleImageRoute::FluxIpAdapter
             | CandleImageRoute::Pulid
             | CandleImageRoute::QwenControl
             | CandleImageRoute::KolorsControl
@@ -1063,6 +1085,7 @@ impl CandleImageRoute {
             CandleImageRoute::KreaControl => krea_control_candle::KREA_CONTROL_ENGINE,
             CandleImageRoute::PoseReject
             | CandleImageRoute::PoseControlBaseMissing
+            | CandleImageRoute::FluxIpAdapterPoseReject
             | CandleImageRoute::KolorsCompositeReject => STUB_ADAPTER,
             CandleImageRoute::ZimageComfyui => {
                 zimage_comfyui_candle::ZIMAGE_COMFYUI_CANDLE_ENGINE
@@ -1135,7 +1158,9 @@ fn resolve_candle_image_route_with_prepared_availability(
     // Order matches the historical ladder: the edit / reference / identity / control lanes are all
     // checked BEFORE the generic `is_candle_engine` txt2img arm (they share candle txt2img model ids, so
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
-    if instantid_available(request, settings) {
+    if flux1_ipadapter_pose_combination(request) {
+        Some(CandleImageRoute::FluxIpAdapterPoseReject)
+    } else if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
     } else if sdxl_control_candidate(request) {
         // Same precedence as the core router: InstantID stays isolated, then generic SDXL control
@@ -5079,12 +5104,40 @@ fn fixed_mlx_artifact_tier(model_id: &str) -> Option<&'static str> {
 /// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
 /// the exact prepared source receipt before any planner, fit gate, or provider loader sees the spec.
 /// Default/absent selection is an exact no-op.
+///
+/// The wrapper is intentional typestate: production routes must explicitly consume the attached
+/// spec before handing it to a planner or provider. This keeps route wiring compile-enforced while
+/// behavior tests exercise the real resolution seam, without source-text assertions.
+#[must_use = "a manifest text-encoder attachment must be consumed by the production route"]
+#[derive(Debug)]
+pub(super) struct ManifestTextEncoderAttachedSpec(LoadSpec);
+
+impl ManifestTextEncoderAttachedSpec {
+    pub(super) fn into_load_spec(self) -> LoadSpec {
+        self.0
+    }
+}
+
+impl std::ops::Deref for ManifestTextEncoderAttachedSpec {
+    type Target = LoadSpec;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ManifestTextEncoderAttachedSpec {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 pub(super) fn attach_manifest_text_encoder(
     spec: LoadSpec,
     engine_id: &str,
     request: &ImageRequest,
     settings: &Settings,
-) -> WorkerResult<LoadSpec> {
+) -> WorkerResult<ManifestTextEncoderAttachedSpec> {
     crate::text_encoder_selection::prepare_selected_text_encoder(
         spec,
         engine_id,
@@ -5092,6 +5145,7 @@ pub(super) fn attach_manifest_text_encoder(
         &request.model_manifest_entry,
         settings,
     )
+    .map(ManifestTextEncoderAttachedSpec)
 }
 
 /// Whether the request carries a non-default authored encoder id. Kept beside the attachment seam
@@ -5113,7 +5167,7 @@ pub(super) fn has_authored_text_encoder(request: &ImageRequest) -> WorkerResult<
 /// the route's existing explicit tokens. Pre-resolved route tokens are compared against the
 /// contract-prepared set so a mutation between dispatch resolution and attachment fails closed.
 pub(super) fn prepare_manifest_text_encoder_with_file_pins(
-    mut spec: LoadSpec,
+    spec: LoadSpec,
     engine_id: &str,
     request: &ImageRequest,
     settings: &Settings,
@@ -5122,17 +5176,17 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
 ) -> WorkerResult<LoadSpec> {
     let selected = has_authored_text_encoder(request)?;
     let pins = pins.into_iter().collect::<Vec<_>>();
-    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let mut attached_spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
     if !selected {
-        crate::paths::prepare_load_spec_with_file_pins(&mut spec, pins, label)?;
-        return Ok(spec);
+        crate::paths::prepare_load_spec_with_file_pins(&mut attached_spec, pins, label)?;
+        return Ok(attached_spec.into_load_spec());
     }
 
     for expected in pins {
         expected
             .ensure_unchanged()
             .map_err(|error| crate::classify_engine_error(label, error))?;
-        let received = spec
+        let received = attached_spec
             .prepared_file_pin_for(expected.loader_path())
             .map_err(|error| crate::classify_engine_error(label, error))?;
         if received != Some(&expected) {
@@ -5142,7 +5196,7 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
             )));
         }
     }
-    Ok(spec)
+    Ok(attached_spec.into_load_spec())
 }
 
 /// Select deferred materialization for the native Candle/CUDA Qwen routes. Only the uniform
@@ -5564,15 +5618,11 @@ fn apply_measured_mlx_load_shape_for_request(
 mod measured_mlx_load_shape_tests {
     use super::*;
     use gen_core::{
-        AdapterKind, AdapterSpec, MemoryStrategy, MemoryStrategySupport, OffloadPolicy, Quant,
-        TransformerComponent,
+        AdapterKind, AdapterSpec, MemoryContractSurfaceTier, MemoryProviderContract, MemoryStrategy,
+        MemoryStrategySupport, OffloadPolicy, Quant, TransformerComponent,
     };
 
-    fn fixture_spec(
-        root: &std::path::Path,
-        quant_bits: Option<u8>,
-        encoder: Option<(&str, Option<i32>)>,
-    ) -> LoadSpec {
+    fn fixture_spec(root: &std::path::Path, quant_bits: Option<u8>) -> LoadSpec {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
@@ -5585,38 +5635,14 @@ mod measured_mlx_load_shape_tests {
             bytes.extend_from_slice(&0f32.to_le_bytes());
             std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
         }
-        if let Some((engine_id, encoder_quant_bits)) = encoder {
-            let contract = crate::inference_runtime::media_encoder_contract(engine_id)
-                .unwrap_or_else(|| panic!("{engine_id} owns a text-encoder contract"));
-            let result = if engine_id == "qwen_image_edit" {
-                gen_core_testkit::write_multimodal_encoder_contract_fixture_with_quant(
-                    &root.join("text_encoder"),
-                    contract,
-                    runtime_macos::providers::qwen_image::VISION_ENCODER_CONTRACT,
-                    None,
-                )
-            } else {
-                gen_core_testkit::write_encoder_contract_fixture_with_quant(
-                    &root.join("text_encoder"),
-                    contract,
-                    encoder_quant_bits,
-                )
-            };
-            result.unwrap_or_else(|error| {
-                panic!("write registry-owned {engine_id} encoder fixture: {error}")
-            });
-        } else {
-            std::fs::write(
-                root.join("text_encoder/config.json"),
-                quant_bits.map_or_else(
-                    || r#"{"dtype":"bfloat16"}"#.to_owned(),
-                    |bits| {
-                        format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#)
-                    },
-                ),
-            )
-            .unwrap();
-        }
+        std::fs::write(
+            root.join("text_encoder/config.json"),
+            quant_bits.map_or_else(
+                || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+            ),
+        )
+        .unwrap();
         std::fs::write(
             root.join("transformer/config.json"),
             quant_bits.map_or_else(
@@ -5626,6 +5652,51 @@ mod measured_mlx_load_shape_tests {
         )
         .unwrap();
         LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+    }
+
+    /// Resolve the provider's shipped declaration fixture without traversing model assets.
+    ///
+    /// Production contract construction deliberately seals every selected encoder file. These
+    /// tests grade route declaration and capability shape, not file identity, so hashing sparse
+    /// production-sized encoder fixtures both duplicates the ArtifactSeal tests and turns a pure
+    /// contract check into minutes of I/O. The registry-owned surface resolver is the exact
+    /// weights-free seam for an already-resolved artifact tier. Route-local fields are copied from
+    /// the production-shaped spec so adapters and resolved catalog identity remain under test.
+    fn weights_free_contract(
+        provider_id: &str,
+        tier: MemoryContractSurfaceTier,
+        spec: &LoadSpec,
+    ) -> MemoryProviderContract {
+        let registry = crate::inference_runtime::media();
+        let fixture = registry
+            .memory_contract_fixture_registrations()
+            .find(|fixture| fixture.provider_id == provider_id)
+            .unwrap_or_else(|| panic!("{provider_id} weights-free contract fixture"));
+        let mut surface = (fixture.surface_specs)()
+            .into_iter()
+            .find(|surface| {
+                surface.selector.tier == tier
+                    && surface.selector.offload_policy == spec.offload_policy
+                    && surface.selector.load_shape == spec.load_shape
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{provider_id} weights-free {:?}/{:?}/{:?} surface",
+                    tier, spec.offload_policy, spec.load_shape
+                )
+            });
+        surface.spec.resolved_route = spec.resolved_route.clone();
+        surface.spec.adapters = spec.adapters.clone();
+        surface.spec.load_shape_declaration_result = spec.load_shape_declaration_result;
+
+        match registry
+            .memory_contract_surface_resolver_registrations()
+            .find(|resolver| resolver.provider_id == provider_id)
+        {
+            Some(resolver) => (resolver.contract)(&surface),
+            None => (fixture.contract)(&surface.spec),
+        }
+        .unwrap_or_else(|error| panic!("{provider_id} weights-free contract: {error}"))
     }
 
     fn rung_four_support(engine_id: &str, spec: &LoadSpec) -> MemoryStrategySupport {
@@ -5642,9 +5713,9 @@ mod measured_mlx_load_shape_tests {
     #[test]
     fn worker_lens_specs_reach_only_their_exact_measured_contracts() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path(), None, None);
+        let bf16 = fixture_spec(bf16_dir.path(), None);
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), Some(4), None).with_quant(Quant::Q4);
+        let q4 = fixture_spec(q4_dir.path(), Some(4)).with_quant(Quant::Q4);
 
         let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
         assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
@@ -5723,37 +5794,34 @@ mod measured_mlx_load_shape_tests {
 
     #[test]
     fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
-        let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(
-            bf16_dir.path(),
-            None,
-            Some(("qwen_image", None)),
-        );
-        let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path(), None, Some(("qwen_image_edit", None)));
-        std::fs::write(
-            q4_dir.path().join("transformer/config.json"),
-            r#"{"quantization":{"bits":4}}"#,
-        )
-        .unwrap();
+        let bf16_root = std::path::PathBuf::from("/__sceneworks_qwen_bf16_contract_fixture__");
+        let bf16 = LoadSpec::new(WeightsSource::Dir(bf16_root.clone()));
+        let q4_root = std::path::PathBuf::from("/__sceneworks_qwen_q4_contract_fixture__");
+        let q4 = LoadSpec::new(WeightsSource::Dir(q4_root.clone())).with_quant(Quant::Q4);
         let lightning_adapter = AdapterSpec::new(
-            q4_dir.path().join("lightning.safetensors"),
+            q4_root.join("lightning.safetensors"),
             1.0,
             AdapterKind::Lora,
         );
 
-        for (label, engine_id, spec) in [
-            ("qwen_image", "qwen_image", bf16.clone()),
+        for (label, engine_id, tier, spec) in [
+            (
+                "qwen_image",
+                "qwen_image",
+                MemoryContractSurfaceTier::Bf16,
+                bf16.clone(),
+            ),
             (
                 "qwen_image_edit_2511",
                 "qwen_image_edit",
-                q4.clone().with_quant(Quant::Q4),
+                MemoryContractSurfaceTier::Q4,
+                q4.clone(),
             ),
             (
                 "qwen_image_edit_2511_lightning",
                 "qwen_image_edit",
-                q4.with_quant(Quant::Q4)
-                    .with_adapters(vec![lightning_adapter]),
+                MemoryContractSurfaceTier::Q4,
+                q4.with_adapters(vec![lightning_adapter]),
             ),
         ] {
             let shaped = apply_measured_mlx_load_shape(engine_id, spec);
@@ -5762,13 +5830,8 @@ mod measured_mlx_load_shape_tests {
                 gen_core::LoadShape::DeferredMaterialization,
                 "{label} must resolve to the shared Qwen provider load shape"
             );
-            let contract = crate::inference_runtime::media()
-                .memory_strategy_contract(
-                    engine_id,
-                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
-                )
-                .unwrap()
-                .expect("Qwen contract");
+            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
+            let contract = weights_free_contract(engine_id, tier, &sequential);
             let rung = contract
                 .capability(MemoryStrategy::BoundedTransformerResidency)
                 .expect("rung 4");
@@ -5781,8 +5844,8 @@ mod measured_mlx_load_shape_tests {
         }
 
         let pid = bf16.clone().with_pid(
-            WeightsSource::File(bf16_dir.path().join("pid.safetensors")),
-            WeightsSource::Dir(bf16_dir.path().join("gemma")),
+            WeightsSource::File(bf16_root.join("pid.safetensors")),
+            WeightsSource::Dir(bf16_root.join("gemma")),
         );
         assert_eq!(
             apply_measured_mlx_load_shape("qwen_image", pid).load_shape,
@@ -5821,36 +5884,40 @@ mod measured_mlx_load_shape_tests {
             has_phases: false,
         };
 
-        for (tier, quant_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
+        for (tier, quant_bits, surface_tier) in [
+            ("bf16", None, MemoryContractSurfaceTier::Bf16),
+            ("q4", Some(4), MemoryContractSurfaceTier::Q4),
+            ("q8", Some(8), MemoryContractSurfaceTier::Q8),
+        ] {
+            // Declaration evaluation reads the tiny transformer marker; provider capability
+            // construction below remains weights-free and never seals the encoder payload.
             let root = tempfile::tempdir().unwrap();
-            let spec = fixture_spec(
-                root.path(),
-                quant_bits,
-                Some(("krea_2_turbo", quant_bits.map(i32::from))),
-            )
-            .with_resolved_route("krea_2_turbo");
+            let spec = fixture_spec(root.path(), quant_bits).with_resolved_route("krea_2_turbo");
             assert_eq!(spec.quantize, None, "{tier} is a prepacked artifact tier");
             let shaped =
-                crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+                crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request_with(
                     "krea_2_turbo",
                     Some(tier),
                     Some(context.mode),
                     turbo_manifest,
                     spec,
                     context,
+                    |candidate| {
+                        weights_free_contract("krea_2_turbo", surface_tier, candidate)
+                            .capability(MemoryStrategy::BoundedTransformerResidency)
+                            .is_some_and(|capability| {
+                                capability.support == MemoryStrategySupport::Implemented
+                            })
+                    },
                 );
             assert_eq!(
                 shaped.load_shape,
                 gen_core::LoadShape::DeferredMaterialization,
                 "plain Krea {tier} must use the production deferred load shape"
             );
-            let resident_contract = crate::inference_runtime::media()
-                .memory_strategy_contract(
-                    "krea_2_turbo",
-                    &shaped.clone().with_offload_policy(OffloadPolicy::Resident),
-                )
-                .unwrap()
-                .expect("plain Krea registers a resident/deferred memory-strategy contract");
+            let resident = shaped.clone().with_offload_policy(OffloadPolicy::Resident);
+            let resident_contract =
+                weights_free_contract("krea_2_turbo", surface_tier, &resident);
             assert_eq!(
                 resident_contract
                     .capability(MemoryStrategy::Resident)
@@ -5860,13 +5927,9 @@ mod measured_mlx_load_shape_tests {
                 "plain Krea {tier} must remain reachable on a roomy resident host"
             );
 
-            let sequential_contract = crate::inference_runtime::media()
-                .memory_strategy_contract(
-                    "krea_2_turbo",
-                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
-                )
-                .unwrap()
-                .expect("plain Krea registers a sequential/deferred memory-strategy contract");
+            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
+            let sequential_contract =
+                weights_free_contract("krea_2_turbo", surface_tier, &sequential);
             let rung = sequential_contract
                 .capability(MemoryStrategy::BoundedTransformerResidency)
                 .expect("Krea compatibility contract contains rung 4");
@@ -5879,14 +5942,9 @@ mod measured_mlx_load_shape_tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let base = fixture_spec(
-            root.path(),
-            Some(4),
-            Some(("krea_2_turbo", Some(4))),
-        )
-        .with_resolved_route("krea_2_turbo");
+        let base = fixture_spec(root.path(), Some(4)).with_resolved_route("krea_2_turbo");
         assert_eq!(
-            crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request_with(
                 "krea_2_turbo",
                 Some("q4"),
                 Some(crate::memory_route_registry::MemoryRouteMode::EditImage),
@@ -5898,19 +5956,21 @@ mod measured_mlx_load_shape_tests {
                     use_pid: false,
                     has_phases: false,
                 },
+                |_| true,
             )
             .load_shape,
             gen_core::LoadShape::EagerMaterialization,
             "native Turbo cannot consume the route-local edit declaration"
         );
         let control = base.with_control(WeightsSource::File(root.path().join("control.safetensors")));
-        let refused = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        let refused = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request_with(
             "krea_2_turbo",
             Some("q4"),
             Some(context.mode),
             turbo_manifest,
             control,
             context,
+            |_| true,
         );
         assert_eq!(refused.load_shape, gen_core::LoadShape::EagerMaterialization);
         assert_eq!(
@@ -8670,7 +8730,10 @@ async fn generate_stream(
     // Finalize caller-selected text-encoder state before asking the provider about the real
     // candidate. Chroma must see and reject an external encoder rather than being admitted against
     // an incomplete LoadSpec which is mutated afterward.
-    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let unattached_spec = spec;
+    let attached_spec =
+        attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
+    let mut spec = attached_spec.into_load_spec();
     // SC-18457: provider adoption is an exact three-way intersection. A route-local BTR entry owns
     // the decision: the typed registry enforces mode/overlay/source semantics and the linked
     // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
@@ -11276,8 +11339,14 @@ async fn generate_candle_stream(
     }
     // Export the selected encoder receipt only after the entire load shape is complete; this exact
     // prepared spec is reused by the selector and eventual provider/cache load.
-    shared_contract_spec =
-        attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
+    let unattached_shared_contract_spec = shared_contract_spec;
+    let attached_shared_contract_spec = attach_manifest_text_encoder(
+        unattached_shared_contract_spec,
+        engine_id,
+        request,
+        settings,
+    )?;
+    let mut shared_contract_spec = attached_shared_contract_spec.into_load_spec();
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
     // A supported Hires refinement is a fresh one-reference image-to-image request even when the
     // caller's first pass was Edit or Inpaint. Admit that final-pass identity independently; the
@@ -13005,6 +13074,10 @@ mod candle_label_tests {
         assert!(
             !CandleImageRoute::SenseNovaEdit.applies_request_loras(&request),
             "SenseNova descriptors expose no user-adapter slot"
+        );
+        assert!(
+            !CandleImageRoute::FluxIpAdapter.applies_request_loras(&request),
+            "the bespoke FLUX IP-Adapter provider has no user-adapter input, so the route guard must refuse LoRAs"
         );
 
         let adapter = AdapterSpec::new(

@@ -3344,7 +3344,7 @@ fn receipt_weights_dir_from_marker(
                 snapshot.is_dir() && files.iter().all(|file| snapshot.join(file).is_file())
             })
             .filter(|snapshot| {
-                recorded_revision.map_or(true, |revision| {
+                recorded_revision.is_none_or(|revision| {
                     snapshot.file_name().and_then(|name| name.to_str()) == Some(revision)
                 })
             })

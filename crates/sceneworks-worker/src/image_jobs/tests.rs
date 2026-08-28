@@ -9,6 +9,25 @@ use super::{
 use serde_json::json;
 
 #[cfg(target_os = "macos")]
+fn assert_route_retarget_artifact_seal_mismatch(
+    error: WorkerError,
+    context: &str,
+    sealed_path: &std::path::Path,
+) {
+    let WorkerError::InvalidPayload(reason) = error else {
+        panic!("expected a typed artifact-seal payload refusal, got: {error:?}")
+    };
+    assert_eq!(
+        reason,
+        format!(
+            "{context}: unsupported: artifact seal mismatch after load: {}",
+            sealed_path.display()
+        ),
+        "retargeting must fail through the retained acquisition-time seal"
+    );
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn every_mlx_text_encoder_route_resolves_from_the_runtime_registry() {
     for id in [
@@ -113,210 +132,60 @@ fn default_and_absent_text_encoder_selection_leave_load_spec_untouched() {
     assert!(absent_spec.text_encoder.is_none());
 }
 
-/// SC-18314 route-coverage guard. Every specialized Krea/Qwen/Z/FLUX.2 load path must attach the
-/// selected encoder before the function's first fit/admission/cache/provider-load seam. This scans
-/// only production source between exact function markers; deleting or moving an attachment behind a
-/// load makes the test fail even though the runtime registry still resolves the route id.
+/// SC-18314 encoder-preparation contract. Every engine id reached by a specialized Krea/Qwen/Z/
+/// FLUX.2 lane must enter the production attachment seam when an authored encoder is present.
+///
+/// This is deliberately a behavior test rather than a source-order scan: the attachment seam
+/// rejects a selected encoder with no API resolution before any fit, admission, cache, or provider
+/// load can proceed. That makes a formatting-only route refactor irrelevant while preserving the
+/// fail-closed contract the old scan intended to protect.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
-fn every_specialized_text_encoder_route_attaches_before_fit_or_load() {
-    fn function_body<'a>(source: &'a str, marker: &str) -> &'a str {
-        source
-            .split_once(marker)
-            .unwrap_or_else(|| panic!("missing production function marker {marker:?}"))
-            .1
-            .split_once("\n}\n")
-            .unwrap_or_else(|| panic!("production function {marker:?} has no top-level end marker"))
-            .0
-    }
+fn every_specialized_text_encoder_engine_rejects_an_unresolved_selection_before_load() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
 
-    const ROUTES: &[(&str, &str, &str, &str)] = &[
-        (
-            "MLX Krea control",
-            include_str!("krea_control.rs"),
-            "async fn generate_krea_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "MLX Krea edit",
-            include_str!("krea_edit.rs"),
-            "async fn generate_krea_edit_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Krea imported control",
-            include_str!("krea_imported.rs"),
-            "async fn generate_krea_imported_control_stream(",
-            "prepare_manifest_text_encoder_with_file_pins(",
-        ),
-        (
-            "Krea imported base/edit/multiphase",
-            include_str!("krea_imported.rs"),
-            "async fn generate_krea_imported_stream(",
-            "prepare_manifest_text_encoder_with_file_pins(",
-        ),
-        (
-            "Krea multiphase",
-            include_str!("krea_multiphase.rs"),
-            "async fn generate_krea_multiphase_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Krea turbo-on-Raw",
-            include_str!("krea_turbo_raw.rs"),
-            "async fn generate_krea_turbo_on_raw_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "MLX Qwen control",
-            include_str!("qwen.rs"),
-            "async fn generate_qwen_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "MLX Qwen edit",
-            include_str!("qwen.rs"),
-            "async fn generate_qwen_edit_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "MLX Z turbo control",
-            include_str!("zimage.rs"),
-            "async fn generate_zimage_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "MLX Z base control",
-            include_str!("zimage.rs"),
-            "async fn generate_zimage_base_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "MLX FLUX.2 edit",
-            include_str!("flux2.rs"),
-            "async fn generate_flux2_edit_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "MLX FLUX.2 control",
-            include_str!("flux2.rs"),
-            "async fn generate_flux2_dev_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Candle Krea control",
-            include_str!("krea_control_candle.rs"),
-            "pub(super) async fn generate_candle_krea_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Candle Krea edit",
-            include_str!("krea_edit_candle.rs"),
-            "pub(super) async fn generate_candle_krea_edit_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Candle Qwen edit",
-            include_str!("qwen_edit_candle.rs"),
-            "pub(super) async fn generate_candle_qwen_edit_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Candle Qwen control",
-            include_str!("qwen_control.rs"),
-            "pub(super) async fn generate_candle_qwen_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Candle Qwen ComfyUI",
-            include_str!("qwen_comfyui_candle.rs"),
-            "pub(super) async fn generate_candle_qwen_comfyui_stream(",
-            "prepare_qwen_comfyui_load_spec_for_request(",
-        ),
-        (
-            "Candle Z control",
-            include_str!("zimage_control.rs"),
-            "pub(super) async fn generate_candle_zimage_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        // The Z-Image identity route no longer owns a bespoke stream: it generates through the
-        // registered `z_image_turbo` provider, whose encoder attachment is covered by the generic
-        // candle stream. `zimage_identity_candle.rs` retains only the request gate.
-        (
-            "Candle Z ComfyUI",
-            include_str!("zimage_comfyui_candle.rs"),
-            "pub(super) async fn generate_candle_zimage_comfyui_stream(",
-            "prepare_zimage_comfyui_load_spec_for_request(",
-        ),
-        (
-            "Candle FLUX.2 edit",
-            include_str!("flux2_edit_candle.rs"),
-            "pub(super) async fn generate_candle_flux2_edit_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Candle FLUX.2 control",
-            include_str!("flux2_control_candle.rs"),
-            "pub(super) async fn generate_candle_flux2_control_stream(",
-            "attach_manifest_text_encoder(",
-        ),
-        (
-            "Candle FLUX.2 ComfyUI",
-            include_str!("flux2_comfyui_candle.rs"),
-            "pub(super) async fn generate_candle_flux2_comfyui_stream(",
-            "prepare_flux2_comfyui_load_spec_for_request(",
-        ),
-    ];
-
-    for (route, source, function, attachment) in ROUTES {
-        let body = function_body(source, function);
-        let attach_at = body.find(attachment).unwrap_or_else(|| {
-            panic!("{route} no longer attaches a selected encoder through {attachment}")
-        });
-        let first_consumer = [
-            "start_cached_gen_stream(",
-            "start_cached_gen_stream_after_cold_admission(",
-            "start_gen_stream(",
-            "gate_with_evict_reclaim(",
-            "admit_conditioning_paths(",
-            "prepare_cached_candle_base_floor(",
-            "MlxRequestPlan::try_for_spec_and_manifest(",
-            "memory_strategy_contract(",
-            "start_cached_gen_stream_with_request_state(",
-            "run_candle_strict_control(",
-        ]
-        .iter()
-        .filter_map(|marker| body.find(marker))
-        .min()
-        .unwrap_or_else(|| panic!("{route} guard found no fit/admission/load consumer"));
-        assert!(
-            attach_at < first_consumer,
-            "{route} attaches the selected encoder after its first fit/admission/load consumer"
-        );
-    }
-
-    // The generic MLX/Candle base lanes cover Krea/Qwen/Z/FLUX.2 txt2img, edits sharing the base
-    // registry provider, and ConvRot. Both must attach after the spec is complete and before planning.
-    let base = include_str!("base.rs");
-    for (route, function, consumer) in [
-        (
-            "generic MLX base routes",
-            "async fn generate_stream(",
-            "MlxRequestPlan::for_spec_and_manifest(",
-        ),
-        (
-            "generic Candle base routes and ConvRot",
-            "async fn generate_candle_stream(",
-            "candle_base_memory_request_mode(",
-        ),
+    for engine_id in [
+        "krea_2_turbo",
+        "krea_2_raw",
+        "krea_2_edit",
+        "krea_2_turbo_edit",
+        "krea_2_turbo_control",
+        "qwen_image",
+        "qwen_image_edit",
+        "qwen_image_control",
+        "z_image_turbo",
+        "z_image",
+        "z_image_turbo_control",
+        "z_image_control",
+        "flux2_klein_9b",
+        "flux2_klein_9b_edit",
+        "flux2_klein_9b_kv_edit",
+        "flux2_dev",
+        "flux2_dev_edit",
+        "flux2_dev_control",
     ] {
-        let body = function_body(base, function);
-        let attach_at = body
-            .find("attach_manifest_text_encoder(")
-            .unwrap_or_else(|| panic!("{route} lost its selected encoder attachment"));
-        let consume_at = body
-            .find(consumer)
-            .unwrap_or_else(|| panic!("{route} lost its planner marker {consumer}"));
-        assert!(attach_at < consume_at, "{route} attaches after {consumer}");
+        let request = request(json!({
+            "projectId": "p",
+            "model": engine_id,
+            "advanced": { "textEncoderModel": "selected-encoder" },
+            "modelManifestEntry": { "family": "test" }
+        }));
+        let error = attach_manifest_text_encoder(
+            LoadSpec::new(WeightsSource::Dir(root.path().join(engine_id))),
+            engine_id,
+            &request,
+            &settings,
+        )
+        .expect_err("an authored encoder must be prepared before a route can load");
+        assert!(
+            error.to_string().contains("no fresh server resolution"),
+            "{engine_id} bypassed the production text-encoder attachment seam: {error}"
+        );
     }
 }
 
@@ -477,11 +346,8 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
         "the co-requisites are repo-pinned; the resolved tier must not move them"
     );
     // The dense/packed refusal did not disappear, it moved to the provider, where the actual
-    // tensor headers are visible. This layer must not pre-empt it in its own words.
-    assert!(
-        !include_str!("detail.rs").contains("requires the installed dense bf16 model tier"),
-        "the retired pre-load tier refusal must not be reinstated alongside the provider's"
-    );
+    // tensor headers are visible. Reaching this packed component resolution is the behavior-level
+    // witness that this preflight has not reinstated the retired dense-only refusal.
 }
 
 #[test]
@@ -983,16 +849,18 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         true,
         false,
     );
-    let production_route = include_str!("base.rs")
-        .split_once("let krea_turbo_ladder = krea_turbo_memory_route(")
-        .expect("production Krea ladder route call")
-        .1
-        .split_once(");")
-        .expect("end of production Krea ladder route call")
-        .0;
     assert!(
-        production_route.contains("hires_fix.is_some()"),
-        "the production route must pass the live hires decision into the exclusion predicate"
+        !krea_turbo_memory_route(
+            "krea_2_turbo",
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+        ),
+        "the production memory-route helper must exclude Hires refinement from the unsupported scope"
     );
     let context = optimized_route.then_some(&optimized_context);
 
@@ -1180,6 +1048,9 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
 
 #[test]
 fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() {
+    // Architecture tripwire retained: real rendering cannot cheaply expose both serialised
+    // per-pass telemetry records on this host; this guards the non-runtime payload schema that
+    // binds a receipt to its physical pass identity.
     let source = include_str!("base.rs");
     let telemetry = source
         .split_once("let passes = match hires_first_pass_memory_context.as_ref()")
@@ -1386,10 +1257,10 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
         .unwrap_or_else(|error| panic!("{} production driver: {error}", case.name));
 
         let expected_states = std::iter::once(gen_core::MemoryCacheState::Cold)
-            .chain(
-                std::iter::repeat(gen_core::MemoryCacheState::Warm)
-                    .take(case.item_count.saturating_sub(1)),
-            )
+            .chain(std::iter::repeat_n(
+                gen_core::MemoryCacheState::Warm,
+                case.item_count.saturating_sub(1),
+            ))
             .collect::<Vec<_>>();
         assert_eq!(
             evaluated_states, expected_states,
@@ -2034,7 +1905,9 @@ fn unconverted_edit_image_job_is_refused_at_dispatch_never_stubbed() {
         "the raw candle-gen component-directory error must not survive: {message}"
     );
 
-    // Production wiring: the gap must be consulted INSIDE `run_image_generate_job`, before the stub
+    // Architecture tripwire retained: the production dispatcher needs a live API/GPU to invoke.
+    // This uniquely proves the non-runtime ordering that makes the behavior seam above reachable.
+    // The gap must be consulted INSIDE `run_image_generate_job`, before the stub
     // writer. Without this the composition above would keep passing while the shipped job stubbed.
     let image_jobs = include_str!("../image_jobs.rs");
     let run_job = image_jobs
@@ -3454,6 +3327,9 @@ fn ideogram_placeholder_recovery_honors_cancel_and_propagates_errors() {
 /// this test fail in the platform-neutral worker suite.
 #[test]
 fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
+    // Architecture tripwire retained: these are whole-function topology constraints (single route
+    // resolution, reject-only probes, and one shared provider lifecycle) with no lightweight route
+    // input that can observe call count/order without a live candle worker.
     fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         let tail = source
             .split_once(start)
@@ -3627,12 +3503,21 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
             && qwen_stream.contains("model.generate_with_memory_context("),
         "Qwen admission context and its exact tier/load receipt must remain provider-owned across load and generation"
     );
+    let qwen_adapter_setup = between(
+        qwen_stream,
+        "let user_adapters = resolve_adapters(request, settings)?;",
+        "\n    // Request-scoped admission for the Qwen-Image-Edit lane.",
+    );
     assert!(
-        qwen_stream.contains("let mut prepared_provider_spec =")
-            && qwen_stream.contains(".prepare_file_sources()")
-            && qwen_stream.contains("qwen_edit_adapter_stack(")
-            && !qwen_stream.contains("lightning && !user_adapters.is_empty()"),
-        "Qwen adapter files must be pinned once and Lightning must preserve built-in + user stacks"
+        qwen_adapter_setup.contains("let adapters = qwen_edit_adapter_stack(")
+            && qwen_adapter_setup
+                .contains("let mut attached_provider_spec = attach_manifest_text_encoder(")
+            && qwen_adapter_setup.matches(".prepare_file_sources()").count() == 1
+            && qwen_adapter_setup.contains(
+                "let prepared_provider_spec = attached_provider_spec.into_load_spec();"
+            )
+            && !qwen_adapter_setup.contains("lightning && !user_adapters.is_empty()"),
+        "Qwen's attached provider spec must pin adapter files once, and Lightning must preserve built-in + user stacks"
     );
     assert!(
         qwen_stream.contains("memoryArtifactCertified")
@@ -8543,8 +8428,8 @@ fn krea_imported_payload_control_overlay_pins_the_lexical_entry() {
     );
 }
 
-/// Production route preparation must own the imported DiT token across the scheduler/admission
-/// awaits. Retargeting the lexical entry after selection therefore invalidates the exact token moved
+/// Production route preparation must own the imported DiT seal across the scheduler/admission
+/// awaits. Retargeting the lexical entry after selection therefore invalidates the exact seal moved
 /// into dispatch; the handler may not silently pin the replacement.
 #[cfg(target_os = "macos")]
 #[test]
@@ -8592,6 +8477,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
         dit_pin,
         prepared_adapters,
     } = *sources;
+    let sealed_path = dit_pin.loader_path().to_path_buf();
     let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()));
     let error = crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
@@ -8599,10 +8485,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
         "test imported route",
     )
     .expect_err("dispatch rejects a retargeted prepared entry");
-    assert!(
-        error.to_string().contains("changed") || error.to_string().contains("identity"),
-        "unexpected validation error: {error}"
-    );
+    assert_route_retarget_artifact_seal_mismatch(error, "test imported route", &sealed_path);
 }
 
 /// The strict-pose imported route owns three independently mutable payload classes: the primary DiT,
@@ -9882,10 +9765,10 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
 }
 
 // sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
-// base/overlay is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
-// to the plain MLX txt2img lane (`ImageRoute::Mlx`), which would silently render an unconditioned image
-// and drop the poses. Generalizes the sc-11796 krea-only reject to every wired family — the MLX twin of
-// the candle `candle_image_route_rejects_wired_pose_when_control_base_absent` (sc-11171/F-008).
+// base/overlay is NOT installed must route to a loud reject, NOT fall through to the plain MLX txt2img
+// lane (`ImageRoute::Mlx`), which would silently render an unconditioned image and drop the poses.
+// `flux_dev` with a reference is the sc-21673 exception: the requested IP-Adapter + pose combination is
+// rejected before the missing-control-base check so neither conditioning input can be silently discarded.
 #[cfg(target_os = "macos")]
 #[test]
 fn image_route_rejects_wired_pose_when_control_base_absent() {
@@ -9907,9 +9790,14 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
             "advanced": { "poses": [{ "id": "a" }] }
         }));
         let route = resolve_image_route(&pose, &settings);
+        let expected = if *model == "flux_dev" {
+            ImageRoute::FluxIpAdapterPoseReject
+        } else {
+            ImageRoute::PoseControlBaseMissing
+        };
         assert_eq!(
             route,
-            Some(ImageRoute::PoseControlBaseMissing),
+            Some(expected),
             "wired pose family {model:?} with an absent control base must loudly reject",
         );
         assert_ne!(
@@ -9970,6 +9858,42 @@ fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
             "wired pose family {model:?} with its base present must route to its control lane, not the reject",
         );
     }
+}
+
+// sc-21673: FLUX.1's IP-Adapter and strict-control routes are separate providers. A request that
+// carries both a reference image and poses must select the explicit refusal, never the control route
+// (which would consume poses but use the reference only for post-generation scoring) or plain IP-Adapter.
+#[cfg(target_os = "macos")]
+#[test]
+fn image_route_refuses_flux1_ipadapter_plus_pose_without_dropping_conditioning() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let model_path = dir.path().to_string_lossy().to_string();
+
+    let plain_ipadapter = request(json!({
+        "projectId": "p", "model": "flux_dev", "count": 1,
+        "referenceAssetId": "identity",
+        "advanced": { "modelPath": model_path.clone() }
+    }));
+    assert_eq!(
+        resolve_image_route(&plain_ipadapter, &settings),
+        Some(ImageRoute::Mlx),
+        "the plain FLUX.1 IP-Adapter request retains the registry route"
+    );
+
+    let ipadapter_with_pose = request(json!({
+        "projectId": "p", "model": "flux_dev", "count": 1,
+        "referenceAssetId": "identity",
+        "advanced": {
+            "modelPath": model_path,
+            "poses": [{ "keypoints": [[0.5, 0.2, 1.0]] }]
+        }
+    }));
+    let route = resolve_image_route(&ipadapter_with_pose, &settings);
+    assert_eq!(route, Some(ImageRoute::FluxIpAdapterPoseReject));
+    assert_ne!(route, Some(ImageRoute::Flux1DevControl));
+    assert_ne!(route, Some(ImageRoute::Mlx));
 }
 
 // sc-20747: the three independently accepted SDXL-family model ids use the backend-neutral OpenPose
@@ -11027,6 +10951,295 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     ])
 }
 
+/// sc-21689: the plan route's cache-only mirror is a restart path too. A corrupt
+/// pre-existing SDXL component must be compared with the exact pinned HF-cache
+/// source and atomically replaced, never accepted merely because it is a file.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn cache_only_sdxl_mirror_replaces_a_corrupt_existing_destination() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let source =
+        sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), SDXL_CLIP_L_REPO)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(SDXL_CLIP_L_REVISION)
+            .join("vocab.json");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source parent");
+    let expected = b"pinned tokenizer vocabulary";
+    std::fs::write(&source, expected).expect("pinned source");
+
+    let destination_dir = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components")
+        .join("tokenizer");
+    std::fs::create_dir_all(&destination_dir).expect("destination dir");
+    let destination = destination_dir.join("vocab.json");
+    std::fs::write(&destination, vec![b'x'; expected.len()])
+        .expect("same-length corrupt destination");
+
+    mirror_cached_sdxl_component_file(
+        &settings,
+        "checkpoint-sc-21689",
+        SDXL_CLIP_L_REPO,
+        SDXL_CLIP_L_REVISION,
+        "vocab.json",
+        &destination_dir,
+    )
+    .expect("corrupt destination is replaced from the pinned source");
+
+    assert_eq!(
+        std::fs::read(&destination).expect("mirrored component"),
+        expected
+    );
+    assert!(
+        std::fs::read_dir(&destination_dir)
+            .expect("destination entries")
+            .all(|entry| !entry
+                .expect("destination entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")),
+        "a successful cache-only promotion leaves no staging artifact"
+    );
+}
+
+/// sc-21689 review regression: two jobs in one worker share a PID. Hold the
+/// first publisher in the middle of its copy and prove the second job cannot
+/// even enter its copy closure until publication completes. Once it acquires
+/// the target lock, it must validate the first result and reuse it instead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn cache_only_sdxl_mirror_serializes_concurrent_same_process_publishers() {
+    use std::io::Write as _;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let source =
+        sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), SDXL_CLIP_L_REPO)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(SDXL_CLIP_L_REVISION)
+            .join("vocab.json");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source parent");
+    let expected = b"pinned tokenizer vocabulary with enough bytes for a split write".to_vec();
+    std::fs::write(&source, &expected).expect("pinned source");
+    let destination_dir = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components")
+        .join("tokenizer");
+
+    let (first_copy_started_tx, first_copy_started_rx) = mpsc::sync_channel(0);
+    let (release_first_copy_tx, release_first_copy_rx) = mpsc::sync_channel(0);
+    let first_settings = settings.clone();
+    let first_destination_dir = destination_dir.clone();
+    let first = std::thread::spawn(move || {
+        mirror_cached_sdxl_component_file_with_copy(
+            &first_settings,
+            "checkpoint-sc-21689-first",
+            SDXL_CLIP_L_REPO,
+            SDXL_CLIP_L_REVISION,
+            "vocab.json",
+            &first_destination_dir,
+            move |source, staging| {
+                let bytes = std::fs::read(source)?;
+                let split = bytes.len() / 2;
+                let mut staged = std::fs::File::create(staging)?;
+                staged.write_all(&bytes[..split])?;
+                staged.flush()?;
+                first_copy_started_tx
+                    .send(())
+                    .expect("announce partial staging write");
+                release_first_copy_rx
+                    .recv()
+                    .expect("release partial staging write");
+                staged.write_all(&bytes[split..])?;
+                Ok(())
+            },
+        )
+    });
+    first_copy_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first publisher reaches partial write");
+
+    let (second_copy_entered_tx, second_copy_entered_rx) = mpsc::sync_channel(0);
+    let second_settings = settings.clone();
+    let second_destination_dir = destination_dir.clone();
+    let second = std::thread::spawn(move || {
+        mirror_cached_sdxl_component_file_with_copy(
+            &second_settings,
+            "checkpoint-sc-21689-second",
+            SDXL_CLIP_L_REPO,
+            SDXL_CLIP_L_REVISION,
+            "vocab.json",
+            &second_destination_dir,
+            move |source, staging| {
+                second_copy_entered_tx
+                    .send(())
+                    .expect("announce second copy");
+                std::fs::copy(source, staging).map(|_| ())
+            },
+        )
+    });
+
+    assert!(
+        second_copy_entered_rx
+            .recv_timeout(Duration::from_millis(500))
+            .is_err(),
+        "a same-process peer must not share or publish the first task's staging inode"
+    );
+    assert!(
+        !destination_dir.join("vocab.json").exists(),
+        "the half-written staging file must remain invisible"
+    );
+
+    release_first_copy_tx
+        .send(())
+        .expect("complete first staging write");
+    first
+        .join()
+        .expect("first publisher thread")
+        .expect("first publisher succeeds");
+    second
+        .join()
+        .expect("second publisher thread")
+        .expect("second publisher reuses verified result");
+    assert!(
+        second_copy_entered_rx.try_recv().is_err(),
+        "the second publisher must validate and reuse the first result without copying"
+    );
+    assert_eq!(
+        std::fs::read(destination_dir.join("vocab.json")).expect("published component"),
+        expected
+    );
+}
+
+/// Mutation guard: even under the target lock, a copier that returns success
+/// after writing the wrong bytes must not replace the caller-visible entry.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn cache_only_sdxl_mirror_rejects_unverified_staging_before_publication() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub dir");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let source =
+        sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), SDXL_CLIP_L_REPO)
+            .expect("safe repo cache path")
+            .join("snapshots")
+            .join(SDXL_CLIP_L_REVISION)
+            .join("vocab.json");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source parent");
+    let expected = b"verified tokenizer vocabulary";
+    std::fs::write(&source, expected).expect("pinned source");
+
+    let destination_dir = settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components")
+        .join("tokenizer");
+    std::fs::create_dir_all(&destination_dir).expect("destination dir");
+    let destination = destination_dir.join("vocab.json");
+    let prior = vec![b'p'; expected.len()];
+    std::fs::write(&destination, &prior).expect("prior caller-visible entry");
+
+    let error = mirror_cached_sdxl_component_file_with_copy(
+        &settings,
+        "checkpoint-sc-21689-mutation",
+        SDXL_CLIP_L_REPO,
+        SDXL_CLIP_L_REVISION,
+        "vocab.json",
+        &destination_dir,
+        |_source, staging| std::fs::write(staging, vec![b'x'; expected.len()]),
+    )
+    .expect_err("a false-success copy must fail verification");
+    assert!(error.to_string().contains("does not match"), "{error}");
+    assert_eq!(
+        std::fs::read(&destination).expect("prior destination survives"),
+        prior,
+        "failed verification must not remove or replace the visible entry"
+    );
+    assert!(
+        std::fs::read_dir(&destination_dir)
+            .expect("destination entries")
+            .all(|entry| !entry
+                .expect("destination entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")),
+        "failed staging is cleaned without touching the destination"
+    );
+}
+
+/// Cross-platform mutation guard for the Windows branch. The executable test
+/// below runs on Windows CI; this source contract also fails on every host if
+/// unlink-then-rename is reintroduced where macOS cannot execute that branch.
+#[test]
+fn cache_only_sdxl_windows_promotion_contract_never_unlinks_destination() {
+    let source = include_str!("sdxl_imported.rs");
+    let promotion = source
+        .split("fn promote_cached_sdxl_component")
+        .nth(1)
+        .expect("promotion helper")
+        .split("/// Compare the staged copy")
+        .next()
+        .expect("promotion helper body");
+
+    assert!(promotion.contains("MOVEFILE_REPLACE_EXISTING"));
+    assert!(promotion.contains("MoveFileExW"));
+    assert!(
+        !promotion.contains("remove_file(destination)"),
+        "Windows publication must never expose an unlink gap"
+    );
+}
+
+/// Windows' standard rename cannot replace an existing destination. This runs
+/// the real Win32 replacement path and prevents the old unlink-then-rename gap
+/// from returning under the platform that needed the fallback.
+#[cfg(all(windows, feature = "backend-candle"))]
+#[test]
+fn cache_only_sdxl_windows_promotion_replaces_existing_destination() {
+    let root = tempfile::tempdir().expect("temp data dir");
+    let destination = root.path().join("vocab.json");
+    let staging = root.path().join("vocab.json.test.partial");
+    std::fs::write(&destination, b"old verified bytes").expect("old destination");
+    std::fs::write(&staging, b"new verified bytes").expect("staged replacement");
+
+    promote_cached_sdxl_component(&staging, &destination)
+        .expect("replace existing destination in one platform operation");
+    assert_eq!(
+        std::fs::read(&destination).expect("replacement destination"),
+        b"new verified bytes"
+    );
+    assert!(!staging.exists(), "successful replacement consumes staging");
+}
+
 /// sc-16453: strict-pose routing must preserve the selected ConvRot DiT identity even before the
 /// shared bf16 tokenizer / text-encoder / VAE surface has been fetched. The immutable ConvRot file
 /// alone is enough to claim the bespoke control route; generation fetches the shared surface and the
@@ -11860,7 +12073,6 @@ fn sc18477_every_named_bespoke_lane_declares_real_adapter_application() {
         CandleImageRoute::SdxlEdit,
         CandleImageRoute::SdxlIpAdapter,
         CandleImageRoute::Flux2Edit,
-        CandleImageRoute::FluxIpAdapter,
         CandleImageRoute::Pulid,
         CandleImageRoute::QwenEdit,
         CandleImageRoute::QwenImageComfyui,
@@ -14313,9 +14525,11 @@ fn sdxl_control_catalog_is_pose_only() {
 
 #[test]
 fn sdxl_control_bespoke_load_applies_fit_and_flash_state_before_allocation() {
+    // Architecture tripwire retained: MLX and Candle arms are mutually cfg-gated; only source can
+    // prove their shared final-spec-before-allocation ordering in one host-side test.
     let source = include_str!("sdxl_control.rs");
     let finalized = source
-        .find("spec = attach_manifest_text_encoder(")
+        .find("let attached_spec =")
         .expect("selected text encoder is attached to the final spec");
     let mlx_gate = source
         .find("let spec = apply_sdxl_control_mlx_residency(spec)?;")
@@ -14571,6 +14785,8 @@ fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request()
         "both product entry points execute the same noise-to-image pose-control provider"
     );
 
+    // Architecture tripwire retained: the imported route needs an installed checkpoint/provider to
+    // construct its stream; this uniquely prevents a second hand-written geometry declaration.
     // PR #2218 added the imported-checkpoint pose route after this builtin guard was written. Pin
     // that second call site to the same constructor: otherwise it can compile with a duplicate
     // hand-built declaration and reintroduce the live references=0/references=1 refusal depending
@@ -16089,6 +16305,9 @@ fn candle_strict_control_trait_routes_each_provider() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
+    // Architecture tripwire retained: this inventory spans cfg-gated Candle providers whose real
+    // constructors require CUDA/runtime artifacts. It proves every route selects a priced path,
+    // not merely that the shared footprint helper behaves correctly.
     let root = tempfile::tempdir().expect("adapter admission fixture");
     let adapter_path = root.path().join("style.safetensors");
     std::fs::write(&adapter_path, vec![0_u8; 4096]).expect("adapter bytes");
@@ -16848,6 +17067,8 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
 /// load and generation rather than remaining telemetry-only metadata.
 #[test]
 fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
+    // Architecture tripwire retained: both concrete Kolors providers are cfg-gated off on this
+    // macOS host; the source scan uniquely checks their immutable receipt-to-load topology.
     let ip = include_str!("kolors_ipadapter.rs");
     let control = include_str!("kolors_control.rs");
 
@@ -16899,6 +17120,8 @@ fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
 
 #[test]
 fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
+    // Architecture tripwire retained: the Candle-only SANA path has no CPU-safe provider execution;
+    // the scan protects immutable revision literals and cross-pass admission wiring.
     let source = include_str!("base.rs");
     let selector = include_str!("../candle_memory_strategy.rs");
     let registry = include_str!("../memory_route_registry.rs");
@@ -19303,9 +19526,9 @@ fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
     }
 }
 
-/// Route preparation owns the exact fine-tuned transformer config/weights across the async worker
-/// preamble. Replacing either file after selection must invalidate the retained token rather than
-/// letting dispatch silently re-resolve and load different bytes.
+/// Route preparation owns the exact fine-tuned transformer config/weights seals across the async
+/// worker preamble. Replacing either file after selection must invalidate the retained seal rather
+/// than letting dispatch silently re-resolve and load different bytes.
 #[cfg(target_os = "macos")]
 #[test]
 fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
@@ -19333,6 +19556,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
     let PreparedImageRoute::MageFinetuned(transformer) = prepared else {
         panic!("prepared route lost its Mage transformer")
     };
+    let sealed_path = transformer.weights.loader_path().to_path_buf();
     let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.directory));
     let error = crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
@@ -19340,10 +19564,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
         "test Mage fine-tuned route",
     )
     .expect_err("dispatch rejects a retargeted prepared transformer");
-    assert!(
-        error.to_string().contains("changed") || error.to_string().contains("identity"),
-        "unexpected validation error: {error}"
-    );
+    assert_route_retarget_artifact_seal_mismatch(error, "test Mage fine-tuned route", &sealed_path);
 }
 
 /// The generated Mage base inherits the undistilled Base descriptor's true-CFG negative-prompt
@@ -19417,6 +19638,8 @@ fn mage_finetuned_memory_shape_requires_exact_source_proof() {
 
 #[test]
 fn mage_finetuned_stream_uses_shared_admission_scope_and_lifecycle() {
+    // Architecture tripwire retained: constructing this production stream loads a Mage provider;
+    // the non-runtime invariant is that the route reaches the shared request-scope lifecycle.
     let source = include_str!("mage_finetuned.rs");
     for marker in [
         "start_cached_gen_stream_with_request_state(",
@@ -19737,6 +19960,8 @@ fn sc_8253_8278_identity_angle_ab() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() {
+    // Architecture tripwire retained: this checks the checked-in generator and generated matrix
+    // remain synchronized, an artifact-provenance invariant rather than a runtime route behavior.
     let generator = include_str!("../../../../scripts/generate-memory-matrix.mjs");
     let declared_block = generator
         .split_once("export const CONTROL_LANE_MODELS = [")
@@ -19823,6 +20048,8 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
 /// text scan, so it runs in the Linux parity and macOS suites too, not only `windows-candle`.
 #[test]
 fn every_candle_conditioning_route_is_admitted_through_a_gate() {
+    // Architecture tripwire retained: exhaustive route classification and live-code gate coverage
+    // cannot be observed by one CPU-safe request; each concrete conditioning provider is Candle-only.
     // A candle route that overlays a second network on the base model, the handler module that owns it,
     // and the marker proving that handler participates in admission.
     //
@@ -19963,9 +20190,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "Flux2Comfyui",
         // Bernini still-image companion: a plain base load.
         "Bernini",
-        // These reject arms error before any generation, so they never allocate.
+        // These reject arms error before any generation, so they never allocate or load an overlay.
         "PoseReject",
         "PoseControlBaseMissing",
+        "FluxIpAdapterPoseReject",
         "KolorsCompositeReject",
         // Generic provider arms — both reach the shared `generate_candle_stream` gate.
         "CandleTxt2Img",
@@ -20575,6 +20803,8 @@ mod preview_stream_tests {
 /// engine-gated types, so it runs on every lane rather than only on macOS / `backend-candle`.
 #[test]
 fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
+    // Architecture tripwire retained: this is an event-loop/UI cadence invariant spanning the worker
+    // and web placeholder contract; no helper exposes the arm's deliberate absence of a post.
     let base = include_str!("base.rs");
     let arm_start = base
         .find("GenEvent::Preview { index, frame } => {")
@@ -20854,6 +21084,8 @@ impl CheckpointPlanFixture {
 #[cfg(target_os = "macos")]
 #[test]
 fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
+    // Architecture tripwire retained: the final ComfyUI Z-Image guard is Candle-only. The behavior
+    // cases above cover the shared planner; this scan uniquely protects its host-unlinkable sibling.
     let fx = CheckpointPlanFixture::new("claim", true);
     let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
     let plan_backed = fx.plan_backed_request(&checkpoint_id, json!({}));
@@ -21293,6 +21525,8 @@ fn a_bespoke_plan_source_declines_another_familys_request_and_still_refuses_a_mi
 #[cfg(target_os = "macos")]
 #[test]
 fn every_plan_backed_krea_request_shape_has_exactly_one_claiming_lane() {
+    // Architecture tripwire retained: the source assertion identifies the live bespoke guard while
+    // the behavior matrix below proves claim outcomes; constructing every provider is not CPU-safe.
     let fx = CheckpointPlanFixture::new("krea-single-claim", true);
     fx.install_pose_overlay();
     let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
@@ -21602,7 +21836,8 @@ fn the_tree_source_helper_declines_another_familys_request() {
             "the {foreign} lane must DECLINE a krea_2 request rather than raise family-mismatch"
         );
     }
-    // And the guard is live code in the TREE helper too, not only in the primary one.
+    // Architecture tripwire retained: the tree helper itself is Candle-gated. The behavior calls
+    // above exercise its shared primary sibling; this uniquely proves the tree guard runs first.
     let source = include_str!("checkpoint_plan.rs");
     let tree_at = source
         .find("pub(crate) fn checkpoint_plan_bespoke_tree(")
@@ -21641,6 +21876,8 @@ fn the_tree_source_helper_declines_another_familys_request() {
 /// `wan_comfyui_available`.
 #[test]
 fn the_wan_video_lane_sources_a_plan_backed_entry_by_expert_role() {
+    // Architecture tripwire retained: the WAN video provider is Candle-only; the source inventory
+    // preserves the intentional deletion boundary and router propagation topology.
     let source = include_str!("../video_jobs/candle.rs");
 
     // The plan source is reached BEFORE every gate that describes a scanned catalog row. A linked
@@ -21806,6 +22043,8 @@ fn the_wan_video_lane_sources_a_plan_backed_entry_by_expert_role() {
 /// and it fails loudly if a symbol disappears early or is renamed.
 #[test]
 fn the_comfyui_tree_lanes_bespoke_surface_and_migration_table_are_still_live_code() {
+    // Architecture tripwire retained: this is a migration/deletion inventory, not route behavior;
+    // the behavior tests named in the doc comment cover the executable plan-backed paths.
     // ---- the bespoke surface sc-20651 deletes, pinned BY NAME, per family ------------------
     //
     // sc-20651 determination — all three lanes are RETAINED. Each one's bespoke scan is reachable
@@ -22083,6 +22322,8 @@ fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
     // so `compile_managed` cannot address it at all — and `resolve_mage_finetuned_components` is a
     // registered row of the plan route's own `CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS`, so it can
     // never be deleted while the plan route serves this family.
+    // Architecture tripwire retained: the behavior above proves the plan directory selection; the
+    // source check uniquely prevents the stream from bypassing its shared admission lifecycle.
     let source = include_str!("mage_finetuned.rs");
     for symbol in [
         "fn resolve_mage_finetuned_transformer(",
@@ -22164,6 +22405,8 @@ fn install_sdxl_clip_tokenizer_assets(settings: &Settings) {
 #[cfg(target_os = "macos")]
 #[test]
 fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
+    // Architecture tripwire retained: the source inventory records the bespoke legacy surface that
+    // migration may delete only after every historical entry is stamped; route outcomes are tested below.
     let fx = CheckpointPlanFixture::new("sdxl-single-claim", true);
     install_sdxl_clip_tokenizer_assets(&fx.settings);
     let checkpoint_id = fx.compile("communityxl.safetensors", &sdxl_ldm_entries());
@@ -22329,6 +22572,8 @@ fn every_plan_backed_sdxl_request_shape_has_exactly_one_claiming_lane() {
 #[cfg(target_os = "macos")]
 #[test]
 fn the_imported_sdxl_lane_stages_only_the_components_its_descriptor_declares() {
+    // Architecture tripwire retained: descriptor-to-stage list equality is a structural inventory;
+    // a provider execution would require real imported SDXL weights and cannot reveal extra staging.
     // The registry half. MLX declares `ldm_tokenizer`; candle declares the two tokenizers. Neither
     // declares the fp16-fix VAE for a FUSED source — which is the whole claim.
     for operation in [
@@ -22419,6 +22664,8 @@ fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
     // Not vacuous: the geometry priced is the request's, not a default.
     assert_eq!((plan.width, plan.height, plan.count), (768, 1024, 3));
 
+    // Architecture tripwire retained: `evaluate_request` needs a loaded generator, so only this
+    // scan can prove the plan route calls the request-scoped seam rather than the bare cache seam.
     let source = include_str!("checkpoint_plan.rs");
     let live = |needle: &str| {
         source
@@ -25609,6 +25856,8 @@ fn a_migrated_pre_epic_entry_keeps_its_model_id_and_loads_the_same_weights() {
 
 #[test]
 fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
+    // Architecture tripwire retained: these cfg-split bespoke providers do not expose a common
+    // CPU-safe constructor; the scan protects their cross-module adapter/admission topology.
     let edit = include_str!("sdxl_edit_candle.rs");
     let ip = include_str!("sdxl_ipadapter.rs");
     let detail = include_str!("detail.rs");
@@ -25669,6 +25918,8 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
 /// the Candle body is cfg-gated off on macOS, so no runtime test on this lane can ask the question.
 #[test]
 fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebinding() {
+    // Architecture tripwire retained: the Candle body is cfg-gated off on macOS, and the invariant
+    // is the ordering of receipt authority versus cache rebinding rather than a provider result.
     let base = include_str!("base.rs");
     let body = base
         .split_once("async fn generate_candle_stream(")

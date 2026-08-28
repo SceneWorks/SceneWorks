@@ -1591,7 +1591,7 @@ fn validate_source_inputs_against_record(
         let exact_overlay_source = session
             .target
             .as_ref()
-            .map_or(true, |target| target.overlay == record.target.overlay)
+            .is_none_or(|target| target.overlay == record.target.overlay)
             && matches!(
                 claim,
                 SourceClaim::Quality | SourceClaim::Loadability | SourceClaim::Overlay
@@ -1781,7 +1781,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     let sole_case = record.sweep.cases.first();
     if !record.sweep.range_verified
         || record.sweep.cases.len() != 1
-        || sole_case.map_or(true, |case| {
+        || sole_case.is_none_or(|case| {
             case.result != SweepResult::Passed || case.parameters != record.strategy.parameters
         })
     {
@@ -1869,7 +1869,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
             .get(&name)
             .ok_or_else(|| format!("{} is missing scenario {name:?}", record.id))?;
         if scenario.result != ScenarioResult::NotRun
-            || scenario.reason.as_deref().map_or(true, str::is_empty)
+            || scenario.reason.as_deref().is_none_or(str::is_empty)
         {
             return Err(format!(
                 "{} scenario {name:?} must remain explicitly not_run",
@@ -1886,7 +1886,7 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
     }
     let overlay = scenarios[&ScenarioName::Overlay];
     if overlay.result != ScenarioResult::NotApplicable
-        || overlay.reason.as_deref().map_or(true, str::is_empty)
+        || overlay.reason.as_deref().is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} runtime-complete evidence must be base-only",
@@ -2174,7 +2174,7 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         && scenarios[&ScenarioName::Overlay]
             .reason
             .as_deref()
-            .map_or(true, str::is_empty)
+            .is_none_or(str::is_empty)
     {
         return Err(format!(
             "{} overlay not_applicable requires a reason",

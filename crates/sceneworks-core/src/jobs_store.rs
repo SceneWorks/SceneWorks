@@ -124,6 +124,26 @@ fn non_gpu_job_types_sql() -> &'static str {
     })
 }
 
+/// The only queued job types whose platform reachability is decided by the
+/// off-Mac Candle eligibility projection. Keep this shared SQL list with the
+/// reachability sweep's index and query so a new video type cannot silently
+/// fall outside either half.
+fn platform_reachability_video_job_types_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        [
+            "video_generate",
+            "person_replace",
+            "video_extend",
+            "video_bridge",
+        ]
+        .iter()
+        .map(|job_type| format!("'{job_type}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+    })
+}
+
 /// The active (non-terminal, non-queued) statuses as a quoted SQL list for
 /// `status in (...)` stale-sweep / claim-guard filters, derived once from
 /// [`ACTIVE_STATUSES`] — same anti-drift rationale as [`non_gpu_job_types_sql`]
@@ -343,6 +363,9 @@ pub struct JobsStore {
     /// not be able to turn a claim's JSON/snapshot work into an untestable timing
     /// assertion (sc-21620).
     last_claim_hydration: Mutex<ClaimHydrationStats>,
+    /// Deterministic evidence that the platform-reachability sweep only
+    /// hydrated rows its durable headers had already identified as candidates.
+    last_platform_reachability_sweep: Mutex<PlatformReachabilitySweepStats>,
 }
 
 /// Selection work performed by the most recent claim on this store.
@@ -356,6 +379,17 @@ pub struct ClaimHydrationStats {
     pub candidate_rows_scanned: usize,
     pub routing_snapshots_hydrated: usize,
     pub claimed_snapshot_hydrated: usize,
+}
+
+/// Work performed by the most recent platform-reachability sweep.
+///
+/// The sweep may hydrate an unreachable video row to retain its existing
+/// error grammar and event payload, but must never deserialize reachable or
+/// non-video queued rows merely because a worker polled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlatformReachabilitySweepStats {
+    pub candidate_rows_scanned: usize,
+    pub snapshots_hydrated: usize,
 }
 
 /// Version of the compact claim-routing projection persisted beside each job.
@@ -533,6 +567,7 @@ impl JobsStore {
             db_path: db_path.into(),
             lock: Mutex::new(None),
             last_claim_hydration: Mutex::new(ClaimHydrationStats::default()),
+            last_platform_reachability_sweep: Mutex::new(PlatformReachabilitySweepStats::default()),
         }
     }
 
@@ -544,6 +579,12 @@ impl JobsStore {
     /// [`Self::claim_next_job`] or [`Self::claim_next_job_routed`].
     pub fn last_claim_hydration(&self) -> ClaimHydrationStats {
         *self.last_claim_hydration.lock()
+    }
+
+    /// Return deterministic instrumentation for the most recent
+    /// [`Self::fail_platform_unreachable_jobs`] call.
+    pub fn last_platform_reachability_sweep(&self) -> PlatformReachabilitySweepStats {
+        *self.last_platform_reachability_sweep.lock()
     }
 
     pub fn initialize(&self) -> JobsStoreResult<()> {
@@ -647,6 +688,19 @@ impl JobsStore {
         ] {
             ensure_column(&transaction, "jobs", column, definition)?;
         }
+        // The reachability sweep runs before each claim. Restrict its lookup to
+        // the only rows whose durable headers can identify them as unreachable,
+        // rather than reading payload JSON from the entire queued table.
+        transaction.execute_batch(&format!(
+            "
+            create index if not exists idx_jobs_queued_platform_unreachable_video
+              on jobs(type, claim_facts_version, claim_candle_eligible)
+             where status = 'queued'
+               and type in ({})
+               and claim_candle_eligible = 0;
+            ",
+            platform_reachability_video_job_types_sql()
+        ))?;
         // sc-16260: why an `unhealthy` worker withdrew its capabilities — the host-side remedy,
         // so the Queue screen can explain a stalled queue instead of leaving an operator to read
         // container logs. Nullable and absent on every healthy worker.
@@ -2323,6 +2377,8 @@ impl JobsStore {
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
         // Cheap exit on the platform where this can never fire, before taking the write lock.
         if matches!(host_os, "macos" | "darwin") {
+            *self.last_platform_reachability_sweep.lock() =
+                PlatformReachabilitySweepStats::default();
             return Ok(Vec::new());
         }
         let mut guard = self.lock.lock();
@@ -2330,15 +2386,31 @@ impl JobsStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = now_unix_seconds();
 
-        let mut statement = transaction.prepare(
+        // Claim facts are written atomically with every supported enqueue and
+        // backfilled during initialize. On an off-Mac host, a current video
+        // row is unreachable exactly when its persisted Candle eligibility is
+        // false. Filter on those compact headers before hydrating a snapshot:
+        // an idle worker may poll behind an arbitrarily large queue, but that
+        // must not deserialize reachable or non-video payloads on each poll.
+        let mut statement = transaction.prepare(&format!(
             "
             select * from jobs
              where status = 'queued'
-             order by created_at asc
+               and type in ({video_types})
+               and claim_candle_eligible = 0
+               and claim_facts_version = ?1
+               and claim_payload_revision = payload_revision
+             order by created_at asc, rowid asc
             ",
-        )?;
-        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+            video_types = platform_reachability_video_job_types_sql(),
+        ))?;
+        let candidates =
+            collect_jobs(statement.query_map(params![CLAIM_ROUTING_FACTS_VERSION], row_to_job)?)?;
         drop(statement);
+        let sweep_stats = PlatformReachabilitySweepStats {
+            candidate_rows_scanned: candidates.len(),
+            snapshots_hydrated: candidates.len(),
+        };
 
         let now_text = format_unix_seconds(now);
         let mut failed_ids = Vec::new();
@@ -2365,6 +2437,7 @@ impl JobsStore {
         }
         let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
+        *self.last_platform_reachability_sweep.lock() = sweep_stats;
         Ok(failed)
     }
 

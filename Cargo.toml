@@ -26,7 +26,7 @@ default-members = [
 [workspace.package]
 version = "0.8.7"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.88"
 license-file = "LICENSE"
 
 # Shared logging backbone (observability foundations). `tracing` is the single
@@ -145,4 +145,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "624fed20c1969b851b60265e3b9dac951068c1f5" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "4ebc9daebbd23df633adfc8bfcedb9945ae8e1d9" }

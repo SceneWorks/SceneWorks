@@ -4416,6 +4416,54 @@ fn platform_sweep_never_touches_a_non_video_or_candle_served_job() {
     assert_eq!(failed[0].id, stranded.id);
 }
 
+/// A claim-time sweep must read payload JSON only for rows its durable routing
+/// headers have already proven unreachable. In particular, a large queued
+/// prefix of reachable video and non-video work cannot turn each worker poll
+/// into an unbounded payload-hydration pass.
+#[test]
+fn platform_sweep_hydrates_only_platform_unreachable_video_candidates() {
+    let store = store("platform-unreachable-bounded-hydration");
+    let mut survivors = Vec::new();
+    for index in 0..80 {
+        survivors.push(job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({ "model": "z_image_turbo", "prompt": format!("image {index}") }),
+        ));
+        survivors.push(job_of(
+            &store,
+            JobType::VideoGenerate,
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": format!("video {index}") }),
+        ));
+    }
+    let unreachable = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+    );
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "only the unreachable video row fails");
+    assert_eq!(failed[0].id, unreachable.id);
+    assert_eq!(
+        store.last_platform_reachability_sweep(),
+        sceneworks_core::jobs_store::PlatformReachabilitySweepStats {
+            candidate_rows_scanned: 1,
+            snapshots_hydrated: 1,
+        },
+        "reachable/non-video queued rows stay header-only regardless of prefix size"
+    );
+    for job in survivors {
+        assert_eq!(
+            store.get_job(&job.id).expect("loads").status,
+            JobStatus::Queued,
+            "reachable/non-video rows remain untouched"
+        );
+    }
+}
+
 /// The sweep fires **regardless of worker presence**, which is what separates it from
 /// `fail_stranded_candle_jobs` and is the reason that sweep could never have covered this case.
 ///
