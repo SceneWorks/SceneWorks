@@ -11197,11 +11197,11 @@ fn cache_only_sdxl_mirror_rejects_unverified_staging_before_publication() {
     );
 }
 
-/// Cross-platform mutation guard for the Windows branch. The executable test
+/// Cross-platform mutation guard for Windows publication. The executable test
 /// below runs on Windows CI; this source contract also fails on every host if
-/// unlink-then-rename is reintroduced where macOS cannot execute that branch.
+/// direct unsafe Win32 calls or unlink-then-rename are reintroduced.
 #[test]
-fn cache_only_sdxl_windows_promotion_contract_never_unlinks_destination() {
+fn cache_only_sdxl_windows_promotion_contract_is_safe_atomic_replace() {
     let source = include_str!("sdxl_imported.rs");
     let promotion = source
         .split("fn promote_cached_sdxl_component")
@@ -11211,8 +11211,16 @@ fn cache_only_sdxl_windows_promotion_contract_never_unlinks_destination() {
         .next()
         .expect("promotion helper body");
 
-    assert!(promotion.contains("MOVEFILE_REPLACE_EXISTING"));
-    assert!(promotion.contains("MoveFileExW"));
+    assert!(promotion.contains("TempPath::try_from_path(staging)"));
+    assert!(promotion.contains(".persist(destination)"));
+    assert!(
+        !source.contains("unsafe"),
+        "SDXL publication must stay within the worker's no-unsafe contract"
+    );
+    assert!(
+        !source.contains("MoveFileExW"),
+        "SDXL publication must use the safe tempfile platform API"
+    );
     assert!(
         !promotion.contains("remove_file(destination)"),
         "Windows publication must never expose an unlink gap"
@@ -11220,8 +11228,8 @@ fn cache_only_sdxl_windows_promotion_contract_never_unlinks_destination() {
 }
 
 /// Windows' standard rename cannot replace an existing destination. This runs
-/// the real Win32 replacement path and prevents the old unlink-then-rename gap
-/// from returning under the platform that needed the fallback.
+/// tempfile's safe platform replacement path and prevents the old
+/// unlink-then-rename gap from returning under the platform that needed it.
 #[cfg(all(windows, feature = "backend-candle"))]
 #[test]
 fn cache_only_sdxl_windows_promotion_replaces_existing_destination() {
