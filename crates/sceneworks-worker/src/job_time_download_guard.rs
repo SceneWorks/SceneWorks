@@ -287,6 +287,13 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "control-datasets",
         CacheRole::Scratch,
     ),
+    // Request-scoped verified training-input snapshots, deleted when the training job completes.
+    (
+        "worker",
+        "training_jobs.rs",
+        "training-inputs",
+        CacheRole::Scratch,
+    ),
     // ControlNet weights, one destination per family (sc-17628…sc-17631 migrate these).
     (
         "worker",

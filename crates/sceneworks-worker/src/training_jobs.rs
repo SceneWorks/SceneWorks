@@ -21,7 +21,12 @@
 //! unsupported combinations remain queued. There is no Python/torch training fallback.
 
 use super::*;
+use fs2::FileExt as _;
+use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
 
 // epic 3720 (sc-3724): the backend-neutral training contract types come from `gen_core`, which is
 // tensor-free and links on every target. The import is gated to the backends that actually run a
@@ -108,6 +113,10 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
         if !image_path.exists() {
             missing.push(image_path.display().to_string());
         }
+        // Resolve and validate the prepared-bundle contract here, but do not hash the source.
+        // `preflight_training_run` materializes each distinct bundle exactly once into a private
+        // verified snapshot and both dry-run validation and real training consume that snapshot.
+        resolve_prepared_bundle_contract(settings, &plan.dataset.root_path, &item.extra)?;
     }
     if !missing.is_empty() {
         let preview = missing
@@ -124,6 +133,567 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PreparedBundleKey {
+    source_path: PathBuf,
+    expected_size: u64,
+    expected_sha256: String,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedBundleContract {
+    key: PreparedBundleKey,
+}
+
+/// Resolve the source path and stored receipt without reading the bundle. The source is confined
+/// to the dataset root; the one content read happens later while copying into the private snapshot.
+fn resolve_prepared_bundle_contract(
+    settings: &Settings,
+    dataset_root: &str,
+    options: &ExtraFields,
+) -> WorkerResult<Option<PreparedBundleContract>> {
+    let Some(value) = options.get("ltxPreparedBundlePath") else {
+        return Ok(None);
+    };
+    let raw = value.as_str().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Training item ltxPreparedBundlePath must be a string.".to_owned(),
+        )
+    })?;
+    let source_path = resolve_dataset_item_path(
+        settings,
+        dataset_root,
+        raw,
+        "Training item ltxPreparedBundlePath",
+    )?;
+    if !source_path.is_file() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Training item ltxPreparedBundlePath must resolve to a regular safetensors file: {}.",
+            source_path.display()
+        )));
+    }
+    let expected_size = options
+        .get("ltxPreparedBundleSize")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Training item ltxPreparedBundleSize must be an unsigned integer.".to_owned(),
+            )
+        })?;
+    let expected_sha256 = options
+        .get("ltxPreparedBundleSha256")
+        .and_then(Value::as_str)
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Training item ltxPreparedBundleSha256 must be a lowercase SHA-256 digest."
+                    .to_owned(),
+            )
+        })?;
+    Ok(Some(PreparedBundleContract {
+        key: PreparedBundleKey {
+            source_path,
+            expected_size,
+            expected_sha256: expected_sha256.to_owned(),
+        },
+    }))
+}
+
+#[cfg(test)]
+type PreparedBundlePublishHook = dyn FnMut(&Path, &Path) -> std::io::Result<()> + Send + 'static;
+
+const PREPARED_BUNDLE_DIRECTORY_PREFIX: &str = "prepared-bundles-";
+const PREPARED_BUNDLE_OWNER_LOCK: &str = ".owner.lock";
+const PREPARED_BUNDLE_COORDINATOR_LOCK: &str = ".prepared-bundles.lock";
+
+/// Owns every verified prepared-bundle snapshot used by one preflight/run. Request paths point
+/// inside `directory`; keeping this guard alive therefore keeps the exact verified copies alive.
+#[derive(Default)]
+struct PreparedTrainingInputs {
+    directory: Option<tempfile::TempDir>,
+    ownership_lock: Option<std::fs::File>,
+    snapshots: BTreeMap<PreparedBundleKey, PathBuf>,
+    #[cfg(test)]
+    materialization_count: usize,
+    #[cfg(test)]
+    after_publish: Option<Box<PreparedBundlePublishHook>>,
+}
+
+impl std::fmt::Debug for PreparedTrainingInputs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedTrainingInputs")
+            .field(
+                "directory",
+                &self.directory.as_ref().map(tempfile::TempDir::path),
+            )
+            .field("ownership_lock", &self.ownership_lock.is_some())
+            .field("snapshots", &self.snapshots)
+            .finish_non_exhaustive()
+    }
+}
+
+fn owner_only_lock_file(path: &Path) -> WorkerResult<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path).map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not open training input snapshot lock {}: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    #[cfg(unix)]
+    file.set_permissions(
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not make training input snapshot lock owner-only {}: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    Ok(file)
+}
+
+fn enforce_owner_only_directory(path: &Path) -> WorkerResult<()> {
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        path,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not make training input snapshot directory owner-only {}: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Remove only crash leftovers that follow this module's naming/locking protocol. The caller holds
+/// the parent coordinator lock, so a new set cannot be observed between directory creation and owner
+/// lock acquisition. A contended owner lock identifies a live set and is always left alone.
+fn reclaim_abandoned_prepared_bundle_sets(parent: &Path) -> WorkerResult<()> {
+    let contended = fs2::lock_contended_error().raw_os_error();
+    for entry in std::fs::read_dir(parent).map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not inspect training input snapshot directory {}: {error}",
+                parent.display()
+            ),
+        ))
+    })? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(PREPARED_BUNDLE_DIRECTORY_PREFIX)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let lock = match owner_only_lock_file(&path.join(PREPARED_BUNDLE_OWNER_LOCK)) {
+            Ok(lock) => lock,
+            // The active owner may have completed and removed its set after `read_dir` returned
+            // this entry. That is a successful cleanup race, not a reclamation failure.
+            Err(WorkerError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        match lock.try_lock_exclusive() {
+            Ok(()) => {
+                // Windows will not remove a directory containing this open handle. Dropping the
+                // acquired stale-set lock before deletion is therefore part of the contract.
+                drop(lock);
+                std::fs::remove_dir_all(&path).map_err(|error| {
+                    WorkerError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "Could not reclaim abandoned training input snapshot {}: {error}",
+                            path.display()
+                        ),
+                    ))
+                })?;
+            }
+            Err(error) if error.raw_os_error() == contended => {}
+            Err(error) => {
+                return Err(WorkerError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "Could not lock training input snapshot {} for reclamation: {error}",
+                        path.display()
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_prepared_bundle_directory(
+    settings: &Settings,
+) -> WorkerResult<(tempfile::TempDir, std::fs::File)> {
+    let parent = settings.data_dir.join("cache").join("training-inputs");
+    std::fs::create_dir_all(&parent).map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not create training input snapshot directory {}: {error}",
+                parent.display()
+            ),
+        ))
+    })?;
+    enforce_owner_only_directory(&parent)?;
+
+    let coordinator = owner_only_lock_file(&parent.join(PREPARED_BUNDLE_COORDINATOR_LOCK))?;
+    coordinator.lock_exclusive().map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not coordinate training input snapshot creation under {}: {error}",
+                parent.display()
+            ),
+        ))
+    })?;
+    reclaim_abandoned_prepared_bundle_sets(&parent)?;
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(PREPARED_BUNDLE_DIRECTORY_PREFIX);
+    #[cfg(unix)]
+    builder
+        .permissions(<std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700));
+    let directory = builder.tempdir_in(&parent).map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not create private training input snapshot under {}: {error}",
+                parent.display()
+            ),
+        ))
+    })?;
+    let ownership_lock =
+        match owner_only_lock_file(&directory.path().join(PREPARED_BUNDLE_OWNER_LOCK)) {
+            Ok(lock) => lock,
+            Err(error) => {
+                return finish_prepared_input_operation(
+                    Err(error),
+                    PreparedTrainingInputs {
+                        directory: Some(directory),
+                        ..PreparedTrainingInputs::default()
+                    },
+                );
+            }
+        };
+    if let Err(error) = ownership_lock.try_lock_exclusive() {
+        let error = WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not claim training input snapshot {}: {error}",
+                directory.path().display()
+            ),
+        ));
+        return finish_prepared_input_operation(
+            Err(error),
+            PreparedTrainingInputs {
+                directory: Some(directory),
+                ownership_lock: Some(ownership_lock),
+                ..PreparedTrainingInputs::default()
+            },
+        );
+    }
+    drop(coordinator);
+    Ok((directory, ownership_lock))
+}
+
+impl PreparedTrainingInputs {
+    fn resolve_model_options(
+        &mut self,
+        settings: &Settings,
+        dataset_root: &str,
+        options: &ExtraFields,
+    ) -> WorkerResult<JsonObject> {
+        let mut resolved = options
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<JsonObject>();
+        let Some(contract) = resolve_prepared_bundle_contract(settings, dataset_root, options)?
+        else {
+            return Ok(resolved);
+        };
+        let snapshot_path = if let Some(path) = self.snapshots.get(&contract.key) {
+            path.clone()
+        } else {
+            let path = self.materialize(settings, &contract)?;
+            self.snapshots.insert(contract.key, path.clone());
+            path
+        };
+        resolved.insert(
+            "ltxPreparedBundlePath".to_owned(),
+            Value::String(snapshot_path.display().to_string()),
+        );
+        Ok(resolved)
+    }
+
+    fn materialize(
+        &mut self,
+        settings: &Settings,
+        contract: &PreparedBundleContract,
+    ) -> WorkerResult<PathBuf> {
+        if self.directory.is_none() {
+            let (directory, ownership_lock) = create_prepared_bundle_directory(settings)?;
+            self.directory = Some(directory);
+            self.ownership_lock = Some(ownership_lock);
+        }
+        let directory = self.directory.as_ref().expect("directory created above");
+        let ordinal = self.snapshots.len();
+        let staged = directory.path().join(format!("{ordinal:06}.partial"));
+        let final_path = directory.path().join(format!(
+            "{ordinal:06}-{}.safetensors",
+            contract.key.expected_sha256
+        ));
+        copy_and_verify_prepared_bundle(&contract.key, &staged)?;
+        std::fs::rename(&staged, &final_path).map_err(|error| {
+            WorkerError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "Could not atomically publish verified LTX prepared bundle {}: {error}",
+                    final_path.display()
+                ),
+            ))
+        })?;
+        #[cfg(test)]
+        {
+            self.materialization_count += 1;
+            if let Some(hook) = &mut self.after_publish {
+                hook(&contract.key.source_path, &final_path).map_err(|error| {
+                    WorkerError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!("Prepared-bundle publish test hook failed: {error}"),
+                    ))
+                })?;
+            }
+        }
+        Ok(final_path)
+    }
+
+    fn close(mut self) -> WorkerResult<()> {
+        let Some(directory) = self.directory.take() else {
+            return Ok(());
+        };
+        let path = directory.path().to_owned();
+        let coordinator = owner_only_lock_file(
+            &path
+                .parent()
+                .expect("tempdir_in always has its requested parent")
+                .join(PREPARED_BUNDLE_COORDINATOR_LOCK),
+        )
+        .and_then(|lock| {
+            lock.lock_exclusive().map_err(|error| {
+                WorkerError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "Could not coordinate training input snapshot cleanup for {}: {error}",
+                        path.display()
+                    ),
+                ))
+            })?;
+            Ok(lock)
+        });
+        // The request/trainer is dropped by the caller; release our own lock handle as well before
+        // attempting directory removal so Windows cannot reject deletion because of an open file.
+        drop(self.ownership_lock.take());
+        let removal = directory.close().map_err(|error| {
+            WorkerError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "Could not remove private training input snapshot {}: {error}",
+                    path.display()
+                ),
+            ))
+        });
+        match (coordinator, removal) {
+            (Ok(lock), Ok(())) => {
+                drop(lock);
+                Ok(())
+            }
+            (Ok(lock), Err(error)) => {
+                drop(lock);
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(removal)) => Err(training_error_with_prepared_cleanup(error, removal)),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_after_publish(
+        hook: impl FnMut(&Path, &Path) -> std::io::Result<()> + Send + 'static,
+    ) -> Self {
+        Self {
+            after_publish: Some(Box::new(hook)),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn root_path(&self) -> Option<&Path> {
+        self.directory.as_ref().map(tempfile::TempDir::path)
+    }
+}
+
+fn copy_and_verify_prepared_bundle(
+    key: &PreparedBundleKey,
+    staged_path: &Path,
+) -> WorkerResult<()> {
+    let mut source = std::fs::File::open(&key.source_path).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "Could not read LTX prepared bundle {}: {error}.",
+            key.source_path.display()
+        ))
+    })?;
+    if !source.metadata()?.is_file() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Training item ltxPreparedBundlePath must resolve to a regular safetensors file: {}.",
+            key.source_path.display()
+        )));
+    }
+    let mut snapshot_options = std::fs::OpenOptions::new();
+    snapshot_options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut snapshot_options, 0o600);
+    let mut snapshot = snapshot_options.open(staged_path).map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not create staged LTX prepared bundle {}: {error}",
+                staged_path.display()
+            ),
+        ))
+    })?;
+    let mut hash = Sha256::new();
+    let mut size = 0_u64;
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = source.read(&mut chunk).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Could not read LTX prepared bundle {}: {error}.",
+                key.source_path.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        size = size.checked_add(read as u64).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Training item LTX prepared bundle byte count overflowed: {}.",
+                key.source_path.display()
+            ))
+        })?;
+        if size > key.expected_size {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
+                key.source_path.display()
+            )));
+        }
+        snapshot.write_all(&chunk[..read]).map_err(|error| {
+            WorkerError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "Could not write staged LTX prepared bundle {}: {error}",
+                    staged_path.display()
+                ),
+            ))
+        })?;
+        hash.update(&chunk[..read]);
+    }
+    snapshot.sync_all().map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not sync staged LTX prepared bundle {}: {error}",
+                staged_path.display()
+            ),
+        ))
+    })?;
+    let actual_sha256 = format!("{:x}", hash.finalize());
+    if size != key.expected_size || actual_sha256 != key.expected_sha256 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Training item LTX prepared bundle failed its stored size/SHA-256 integrity check: {}.",
+            key.source_path.display()
+        )));
+    }
+    let metadata = snapshot.metadata()?;
+    if !metadata.is_file() || metadata.len() != size {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Verified LTX prepared bundle snapshot is not the expected regular file: {}.",
+            staged_path.display()
+        )));
+    }
+    drop(snapshot);
+    Ok(())
+}
+
+fn training_error_with_prepared_cleanup(error: WorkerError, cleanup: WorkerError) -> WorkerError {
+    let cleanup = cleanup.to_string();
+    tracing::error!(cleanup = %cleanup, "Training input snapshot cleanup failed");
+    let suffix =
+        |detail: String| format!("{detail} Training input snapshot cleanup also failed: {cleanup}");
+    match error {
+        WorkerError::Io(error) => {
+            WorkerError::Io(std::io::Error::new(error.kind(), suffix(error.to_string())))
+        }
+        WorkerError::Api {
+            status,
+            detail,
+            code,
+        } => WorkerError::Api {
+            status,
+            detail: suffix(detail),
+            code,
+        },
+        WorkerError::InvalidPayload(detail) => WorkerError::InvalidPayload(suffix(detail)),
+        WorkerError::ExternalLibraryUnavailable(detail) => {
+            WorkerError::ExternalLibraryUnavailable(suffix(detail))
+        }
+        WorkerError::Engine(detail) => WorkerError::Engine(suffix(detail)),
+        WorkerError::Canceled(detail) => WorkerError::Canceled(suffix(detail)),
+        // These wrapped errors cannot be rebuilt with additional context. Keep the primary typed
+        // error while the structured log above makes the cleanup failure independently observable.
+        other => other,
+    }
+}
+
+fn finish_prepared_input_operation<T>(
+    operation: WorkerResult<T>,
+    prepared_inputs: PreparedTrainingInputs,
+) -> WorkerResult<T> {
+    match (operation, prepared_inputs.close()) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => Err(training_error_with_prepared_cleanup(error, cleanup)),
+    }
+}
+
 /// A fully mapped, weights-free training request. Both dry-run and real execution obtain this from
 /// [`preflight_training_run`], so path resolution and plan-to-engine config mapping cannot drift.
 #[cfg(any(
@@ -134,6 +704,31 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
 struct PreparedTrainingRun {
     engine_id: &'static str,
     request: TrainingRequest,
+    prepared_inputs: PreparedTrainingInputs,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl PreparedTrainingRun {
+    /// Explicit dry-run cleanup so a Windows deletion failure is surfaced instead of being hidden
+    /// by `TempDir`'s best-effort `Drop` cleanup.
+    fn close(self) -> WorkerResult<()> {
+        self.finish(Ok(()))
+    }
+
+    /// Drop the typed request before snapshot cleanup, preserving a primary operation error if the
+    /// cleanup independently fails.
+    fn finish<T>(self, operation: WorkerResult<T>) -> WorkerResult<T> {
+        let Self {
+            request,
+            prepared_inputs,
+            ..
+        } = self;
+        drop(request);
+        finish_prepared_input_operation(operation, prepared_inputs)
+    }
 }
 
 /// Weights-free preflight shared by dry and real execution. It binds the serialized plan's exact
@@ -149,9 +744,20 @@ fn preflight_training_run(
 ) -> WorkerResult<PreparedTrainingRun> {
     validate_training_plan(settings, plan)?;
     let engine_id = validate_training_target_config(plan)?;
-    let request = training_request_from_plan(settings, plan)?;
-    validate_weights_free_training_request(plan, engine_id, &request)?;
-    Ok(PreparedTrainingRun { engine_id, request })
+    let mut prepared_inputs = PreparedTrainingInputs::default();
+    let request = match training_request_from_plan(settings, plan, &mut prepared_inputs) {
+        Ok(request) => request,
+        Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
+    };
+    if let Err(error) = validate_weights_free_training_request(plan, engine_id, &request) {
+        drop(request);
+        return finish_prepared_input_operation(Err(error), prepared_inputs);
+    }
+    Ok(PreparedTrainingRun {
+        engine_id,
+        request,
+        prepared_inputs,
+    })
 }
 
 /// The default neither-backend build never claims a native training job. Keep its plan validator
@@ -163,7 +769,21 @@ fn preflight_training_run(
 )))]
 fn preflight_training_run(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
     validate_training_plan(settings, plan)?;
-    validate_training_target_config(plan).map(|_| ())
+    validate_training_target_config(plan)?;
+    // This build cannot construct a typed engine request, but it still verifies each stored
+    // prepared-bundle receipt exactly once before accepting a dry-run plan.
+    let mut prepared_inputs = PreparedTrainingInputs::default();
+    let operation = (|| {
+        for item in &plan.dataset.items {
+            prepared_inputs.resolve_model_options(
+                settings,
+                &plan.dataset.root_path,
+                &item.extra,
+            )?;
+        }
+        Ok(())
+    })();
+    finish_prepared_input_operation(operation, prepared_inputs)
 }
 
 fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static str> {
@@ -253,6 +873,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
 fn training_request_from_plan(
     settings: &Settings,
     plan: &TrainingPlan,
+    prepared_inputs: &mut PreparedTrainingInputs,
 ) -> WorkerResult<TrainingRequest> {
     let items = plan
         .dataset
@@ -279,6 +900,11 @@ fn training_request_from_plan(
                         )
                     })
                     .transpose()?,
+                model_options: prepared_inputs.resolve_model_options(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.extra,
+                )?,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -473,6 +1099,15 @@ async fn run_training_dry_run(
         ),
     )
     .await?;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    preflight_training_run(settings, plan)?.close()?;
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
     preflight_training_run(settings, plan)?;
     let item_count = plan.dataset.items.len();
     update_job(
@@ -831,6 +1466,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         sample_every: advanced_u32(advanced, "sampleEvery", 0),
         sample_steps: advanced_u32(advanced, "sampleSteps", 20),
         sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
+        // Preserve family-specific options instead of collapsing them into the common scalar
+        // fields above. Native trainers parse only the keys they own and reject unsupported modes.
+        model_options: advanced.clone(),
         // Preserve submitted resume intent. Each backend either implements it or the shared
         // dry/real preflight rejects it before any model load.
         resume: advanced_bool(advanced, "resume", false),
@@ -1104,13 +1742,17 @@ pub(crate) async fn run_training_execution(
     )
     .await?;
 
-    let PreparedTrainingRun { engine_id, request } = preflight_training_run(settings, plan)?;
+    let prepared_run = preflight_training_run(settings, plan)?;
 
-    let weights_dir = resolve_app_managed_model_dir(
+    let weights_dir = match resolve_app_managed_model_dir(
         settings,
         &plan.target.base_model_path,
         "Training baseModelPath",
-    )?;
+    ) {
+        Ok(weights_dir) => weights_dir,
+        Err(error) => return prepared_run.finish(Err(error)),
+    };
+    let engine_id = prepared_run.engine_id;
 
     // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto the
     // trainer `LoadSpec` so a self-contained install trains without a separate gemma download (sc-9989).
@@ -1122,9 +1764,14 @@ pub(crate) async fn run_training_execution(
     // component id + repo), then moved into the closure and folded onto the trainer `LoadSpec`. Empty for
     // the self-contained macOS MLX SDXL trainer (its descriptor advertises none), so a no-op on macOS.
     let train_components =
-        resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
+        match resolve_trainer_components(engine_id, &plan.target.base_model, settings) {
+            Ok(components) => components,
+            Err(error) => return prepared_run.finish(Err(error)),
+        };
 
-    tokio::fs::create_dir_all(&request.output_dir).await?;
+    if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
+        return prepared_run.finish(Err(error.into()));
+    }
     // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
     // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
     // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped
@@ -1139,10 +1786,20 @@ pub(crate) async fn run_training_execution(
     // forces gradient checkpointing on for them (Z-Image and both Wan A14B variants) regardless of
     // the plan value.
     // On macOS this is the identity. See its doc comment for the why.
-    let sample_config = request.config.clone();
-    let total_steps = request.config.steps;
+    let sample_config = prepared_run.request.config.clone();
+    let total_steps = prepared_run.request.config.steps;
 
-    check_cancel(api, &job.id, "LoRA training canceled before it started.").await?;
+    if let Err(error) =
+        check_cancel(api, &job.id, "LoRA training canceled before it started.").await
+    {
+        return prepared_run.finish(Err(error));
+    }
+
+    let PreparedTrainingRun {
+        engine_id,
+        request,
+        prepared_inputs,
+    } = prepared_run;
 
     let cancel = request.cancel.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<TrainEvent>(64);
@@ -1176,29 +1833,36 @@ pub(crate) async fn run_training_execution(
             let spec = train_components
                 .into_iter()
                 .fold(spec, |spec, (id, source)| spec.with_component(id, source));
-            let mut trainer =
-                crate::inference_runtime::load_trainer(engine_id, &spec).map_err(|error| {
-                    WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+            let operation = (|| {
+                let mut trainer = crate::inference_runtime::load_trainer(engine_id, &spec)
+                    .map_err(|error| {
+                        WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+                    })?;
+                trainer.validate(&request).map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "{engine_id} trainer rejected the plan: {error}"
+                    ))
                 })?;
-            trainer.validate(&request).map_err(|error| {
-                WorkerError::InvalidPayload(format!(
-                    "{engine_id} trainer rejected the plan: {error}"
-                ))
-            })?;
-            // If the consumer loop has returned early (a POST failure / 409 dropped `rx`), the
-            // channel is closed. Detect that here and trip the engine cancel flag so the trainer
-            // bails at its next cooperative check instead of silently running to completion on a
-            // job nobody is listening to (sc-8804, F-003 — the swallowed-closed-channel leak). The
-            // `progress_cancel` clone is the same flag threaded into the `TrainingRequest`.
-            let progress_cancel = request.cancel.clone();
-            let mut on_progress = |progress: TrainingProgress| {
-                if tx.blocking_send(TrainEvent::Progress(progress)).is_err() {
-                    progress_cancel.cancel();
-                }
-            };
-            let output = trainer
-                .train(&request, &mut on_progress)
-                .map_err(|error| WorkerError::Engine(format!("training failed: {error}")))?;
+                // If the consumer loop has returned early (a POST failure / 409 dropped `rx`), the
+                // channel is closed. Detect that here and trip the engine cancel flag so the trainer
+                // bails at its next cooperative check instead of silently running to completion on a
+                // job nobody is listening to (sc-8804, F-003 — the swallowed-closed-channel leak). The
+                // `progress_cancel` clone is the same flag threaded into the `TrainingRequest`.
+                let progress_cancel = request.cancel.clone();
+                let mut on_progress = |progress: TrainingProgress| {
+                    if tx.blocking_send(TrainEvent::Progress(progress)).is_err() {
+                        progress_cancel.cancel();
+                    }
+                };
+                trainer
+                    .train(&request, &mut on_progress)
+                    .map_err(|error| WorkerError::Engine(format!("training failed: {error}")))
+            })();
+            // The operation closure owns and drops the trainer on success, validation failure,
+            // load failure, training failure, or cancellation. Drop the request next, then release
+            // the owner lock and remove the snapshot set explicitly on every one of those paths.
+            drop(request);
+            let output = finish_prepared_input_operation(operation, prepared_inputs)?;
             let _ = tx.blocking_send(TrainEvent::Done(output));
             Ok(())
         })
@@ -2050,6 +2714,327 @@ mod tests {
             gpu_memory_limit_bytes: 0,
             external_model_roots: Vec::new(),
         }
+    }
+
+    #[test]
+    fn ltx_prepared_bundle_path_is_resolved_under_the_dataset_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let dataset_root = data_dir.join("datasets").join("ds-1");
+        let prepared_dir = dataset_root.join("prepared");
+        std::fs::create_dir_all(&prepared_dir).expect("create prepared dir");
+        let bundle = prepared_dir.join("item-0001.safetensors");
+        std::fs::write(&bundle, b"stub").expect("write prepared bundle");
+        let mut options = ExtraFields::new();
+        options.insert(
+            "ltxPreparedBundlePath".to_owned(),
+            json!("prepared/item-0001.safetensors"),
+        );
+        options.insert("ltxPreparedBundleSize".to_owned(), json!(4));
+        options.insert(
+            "ltxPreparedBundleSha256".to_owned(),
+            json!(format!("{:x}", Sha256::digest(b"stub"))),
+        );
+        options.insert("workflowMetadata".to_owned(), json!({ "kind": "video" }));
+
+        let mut prepared_inputs = PreparedTrainingInputs::default();
+        let resolved = prepared_inputs
+            .resolve_model_options(&settings, &dataset_root.display().to_string(), &options)
+            .expect("resolve confined prepared bundle");
+        let canonical_bundle = bundle.canonicalize().expect("canonical prepared bundle");
+        let snapshot = PathBuf::from(
+            resolved
+                .get("ltxPreparedBundlePath")
+                .and_then(Value::as_str)
+                .expect("snapshot path"),
+        );
+        assert_ne!(
+            snapshot, canonical_bundle,
+            "the request must not retain the source path"
+        );
+        assert!(
+            snapshot.starts_with(prepared_inputs.root_path().expect("snapshot root")),
+            "snapshot must stay in the per-run private directory"
+        );
+        assert_eq!(std::fs::read(&snapshot).expect("read snapshot"), b"stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let snapshot_root = prepared_inputs.root_path().expect("snapshot root");
+            let snapshot_parent = snapshot_root.parent().expect("snapshot parent");
+            for (path, expected_mode) in [
+                (snapshot_parent, 0o700),
+                (snapshot_root, 0o700),
+                (&snapshot, 0o600),
+                (&snapshot_root.join(PREPARED_BUNDLE_OWNER_LOCK), 0o600),
+            ] {
+                let mode = std::fs::metadata(path)
+                    .expect("snapshot permissions")
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, expected_mode, "{} must be owner-only", path.display());
+            }
+        }
+        assert_eq!(
+            resolved.get("workflowMetadata"),
+            Some(&json!({ "kind": "video" })),
+            "non-path metadata must be forwarded losslessly"
+        );
+        let snapshot_root = prepared_inputs
+            .root_path()
+            .expect("snapshot root")
+            .to_owned();
+        drop(resolved);
+        prepared_inputs.close().expect("remove snapshot");
+        assert!(
+            !snapshot_root.exists(),
+            "snapshot guard must clean on close"
+        );
+
+        std::fs::write(&bundle, b"evil").expect("same-size tamper prepared bundle");
+        let error = PreparedTrainingInputs::default()
+            .resolve_model_options(&settings, &dataset_root.display().to_string(), &options)
+            .expect_err("tampered prepared bundle must be rejected");
+        assert!(
+            error.to_string().contains("integrity check"),
+            "got: {error}"
+        );
+        let snapshot_parent = data_dir.join("cache").join("training-inputs");
+        assert_eq!(
+            std::fs::read_dir(&snapshot_parent)
+                .expect("snapshot parent")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(PREPARED_BUNDLE_DIRECTORY_PREFIX)
+                })
+                .count(),
+            0,
+            "a failed integrity check must drop its partial private snapshot"
+        );
+        std::fs::write(&bundle, b"stub").expect("restore prepared bundle");
+
+        options.insert(
+            "ltxPreparedBundlePath".to_owned(),
+            json!("../../outside.safetensors"),
+        );
+        let error = PreparedTrainingInputs::default()
+            .resolve_model_options(&settings, &dataset_root.display().to_string(), &options)
+            .expect_err("prepared bundle traversal must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("must be inside an app-managed directory"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn prepared_bundle_reclamation_skips_active_set_and_removes_lockable_crash_leftover() {
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let settings = test_settings(data_dir.path());
+        let (active_directory, active_lock) =
+            create_prepared_bundle_directory(&settings).expect("create active snapshot set");
+        let active_path = active_directory.path().to_owned();
+        let parent = active_path.parent().expect("snapshot parent");
+
+        let stale_path = parent.join(format!("{PREPARED_BUNDLE_DIRECTORY_PREFIX}stale"));
+        std::fs::create_dir(&stale_path).expect("create stale snapshot set");
+        enforce_owner_only_directory(&stale_path).expect("secure stale set");
+        drop(
+            owner_only_lock_file(&stale_path.join(PREPARED_BUNDLE_OWNER_LOCK))
+                .expect("create stale owner lock"),
+        );
+        std::fs::write(stale_path.join("000000-dead.safetensors"), b"stale")
+            .expect("write stale snapshot");
+
+        let unrelated = parent.join("unrelated-cache-entry");
+        std::fs::create_dir(&unrelated).expect("create unrelated cache entry");
+
+        let (next_directory, next_lock) =
+            create_prepared_bundle_directory(&settings).expect("create next snapshot set");
+        assert!(active_path.is_dir(), "a contended active set must survive");
+        assert!(
+            !stale_path.exists(),
+            "a prefix-matched set with an acquirable lock must be reclaimed"
+        );
+        assert!(
+            unrelated.is_dir(),
+            "reclamation must not touch non-prefix cache entries"
+        );
+
+        PreparedTrainingInputs {
+            directory: Some(next_directory),
+            ownership_lock: Some(next_lock),
+            ..PreparedTrainingInputs::default()
+        }
+        .close()
+        .expect("close next set");
+        PreparedTrainingInputs {
+            directory: Some(active_directory),
+            ownership_lock: Some(active_lock),
+            ..PreparedTrainingInputs::default()
+        }
+        .close()
+        .expect("close active set");
+    }
+
+    #[test]
+    fn prepared_bundle_error_cleanup_removes_set_and_preserves_primary_error() {
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let settings = test_settings(data_dir.path());
+        let (directory, ownership_lock) =
+            create_prepared_bundle_directory(&settings).expect("create snapshot set");
+        let path = directory.path().to_owned();
+        let prepared_inputs = PreparedTrainingInputs {
+            directory: Some(directory),
+            ownership_lock: Some(ownership_lock),
+            ..PreparedTrainingInputs::default()
+        };
+        let error = finish_prepared_input_operation::<()>(
+            Err(WorkerError::Canceled("primary cancellation".to_owned())),
+            prepared_inputs,
+        )
+        .expect_err("the primary operation must remain failed");
+        assert!(
+            !path.exists(),
+            "the error path must explicitly remove its set"
+        );
+        assert!(
+            matches!(error, WorkerError::Canceled(ref detail) if detail == "primary cancellation"),
+            "successful cleanup must preserve the primary error unchanged: {error}"
+        );
+
+        let combined = training_error_with_prepared_cleanup(
+            WorkerError::Canceled("primary cancellation".to_owned()),
+            WorkerError::Io(std::io::Error::other("secondary cleanup failure")),
+        );
+        assert!(
+            matches!(combined, WorkerError::Canceled(ref detail)
+                if detail.contains("primary cancellation")
+                    && detail.contains("secondary cleanup failure")),
+            "cleanup detail must be surfaced without changing cancellation classification: {combined}"
+        );
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn prepared_bundle_snapshot_survives_same_size_source_swap_deduplicates_and_cleans() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let dataset_root = data_dir.join("datasets").join("ds-1");
+        let prepared_dir = dataset_root.join("prepared");
+        std::fs::create_dir_all(&prepared_dir).expect("create prepared dir");
+        let bundle = prepared_dir.join("shared.safetensors");
+        let replacement = prepared_dir.join("replacement.safetensors");
+        let original = vec![0x5a; 128 * 1024];
+        let swapped = vec![0xa5; original.len()];
+        std::fs::write(&bundle, &original).expect("write original");
+        std::fs::write(&replacement, &swapped).expect("stage same-size replacement");
+
+        let mut options = ExtraFields::new();
+        options.insert(
+            "ltxPreparedBundlePath".to_owned(),
+            json!("prepared/shared.safetensors"),
+        );
+        options.insert(
+            "ltxPreparedBundleSize".to_owned(),
+            json!(original.len() as u64),
+        );
+        options.insert(
+            "ltxPreparedBundleSha256".to_owned(),
+            json!(format!("{:x}", Sha256::digest(&original))),
+        );
+
+        let first_image = dataset_root.join("first.png");
+        let second_image = dataset_root.join("second.png");
+        std::fs::write(&first_image, b"png-1").expect("write first image");
+        std::fs::write(&second_image, b"png-2").expect("write second image");
+        let mut value = plan_json(
+            &data_dir,
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[
+                &first_image.display().to_string(),
+                &second_image.display().to_string(),
+            ],
+        );
+        for item in value["dataset"]["items"]
+            .as_array_mut()
+            .expect("plan items")
+        {
+            for (key, value) in &options {
+                item[key] = value.clone();
+            }
+        }
+        let plan = parse(value);
+
+        let expected_source = bundle.canonicalize().expect("canonical source");
+        let hook_source = expected_source.clone();
+        let mut prepared_inputs = PreparedTrainingInputs::with_after_publish({
+            let replacement = replacement.clone();
+            move |source, snapshot| {
+                assert_eq!(source, hook_source);
+                assert!(
+                    snapshot.is_file(),
+                    "snapshot must be published before the hook"
+                );
+                std::fs::rename(&replacement, source)
+            }
+        });
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
+            .expect("map request through verified snapshot");
+        assert_eq!(
+            std::fs::read(&bundle).expect("read swapped source"),
+            swapped,
+            "the original pathname must now name the replacement bytes"
+        );
+        let first_path = PathBuf::from(
+            request.items[0]
+                .model_options
+                .get("ltxPreparedBundlePath")
+                .and_then(Value::as_str)
+                .expect("first snapshot path"),
+        );
+        let second_path = PathBuf::from(
+            request.items[1]
+                .model_options
+                .get("ltxPreparedBundlePath")
+                .and_then(Value::as_str)
+                .expect("second snapshot path"),
+        );
+        assert_eq!(first_path, second_path, "shared bundles must deduplicate");
+        assert_eq!(prepared_inputs.materialization_count, 1);
+        // Model the inference validator and trainer reopening the request path independently.
+        assert_eq!(
+            std::fs::read(&first_path).expect("validation read"),
+            original
+        );
+        assert_eq!(
+            std::fs::read(&second_path).expect("training read"),
+            original
+        );
+
+        let snapshot_root = prepared_inputs
+            .root_path()
+            .expect("snapshot root")
+            .to_owned();
+        drop(request);
+        prepared_inputs.close().expect("remove snapshot set");
+        assert!(
+            !snapshot_root.exists(),
+            "snapshot set must be removed after use"
+        );
     }
 
     /// A complete resolved plan as the API serializes it, parameterized by the
@@ -3002,13 +3987,16 @@ mod tests {
     fn map_training_config_reads_advanced_and_passes_optimizer_verbatim() {
         let dir = tempfile::tempdir().expect("tempdir");
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
-        let plan = parse(plan_json(
+        let mut value = plan_json(
             dir.path(),
             "z_image_lora",
             "z_image_turbo",
             "lokr",
             &[&image.display().to_string()],
-        ));
+        );
+        value["config"]["advanced"]["ltxWorkflow"] = json!("t2v_lora");
+        value["config"]["advanced"]["ltxValidation"] = json!({ "frames": 89 });
+        let plan = parse(value);
         let cfg = map_training_config(&plan.config);
         assert_eq!(cfg.rank, 16);
         assert_eq!(cfg.alpha as u32, 32);
@@ -3029,6 +4017,16 @@ mod tests {
         );
         assert_eq!(cfg.timestep_bias, "high_noise");
         assert_eq!(cfg.trigger_word, None);
+        assert_eq!(
+            cfg.model_options.get("ltxWorkflow"),
+            Some(&json!("t2v_lora"))
+        );
+        assert_eq!(
+            cfg.model_options
+                .get("ltxValidation")
+                .and_then(|value| value.get("frames")),
+            Some(&json!(89))
+        );
     }
 
     /// sc-14056 / sc-14980 — the TRAINING seam must ask for the DENSE tier, by name.
@@ -3784,6 +4782,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            model_options: Default::default(),
             resume: false,
             control_type: None,
         };
@@ -3792,6 +4791,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -3895,6 +4895,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            model_options: Default::default(),
             resume: false,
             control_type: None,
         };
@@ -3903,6 +4904,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4009,6 +5011,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            model_options: Default::default(),
             resume: false,
             control_type: None,
         };
@@ -4017,6 +5020,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4161,6 +5165,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            model_options: Default::default(),
             resume: false,
             control_type: None,
         };
@@ -4169,6 +5174,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4352,6 +5358,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4591,6 +5598,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir,
