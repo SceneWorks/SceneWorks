@@ -201,9 +201,10 @@ pub(crate) async fn delete_lora(
         .into_iter()
         .find(|item| {
             item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
-                && query.scope.as_deref().map_or(true, |scope| {
-                    item.get("scope").and_then(Value::as_str) == Some(scope)
-                })
+                && query
+                    .scope
+                    .as_deref()
+                    .is_none_or(|scope| item.get("scope").and_then(Value::as_str) == Some(scope))
         })
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
@@ -358,9 +359,10 @@ pub(crate) async fn update_lora(
         .into_iter()
         .find(|item| {
             item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
-                && query.scope.as_deref().map_or(true, |scope| {
-                    item.get("scope").and_then(Value::as_str) == Some(scope)
-                })
+                && query
+                    .scope
+                    .as_deref()
+                    .is_none_or(|scope| item.get("scope").and_then(Value::as_str) == Some(scope))
         })
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
@@ -452,9 +454,10 @@ pub(crate) async fn lora_embedded_tags(
         .into_iter()
         .find(|item| {
             item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
-                && query.scope.as_deref().map_or(true, |scope| {
-                    item.get("scope").and_then(Value::as_str) == Some(scope)
-                })
+                && query
+                    .scope
+                    .as_deref()
+                    .is_none_or(|scope| item.get("scope").and_then(Value::as_str) == Some(scope))
         })
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,

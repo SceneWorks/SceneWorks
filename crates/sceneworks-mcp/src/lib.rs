@@ -117,7 +117,7 @@ pub(crate) fn forwarded_authority_is_allowed(authority: &str, allowed_hosts: &[S
                 } else {
                     (allowed.trim_matches(['[', ']']).to_ascii_lowercase(), None)
                 };
-            allowed_host == host && allowed_port.map_or(true, |allowed| port == Some(allowed))
+            allowed_host == host && allowed_port.is_none_or(|allowed| port == Some(allowed))
         })
 }
 

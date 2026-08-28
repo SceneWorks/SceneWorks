@@ -14,7 +14,7 @@
 //! — does not work in this crate, for three independent reasons:
 //!
 //! 1. [`crate::downloads`] is glob-imported at the crate root (`use downloads::*;`), so
-//!    `ensure_hf_cached_file`, `ensure_cached_file`, `ensure_cached_file_verified` and
+//!    `ensure_hf_cached_file`, `ensure_hf_cached_file_atomically`, `ensure_cached_file`, `ensure_cached_file_verified` and
 //!    [`crate::downloads::DownloadContext`] are in scope, unqualified, in **every** module. Any new
 //!    file can also spell them `crate::downloads::…`; several already do.
 //! 2. `DownloadContext` is a plain struct with public-in-crate fields and no privileged constructor.
@@ -611,10 +611,13 @@ const CACHE_ROOT_PRODUCERS: &[(&str, &str, &str)] = &[
 /// list plus [`NON_WEIGHT_FETCHERS`]. A fifth (or fifteenth) primitive therefore cannot appear in
 /// `downloads.rs` without a deliberate, reviewed decision about which of the two lists it belongs in.
 const DOWNLOAD_PRIMITIVES: &[&str] = &[
-    // The three helpers sc-17637 names, plus their whole-snapshot peers.
+    // The three helpers sc-17637 names, the atomic imported-component publication
+    // wrapper, plus their whole-snapshot peers.
     "ensure_cached_file",
     "ensure_cached_file_verified",
+    "ensure_cached_file_verified_atomically",
     "ensure_hf_cached_file",
+    "ensure_hf_cached_file_atomically",
     "download_snapshot_into_cache",
     // `download_snapshot_into_cache`'s inner half: fetches a whole HF snapshot into an arbitrary
     // caller-chosen directory. The two job-time Lightning-LoRA sites use the `_into_cache` wrapper,

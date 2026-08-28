@@ -150,7 +150,7 @@ impl ResolvedBundleMember {
             && self
                 .component_id
                 .as_deref()
-                .map_or(true, |value| value.trim().is_empty())
+                .is_none_or(|value| value.trim().is_empty())
         {
             return Err(ArtifactContractError(format!(
                 "{:?} bundle member has no component id",

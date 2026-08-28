@@ -818,20 +818,21 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     let work = qwen_edit_candle_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
-    let mut prepared_provider_spec = attach_manifest_text_encoder(
+    let mut attached_provider_spec = attach_manifest_text_encoder(
         load_spec(qwen_base.clone(), None, adapters.clone(), None)
             .with_resolved_route(request.model.clone()),
         "qwen_image_edit",
         request,
         settings,
     )?;
-    prepared_provider_spec
+    attached_provider_spec
         .prepare_file_sources()
         .map_err(|error| {
             WorkerError::InvalidPayload(format!(
                 "Qwen Edit could not retain the exact adapter file receipts: {error}"
             ))
         })?;
+    let prepared_provider_spec = attached_provider_spec.into_load_spec();
 
     // Request-scoped admission for the Qwen-Image-Edit lane. The shared memory selector exclusively
     // chooses Resident or an optimized rung from the exact artifact/provider/request identity. The

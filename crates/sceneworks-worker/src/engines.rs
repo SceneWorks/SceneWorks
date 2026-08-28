@@ -1454,7 +1454,7 @@ mod tests {
                 .and_then(serde_json::Value::as_array);
             let Some(active) = mlx_model(id) else {
                 assert!(
-                    manifest_floors.map_or(true, Vec::is_empty),
+                    manifest_floors.is_none_or(Vec::is_empty),
                     "{id}: precisionFloors require an active provider descriptor"
                 );
                 continue;

@@ -50,14 +50,19 @@ use super::gpu::{
     visible_gpu_ids, worker_capabilities_with_utility, GpuDiscoveryAttempt, GpuDiscoveryFailure,
 };
 use super::media_jobs::{
-    candidate_people, concat_file_contents, crossfade_duration, output_dimensions, plan_segments,
-    run_ffmpeg,
+    candidate_people, concat_file_contents, crossfade_duration, ffmpeg_execution_deadline,
+    ffmpeg_execution_timeout_from, output_dimensions, plan_segments, run_ffmpeg,
+    run_ffmpeg_capture_stderr_with_timeout, run_ffmpeg_probe_command_with_timeout,
+    run_ffmpeg_with_stdin_chunks_and_timeout, FfmpegContext, FFMPEG_EXECUTION_TIMEOUT_MAX,
 };
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use super::media_jobs::{mask_rollup_state, segment_assembly_frames, SegmentClip, SegmentOutcome};
+use super::media_jobs::{
+    mask_rollup_state, probe_source_frame_count_command_with_timeout, segment_assembly_frames,
+    SegmentClip, SegmentOutcome,
+};
 use super::model_jobs::{
     check_downloaded_model_family, derived_tokenizer_overlay,
     downloaded_model_detection_io_error_is_inconclusive, finalize_converted_dir,

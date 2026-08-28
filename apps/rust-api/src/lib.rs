@@ -3213,7 +3213,7 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
                     })
                 && original
                     .get(index + spelling.value.len())
-                    .map_or(true, |next| {
+                    .is_none_or(|next| {
                         if spelling.directory {
                             matches!(next, b'/' | b'\\')
                                 || next.is_ascii_whitespace()
@@ -3238,7 +3238,7 @@ fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePa
                         } else if *next == b'.' {
                             original
                                 .get(index + spelling.value.len() + 1)
-                                .map_or(true, |after| {
+                                .is_none_or(|after| {
                                     after.is_ascii_whitespace()
                                         || matches!(
                                             after,

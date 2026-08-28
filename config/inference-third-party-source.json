@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin b646a6f8 advances inference main through the merged epic-20738 feature train. Relative to the prior c6abde8f audit, the exact scanner finds 650 provenance candidates (up one) and the same 96 production-Rust crate prefixes. The one added candidate is crates/media/candle-gen/candle-gen-sdxl/src/control_provider.rs, covered by the existing SDXL architecture disposition; no path was removed. The normalized marker changed only for the adjacent candle-gen-sdxl/src/lib.rs registration and documentation in the same source area, 15 other existing rows differ only in git_blob_sha1, and no source-area assignment changed. The pre-existing two unclassified MiniMax-H3 crate prefixes and eighteen ported-source candidates remain the same 20 report-only compliance worklist items under sc-19751. No LICENSE file or production include_str!/include_bytes! inventory changed.",
-  "inferenceRevision": "a691b579bfc244e3d469513c2b6ea57791958703",
-  "auditDigest": "206940608cd7ba36dee2b27c6527635dd02a833ddc537610d36b78b07c306243",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 26f172e7 is inference main's merge of the epic-21668 feature. Its tree is byte-identical to the prior feature-integration pin 4d6f5e7a (tree 6e8c39ab), so the exact scanner still records the same 651 provenance candidates and 97 production-Rust crate prefixes; only revision-keyed audit metadata changes. The derived audit reports the same 21 report-only compliance worklist items under sc-19751: eighteen ported-source candidates plus the inference workspace root and two MiniMax-H3 crate prefixes without a disposition. Three shipped model records still have undetermined upstream weight licenses and remain report-only.",
+  "inferenceRevision": "26f172e7113025c87097350ae181c5c386036edf",
+  "auditDigest": "75a9bc199af41725499cebe491276ddbf27d9c32a7cdc64a62fd6106e960793c",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "a691b579bfc244e3d469513c2b6ea57791958703",
+    "revision": "26f172e7113025c87097350ae181c5c386036edf",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 651,
-    "populationSha256": "6eac731d6eb919dc3163a3c610cc0d3522170ce3d214777233c5dd3e392c02e6"
+    "populationSha256": "2ff75049d5ca66a9d6bf8f1b4b3460cafced749ae7bd60a6786eadcb36d674b8"
   },
   "portedSourceAreas": [
     {
@@ -830,10 +830,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "a691b579bfc244e3d469513c2b6ea57791958703",
+    "revision": "26f172e7113025c87097350ae181c5c386036edf",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 96,
-    "cratePopulationSha256": "ab6f0f6f4c71a93339973ba3054d40b651b8db7f96ed219d5d152c3c624c49fc"
+    "cratePrefixes": 97,
+    "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"
   },
   "crateDispositions": [
     {
