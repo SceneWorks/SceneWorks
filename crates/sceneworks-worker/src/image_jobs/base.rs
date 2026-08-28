@@ -7464,11 +7464,17 @@ fn resolve_identity_init(
 /// reference-guided img2img surface).
 ///
 /// Available to the candle lane too (sc-10134): the candle `generate_candle_stream` calls this to
-/// resolve the img2img init off-Mac for EVERY `ui.img2img` model, feeding the same `(image, strength)`
-/// into `generate_one`'s `reference` → `Conditioning::Reference` → the engine's img2img entrypoint.
-/// The `ui.img2img` candle roll-out is complete — Krea, SD3.5, Z-Image, Boogu and Ideogram via the epic
-/// 8588 A4 stories, SANA base/Sprint via sc-18475 — so this arm serves all of them uniformly through
-/// [`model_supports_img2img`].
+/// resolve the img2img init off-Mac for every model the candle router admits on a generic img2img
+/// lane, feeding the same `(image, strength)` into `generate_one`'s `reference` →
+/// `Conditioning::Reference` → the engine's img2img entrypoint. That arm is model-agnostic; the
+/// authoritative list of the ids the router actually wires lives beside the `generate_candle_stream`
+/// call site, and this resolver serves all of them uniformly through [`model_supports_img2img`].
+///
+/// NOT every `ui.img2img` model, despite the flag being the gate here: FLUX.2 Klein
+/// (`flux2_klein_9b` / `_kv` / `_true_v2`) also declares `ui.img2img`, but
+/// `candle_reserves_reference_only_modes` hands its whole reference surface to the bespoke
+/// `Flux2Edit` route, and `generate_candle_stream` fails closed on a Klein reference-bearing mode
+/// before reaching this resolver — so Klein never takes the generic init.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -7508,9 +7514,11 @@ fn resolve_img2img_init_generic(
 /// `ui.img2img` model uniformly.
 ///
 /// Available to the candle lane too (sc-10134): `generate_candle_stream` gates its GENERIC img2img
-/// resolve on this same manifest flag off-Mac — every `ui.img2img` model reaches the candle lane with a
-/// reference this way (Krea, SD3.5, Z-Image, Boogu, Ideogram via the epic 8588 A4 stories; SANA
-/// base/Sprint via sc-18475), each engine owning its img2img entrypoint.
+/// resolve on this same manifest flag off-Mac, each engine owning its img2img entrypoint. The flag is
+/// necessary but not sufficient there — a model reaches that arm only if the candle router also wires
+/// it an img2img lane (the wired id list is stated at the `generate_candle_stream` call site). FLUX.2
+/// Klein declares `ui.img2img` yet has no such lane: its reference surface is reserved for the bespoke
+/// `Flux2Edit` route, so it never reaches [`resolve_img2img_init_generic`] off-Mac.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -8297,10 +8305,15 @@ fn resolve_generic_lane_conditioning(
         // Generic plain-t2i img2img latent-init for any `ui.img2img` model (epic 8588 A4, sc-10189):
         // a `referenceAssetId` + `advanced.strength` seeds the denoise from the VAE-encoded reference,
         // which the engine routes to that model's img2img entrypoint via the single
-        // `Conditioning::Reference`. Krea 2 Turbo (sc-8591 #666), SD3.5 large/turbo/medium (sc-10189
-        // #667), and SANA base/Sprint (sc-18475) opt in today; a new text-only model joins by flipping
-        // `ui.img2img` and landing its engine entrypoint. Sits after the model-specific reference arms
-        // (z-image/flux/kolors/ideogram) so their bespoke surfaces keep precedence.
+        // `Conditioning::Reference`. Reached today by Krea 2 Turbo (sc-8591 #666), SD3.5
+        // large/turbo/medium (sc-10189 #667), SANA base/Sprint (sc-18475), base `z_image` (sc-10265),
+        // and Boogu / Ideogram 4 in a plain-t2i shape (Ideogram's bespoke arm above keys on
+        // `edit_image`; Boogu's instruction editor is the separate `boogu_image_edit` id resolved
+        // through `edit_refs`, so neither intercepts a t2i reference). A new text-only
+        // model joins by flipping `ui.img2img` and landing its engine entrypoint. Sits after the
+        // model-specific reference arms (z-image/flux/kolors/ideogram) so their bespoke surfaces keep
+        // precedence; `z_image_turbo` reaches this same resolver from inside the z-image arm via
+        // [`zimage_uses_generic_img2img`].
         Ok(LaneConditioning {
             identity_init: resolve_img2img_init_generic(request, settings, project_path)?,
             ..Default::default()
