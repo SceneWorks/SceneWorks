@@ -350,6 +350,23 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
   assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
 });
 
+test("windows-candle captures and schema-checks the SC-21714 certifying Krea record", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const capture = stepBody(
+    workflow,
+    "Build and run the Candle Krea diagnostic and certifying captures",
+  );
+  assert.match(capture, /--fixture krea-q4-1024-seed42 --fresh-per-case/);
+  assert.match(capture, /--output "%RUNNER_TEMP%\\sc-21714-candle-certifying\.json"/);
+  assert.match(
+    capture,
+    /memory-calibration-harness\.mjs check --input "%RUNNER_TEMP%\\sc-21714-candle-certifying\.json"/,
+  );
+  const upload = stepBody(workflow, "Upload raw schema-checked Candle Krea evidence");
+  assert.match(upload, /name: sc-21714-krea-certifying-\$\{\{ github\.run_id \}\}/);
+  assert.match(upload, /\$\{\{ runner\.temp \}\}\/sc-21714-candle-certifying\.json/);
+});
+
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
   const candle = await source(".github/workflows/windows-candle.yml");
   const mlx = await source(".github/workflows/macos-mlx.yml");
@@ -1234,7 +1251,13 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       candleReference.lastIndexOf("load_five_rung_generator(&first_request)?"),
     "the Candle batch must validate every target before its one model load",
   );
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
+  // The inline Krea arm emits a complete receipt after SC-21714; only the two pre-execution and
+  // five-rung paths remain gated. Pin the complete arm's target-derived overlay settlement too.
+  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 2);
+  assert.match(
+    candle,
+    /settle_plain_overlay_scenario\(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH\)\?/,
+  );
   assert.doesNotMatch(candle, /protocol::gated_fragment\(/);
 });
 
