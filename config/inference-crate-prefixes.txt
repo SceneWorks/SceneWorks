@@ -2,6 +2,7 @@
 # Every prefix here must be classified in config/inference-third-party-source.json — either by a
 # portedSourceAreas entry covering it, or by an explicit crateDispositions decision. Unclassified
 # prefixes FAIL check-license-coverage.mjs; there is no silent default.
+.
 crates/audio/candle-audio
 crates/audio/candle-audio-acestep
 crates/audio/candle-audio-catalog

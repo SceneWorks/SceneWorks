@@ -960,7 +960,10 @@ fn complete_validation_rejects_a_post_publication_bundle_swap_everywhere() {
     assert!(store
         .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
         .is_err());
-    assert!(store.enumerate().is_err());
+    assert_eq!(
+        store.enumerate().unwrap()[0].state,
+        ResolvedCacheEntryState::Corrupt
+    );
     let digest = cache_key_digest(&candidate.cache_key).unwrap();
     let _lock = store.lock_metadata(&digest).unwrap();
     assert_eq!(
@@ -1038,7 +1041,10 @@ fn complete_validation_rejects_a_post_publication_directory_junction_everywhere(
     assert!(store
         .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
         .is_err());
-    assert!(store.enumerate().is_err());
+    assert_eq!(
+        store.enumerate().unwrap()[0].state,
+        ResolvedCacheEntryState::Corrupt
+    );
     let digest = cache_key_digest(&candidate.cache_key).unwrap();
     let metadata_lock = store.lock_metadata(&digest).unwrap();
     assert_eq!(
@@ -1303,6 +1309,100 @@ fn incomplete_complete_entry_is_never_available_or_reconstructed() {
     assert_eq!(std::fs::read(bundle_file).unwrap(), b"short");
 }
 
+/// A managed cache may outlive manual filesystem changes. Foreign residue must not make the
+/// cache unusable, while a damaged managed entry must remain visible for recovery without
+/// withholding valid entries from cache reads or retention.
+#[test]
+fn foreign_entries_and_damaged_complete_entries_are_isolated_per_entry() {
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let damaged = source_candidate(&source, REVISION_A);
+    let valid = source_candidate(&source, REVISION_B);
+    make_complete(&store, &damaged, &source);
+    make_complete(&store, &valid, &source);
+
+    // Not an app-owned digest directory. Enumeration and retention must leave it untouched.
+    let foreign = store.root().join("entries").join("foreign-import.bin");
+    std::fs::write(&foreign, b"not a resolved-cache entry").unwrap();
+
+    // This is a real app-owned entry whose journal says Complete, but its bundle is no longer
+    // structurally valid. It must be shown as corrupt rather than poisoning the valid entry.
+    let damaged_file = store
+        .bundle_path(&damaged.cache_key)
+        .unwrap()
+        .join("weights.bin");
+    std::fs::write(&damaged_file, b"short").unwrap();
+
+    let summaries = store.enumerate().unwrap();
+    assert_eq!(summaries.len(), 2, "foreign residue is not a cache entry");
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.cache_key == damaged.cache_key)
+            .unwrap()
+            .state,
+        ResolvedCacheEntryState::Corrupt
+    );
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.cache_key == valid.cache_key)
+            .unwrap()
+            .state,
+        ResolvedCacheEntryState::Complete
+    );
+    assert!(
+        store.lookup_complete(&valid.cache_key).unwrap().is_some(),
+        "the damaged entry does not disable valid cache reads"
+    );
+
+    let recovered = store.recover().unwrap();
+    assert_eq!(
+        recovered
+            .iter()
+            .find(|summary| summary.cache_key == damaged.cache_key)
+            .unwrap()
+            .state,
+        ResolvedCacheEntryState::Corrupt
+    );
+    assert!(
+        store
+            .entry_path(&damaged.cache_key)
+            .unwrap()
+            .join("corrupt.marker.json")
+            .is_file(),
+        "recovery persists the damaged entry's isolated corruption state"
+    );
+
+    let report = store
+        .enforce_retention(
+            &ResolvedCachePolicy {
+                enabled: true,
+                max_bytes: 1,
+                inactivity_seconds: u64::MAX,
+            },
+            0,
+        )
+        .unwrap();
+    assert!(
+        report.failed.is_empty(),
+        "foreign and damaged entries do not abort retention"
+    );
+    assert!(report
+        .evicted
+        .iter()
+        .any(|entry| entry.cache_key == valid.cache_key));
+    assert!(report.retained.iter().any(|entry| {
+        entry.cache_key == damaged.cache_key && entry.hold == RetentionHold::RecoveryCandidate
+    }));
+    assert!(
+        foreign.is_file(),
+        "the cache never adopts or deletes foreign residue"
+    );
+}
+
 /// Publication's pre-rename walk must never reopen staged files by path: the reopen is the
 /// TOCTOU window (a parent junction swap between validation and reopen flushes the wrong file)
 /// and a write-capable reopen cannot even be assumed possible (read-only staged content,
@@ -1334,7 +1434,7 @@ fn publish_walk_accepts_read_only_staged_files_without_reopening_them() {
 }
 
 #[test]
-fn checked_enumeration_rejects_overflow() {
+fn checked_enumeration_ignores_corrupt_entries() {
     let scratch = TempDir::new().unwrap();
     let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
     let source_a = scratch.path().join("source-a");
@@ -1350,7 +1450,7 @@ fn checked_enumeration_rejects_overflow() {
         metadata.verified_bytes = bytes;
         store.write_metadata_unlocked(&digest, &metadata).unwrap();
     }
-    assert!(store.checked_verified_bytes().is_err());
+    assert_eq!(store.checked_verified_bytes().unwrap(), 0);
 }
 
 #[test]

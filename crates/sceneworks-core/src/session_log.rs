@@ -121,19 +121,18 @@ impl SessionLog {
         let limit = query.limit.unwrap_or(500).clamp(1, 5000);
         let search = query.search.as_deref().map(str::to_ascii_lowercase);
         let matches = |entry: &LogEntry| {
-            // MSRV 1.80: `Option::is_none_or` is 1.82, so use `map_or(true, …)`.
-            query.after_seq.map_or(true, |seq| entry.seq > seq)
+            query.after_seq.is_none_or(|seq| entry.seq > seq)
                 && query
                     .source
                     .as_deref()
-                    .map_or(true, |source| entry.source == source)
+                    .is_none_or(|source| entry.source == source)
                 && query
                     .level
                     .as_deref()
-                    .map_or(true, |level| entry.level == level)
-                && search.as_deref().map_or(true, |needle| {
-                    entry.raw.to_ascii_lowercase().contains(needle)
-                })
+                    .is_none_or(|level| entry.level == level)
+                && search
+                    .as_deref()
+                    .is_none_or(|needle| entry.raw.to_ascii_lowercase().contains(needle))
         };
         // F-093: walk newest→oldest and stop after cloning `limit` matches, instead
         // of cloning every matching entry (up to the full 5000-deep buffer) and then

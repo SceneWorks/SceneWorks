@@ -976,6 +976,13 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::FluxIpAdapterPoseReject => {
+                return Err(WorkerError::InvalidPayload(
+                    "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                     this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                     than silently dropping either requested conditioning".to_owned(),
+                ));
+            }
             ImageRoute::PoseControlBaseMissing => {
                 // A strict-pose job on a WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
                 // base/overlay snapshot is NOT installed (its `…_control_available` weight-gate failed, so
@@ -1482,6 +1489,13 @@ pub(crate) async fn run_image_generate_job(
                         request.model,
                         WIRED_CANDLE_POSE_FAMILIES.join(", ")
                     )));
+                }
+                CandleImageRoute::FluxIpAdapterPoseReject => {
+                    return Err(WorkerError::InvalidPayload(
+                        "FLUX.1 IP-Adapter reference conditioning cannot be combined with strict pose control; \
+                         this backend has separate IP-Adapter and ControlNet providers, so refusing rather \
+                         than silently dropping either requested conditioning".to_owned(),
+                    ));
                 }
                 // No-silent-T2I (sc-11171, F-008): a strict-pose job on a WIRED candle pose family whose
                 // control base snapshot is NOT installed (the family's `…_control_available` weight-gate

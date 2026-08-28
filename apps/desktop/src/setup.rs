@@ -1308,9 +1308,6 @@ fn decide_api_bind_env(enabled: bool, port: Option<u16>, password: Option<String
     if !enabled {
         return loopback();
     }
-    let password = password
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
     let Some(password) = password else {
         return ApiBindEnv {
             warning: Some(
@@ -1320,6 +1317,20 @@ fn decide_api_bind_env(enabled: bool, port: Option<u16>, password: Option<String
             ),
             ..loopback()
         };
+    };
+    let password = match crate::settings::validate_remote_password(&password) {
+        Ok(password) => password.to_owned(),
+        Err(_) => {
+            return ApiBindEnv {
+                warning: Some(format!(
+                    "remote access is enabled but the saved password does not meet the \
+                     {}-character minimum — binding loopback-only. Replace it in \
+                     Settings → Remote Access, then restart SceneWorks.",
+                    crate::settings::MIN_REMOTE_PASSWORD_LENGTH
+                )),
+                ..loopback()
+            };
+        }
     };
     let port = port.unwrap_or(crate::settings::DEFAULT_REMOTE_PORT);
     ApiBindEnv {
@@ -1341,9 +1352,11 @@ fn lan_access_token() -> Option<String> {
     if !crate::settings::load_settings().remote_access_enabled {
         return None;
     }
-    crate::settings::read_remote_password()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    crate::settings::read_remote_password().and_then(|value| {
+        crate::settings::validate_remote_password(&value)
+            .ok()
+            .map(str::to_owned)
+    })
 }
 
 /// Spawn the API sidecar, pipe its output to api.log, and return the chosen port.
@@ -4627,18 +4640,18 @@ mod bind_tests {
 
     #[test]
     fn enabled_with_password_binds_open_fixed_port_with_token() {
-        let env = decide_api_bind_env(true, Some(8910), Some("  swordfish  ".to_owned()));
+        let env = decide_api_bind_env(true, Some(8910), Some("  swordfish-12  ".to_owned()));
         assert_eq!(env.host, "0.0.0.0");
         assert_eq!(env.port, "8910");
         // Token is the trimmed password; it is also handed to the GPU worker(s).
-        assert_eq!(env.access_token.as_deref(), Some("swordfish"));
+        assert_eq!(env.access_token.as_deref(), Some("swordfish-12"));
         assert_eq!(env.fixed_port, Some(8910));
         assert!(env.warning.is_none());
     }
 
     #[test]
     fn enabled_without_port_uses_the_default_suggestion() {
-        let env = decide_api_bind_env(true, None, Some("pw".to_owned()));
+        let env = decide_api_bind_env(true, None, Some("twelve-chars".to_owned()));
         assert_eq!(env.host, "0.0.0.0");
         assert_eq!(env.port, DEFAULT_REMOTE_PORT.to_string());
         assert_eq!(env.fixed_port, Some(DEFAULT_REMOTE_PORT));
@@ -4666,6 +4679,18 @@ mod bind_tests {
         assert_eq!(env.host, "127.0.0.1");
         assert!(env.access_token.is_none());
         assert!(env.warning.is_some());
+    }
+
+    #[test]
+    fn enabled_with_short_password_fails_closed_with_replacement_guidance() {
+        let env = decide_api_bind_env(true, Some(8787), Some("legacy".to_owned()));
+        assert_eq!(env.host, "127.0.0.1");
+        assert_eq!(env.port, "0");
+        assert!(env.access_token.is_none());
+        assert!(env.fixed_port.is_none());
+        let warning = env.warning.expect("short password must surface a warning");
+        assert!(warning.contains("12-character minimum"), "{warning}");
+        assert!(warning.contains("Replace it in Settings"), "{warning}");
     }
 
     /// Story 3: the desktop must NEVER set `SCENEWORKS_ALLOW_OPEN_BIND` (the server's

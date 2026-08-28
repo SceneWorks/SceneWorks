@@ -3516,7 +3516,7 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
         assert!(
             component["payload"]
                 .get("family")
-                .map_or(true, Value::is_null),
+                .is_none_or(Value::is_null),
             "a shared component is a different artifact than the DiT and must not carry its family"
         );
     }
@@ -4220,7 +4220,7 @@ async fn model_download_job_enqueues_co_requisite_dependencies() {
         .find(|job| job["payload"]["repo"] == "SceneWorks/gemma-2-2b-it")
         .expect("a co-requisite download job is enqueued");
     assert!(
-        co_requisite["payload"].get("family").map_or(true, Value::is_null),
+        co_requisite["payload"].get("family").is_none_or(Value::is_null),
         "a co-requisite job must not carry the model family (different artifact than the checkpoint)"
     );
 }
@@ -4333,9 +4333,7 @@ async fn sdxl_openpose_is_one_shared_soft_component_installed_with_each_backbone
     assert_eq!(control["payload"]["revision"], CONTROL_REVISION);
     assert_eq!(control["payload"]["files"], json!([CONTROL_FILE]));
     assert!(
-        control["payload"]
-            .get("family")
-            .map_or(true, Value::is_null),
+        control["payload"].get("family").is_none_or(Value::is_null),
         "a shared conditioning component is not reconciled as the SDXL base family"
     );
 }
@@ -4673,7 +4671,7 @@ async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
     assert!(
         primary["payload"]
             .get("revision")
-            .map_or(true, Value::is_null),
+            .is_none_or(Value::is_null),
         "the primary download must not carry a pinned revision (defaults to main)"
     );
 
