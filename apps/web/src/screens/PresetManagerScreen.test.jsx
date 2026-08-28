@@ -230,6 +230,38 @@ describe("PresetManagerScreen", () => {
     );
   });
 
+  it("surfaces rejected create and update saves without unhandled rejections", async () => {
+    const createPreset = vi.fn(() => Promise.reject({ message: { detail: "not renderable" } }));
+    const updatePreset = vi.fn(() => Promise.reject("Preset storage is unavailable."));
+    const unhandled = [];
+    const onUnhandled = (event) => {
+      unhandled.push(event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+
+    try {
+      await render(baseContext({ createPreset, updatePreset }));
+      await clickButton("New preset");
+      await changeField(field(container, "Name"), "Reject me");
+      await clickButton("Create preset");
+      expect(container.textContent).toContain("Could not save this preset.");
+
+      await clickButton("All presets");
+      await act(async () => {
+        [...container.querySelectorAll(".preset-card")]
+          .find((card) => card.textContent.includes("Anime Key Visual"))
+          .querySelector(".secondary-action")
+          .click();
+      });
+      await clickButton("Save preset");
+      expect(container.textContent).toContain("Preset storage is unavailable.");
+      expect(unhandled).toEqual([]);
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    }
+  });
+
   // sc-10548: PATCH replaces `defaults` wholesale, so anything the editor doesn't render
   // must be carried through explicitly or a rename destroys it.
   it("preserves defaults the editor doesn't render, and still clears ones it does", async () => {

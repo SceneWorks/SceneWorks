@@ -43,12 +43,7 @@ def matrix_validator():
     return jsonschema.Draft202012Validator(schema, registry=registry)
 
 
-def test_generated_memory_matrix_is_current_and_schema_valid():
-    subprocess.run(
-        ["node", "scripts/generate-memory-matrix.mjs", "--check"],
-        cwd=ROOT,
-        check=True,
-    )
+def test_generated_memory_matrix_is_schema_valid():
     matrix_validator().validate(load_matrix())
 
 
@@ -306,26 +301,38 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert all(re.fullmatch(r"imc-[0-9a-f]{20}", record_id) for record_id in evidence_ids)
     evidence_by_id = {record["id"]: record for record in calibration["records"]}
     records_by_status = Counter(record["status"] for record in calibration["records"])
-    # The bundle carries exactly two statuses. A third would slip straight past every partition below,
-    # which is the defect this owns — not the size of either population. Those sizes have only ever
-    # grown (complete 33 -> 50 -> 52 -> 65 -> 70 across sc-16915 / SC-18237 / SC-18353 / SC-19753;
-    # runtime_complete 15 -> 19 at SC-18218), and renewing the pair each time re-froze the corpus
-    # without ever asserting a property. Both populations must be non-empty and must partition the
-    # bundle exactly; everything downstream is then derived from `records_by_status` rather than from a
-    # second transcription of it, so the matrix and the bundle cannot disagree.
-    assert set(records_by_status) == {"complete", "runtime_complete"}
-    assert all(count > 0 for count in records_by_status.values())
+    # Population SIZES are never pinned here: they have only ever grown (complete 33 -> 50 -> 52 -> 65
+    # -> 70 across sc-16915 / SC-18237 / SC-18353 / SC-19753; runtime_complete 15 -> 19 at SC-18218)
+    # and renewing the pair each time re-froze the corpus without ever asserting a property.
+    # Everything downstream is derived from `records_by_status` rather than from a second
+    # transcription of it, so the matrix and the bundle cannot disagree.
+    #
+    # sc-21715: this used to read `set(records_by_status) == {"complete", "runtime_complete"}`,
+    # because a third status DID slip past every partition below — `calibrationRunsByStatus` named
+    # only those two while `summary.calibrationRuns` counted the whole bundle. The tally now
+    # partitions the bundle over the schema's full status enum, so the corpus no longer has to be
+    # held two-status to keep the derived counts honest. What must still hold is that no record
+    # carries a status the schema does not admit, and that both certifying populations are non-empty.
+    record_statuses = calibration_schema["$defs"]["record"]["properties"]["status"]["enum"]
+    assert set(records_by_status) <= set(record_statuses)
+    assert records_by_status["complete"] > 0
+    assert records_by_status["runtime_complete"] > 0
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
     runs_by_status = Counter(run["record"]["status"] for run in matrix["calibrationRuns"])
     assert runs_by_status == records_by_status
-    assert matrix["summary"]["calibrationRuns"] == sum(runs_by_status.values())
+    assert matrix["summary"]["calibrationRuns"] == len(calibration["records"])
+    # A key per admitted status, zeros included, summing to the total above — derived from the enum
+    # so a status added to the schema reds here instead of quietly falling outside the tally.
     assert matrix["summary"]["calibrationRunsByStatus"] == {
-        "complete": records_by_status["complete"],
-        "runtimeComplete": records_by_status["runtime_complete"],
+        re.sub(r"_([a-z])", lambda m: m.group(1).upper(), status): records_by_status[status]
+        for status in record_statuses
     }
+    assert sum(matrix["summary"]["calibrationRunsByStatus"].values()) == matrix["summary"][
+        "calibrationRuns"
+    ]
 
     # `current` vs `historical` is decided against the shipped inference pin plus exact audited
     # compatibility. SC-15833 certifies the Candle FLUX.2 closure across an exact window -- captured

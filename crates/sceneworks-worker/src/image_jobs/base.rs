@@ -12387,10 +12387,23 @@ fn image_settings_metrics(
             .and_then(serde_json::Number::from_f64)
     };
     let loras: Vec<String> = request.loras.iter().filter_map(lora_label).collect();
+    // Two more facts beside the tier (sc-21484, epic 11037). `quant_label` answers "which variant
+    // was selected"; it does NOT answer "what is this checkpoint stored in" or "what did this host
+    // execute", and a stats row that reports only the tier lets a reader conclude that a
+    // `nvfp4`-tier run executed NVFP4 natively on a box that in fact took the dense BF16 fallback.
+    //
+    // Both come from the verified source classification and the load receipt, never from
+    // `quant_label` and never from the host's capability — see `checkpoint_weight_facts_host`.
+    let (source_codec, execution_representation) =
+        crate::checkpoint_weight_facts_host::manifest_entry_metrics_pair(
+            &request.model_manifest_entry,
+        );
     GenerationMetrics {
         model: (!request.model.is_empty()).then(|| request.model.clone()),
         quant_label,
         quant_bits: quant_bits.map(|bits| bits as u32),
+        source_codec,
+        execution_representation,
         sampler: string_or("sampler", "default"),
         scheduler: string_or("scheduler", "default"),
         scheduler_shift: number_field("schedulerShift"),
@@ -12730,6 +12743,10 @@ async fn consume_gen_events_with_disclosure(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let mut prompt_enhancement_reports = PromptEnhancementReports::new();
+    // The measured three-fact set of this job's load, once the producing lane sends one
+    // (sc-11045). `None` for every lane that holds no runtime handle — those assets keep whatever
+    // the route stamped pre-load (including the honest `no-runtime-receipt` materialization).
+    let mut measured_checkpoint_facts: Option<Value> = None;
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -12851,6 +12868,12 @@ async fn consume_gen_events_with_disclosure(
                     latest_preview = Some(slot);
                 }
             }
+            GenEvent::CheckpointWeightFacts { facts } => {
+                // Measured checkpoint facts from the loaded handle (sc-11045). Latest-wins on
+                // purpose: the engine's own sink is last-write-wins per materialization, so the
+                // newest event always describes the most recent read.
+                measured_checkpoint_facts = Some(facts);
+            }
             GenEvent::PromptEnhancement {
                 index,
                 expected_prompt,
@@ -12903,6 +12926,15 @@ async fn consume_gen_events_with_disclosure(
                     image_raw_settings.insert(
                         crate::face_likeness::FACE_LIKENESS_FACT_KEY.to_owned(),
                         Value::Object(block),
+                    );
+                }
+                // A measured fact set from the loaded handle supersedes the route's pre-load stamp
+                // (whose materialization is honestly `no-runtime-receipt`): same three facts, now
+                // with what the load actually materialized (sc-11045).
+                if let Some(facts) = measured_checkpoint_facts.as_ref() {
+                    image_raw_settings.insert(
+                        crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY.to_owned(),
+                        facts.clone(),
                     );
                 }
                 // Encode + write the asset PNG off the async runtime thread (sc-8909 / F-107).

@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfirmHost } from "../appConfirm.jsx";
 import { AppContext } from "../context/AppContext.js";
+import { ScreenActiveContext } from "../context/ScreenActiveContext.js";
 import { resetNavigationPreferenceQueueForTests } from "../uiPreferences.js";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -352,6 +353,112 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.textContent).toContain("8.0 KiB");
   });
 
+  it("does not poll a paused or inactive selected catalog", async () => {
+    catalogs = [catalog({ processing: { ...catalog().processing, state: "paused" } })];
+    await remountWithFakeTimers();
+    await act(async () => vi.advanceTimersByTime(9000));
+    expect(requests.filter((item) => item.path.endsWith("/status"))).toHaveLength(0);
+
+    catalogs = [catalog()];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ScreenActiveContext.Provider value={false}>
+          <AppContext.Provider value={{ token: "token" }}>
+            <DatasetCatalogsScreen />
+            <ConfirmHost />
+          </AppContext.Provider>
+        </ScreenActiveContext.Provider>,
+      );
+    });
+    await flush();
+    await act(async () => vi.advanceTimersByTime(9000));
+    expect(requests.filter((item) => item.path.endsWith("/status"))).toHaveLength(0);
+  });
+
+  it("clears an already-scheduled poll when the active screen becomes inactive", async () => {
+    await act(async () => root.unmount());
+    vi.useFakeTimers();
+    root = createRoot(container);
+    const renderScreen = async (active) => {
+      await act(async () => {
+        root.render(
+          <ScreenActiveContext.Provider value={active}>
+            <AppContext.Provider value={{ token: "token" }}>
+              <DatasetCatalogsScreen />
+              <ConfirmHost />
+            </AppContext.Provider>
+          </ScreenActiveContext.Provider>,
+        );
+      });
+      await flush();
+    };
+    await renderScreen(true);
+    await renderScreen(false);
+    await act(async () => vi.advanceTimersByTime(9000));
+    expect(requests.filter((item) => item.path.endsWith("/status"))).toHaveLength(0);
+  });
+
+  it("settles a catalog mutation across inactive and active poll lifecycles", async () => {
+    await act(async () => root.unmount());
+    vi.useFakeTimers();
+    root = createRoot(container);
+    const mutation = deferred();
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, options = {}) => {
+      if (new URL(url).pathname.endsWith("/pause")) return mutation.promise;
+      return original(url, options);
+    });
+    const renderScreen = async (active) => {
+      await act(async () => {
+        root.render(
+          <ScreenActiveContext.Provider value={active}>
+            <AppContext.Provider value={{ token: "token" }}>
+              <DatasetCatalogsScreen />
+              <ConfirmHost />
+            </AppContext.Provider>
+          </ScreenActiveContext.Provider>,
+        );
+      });
+      await flush();
+    };
+    await renderScreen(true);
+
+    const pauseButton = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Pause"));
+    await act(async () => pauseButton.click());
+    expect(pauseButton.disabled).toBe(true);
+
+    await renderScreen(false);
+    await renderScreen(true);
+    await act(async () => {
+      mutation.resolve(response(catalog()));
+      await Promise.resolve();
+    });
+    await flush();
+
+    const recoveredPauseButton = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Pause"));
+    expect(recoveredPauseButton.disabled).toBe(false);
+  });
+
+  it("stops after a terminal status response", async () => {
+    await remountWithFakeTimers();
+    const original = fetch.getMockImplementation();
+    let polls = 0;
+    fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/status")) {
+        polls += 1;
+        return response(catalog({ processing: { ...catalog().processing, state: "completed" } }));
+      }
+      return original(url, options);
+    });
+    await act(async () => vi.advanceTimersByTime(3000));
+    await flush();
+    await act(async () => vi.advanceTimersByTime(9000));
+    expect(polls).toBe(1);
+  });
+
   it("curates a reproducible primary sample with server paging, facets, saved views, and review overrides", async () => {
     const browse = [...container.querySelectorAll("button")]
       .find((button) => button.textContent.includes("Browse catalog"));
@@ -361,6 +468,9 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.textContent).toContain("28 matches");
     expect(container.textContent).toContain("A full-body photograph outdoors");
     expect(container.textContent).toContain("photograph (28)");
+    expect(container.querySelector("input[aria-label='Catalog text search']").placeholder).toBe("red dress, full_body…");
+    expect(container.textContent).toContain("photograph · exclude");
+    expect(container.textContent).not.toMatch(/(?:Ã|Â|â€¦)/);
     const queryRequest = requests.find((item) => item.path.endsWith("/curation/query"));
     expect(queryRequest.body.filters).toEqual(expect.arrayContaining([
       { field: "medium", values: ["photograph"] },

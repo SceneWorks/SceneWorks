@@ -86,6 +86,58 @@ describe("putUiPreferences", () => {
 });
 
 describe("persistNavigationPreferences", () => {
+  it("waits with bounded exponential backoff before retrying transient navigation writes and recovers", async () => {
+    vi.useFakeTimers();
+    apiFetch
+      .mockRejectedValueOnce(new Error("network unavailable"))
+      .mockRejectedValueOnce(Object.assign(new Error("throttled"), { status: 429 }))
+      .mockResolvedValueOnce({});
+
+    try {
+      const persisted = persistNavigationPreferences({ activeView: "Library" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(199);
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      await persisted;
+
+      expect(apiFetch).toHaveBeenCalledTimes(3);
+    } finally {
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry a permanent 4xx navigation write", async () => {
+    vi.useFakeTimers();
+    try {
+      apiFetch.mockRejectedValueOnce(Object.assign(new Error("HTTP 400"), { status: 400 }));
+
+      const persisted = persistNavigationPreferences({ activeView: "no-retry-400" });
+      await vi.advanceTimersByTimeAsync(1000);
+      await persisted;
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry an aborted navigation write", async () => {
+    apiFetch.mockRejectedValueOnce(Object.assign(new Error("aborted"), { name: "AbortError" }));
+
+    await persistNavigationPreferences({ activeView: "Library" });
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("serializes writes, coalesces the latest intent, and reads the token at request time", async () => {
     const first = deferred();
     const second = deferred();
