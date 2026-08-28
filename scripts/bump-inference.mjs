@@ -348,6 +348,18 @@ function verifyLicenseAudit(io = {}) {
           .join("\n"),
     );
   }
+  if (!Array.isArray(derived.auditSummaryErrors)) {
+    throw new Error(
+      "the license checker did not return auditSummaryErrors; the bump cannot verify the human audit summary.",
+    );
+  }
+  if (derived.auditSummaryErrors.length > 0) {
+    throw new Error(
+      "the inference source/license audit human _comment is stale after deriveLicenseAudit() ran. " +
+        "Review the pin advance and update the summary without copying historical finding counts.\n" +
+        derived.auditSummaryErrors.map((error) => `  ${error}`).join("\n"),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,6 +1332,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   // The fake deriver mirrors the real one where it matters: its digest is a function of the record on
   // disk, so a restamp taken before the population facts land is visibly the wrong digest.
   const AUDIT_FIXTURE = {
+    _comment: `Pin ${PREVIOUS_PIN.slice(0, 8)} records 600 provenance candidates and 90 production-Rust crate prefixes.`,
     inferenceRevision: PREVIOUS_PIN,
     auditDigest: "0".repeat(64),
     includeSites: [{ source: "a", included: "b", disposition: "artifact" }],
@@ -1338,13 +1351,33 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   };
   let stored = structuredClone(AUDIT_FIXTURE);
   const auditWrites = [];
-  const fakeDerive = () => ({
-    provenanceMatchedFiles: 626,
-    provenancePopulationSha256: "3".repeat(64),
-    cratePrefixes: 94,
-    cratePopulationSha256: "4".repeat(64),
-    auditDigest: `digest-of:${stored.provenanceScan.matchedFiles}:${stored.crateCoverage.cratePrefixes}`,
-  });
+  const fakeDerive = (audit = stored) => {
+    const summary = audit._comment ?? "";
+    const summaryErrors = [];
+    if (!summary.includes(audit.inferenceRevision.slice(0, 8))) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current pin ${audit.inferenceRevision.slice(0, 8)}.`,
+      );
+    }
+    if (!summary.includes(`${audit.provenanceScan.matchedFiles} provenance candidates`)) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current population ${audit.provenanceScan.matchedFiles} provenance candidates.`,
+      );
+    }
+    if (!summary.includes(`${audit.crateCoverage.cratePrefixes} production-Rust crate prefixes`)) {
+      summaryErrors.push(
+        `inference source audit _comment does not name current population ${audit.crateCoverage.cratePrefixes} production-Rust crate prefixes.`,
+      );
+    }
+    return {
+      provenanceMatchedFiles: 626,
+      provenancePopulationSha256: "3".repeat(64),
+      cratePrefixes: 94,
+      cratePopulationSha256: "4".repeat(64),
+      auditDigest: `digest-of:${audit.provenanceScan.matchedFiles}:${audit.crateCoverage.cratePrefixes}`,
+      auditSummaryErrors: summaryErrors,
+    };
+  };
   deriveLicenseAudit(SHA, "/self-test/inference", {
     scan: () => "",
     derive: fakeDerive,
@@ -1383,7 +1416,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     try {
       verifyLicenseAudit({
         report: () => {},
-        derive: fakeDerive,
+        derive: () => fakeDerive(audit),
         readAudit: () => audit,
         log: () => {},
       });
@@ -1392,6 +1425,18 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       return error.message;
     }
   };
+  const staleSummary = verifyDrift((audit) => audit);
+  check(
+    "a restamped audit with stale human prose refuses and names the current pin and population",
+    !!staleSummary &&
+      /human _comment is stale/.test(staleSummary) &&
+      new RegExp(SHA.slice(0, 8)).test(staleSummary) &&
+      /626 provenance candidates/.test(staleSummary) &&
+      /94 production-Rust crate prefixes/.test(staleSummary),
+  );
+  stored._comment =
+    `Pin ${SHA.slice(0, 8)} records 626 provenance candidates and 94 production-Rust crate prefixes; ` +
+    `the prior pin was ${PREVIOUS_PIN.slice(0, 8)}.`;
   check("a fully restamped audit passes verification", verifyDrift((audit) => audit) === null);
   const skippedCount = verifyDrift((audit) => {
     audit.provenanceScan.matchedFiles = 600;

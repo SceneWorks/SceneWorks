@@ -2765,7 +2765,10 @@ pub fn build_training_plan(
                 ),
                 width: item.width,
                 height: item.height,
-                extra: ExtraFields::new(),
+                // Preserve model-specific per-example inputs. The worker forwards non-path
+                // metadata losslessly and resolves any path-bearing fields under the dataset root
+                // before handing the request to the native trainer.
+                extra: item.extra.clone(),
                 // ControlNet training: resolve the per-item control-conditioning sidecar the same
                 // way as the target image (relative → absolute under the dataset root). `None` for
                 // a LoRA item; a control-branch kernel's validate rejects a plan item missing it.

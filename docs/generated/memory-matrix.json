@@ -1,7 +1,7 @@
 {
   "schemaVersion": 9,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:83720fa616a1f7c8b812ccb4f3f6d7521e0def290bae99f925b488afcf84b197",
+    "sceneWorksRevision": "source-tree:3228577ffb62b5e182e8e661d6a4f58c0fdae974a39240f37d78026b59539d85",
     "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
     "sources": {
       "manifest": {
@@ -94,11 +94,11 @@
       },
       "rung4ContractPrerequisites": {
         "path": "config/rung4-contract-prerequisites.json",
-        "sha256": "ab162598d1169e199c502cf43ac759f1240b1fe74bb818cbed726a8e52b5be5f"
+        "sha256": "bba88eae9631cb1a388181b4e674868db1c3a21f92a12b7c34e6693604d374fd"
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "0d057c197f0be3188f9a93bd9fcc75e11993c35a3416cb44142b520fa871ba4d"
+        "sha256": "6e2c1fd5a04411e1f03fa3e71214a61e4d4d256813a0500da56aa4d998afb5fd"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
@@ -199,11 +199,11 @@
     },
     "currentCalibrationRuns": 1,
     "memoryContractReconciliation": {
-      "providers": 101,
+      "providers": 102,
       "bespokeWaivers": 1,
-      "mismatches": 323,
+      "mismatches": 335,
       "byLeg": {
-        "engine_manifest": 219,
+        "engine_manifest": 231,
         "survey_engine": 104
       }
     },

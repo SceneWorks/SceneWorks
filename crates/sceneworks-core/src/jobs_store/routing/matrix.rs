@@ -978,6 +978,78 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
     Ok(facts)
 }
 
+/// The product-to-runtime trainer identity contract. Capability flags alone cannot distinguish
+/// architecture-compatible-looking trainers from the exact model version a product target names:
+/// LTX-2.3 and LTX-2.5 both advertise LoRA, but accepting either for either target trains the wrong
+/// base. Keep the product target id, base id, and worker kernel in the key, and allow the value to be
+/// backend-local because inference deliberately registers the future LTX-2.5 trainer under different
+/// MLX and Candle ids.
+fn expected_backend_local_trainer_id(
+    target: &crate::training::TrainingTarget,
+    backend: &str,
+) -> Result<&'static str, String> {
+    let (mlx, candle) = match (
+        target.id.as_str(),
+        target.base_model.as_str(),
+        target.kernel.as_str(),
+    ) {
+        ("z_image_turbo_lora", "z_image_turbo", "z_image_lora") => {
+            ("z_image_turbo", "z_image_turbo")
+        }
+        ("sdxl_lora", "sdxl", "sdxl_lora")
+        | ("illustrious_xl_v1_lora", "illustrious_xl_v1", "sdxl_lora")
+        | ("illustrious_xl_v2_lora", "illustrious_xl_v2", "sdxl_lora") => ("sdxl", "sdxl"),
+        ("kolors_lora", "kolors", "kolors_lora") => ("kolors", "kolors"),
+        ("lens_turbo_lora", "lens", "lens_lora") => ("lens", "lens"),
+        ("krea_2_raw_lora", "krea_2_raw", "krea_lora") => ("krea_2_raw", "krea_2_raw"),
+        ("krea_2_control", "krea_2_raw", "krea_control") => ("krea_2_control", "krea_2_control"),
+        ("sd3_5_large_lora", "sd3_5_large", "sd3_lora") => ("sd3_5_large", "sd3_5_large"),
+        ("sd3_5_medium_lora", "sd3_5_medium", "sd3_lora") => ("sd3_5_medium", "sd3_5_medium"),
+        ("anima_base_lora", "anima_base", "anima_lora") => ("anima_base", "anima_base"),
+        ("ltx_video_lora", "ltx_2_3", "ltx_mlx_lora") => ("ltx_2_3", "ltx_2_3"),
+        ("ltx_2_5_video_lora", "ltx_2_5", "ltx_mlx_lora") => ("ltx_2_5", "ltx_2_5_distilled"),
+        ("wan_lora", "wan_2_2", "wan_lora") => ("wan2_2_ti2v_5b", "wan2_2_ti2v_5b"),
+        ("wan_t2v_14b_lora", "wan_2_2_t2v_14b", "wan_moe_lora") => {
+            ("wan2_2_t2v_14b", "wan2_2_t2v_14b")
+        }
+        ("wan_i2v_14b_lora", "wan_2_2_i2v_14b", "wan_moe_lora") => {
+            ("wan2_2_i2v_14b", "wan2_2_i2v_14b")
+        }
+        ("mage_flow_base_lora", "mage_flow_base", "mage_flow_lora") => {
+            ("mage_flow_base", "mage_flow_base")
+        }
+        _ => {
+            return Err(format!(
+                "production training target {:?} (base {:?}, kernel {:?}) has no explicit backend-local trainer identity contract",
+                target.id, target.base_model, target.kernel
+            ));
+        }
+    };
+    match backend {
+        "mlx" => Ok(mlx),
+        "candle" => Ok(candle),
+        other => Err(format!(
+            "production training target {:?} requested an identity for unknown backend {other:?}",
+            target.id
+        )),
+    }
+}
+
+fn validate_backend_local_trainer_identity(
+    target: &crate::training::TrainingTarget,
+    backend: &str,
+    engine: &str,
+) -> Result<(), String> {
+    let expected_engine = expected_backend_local_trainer_id(target, backend)?;
+    if engine != expected_engine {
+        return Err(format!(
+            "{backend} production trainer mapping {:?} -> {:?} violates the explicit identity contract for base {:?}/kernel {:?}; expected {:?}",
+            target.id, engine, target.base_model, target.kernel, expected_engine,
+        ));
+    }
+    Ok(())
+}
+
 fn validate_runtime_pair(
     mlx: &RuntimeDescriptorFacts,
     candle: &RuntimeDescriptorFacts,
@@ -999,8 +1071,52 @@ fn validate_runtime_pair(
     if mlx.model_mappings != candle.model_mappings {
         return Err("matching-platform production model mappings differ".to_owned());
     }
-    if mlx.trainer_mappings != candle.trainer_mappings {
-        return Err("matching-platform production trainer mappings differ".to_owned());
+    for facts in [mlx, candle] {
+        for (target, engine) in &facts.trainer_mappings {
+            if target.trim().is_empty() || engine.trim().is_empty() {
+                return Err(format!(
+                    "{} runtime artifact contains an incomplete trainer mapping {:?} -> {:?}",
+                    facts.snapshot.backend, target, engine
+                ));
+            }
+        }
+    }
+    let mlx_training_targets: BTreeSet<_> =
+        mlx.trainer_mappings.keys().map(String::as_str).collect();
+    let candle_training_targets: BTreeSet<_> =
+        candle.trainer_mappings.keys().map(String::as_str).collect();
+    if mlx_training_targets != candle_training_targets {
+        let mlx_only: Vec<_> = mlx_training_targets
+            .difference(&candle_training_targets)
+            .copied()
+            .collect();
+        let candle_only: Vec<_> = candle_training_targets
+            .difference(&mlx_training_targets)
+            .copied()
+            .collect();
+        return Err(format!(
+            "matching-platform production training targets differ (MLX only: {mlx_only:?}; Candle only: {candle_only:?})"
+        ));
+    }
+    let builtin_training_targets = crate::training::builtin_training_targets();
+    let training_targets_by_id: BTreeMap<_, _> = builtin_training_targets
+        .targets
+        .iter()
+        .map(|target| (target.id.as_str(), target))
+        .collect();
+    let builtin_training_target_ids: BTreeSet<_> = training_targets_by_id.keys().copied().collect();
+    if mlx_training_targets != builtin_training_target_ids {
+        let missing: Vec<_> = builtin_training_target_ids
+            .difference(&mlx_training_targets)
+            .copied()
+            .collect();
+        let unknown: Vec<_> = mlx_training_targets
+            .difference(&builtin_training_target_ids)
+            .copied()
+            .collect();
+        return Err(format!(
+            "production trainer mappings do not exactly cover builtin training targets (missing: {missing:?}; unknown: {unknown:?})"
+        ));
     }
     for facts in [mlx, candle] {
         if facts.snapshot.generator_capabilities.is_empty() {
@@ -1030,6 +1146,77 @@ fn validate_runtime_pair(
                     "{} runtime audio generator {:?} has backend/modality drift",
                     facts.snapshot.backend, descriptor.id
                 ));
+            }
+        }
+        let mut trainer_descriptors = BTreeMap::new();
+        for descriptor in &facts.snapshot.trainer_capabilities {
+            if descriptor.id.trim().is_empty() || descriptor.backend != facts.snapshot.backend {
+                return Err(format!(
+                    "{} runtime trainer {:?} has backend/identity drift",
+                    facts.snapshot.backend, descriptor.id
+                ));
+            }
+            if trainer_descriptors
+                .insert(descriptor.id.as_str(), descriptor)
+                .is_some()
+            {
+                return Err(format!(
+                    "{} runtime artifact repeats trainer descriptor {:?}",
+                    facts.snapshot.backend, descriptor.id
+                ));
+            }
+        }
+        for (target, engine) in &facts.trainer_mappings {
+            let target_contract = training_targets_by_id
+                .get(target.as_str())
+                .expect("trainer target population checked above");
+            validate_backend_local_trainer_identity(
+                target_contract,
+                &facts.snapshot.backend,
+                engine,
+            )?;
+            let mut routed_network_types = Vec::new();
+            for network_type in target_network_types(target_contract)? {
+                let job_type = if network_type == "control" {
+                    JobType::ControlTraining
+                } else {
+                    JobType::LoraTrain
+                };
+                let job = probe_job(
+                    job_type,
+                    "",
+                    training_payload(target_contract, &network_type),
+                )?;
+                if backend_supports(&job, facts)? {
+                    routed_network_types.push(network_type);
+                }
+            }
+            if routed_network_types.is_empty() {
+                // Product target population is cross-platform even when one backend intentionally
+                // has no provider (currently MLX Krea Control). An unrouted lane must stay false;
+                // only a lane the production scheduler admits is required to resolve a provider.
+                continue;
+            }
+            let Some(descriptor) = trainer_descriptors.get(engine.as_str()) else {
+                return Err(format!(
+                    "{} routed production trainer mapping {:?} -> {:?} names no registered local trainer descriptor",
+                    facts.snapshot.backend, target, engine,
+                ));
+            };
+            for network_type in routed_network_types {
+                let supported = match network_type.as_str() {
+                    "lora" => descriptor.supports_lora,
+                    "lokr" => descriptor.supports_lokr,
+                    "control" => descriptor.supports_control,
+                    "full" => descriptor.supports_full_finetune,
+                    _ => unreachable!("target_network_types validates the network type"),
+                };
+                if !supported {
+                    return Err(format!(
+                        "{} routed production trainer mapping {:?} -> {:?} lacks {:?} support in its registered local descriptor",
+                        facts.snapshot.backend, target, engine, network_type
+                    ));
+                }
             }
         }
     }
@@ -3445,6 +3632,200 @@ mod tests {
         let digest = live.sources.values_mut().next().unwrap();
         *digest = "0".repeat(64);
         assert!(checked_in_matrix_matches_live(checked_in, live).is_ok());
+    }
+
+    fn valid_runtime_pair() -> (RuntimeDescriptorFacts, RuntimeDescriptorFacts) {
+        (
+            runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap(),
+            runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap(),
+        )
+    }
+
+    fn runtime_pair_with_same_capability_wrong_ltx_version(
+    ) -> (RuntimeDescriptorFacts, RuntimeDescriptorFacts) {
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        for (facts, engine) in [(&mut mlx, "ltx_2_5"), (&mut candle, "ltx_2_5_distilled")] {
+            facts
+                .trainer_mappings
+                .insert("ltx_video_lora".to_owned(), engine.to_owned());
+            if !facts
+                .snapshot
+                .trainer_capabilities
+                .iter()
+                .any(|descriptor| descriptor.id == engine)
+            {
+                facts
+                    .snapshot
+                    .trainer_capabilities
+                    .push(TrainerCapabilityFacts {
+                        id: engine.to_owned(),
+                        backend: facts.snapshot.backend.clone(),
+                        supports_lora: true,
+                        supports_lokr: false,
+                        supports_control: false,
+                        supports_full_finetune: false,
+                    });
+            }
+        }
+        (mlx, candle)
+    }
+
+    #[test]
+    fn runtime_pair_accepts_platform_local_trainer_ids_for_the_same_target() {
+        let (mlx, candle) = valid_runtime_pair();
+        validate_runtime_pair(&mlx, &candle).unwrap();
+
+        let mut ltx_2_5 = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "ltx_video_lora")
+            .unwrap();
+        ltx_2_5.id = "ltx_2_5_video_lora".to_owned();
+        ltx_2_5.base_model = "ltx_2_5".to_owned();
+        assert_eq!(
+            expected_backend_local_trainer_id(&ltx_2_5, "mlx").unwrap(),
+            "ltx_2_5"
+        );
+        assert_eq!(
+            expected_backend_local_trainer_id(&ltx_2_5, "candle").unwrap(),
+            "ltx_2_5_distilled"
+        );
+    }
+
+    #[test]
+    fn runtime_pair_rejects_training_target_population_drift() {
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle.trainer_mappings.remove("ltx_video_lora");
+
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("production training targets differ")
+                && error.contains("ltx_video_lora"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_pair_rejects_unregistered_or_wrong_backend_local_trainers() {
+        let (mlx, candle) = runtime_pair_with_same_capability_wrong_ltx_version();
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("violates the explicit identity contract")
+                && error.contains("ltx_video_lora")
+                && error.contains("ltx_2_3"),
+            "a same-capability LTX-2.5 trainer must not satisfy the LTX-2.3 product target: {error}"
+        );
+
+        let mut ltx_2_5 = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "ltx_video_lora")
+            .unwrap();
+        ltx_2_5.id = "ltx_2_5_video_lora".to_owned();
+        ltx_2_5.base_model = "ltx_2_5".to_owned();
+        for backend in ["mlx", "candle"] {
+            let error = validate_backend_local_trainer_identity(&ltx_2_5, backend, "ltx_2_3")
+                .expect_err("LTX-2.3 must not satisfy the future LTX-2.5 target");
+            assert!(
+                error.contains("violates the explicit identity contract")
+                    && error.contains("ltx_2_5_video_lora"),
+                "the future LTX-2.5 product target must reject LTX-2.3 on {backend}: {error}"
+            );
+        }
+
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle
+            .snapshot
+            .trainer_capabilities
+            .retain(|descriptor| descriptor.id != "ltx_2_3");
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("routed production trainer mapping")
+                && error.contains("names no registered local trainer descriptor"),
+            "unexpected error: {error}"
+        );
+
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle
+            .snapshot
+            .trainer_capabilities
+            .iter_mut()
+            .find(|descriptor| descriptor.id == "ltx_2_3")
+            .unwrap()
+            .supports_lora = false;
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("lacks \"lora\" support"),
+            "unexpected error: {error}"
+        );
+
+        let (mlx, mut candle) = valid_runtime_pair();
+        candle
+            .snapshot
+            .trainer_capabilities
+            .iter_mut()
+            .find(|descriptor| descriptor.id == "ltx_2_3")
+            .unwrap()
+            .backend = "mlx".to_owned();
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("runtime trainer") && error.contains("backend/identity drift"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_pair_rejects_ambiguous_or_incomplete_trainer_facts() {
+        let (mlx, mut candle) = valid_runtime_pair();
+        let duplicate = candle
+            .snapshot
+            .trainer_capabilities
+            .iter()
+            .find(|descriptor| descriptor.id == "ltx_2_3")
+            .unwrap()
+            .clone();
+        candle.snapshot.trainer_capabilities.push(duplicate);
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("repeats trainer descriptor"),
+            "unexpected error: {error}"
+        );
+
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        mlx.trainer_mappings
+            .insert(String::new(), "ltx_2_3".to_owned());
+        candle
+            .trainer_mappings
+            .insert(String::new(), "ltx_2_3".to_owned());
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("incomplete trainer mapping"),
+            "unexpected error: {error}"
+        );
+
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        mlx.trainer_mappings
+            .insert("ltx_video_lora".to_owned(), String::new());
+        candle
+            .trainer_mappings
+            .insert("ltx_video_lora".to_owned(), String::new());
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("incomplete trainer mapping"),
+            "unexpected error: {error}"
+        );
+
+        let (mut mlx, mut candle) = valid_runtime_pair();
+        mlx.trainer_mappings
+            .insert("unknown_training_target".to_owned(), "ltx_2_3".to_owned());
+        candle
+            .trainer_mappings
+            .insert("unknown_training_target".to_owned(), "ltx_2_3".to_owned());
+        let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+        assert!(
+            error.contains("unknown: [\"unknown_training_target\"]"),
+            "unexpected error: {error}"
+        );
     }
 
     /// sc-20530 (adversarial review). `stamp_absent_optional_carriers` is the whole reason this
