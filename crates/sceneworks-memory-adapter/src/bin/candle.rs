@@ -27,11 +27,11 @@ const QWEN_STILL_CALIBRATION: &str = "Candle Qwen base calibration";
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 // The shipped q4/1024 golden approved mean_absolute_rgb_delta_255 <= 0.01681. Preserve that
-// source-of-truth policy as a round five-level mean envelope. The historical contract did not
+// source-of-truth policy exactly. The historical contract did not
 // constrain a single outlier channel, so the maximum metric remains diagnostic while the mean is
 // the promotion gate. The required broad mutation must still breach at least one envelope bound.
 const KREA_CANDLE_MAX_THRESHOLD: f64 = 1.0;
-const KREA_CANDLE_MEAN_THRESHOLD: f64 = 5.0 / 255.0;
+const KREA_CANDLE_MEAN_THRESHOLD: f64 = 0.01681;
 
 fn certifying_wddm_idle_config() -> StableIdleConfig {
     // GPU 1's otherwise-idle WDDM graphics residency measured 1.6 GB in run 33188922159. The
@@ -1892,6 +1892,9 @@ mod tests {
         assert!(maximum < KREA_CANDLE_MAX_THRESHOLD);
         assert!(mean > KREA_CANDLE_MEAN_THRESHOLD);
         assert!(ensure_krea_quality(maximum, mean, "regression").is_err());
+        assert!(ensure_krea_quality(1.0, 0.01681, "exact boundary").is_ok());
+        assert!(ensure_krea_quality(1.0, 0.01681 + 1e-12, "mean above boundary").is_err());
+        assert!(ensure_krea_quality(1.0 + 1e-12, 0.01681, "maximum above boundary").is_err());
     }
 
     #[test]
