@@ -19441,38 +19441,58 @@
       "adapter": "ltx_video",
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
       // One rehost, two transformer identities. Every selected quant tier downloads both nested
-      // variants and the worker selects exactly one root; no size/revision is claimed until SC-18780.
+      // variants and the worker selects exactly one root. Sizes are measured from the finalized
+      // bundles; the immutable revision is added only after SC-18780 publishes and verifies them.
       "downloads": [
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
           "coRequisite": true,
-          "files": ["enhancer/*"]
+          "files": ["enhancer/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 23951746871
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
           "coRequisite": true,
-          "files": ["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"]
+          "files": ["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 8899889568
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
           "variant": "q4",
           "default": true,
-          "files": ["distilled/q4/*", "dev/q4/*"]
+          "files": ["distilled/q4/*", "dev/q4/*"],
+          "platforms": ["macos", "windows", "linux"],
+          // Exact published-directory bytes for both transformer identities selected by this row.
+          "estimatedSizeBytes": 82001022554,
+          "footprint": { "diskSizeBytes": 82001022554, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
           "variant": "q8",
-          "files": ["distilled/q8/*", "dev/q8/*"]
+          "files": ["distilled/q8/*", "dev/q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 83672119594,
+          "footprint": { "diskSizeBytes": 83672119594, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
           "variant": "bf16",
-          "files": ["distilled/bf16/*", "dev/bf16/*"]
+          "files": ["distilled/bf16/*", "dev/bf16/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 145561735442,
+          "footprint": { "diskSizeBytes": 145561735442, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": { "model": "${HF_CACHE}/SceneWorks/ltx-2.5-mlx" },

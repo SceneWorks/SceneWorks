@@ -193,6 +193,47 @@ def test_cached_manifest_and_schema_loaders_return_isolated_copies():
     assert _load_schema(SCHEMA_PATH)["type"] == original_type
 
 
+def test_ltx25_builtin_manifest_uses_published_tier_sizes_and_geometry():
+    """sc-18781: one selected tier installs both published transformer identities."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "ltx_2_5")
+    co_requisites = [row for row in model["downloads"] if row.get("coRequisite")]
+    tiers = {
+        row["variant"]: row
+        for row in model["downloads"]
+        if not row.get("coRequisite")
+    }
+    expected_bytes = {
+        "q4": 82_001_022_554,
+        "q8": 83_672_119_594,
+        "bf16": 145_561_735_442,
+    }
+
+    assert set(tiers) == set(expected_bytes)
+    for tier, measured_bytes in expected_bytes.items():
+        row = tiers[tier]
+        assert row["files"] == [f"distilled/{tier}/*", f"dev/{tier}/*"]
+        assert row["platforms"] == ["macos", "windows", "linux"]
+        assert row["estimatedSizeBytes"] == measured_bytes
+        assert row["footprint"]["diskSizeBytes"] == measured_bytes
+        assert row["footprint"]["residentMemoryBytes"] is None
+        assert row["footprint"]["peakMemoryBytes"] is None
+
+    expected_co_requisites = {
+        ("enhancer/*",): 23_951_746_871,
+        ("distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",): 8_899_889_568,
+    }
+    assert len(co_requisites) == len(expected_co_requisites)
+    for row in co_requisites:
+        assert row["platforms"] == ["macos", "windows", "linux"]
+        assert row["estimatedSizeBytes"] == expected_co_requisites[tuple(row["files"])]
+
+    assert model["defaults"]["steps"] == 8
+    assert model["limits"]["steps"] == [8, 30]
+    assert model["limits"]["requiresDimensionsMultipleOf"] == 64
+    assert "maxPixels" not in model["limits"]
+
+
 COMPONENTS_REPO = "SceneWorks/Mage-Flow-Components-mlx"
 COMPONENTS_REVISION = "c936de2a107ee8d0869137e73943f6414f23adaa"
 # Measured on the uploaded artifacts (sc-14980). Per-tier DiT, and the shared per-tier components.
