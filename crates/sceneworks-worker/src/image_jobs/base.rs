@@ -7403,10 +7403,12 @@ fn resolve_identity_init(
 /// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea Turbo's
 /// reference-guided img2img surface).
 ///
-/// Available to the candle lane too (sc-10134): the candle `generate_candle_stream` calls this to resolve
-/// the Krea 2 Turbo img2img init off-Mac, feeding the same `(image, strength)` into `generate_one`'s
-/// `reference` → `Conditioning::Reference` → the engine's `render_img2img`. (The broader `ui.img2img`
-/// candle roll-out for SD3.5 / Z-Image / Boogu / Ideogram is sc-10265.)
+/// Available to the candle lane too (sc-10134): the candle `generate_candle_stream` calls this to
+/// resolve the img2img init off-Mac for EVERY `ui.img2img` model, feeding the same `(image, strength)`
+/// into `generate_one`'s `reference` → `Conditioning::Reference` → the engine's img2img entrypoint.
+/// The `ui.img2img` candle roll-out is complete — Krea, SD3.5, Z-Image, Boogu and Ideogram via the epic
+/// 8588 A4 stories, SANA base/Sprint via sc-18475 — so this arm serves all of them uniformly through
+/// [`model_supports_img2img`].
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -7445,9 +7447,10 @@ fn resolve_img2img_init_generic(
 /// those bespoke surfaces keep precedence; the generic arm then catches Krea + SD3.5 + any future
 /// `ui.img2img` model uniformly.
 ///
-/// Available to the candle lane too (sc-10134): `generate_candle_stream` gates its Krea 2 Turbo img2img
-/// resolve on this same manifest flag off-Mac. (Today the candle router only lets `krea_2_turbo` reach the
-/// candle lane with a reference; the other `ui.img2img` families follow in sc-10265.)
+/// Available to the candle lane too (sc-10134): `generate_candle_stream` gates its GENERIC img2img
+/// resolve on this same manifest flag off-Mac — every `ui.img2img` model reaches the candle lane with a
+/// reference this way (Krea, SD3.5, Z-Image, Boogu, Ideogram via the epic 8588 A4 stories; SANA
+/// base/Sprint via sc-18475), each engine owning its img2img entrypoint.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
