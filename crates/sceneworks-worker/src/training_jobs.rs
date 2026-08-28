@@ -279,6 +279,7 @@ fn training_request_from_plan(
                         )
                     })
                     .transpose()?,
+                model_options: Default::default(),
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -864,6 +865,7 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
+        model_options: Default::default(),
     }
 }
 
@@ -3786,12 +3788,14 @@ mod tests {
             sample_guidance_scale: 1.0,
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -3897,12 +3901,14 @@ mod tests {
             sample_guidance_scale: 1.0,
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4011,12 +4017,14 @@ mod tests {
             sample_guidance_scale: 1.0,
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4163,12 +4171,14 @@ mod tests {
             sample_guidance_scale: 1.0,
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4352,6 +4362,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4591,6 +4602,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir,
