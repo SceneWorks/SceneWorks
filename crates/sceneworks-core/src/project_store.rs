@@ -3246,6 +3246,7 @@ impl ProjectStore {
                 "Asset sidecar path must be project-relative".to_owned(),
             ));
         }
+        let sidecar_path = confined_deletion_target(&project_path, &sidecar_rel, "Asset sidecar")?;
         let asset = read_json(&sidecar_path)?;
         let media_rel = asset
             .pointer("/file/path")
@@ -3258,8 +3259,17 @@ impl ProjectStore {
                 "Asset media path must be project-relative".to_owned(),
             ));
         }
-        let media_path = project_path.join(media_rel);
-        let trash_dir = project_path.join("trash");
+        let media_path = if media_rel.is_empty() {
+            None
+        } else {
+            Some(confined_deletion_target(
+                &project_path,
+                media_rel,
+                "Asset media",
+            )?)
+        };
+        let project_root = fs::canonicalize(&project_path)?;
+        let trash_dir = project_root.join("trash");
         let asset_trash_dir = sidecar_path
             .parent()
             .filter(|parent| {
@@ -3275,7 +3285,10 @@ impl ProjectStore {
                 vec![dir]
             } else {
                 let mut targets = Vec::new();
-                if media_path.exists() && media_path.is_file() {
+                if let Some(media_path) = media_path
+                    .as_ref()
+                    .filter(|path| path.exists() && path.is_file())
+                {
                     targets.push(media_path.clone());
                 }
                 if sidecar_path.exists() {
@@ -3307,7 +3320,7 @@ impl ProjectStore {
         remove_sibling_poster_no_symlinks(&project_path, media_rel)?;
         CharacterStore::new(&self.data_dir, project_path.clone())
             .remove_asset_references(asset_id)?;
-        if media_path.exists() && media_path.is_file() {
+        if let Some(media_path) = media_path.filter(|path| path.exists() && path.is_file()) {
             fs::remove_file(media_path)?;
         }
         remove_asset_sidecar(&sidecar_path)?;
@@ -5615,6 +5628,76 @@ fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult
     transaction.execute("delete from assets where id = ?1", params![asset_id])?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Resolve a project-relative deletion target without following linked parents.
+///
+/// Purge paths come from durable sidecars and the derived index, both of which can
+/// be modified outside the application. A lexical `..` check is therefore not
+/// enough: an otherwise-normal component can be a symlink or Windows reparse
+/// point that redirects the later trash/remove operation outside the project.
+fn confined_deletion_target(
+    project_path: &Path,
+    relative_path: &str,
+    label: &str,
+) -> ProjectStoreResult<PathBuf> {
+    if !is_safe_relative_path(relative_path) {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "{label} path must be project-relative"
+        )));
+    }
+
+    let root = fs::canonicalize(project_path)?;
+    let components = Path::new(relative_path).components().collect::<Vec<_>>();
+    let mut target = root.clone();
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path must be project-relative"
+            )));
+        };
+        target.push(component);
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                for remainder in components.iter().skip(index + 1) {
+                    if let std::path::Component::Normal(remainder) = remainder {
+                        target.push(remainder);
+                    }
+                }
+                return Ok(target);
+            }
+            Err(error) => return Err(ProjectStoreError::Io(error)),
+        };
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path contains a symlink or reparse point"
+            )));
+        }
+        if index + 1 < components.len() && !metadata.is_dir() {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path contains a non-directory parent"
+            )));
+        }
+        if !fs::canonicalize(&target)?.starts_with(&root) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "{label} path escapes the project"
+            )));
+        }
+    }
+    Ok(target)
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 /// Remove a source sibling poster without ever traversing a symlinked parent.
@@ -12044,6 +12127,136 @@ mod tests {
                 assert!(safe_sidecar_path.exists(), "safe sidecar is untouched");
                 assert!(media_path.exists(), "media is untouched");
             }
+        }
+    }
+
+    #[test]
+    fn purge_asset_rejects_linked_media_and_sidecar_parents_before_deletion() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        for permanent in [false, true] {
+            let mode = if permanent { "permanent" } else { "trash" };
+            let project = store
+                .create_project(&format!("Linked media {mode}"))
+                .expect("project creates");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let asset_id = format!("linked-media-{mode}");
+            let safe_media_rel = format!("assets/images/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": safe_media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-08-28T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("safe asset persists");
+            let safe_sidecar = project_path
+                .join(&safe_media_rel)
+                .with_extension("sceneworks.json");
+
+            let external_dir = temp_dir.path().join(format!("external-media-{mode}"));
+            std::fs::create_dir_all(&external_dir).expect("external dir creates");
+            let linked_parent = project_path.join("assets").join(format!("linked-{mode}"));
+            if let Err(error) = create_dir_symlink(&external_dir, &linked_parent) {
+                eprintln!("symlink privilege unavailable; skipping purge fixture: {error}");
+                return;
+            }
+            let external_media = external_dir.join(format!("{asset_id}.png"));
+            std::fs::write(&external_media, b"external media").expect("external media writes");
+
+            let mut sidecar: Value =
+                serde_json::from_slice(&std::fs::read(&safe_sidecar).expect("safe sidecar reads"))
+                    .expect("sidecar decodes");
+            sidecar["file"]["path"] = Value::String(format!("assets/linked-{mode}/{asset_id}.png"));
+            write_json(&safe_sidecar, &sidecar).expect("sidecar media path updates");
+            let sidecar_before = std::fs::read(&safe_sidecar).expect("sidecar snapshots");
+
+            let error = store
+                .purge_asset(&project.id, &asset_id, permanent)
+                .expect_err("linked media parent is refused");
+            assert!(matches!(
+                error,
+                ProjectStoreError::BadRequest(ref detail)
+                    if detail == "Asset media path contains a symlink or reparse point"
+            ));
+            assert_eq!(
+                std::fs::read(&external_media).expect("external media remains"),
+                b"external media"
+            );
+            assert_eq!(
+                std::fs::read(&safe_sidecar).expect("sidecar remains"),
+                sidecar_before
+            );
+        }
+
+        for permanent in [false, true] {
+            let mode = if permanent { "permanent" } else { "trash" };
+            let project = store
+                .create_project(&format!("Linked sidecar {mode}"))
+                .expect("project creates");
+            let project_path = std::path::PathBuf::from(&project.path);
+            let external_dir = temp_dir.path().join(format!("external-sidecar-{mode}"));
+            std::fs::create_dir_all(&external_dir).expect("external dir creates");
+            let linked_parent = project_path
+                .join("assets")
+                .join(format!("linked-sidecar-{mode}"));
+            if let Err(error) = create_dir_symlink(&external_dir, &linked_parent) {
+                eprintln!("symlink privilege unavailable; skipping purge fixture: {error}");
+                return;
+            }
+
+            let asset_id = format!("linked-sidecar-{mode}");
+            let media_rel = format!("assets/linked-sidecar-{mode}/{asset_id}.png");
+            store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-1",
+                    "set",
+                    &json!({
+                        "assetId": asset_id,
+                        "mediaPath": media_rel,
+                        "mimeType": "image/png",
+                        "displayName": asset_id,
+                        "createdAt": "2026-08-28T00:00:00Z",
+                        "mode": "text_to_image",
+                        "model": "test",
+                        "adapter": "test",
+                        "prompt": "test"
+                    }),
+                )
+                .expect("linked fixture persists");
+            let external_media = external_dir.join(format!("{asset_id}.png"));
+            let external_sidecar = external_media.with_extension("sceneworks.json");
+            std::fs::write(&external_media, b"external media").expect("external media writes");
+            let sidecar_before = std::fs::read(&external_sidecar).expect("sidecar snapshots");
+
+            let error = store
+                .purge_asset(&project.id, &asset_id, permanent)
+                .expect_err("linked sidecar parent is refused");
+            assert!(matches!(
+                error,
+                ProjectStoreError::BadRequest(ref detail)
+                    if detail == "Asset sidecar path contains a symlink or reparse point"
+            ));
+            assert_eq!(
+                std::fs::read(&external_media).expect("external media remains"),
+                b"external media"
+            );
+            assert_eq!(
+                std::fs::read(&external_sidecar).expect("external sidecar remains"),
+                sidecar_before
+            );
         }
     }
 
