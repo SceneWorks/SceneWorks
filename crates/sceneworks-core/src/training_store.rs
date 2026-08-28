@@ -1642,7 +1642,7 @@ fn materialize_external_item(
         tier0_scalars: None,
         quality_ack: None,
         added_at: now.to_owned(),
-        extra: input.extra,
+        extra: forward_compatible_item_extra(input.extra),
     })
 }
 
@@ -1741,8 +1741,20 @@ fn materialize_item(
         // Fresh file → no dismissed findings yet (sc-6534).
         quality_ack: None,
         added_at: now.to_owned(),
-        extra: input.extra,
+        extra: forward_compatible_item_extra(input.extra),
     })
+}
+
+/// A dataset item returned by the API is also accepted as an update input. Serde's flattened
+/// forward-compatible map therefore sees the server-owned output fields that are intentionally
+/// absent from [`TrainingDatasetItemInput`]. Do not serialize those stale values beside the freshly
+/// computed typed fields: duplicate `addedAt`/`contentHash` keys make the saved manifest unreadable,
+/// while cached quality data must never survive rematerializing different bytes.
+fn forward_compatible_item_extra(mut extra: ExtraFields) -> ExtraFields {
+    for field in ["contentHash", "tier0Scalars", "qualityAck", "addedAt"] {
+        extra.remove(field);
+    }
+    extra
 }
 
 /// The derived image to re-point a dataset item at (sc-6539 one-tap fixes). Produced by a fix that

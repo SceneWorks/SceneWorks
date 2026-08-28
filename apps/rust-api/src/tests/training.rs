@@ -1087,7 +1087,7 @@ async fn ltx_prepared_upload_saves_reopens_and_rejects_wrong_schema() {
         Value::Null,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{reopened}");
     assert_eq!(
         reopened["items"][0]["ltxPreparedBundlePath"],
         updated["items"][0]["ltxPreparedBundlePath"]

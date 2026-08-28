@@ -2280,6 +2280,7 @@ mod huggingface_receipt_tests {
 
     #[test]
     fn old_receipted_adapter_is_usable_stale_but_arbitrary_safetensors_is_not() {
+        let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";
@@ -2331,6 +2332,7 @@ mod huggingface_receipt_tests {
 
     #[test]
     fn current_adapter_clears_update_available() {
+        let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";

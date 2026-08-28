@@ -968,13 +968,22 @@ fn validate_runtime_pair(
     // `previewSupportDerivation.js` and `bump-inference.mjs` on exactly this reasoning — "a
     // capability dump goes stale when a provider gains or loses a capability, a property of the
     // dump's CONTENT, not when the revision label attached to it moves" — but did not reach this
-    // Rust sibling. Nothing is weakened by dropping it: the three checks below compare the actual
+    // Rust sibling. Nothing is weakened by dropping it: the checks below compare the actual
     // mappings and descriptor populations, so a real divergence between the halves still fails here
     // regardless of what revision either was stamped at.
     if mlx.model_mappings != candle.model_mappings {
         return Err("matching-platform production model mappings differ".to_owned());
     }
-    if mlx.trainer_mappings != candle.trainer_mappings {
+    // Training target ids are shared product coordinates, but the mapped engine ids are native
+    // backend implementation details. LTX 2.5 is deliberately `ltx_2_5` on MLX and
+    // `ltx_2_5_distilled` on Candle. Require the same target population here; the existing
+    // `trainer_supports` join below resolves each native mapping against its own snapshot and
+    // deliberately returns false for unsupported lanes such as MLX Krea control training.
+    if !mlx
+        .trainer_mappings
+        .keys()
+        .eq(candle.trainer_mappings.keys())
+    {
         return Err("matching-platform production trainer mappings differ".to_owned());
     }
     for facts in [mlx, candle] {
@@ -5494,6 +5503,29 @@ mod tests {
             .unwrap()
             .engine_ids = vec!["wan2_2_t2v_14b".to_owned()];
         assert!(validate_runtime_pair(&wrong_video_shape, &candle).is_err());
+    }
+
+    #[test]
+    fn trainer_mappings_allow_native_engine_ids_and_fail_closed() {
+        let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+        let target = "ltx_2_5_video_lora";
+
+        assert_ne!(
+            mlx.trainer_mappings.get(target),
+            candle.trainer_mappings.get(target),
+            "the regression requires distinct native LTX 2.5 trainer engines"
+        );
+        validate_runtime_pair(&mlx, &candle).unwrap();
+        assert!(trainer_supports(&mlx, target, "lora"));
+        assert!(trainer_supports(&candle, target, "lora"));
+
+        let mut missing_target = candle.clone();
+        missing_target.trainer_mappings.remove(target);
+        assert_eq!(
+            validate_runtime_pair(&mlx, &missing_target).unwrap_err(),
+            "matching-platform production trainer mappings differ"
+        );
     }
 
     #[test]

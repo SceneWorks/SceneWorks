@@ -1377,6 +1377,7 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_closed() {
+    let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");

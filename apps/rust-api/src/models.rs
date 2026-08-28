@@ -8530,10 +8530,11 @@ mod model_size_concurrency_tests {
         //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
         //   epic  sc-20756 H3 Ref2VA off-Mac tier  +0 / +1 / +1
         // giving 89 / 86 / 86. Each side read only its own set and so read 87/84/84 (main) or
-        // 88/85/85 (epic, at the previous sync); neither is right once both land.
+        // 88/85/85 (epic, at the previous sync); neither is right once both land. SC-18780 then
+        // publishes the single cross-platform LTX 2.5 turnkey context, giving 90 / 87 / 87.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 89_usize), ("windows", 86), ("linux", 86)]
+            [("macos", 90_usize), ("windows", 87), ("linux", 87)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
