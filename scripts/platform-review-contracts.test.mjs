@@ -353,6 +353,10 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
   const candle = await source(".github/workflows/windows-candle.yml");
   const mlx = await source(".github/workflows/macos-mlx.yml");
+  const candleWorker = candle.slice(
+    candle.indexOf("  candle-worker:"),
+    candle.indexOf("  imported-nvfp4-worker-smoke:"),
+  );
 
   // The MLX lane is the template: base labels for ordinary runs, plus a weights label for a
   // dispatch that needs real weights on disk. Assert the template still looks like that, so this
@@ -368,9 +372,41 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
   // available pool for this ~24m lane in half for no coverage.
   assert.doesNotMatch(
-    candle,
+    candleWorker,
     /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
   );
+  assert.ok(
+    candleWorker.includes(
+      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}",
+    ),
+    "real-weight dispatch profiles must share the GPU lock while ordinary runs remain unique",
+  );
+  assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
+});
+
+test("windows-candle runs the imported NVFP4 worker acceptance on the real-weights host", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const at = workflow.indexOf("  imported-nvfp4-worker-smoke:\n");
+  assert.ok(at >= 0, "windows-candle.yml must keep the imported NVFP4 smoke job");
+  const job = workflow.slice(at);
+
+  assert.match(job, /^ {4}needs: candle-worker$/m);
+  assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
+  assert.match(job, /^ {6}cancel-in-progress: false$/m);
+  assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
+  assert.match(job, /github\.event_name == 'push'/);
+  assert.match(job, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
+  assert.doesNotMatch(job, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
+  assert.match(
+    job,
+    /^ {6}SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\\huggingface\\hub\\models--Comfy-Org--Krea-2\\snapshots\\952f49d49653cb42e7d6cf7cbfad74738073ec7d\\diffusion_models\\krea2_turbo_nvfp4\.safetensors'$/m,
+  );
+  assert.match(
+    job,
+    /cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1/,
+  );
+  assert.doesNotMatch(job, /continue-on-error:/);
 });
 
 test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
@@ -655,6 +691,10 @@ test("windows-candle provisions before it compiles anything", async () => {
 
 test("a weights-only dispatch skips the entire compile chain, pinned per step", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
+  const candleWorker = workflow.slice(
+    workflow.indexOf("  candle-worker:"),
+    workflow.indexOf("  imported-nvfp4-worker-smoke:"),
+  );
 
   // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true AND
   // `run_five_rung_reference` false; every other shape must still compile. Half of this is not a
@@ -676,7 +716,7 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   // either skipped for a weights-only dispatch, or gated on the five-rung capture or the LTX Eros
   // acceptance capture (SC-18902) -- neither of which is a weights-only dispatch, so both
   // legitimately compile what they run.
-  for (const step of jobSteps(workflow).filter((candidate) => candidate.cargo)) {
+  for (const step of jobSteps(candleWorker).filter((candidate) => candidate.cargo)) {
     assert.ok(
       skip.test(step.body) ||
         /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance)/.test(step.body),
