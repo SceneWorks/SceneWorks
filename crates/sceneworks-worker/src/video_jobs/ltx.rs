@@ -28,12 +28,20 @@ pub(super) const LTX_ADAPTER: &str = "mlx_ltx";
 /// single SceneWorks rehost.  The selector is part of the request contract, not
 /// a display-only model label: absent requests retain the shipped distilled
 /// default and every explicit value is fail-closed.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Ltx25TransformerVariant {
     Distilled,
     Dev,
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 impl Ltx25TransformerVariant {
     pub(super) const fn component_dir(self) -> &'static str {
         match self {
@@ -43,6 +51,10 @@ impl Ltx25TransformerVariant {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) fn ltx25_transformer_variant(
     request: &VideoRequest,
 ) -> WorkerResult<Ltx25TransformerVariant> {

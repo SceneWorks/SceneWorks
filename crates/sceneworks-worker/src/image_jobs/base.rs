@@ -9620,7 +9620,7 @@ fn krea_runtime_evidence_context(
         repository,
         revision,
     )?;
-    crate::vram_gate::KreaRuntimeEvidenceContext::inspect(
+    crate::vram_gate::KreaRuntimeEvidenceContext::inspect_turbo_fit(
         "krea_2_turbo",
         "candle",
         &settings.gpu_id,
