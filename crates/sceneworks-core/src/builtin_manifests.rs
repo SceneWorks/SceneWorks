@@ -580,6 +580,74 @@ mod tests {
     }
 
     #[test]
+    fn ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders() {
+        let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let model = manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("ltx_2_5"))
+            .expect("ltx_2_5 is present");
+
+        assert_eq!(
+            model["mlx"]["memoryStrategyCapabilities"],
+            serde_json::json!({
+                "bounded_decode": {
+                    "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+                    "overlays": ["none", "lora"]
+                },
+                "bounded_attention": {
+                    "parameters": { "attentionChunkSize": 16_777_216 },
+                    "overlays": ["none", "lora"]
+                },
+                "bounded_transformer_residency": {
+                    "parameters": {
+                        "transformerWindowSize": 1,
+                        "transformerWindowComponent": "Dit"
+                    },
+                    "overlays": ["none"]
+                }
+            })
+        );
+        assert_eq!(
+            model["candle"],
+            serde_json::json!({
+                "memoryStrategyCapabilities": {
+                    "bounded_decode": {
+                        "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+                        "overlays": ["none", "lora"],
+                        "tiers": ["q4", "bf16"]
+                    },
+                    "bounded_attention": {
+                        "parameters": { "attentionChunkSize": 16_777_216 },
+                        "overlays": ["none", "lora"],
+                        "tiers": ["q4", "bf16"]
+                    },
+                    "bounded_transformer_residency": {
+                        "parameters": {
+                            "transformerWindowSize": 1,
+                            "transformerWindowComponent": "Dit"
+                        },
+                        "overlays": ["none"],
+                        "tiers": ["q4", "bf16"]
+                    }
+                }
+            })
+        );
+        for backend in ["mlx", "candle"] {
+            assert!(
+                model[backend]
+                    .get("memoryStrategyStructuralExemptions")
+                    .is_none(),
+                "Missing rungs are not structural exemptions on {backend}"
+            );
+        }
+        assert!(model["candle"].get("supportsSequentialOffload").is_none());
+    }
+
+    #[test]
     fn krea_2_raw_declares_no_default_negative_and_low_guidance_with_raw_guide() {
         // sc-14203 (partially revises sc-13881): Raw's defaults fix. On-device render-validation showed the
         // "soft/over-warm" heat was driven by the guidance default (Krea's nominal 3.5 ≡ standard-CFG 4.5)

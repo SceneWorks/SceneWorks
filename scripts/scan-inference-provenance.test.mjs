@@ -12,6 +12,7 @@ import test from "node:test";
 
 import {
   MARKER,
+  cratePrefixesForTree,
   cratePopulationSha256,
   parseCrates,
   serializeCrates,
@@ -136,4 +137,24 @@ test("an empty crate prefix cannot survive the serialize/parse round trip", () =
   // produces it, serializeCrates renders it as a blank line, and parseCrates drops blank lines — so
   // the crate silently leaves the population it is supposed to be classified in.
   assert.deepEqual(parseCrates(serializeCrates(["", "crates/a"])), ["crates/a"]);
+});
+
+test("a virtual workspace does not invent a root crate for shared Rust modules", () => {
+  const prefixes = cratePrefixesForTree([
+    "Cargo.toml",
+    "crates/media/shared.rs",
+    "crates/media/provider/Cargo.toml",
+    "crates/media/provider/src/lib.rs",
+  ], "[workspace]\nmembers = [\"crates/media/provider\"]\n");
+
+  assert.deepEqual([...prefixes].sort(), ["crates/media/provider"]);
+});
+
+test("a real root package still fails closed on its ambiguous empty prefix", () => {
+  const prefixes = cratePrefixesForTree([
+    "Cargo.toml",
+    "src/lib.rs",
+  ], "[package]\nname = \"root-package\"\nversion = \"0.1.0\"\n");
+
+  assert.deepEqual([...prefixes], [""]);
 });

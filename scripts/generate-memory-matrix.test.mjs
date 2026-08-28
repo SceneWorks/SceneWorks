@@ -3335,7 +3335,7 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // The pinned revision is the current committed inference-main head. Keep this literal
   // alongside the current generated receipt: the assertion below only means something while the
   // pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "624fed20c1969b851b60265e3b9dac951068c1f5");
+  assert.equal(pin, "43c6cc8333511ffa33aea6ff2e917411ba7c724a");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
@@ -5674,7 +5674,7 @@ test("the universe is modality-aware, and every video entry is IN it (sc-18815)"
 });
 
 test("video providers are per BACKEND, derived from the worker's own route resolvers (sc-18815)", async () => {
-  // LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on candle. A single scalar route would be wrong
+  // Each LTX generation has distinct MLX and Candle providers. A single scalar route would be wrong
   // on one backend, and a wrong provider is not cosmetic — it is the key calibration evidence, the
   // calibration plan and the per-provider closure digests all bind on. `mlx:ltx_2_3` is the exact
   // key sc-18808 committed to `config/inference-provider-closures.json`.
@@ -5694,13 +5694,71 @@ test("video providers are per BACKEND, derived from the worker's own route resol
   );
   assert.deepEqual([...providers].sort(), ["candle:ltx_2_3_distilled", "mlx:ltx_2_3"]);
 
+  const ltx25 = matrix.models.find((model) => model.id === "ltx_2_5");
+  assert.equal(ltx25.familyGroup, "ltx-video");
+  assert.deepEqual(ltx25.resolvedRoutes, { mlx: "ltx_2_5", candle: "ltx_2_5_distilled" });
+  const ltx25Providers = new Set(
+    matrix.cells
+      .filter((cell) => cell.modelId === "ltx_2_5")
+      .map((cell) => `${cell.backend}:${cell.provider}`),
+  );
+  assert.deepEqual([...ltx25Providers].sort(), ["candle:ltx_2_5_distilled", "mlx:ltx_2_5"]);
+
   const closures = JSON.parse(
     await readFile(new URL("../config/inference-provider-closures.json", import.meta.url), "utf8"),
   );
-  assert.ok(
-    closures.providers["mlx:ltx_2_3"],
-    "the provider a cell binds on must be the one the closure table already names",
+  for (const provider of ["mlx:ltx_2_3", "mlx:ltx_2_5", "candle:ltx_2_5_distilled"]) {
+    assert.ok(
+      closures.providers[provider],
+      `the provider ${provider} that a cell binds on must be named by the closure table`,
+    );
+  }
+});
+
+test("LTX-2.5 selects every routed platform and exposes only its declared memory ladder (sc-18800)", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const cells = matrix.cells.filter((cell) => cell.modelId === "ltx_2_5");
+
+  assert.equal(cells.length, 360, "2 backends x 3 tiers x 6 modes x 2 overlays x 5 rungs");
+  assert.deepEqual([...new Set(cells.map((cell) => cell.backend))].sort(), ["candle", "mlx"]);
+  assert.deepEqual([...new Set(cells.map((cell) => cell.tier))].sort(), ["bf16", "q4", "q8"]);
+  assert.deepEqual(
+    [...new Set(cells.map((cell) => cell.mode))].sort(),
+    [
+      "extend_clip",
+      "first_last_frame",
+      "image_to_video",
+      "replace_person",
+      "text_to_video",
+      "video_bridge",
+    ],
   );
+  assert.deepEqual([...new Set(cells.map((cell) => cell.overlay))].sort(), ["lora", "none"]);
+  assert.ok(cells.every((cell) => cell.memoryCharacterization.status === "unmeasured"));
+
+  const assertUniformState = (backend, rung, overlay, expected, tiers = ["bf16", "q4", "q8"]) => {
+    const selected = cells.filter(
+      (cell) => cell.backend === backend && cell.rung === rung && cell.overlay === overlay &&
+        tiers.includes(cell.tier),
+    );
+    assert.equal(selected.length, tiers.length * 6, `${backend}:${rung}:${overlay} must cover the selected tiers and every mode`);
+    assert.deepEqual([...new Set(selected.map((cell) => cell.state))], [expected]);
+  };
+
+  for (const overlay of ["none", "lora"]) {
+    assertUniformState("mlx", "bounded_decode", overlay, "Implemented/unverified");
+    assertUniformState("mlx", "bounded_attention", overlay, "Implemented/unverified");
+    assertUniformState("candle", "staged_residency", overlay, "Missing");
+    assertUniformState("candle", "bounded_decode", overlay, "Implemented/unverified", ["bf16", "q4"]);
+    assertUniformState("candle", "bounded_attention", overlay, "Implemented/unverified", ["bf16", "q4"]);
+    assertUniformState("candle", "bounded_decode", overlay, "Missing", ["q8"]);
+    assertUniformState("candle", "bounded_attention", overlay, "Missing", ["q8"]);
+  }
+  assertUniformState("mlx", "bounded_transformer_residency", "none", "Implemented/unverified");
+  assertUniformState("mlx", "bounded_transformer_residency", "lora", "Missing");
+  assertUniformState("candle", "bounded_transformer_residency", "none", "Implemented/unverified", ["bf16", "q4"]);
+  assertUniformState("candle", "bounded_transformer_residency", "none", "Missing", ["q8"]);
+  assertUniformState("candle", "bounded_transformer_residency", "lora", "Missing");
 });
 
 test("a video route parser handles every form the worker spells, consts included (sc-18815)", () => {
@@ -5993,7 +6051,7 @@ test("video cells name no per-entry story, and their family owner is the real on
   // SC-15812's defect reached from the other direction, so it is checked with the same force.
   const matrix = await buildMatrix({ publish: false });
   const video = matrix.models.filter((model) => model.modality === "video");
-  assert.ok(video.length === 10);
+  assert.equal(video.length, 11);
   for (const model of video) {
     for (const backend of model.backends) {
       assert.equal(model.owningModelStories[backend], null);

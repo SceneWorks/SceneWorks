@@ -11705,7 +11705,7 @@ fn generate_ltx_validates_and_stages_the_selector_before_side_effects() {
         .expect("generate_ltx exists")
         .1;
     let selector = generate
-        .find("resolve_selected_ltx_text_encoder(")
+        .find("resolve_ltx_text_encoder_for_model(")
         .expect("selector resolution");
     for side_effect in [
         "resolve_video_clip_conditioning(",

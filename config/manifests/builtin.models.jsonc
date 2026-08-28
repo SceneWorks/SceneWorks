@@ -19523,7 +19523,49 @@
       "mlx": {
         "minMemoryGb": 31,
         "repo": "SceneWorks/ltx-2.5-mlx",
-        "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 }
+        "autoDistillLora": { "stage1Strength": 0.0, "stage2Strength": 1.0 },
+        // SC-18800: the pinned `ltx_2_5` contract exposes the ordinary conv-VAE tiler, both
+        // attention-score budgets, and the adapter-free 48-block AvDiT window. The dev transformer
+        // always installs the required stage-two refinement LoRA, so it deliberately does not
+        // inherit the adapter-free rung-4 claim. Missing is not structural non-applicability: no
+        // structural exemptions are declared for any other coordinate.
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 16777216 },
+            "overlays": ["none", "lora"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        }
+      },
+      "candle": {
+        // SC-18800: Candle's ordinary ConvVAE route consumes the selected decode edge/overlap, while
+        // the optional DiffVAE route rejects those parameters and keeps its own automatic budget.
+        // Bounded attention and the adapter-free AvDiT window are independently selectable. Staged
+        // residency remains Missing rather than being mislabeled as StructurallyNotApplicable.
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 192, "decodeOverlap": 64 },
+            "overlays": ["none", "lora"],
+            "tiers": ["q4", "bf16"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 16777216 },
+            "overlays": ["none", "lora"],
+            "tiers": ["q4", "bf16"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"],
+            "tiers": ["q4", "bf16"]
+          }
+        }
       },
       "ui": {
         "label": "LTX-2.5",

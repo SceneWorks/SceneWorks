@@ -27,7 +27,7 @@ const EXPECTED_IMAGE_COUNT = 53;
 // no rungs, no fit gate, no strategy selector — so they are outside the universe by design rather
 // than by omission, and admitting one would need the same three things video needed here.
 const MATRIX_MODALITIES = new Set(["image", "video"]);
-const EXPECTED_VIDEO_COUNT = 10;
+const EXPECTED_VIDEO_COUNT = 11;
 // SC-18218 removed FLUX.2-dev from the MLX staged-residency census when the then-pinned provider was
 // eager/resident-only; sc-20799 REVERSED that at pin ebcdc7da7, where all three Dev MLX providers
 // declare selectable Sequential staged residency, so flux2_dev is now census-required (the assertion
@@ -345,7 +345,7 @@ export function familyLabel(group) {
  * two catalog entries — so the family is not counted or surveyed twice.
  */
 export function familyGroup(modelId) {
-  if (modelId.startsWith("ltx_2_3")) return "ltx-video";
+  if (modelId.startsWith("ltx_2_3") || modelId === "ltx_2_5") return "ltx-video";
   if (modelId.startsWith("wan_2_2")) return "wan-video";
   if (modelId === "scail2_14b") return "scail2";
   if (modelId === "krea_realtime_14b") return "krea-realtime";
@@ -3460,7 +3460,10 @@ export function strategyStatus({
     };
   }
   const staticCapability = declaredModel[backend]?.memoryStrategyCapabilities?.[rung];
-  if (staticCapability?.overlays?.includes(overlay)) {
+  if (
+    staticCapability?.overlays?.includes(overlay) &&
+    (!staticCapability.tiers || staticCapability.tiers.includes(tier))
+  ) {
     return {
       state: "Implemented/unverified",
       source: `config/manifests/builtin.models.jsonc#models/${declaredModel.id}/${backend}/memoryStrategyCapabilities/${rung}`,

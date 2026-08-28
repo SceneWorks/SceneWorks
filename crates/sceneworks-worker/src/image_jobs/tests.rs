@@ -8600,7 +8600,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
     )
     .expect_err("dispatch rejects a retargeted prepared entry");
     assert!(
-        error.to_string().contains("changed") || error.to_string().contains("identity"),
+        error.to_string().contains("artifact seal mismatch"),
         "unexpected validation error: {error}"
     );
 }
@@ -19341,7 +19341,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
     )
     .expect_err("dispatch rejects a retargeted prepared transformer");
     assert!(
-        error.to_string().contains("changed") || error.to_string().contains("identity"),
+        error.to_string().contains("artifact seal mismatch"),
         "unexpected validation error: {error}"
     );
 }

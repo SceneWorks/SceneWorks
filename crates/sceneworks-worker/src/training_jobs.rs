@@ -2215,8 +2215,9 @@ mod tests {
     #[test]
     fn ltx_prepared_bundle_path_is_resolved_under_the_dataset_root() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let settings = test_settings(dir.path());
-        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let dataset_root = data_dir.join("datasets").join("ds-1");
         let prepared_dir = dataset_root.join("prepared");
         std::fs::create_dir_all(&prepared_dir).expect("create prepared dir");
         let bundle = prepared_dir.join("item-0001.safetensors");
@@ -2236,9 +2237,10 @@ mod tests {
             &options,
         )
         .expect("resolve confined prepared bundle");
+        let canonical_bundle = bundle.canonicalize().expect("canonical prepared bundle");
         assert_eq!(
             resolved.get("ltxPreparedBundlePath"),
-            Some(&json!(bundle.display().to_string()))
+            Some(&json!(canonical_bundle.display().to_string()))
         );
 
         std::fs::write(&bundle, b"tampered").expect("tamper prepared bundle");
@@ -2265,7 +2267,9 @@ mod tests {
         )
         .expect_err("prepared bundle traversal must be rejected");
         assert!(
-            error.to_string().contains("outside the allowed roots"),
+            error
+                .to_string()
+                .contains("must be inside an app-managed directory"),
             "got: {error}"
         );
     }
@@ -4032,6 +4036,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            model_options: Default::default(),
             resume: false,
             control_type: None,
         };
@@ -4040,6 +4045,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4143,6 +4149,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            model_options: Default::default(),
             resume: false,
             control_type: None,
         };
@@ -4151,6 +4158,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -4257,6 +4265,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            model_options: Default::default(),
             resume: false,
             control_type: None,
         };
@@ -4265,6 +4274,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                model_options: Default::default(),
             }],
             config,
             output_dir: output_dir.clone(),

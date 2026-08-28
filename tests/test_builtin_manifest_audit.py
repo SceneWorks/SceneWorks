@@ -234,6 +234,55 @@ def test_ltx25_builtin_manifest_uses_published_tier_sizes_and_geometry():
     assert "maxPixels" not in model["limits"]
 
 
+def test_ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders():
+    """sc-18800: static declarations mirror the two provider contracts without false exemptions."""
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "ltx_2_5")
+
+    assert model["mlx"]["memoryStrategyCapabilities"] == {
+        "bounded_decode": {
+            "parameters": {"decodeTileEdge": 192, "decodeOverlap": 64},
+            "overlays": ["none", "lora"],
+        },
+        "bounded_attention": {
+            "parameters": {"attentionChunkSize": 16_777_216},
+            "overlays": ["none", "lora"],
+        },
+        "bounded_transformer_residency": {
+            "parameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit",
+            },
+            "overlays": ["none"],
+        },
+    }
+    assert model["candle"] == {
+        "memoryStrategyCapabilities": {
+            "bounded_decode": {
+                "parameters": {"decodeTileEdge": 192, "decodeOverlap": 64},
+                "overlays": ["none", "lora"],
+                "tiers": ["q4", "bf16"],
+            },
+            "bounded_attention": {
+                "parameters": {"attentionChunkSize": 16_777_216},
+                "overlays": ["none", "lora"],
+                "tiers": ["q4", "bf16"],
+            },
+            "bounded_transformer_residency": {
+                "parameters": {
+                    "transformerWindowSize": 1,
+                    "transformerWindowComponent": "Dit",
+                },
+                "overlays": ["none"],
+                "tiers": ["q4", "bf16"],
+            },
+        }
+    }
+    for backend in ("mlx", "candle"):
+        assert "memoryStrategyStructuralExemptions" not in model[backend]
+    assert "supportsSequentialOffload" not in model["candle"]
+
+
 COMPONENTS_REPO = "SceneWorks/Mage-Flow-Components-mlx"
 COMPONENTS_REVISION = "c936de2a107ee8d0869137e73943f6414f23adaa"
 # Measured on the uploaded artifacts (sc-14980). Per-tier DiT, and the shared per-tier components.

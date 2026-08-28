@@ -190,6 +190,32 @@ export function scan(repo, revision = pinnedRevision()) {
   return candidates.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+const manifestDeclaresPackage = (source) => /^\s*\[package\]\s*(?:#.*)?$/m.test(source);
+
+/**
+ * Derive crate prefixes from one git-tree inventory.
+ *
+ * A root `Cargo.toml` can be either a package manifest or a virtual workspace manifest. The latter
+ * owns no Rust sources: repository-level shared modules may sit outside a member directory and be
+ * included by member crates with `#[path]`. Treating those files as an empty-prefix root crate
+ * invents a package that Cargo itself does not see. A real root package remains unsupported because
+ * the path-prefix coverage format has no unambiguous non-empty spelling for it.
+ */
+export function cratePrefixesForTree(files, rootManifest = "") {
+  const rootIsPackage = files.includes("Cargo.toml") && manifestDeclaresPackage(rootManifest);
+  const crateDirs = files
+    .filter((file) => file === "Cargo.toml" || file.endsWith("/Cargo.toml"))
+    .map((file) => (file === "Cargo.toml" ? "" : file.slice(0, -"/Cargo.toml".length)))
+    .filter((dir) => dir !== "" || rootIsPackage)
+    .sort((a, b) => b.length - a.length);
+  const owning = new Set();
+  for (const file of files.filter(productionRustPath)) {
+    const owner = crateDirs.find((dir) => dir === "" || file.startsWith(`${dir}/`));
+    if (owner !== undefined) owning.add(owner);
+  }
+  return owning;
+}
+
 /**
  * Every crate prefix in `revision` that owns at least one production `.rs` file.
  *
@@ -206,15 +232,10 @@ export function scanCrates(repo, revision = pinnedRevision()) {
   const files = execFileSync("git", ["-C", repo, "ls-tree", "-r", "--name-only", revision], {
     encoding: "utf8",
   }).trim().split("\n");
-  const crateDirs = files
-    .filter((file) => file === "Cargo.toml" || file.endsWith("/Cargo.toml"))
-    .map((file) => (file === "Cargo.toml" ? "" : file.slice(0, -"/Cargo.toml".length)))
-    .sort((a, b) => b.length - a.length);
-  const owning = new Set();
-  for (const file of files.filter(productionRustPath)) {
-    const owner = crateDirs.find((dir) => dir === "" || file.startsWith(`${dir}/`));
-    if (owner !== undefined) owning.add(owner);
-  }
+  const rootManifest = files.includes("Cargo.toml")
+    ? execFileSync("git", ["-C", repo, "show", `${revision}:Cargo.toml`], { encoding: "utf8" })
+    : "";
+  const owning = cratePrefixesForTree(files, rootManifest);
   // A root-level `Cargo.toml` that directly owns top-level production `.rs` files yields the
   // EMPTY-STRING prefix. `serializeCrates` would render it as a blank line and `parseCrates` drops
   // blank lines, so the crate would vanish from the inventory. That fails on count/hash rather than

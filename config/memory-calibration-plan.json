@@ -9070,6 +9070,87 @@
           "expectedResult": "passed"
         }
       ]
+    },
+    {
+      "name": "mlx-ltx-2-5-q4-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "fixture": "ltx-2-5-mlx-q4-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-ltx-2-5-q4-bounded_transformer_residency-768x512-f145",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "ltx_2_5_distilled",
+        "modelId": "ltx_2_5",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+      "fixture": "ltx-2-5-candle-q4-768x512-f145-fps24-seed18755",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
     }
   ]
 }
