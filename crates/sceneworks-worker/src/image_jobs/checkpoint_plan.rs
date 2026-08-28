@@ -1809,6 +1809,13 @@ async fn generate_checkpoint_plan_stream(
         .collect();
     let total = work.len();
 
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let checkpoint_path_for_facts = match &sources.primary {
+        WeightsSource::File(path) => Some(path.clone()),
+        _ => None,
+    };
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let spec = checkpoint_plan_load_spec(&sources, quant)?;
     let engine_id = sources.descriptor.id;
 
@@ -1972,8 +1979,9 @@ async fn generate_checkpoint_plan_stream(
             },
         ),
         move |model, tx, cancel| {
+            let facts_tx = tx.clone();
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
-                generate_one(
+                let generated = generate_one(
                     model,
                     seed,
                     prompt,
@@ -1984,7 +1992,27 @@ async fn generate_checkpoint_plan_stream(
                     on_progress,
                     negative_prompt.clone(),
                     &checkpoint_id,
-                )
+                )?;
+                // A plan-backed imported checkpoint reaches the same runtime handle as the
+                // bespoke imported-Krea route, so publish the handle's post-load receipt through
+                // the same event seam. The consumer applies this measured fact set to the image
+                // event that follows, replacing the honest pre-load `no-runtime-receipt` fallback.
+                if generated.is_some() {
+                    if let Some(facts) =
+                        crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+                            &manifest_entry_for_facts,
+                            checkpoint_path_for_facts.as_deref(),
+                            model.checkpoint_weight_facts(),
+                        )
+                    {
+                        let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
+                            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(
+                                &facts,
+                            ),
+                        });
+                    }
+                }
+                Ok(generated)
             })
         },
     );

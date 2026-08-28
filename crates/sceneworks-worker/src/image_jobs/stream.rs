@@ -34,9 +34,9 @@ enum GenEvent {
     /// write, replacing the pre-load `no-runtime-receipt` stamp. Lanes that hold no handle simply
     /// never produce this variant.
     //
-    // The only producer today is the candle imported-Krea lane (the one route whose runtime handle
-    // answers `checkpoint_weight_facts()` at this pin), so builds without that lane construct
-    // nothing here while the consumer arm still compiles everywhere.
+    // The producers today are the candle imported-Krea and checkpoint-plan lanes (the routes whose
+    // runtime handles answer `checkpoint_weight_facts()` at this pin), so builds without those
+    // lanes construct nothing here while the consumer arm still compiles everywhere.
     #[cfg_attr(
         not(all(not(target_os = "macos"), feature = "backend-candle")),
         allow(dead_code)
