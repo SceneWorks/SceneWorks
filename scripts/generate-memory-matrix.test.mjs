@@ -5641,14 +5641,14 @@ test("the universe is modality-aware, and every video entry is IN it (sc-18815)"
     .models.filter((model) => model.type === "video" && !outOfMatrixEntries.has(model.id))
     .map((model) => model.id)
     .sort();
-  assert.equal(manifestVideo.length, 10);
+  assert.equal(manifestVideo.length, 11);
 
   const matrix = await buildMatrix({ publish: false });
   const inMatrix = matrix.models.filter((model) => model.modality === "video").map((model) => model.id);
   assert.deepEqual(inMatrix.sort(), manifestVideo, "every manifest video entry is in the universe");
   assert.equal(matrix.models.filter((model) => model.modality === "image").length, 53);
   assert.equal(matrix.summary.catalogEntries, matrix.models.length);
-  assert.deepEqual(matrix.summary.catalogEntriesByModality, { image: 53, video: 10 });
+  assert.deepEqual(matrix.summary.catalogEntriesByModality, { image: 53, video: 11 });
 
   // Cells exist for every routed video lane, on every rung — the "per-rung coverage rows" the story
   // asks for — and their states are the ordinary vocabulary, not a video-specific one.
@@ -5839,37 +5839,45 @@ test("MiniMax-H3 Candle dispatch exposes the authorized base and Ref2VA routes",
   );
 });
 
-test("a routed backend with no *_engine_id arm fails HERE, naming the resolver (sc-18815)", async () => {
-  // The review mutation. Deleting `ltx_2_3` from `ltx_engine_id`'s arm used to let generation SUCCEED:
-  // `resolvedRoutes.mlx` went `null`, the scalar fell back to `video.mlx ?? video.candle`, and all 180
-  // MLX cells were stamped `ltx_2_3_distilled` — CANDLE's provider on an MLX cell, which is the exact
-  // substitution this resolver exists to prevent. The only thing that noticed was JSON-schema
-  // validation two lanes downstream, reporting `None is not of type 'string'` and naming neither the
-  // resolver nor the cause. It has to fail at the resolver, with the owing function named.
+test("a routed backend with no *_engine_id arm fails HERE, naming the resolver (sc-18815, sc-18801)", async () => {
+  // The review mutation. Deleting the new LTX-2.5 identity from `ltx_engine_id` used to let
+  // generation SUCCEED: `resolvedRoutes.mlx` went `null`, the scalar fell back to
+  // `video.mlx ?? video.candle`, and MLX cells were stamped with CANDLE's provider. This multi-record
+  // fixture proves each exact arm is independently required rather than accepting a blanket LTX
+  // mapping. It has to fail at the resolver, with the owning function named.
   const ltx = await readFile(new URL(`../${SOURCE_PATHS.videoRouteLtx}`, import.meta.url), "utf8");
-  const withoutMlxArm = ltx.replace(
-    'matches!(model, "ltx_2_3" | "ltx_2_3_eros")',
-    'matches!(model, "ltx_2_3_eros")',
-  );
-  assert.notEqual(withoutMlxArm, ltx, "the mutation must actually change ltx.rs");
-
-  await assert.rejects(
-    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteLtx: withoutMlxArm } }),
-    /ltx_2_3: the routing catalog routes mlx, but no mlx provider resolved — expected an arm in ltx_engine_id/,
-  );
-
-  // The named resolver is per BACKEND, not one generic complaint: the same entry losing its candle
-  // arm must point at `candle_video_engine_id` instead.
   const candle = await readFile(new URL(`../${SOURCE_PATHS.videoRouteCandle}`, import.meta.url), "utf8");
-  const withoutCandleArm = candle.replace(
-    '"ltx_2_3" => Some("ltx_2_3_distilled")',
-    '"ltx_2_3_missing" => Some("ltx_2_3_distilled")',
-  );
-  assert.notEqual(withoutCandleArm, candle, "the mutation must actually change candle.rs");
-  await assert.rejects(
-    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteCandle: withoutCandleArm } }),
-    /ltx_2_3: the routing catalog routes candle, but no candle provider resolved — expected an arm in candle_video_engine_id/,
-  );
+  const routeMutations = [
+    {
+      model: "ltx_2_5",
+      mlxFrom: '"ltx_2_5" => Some("ltx_2_5")',
+      mlxTo: '"ltx_2_5_missing" => Some("ltx_2_5")',
+      candleFrom: '"ltx_2_5" => Some("ltx_2_5_distilled")',
+      candleTo: '"ltx_2_5_missing" => Some("ltx_2_5_distilled")',
+    },
+  ];
+
+  for (const mutation of routeMutations) {
+    const withoutMlxArm = ltx.replace(mutation.mlxFrom, mutation.mlxTo);
+    assert.notEqual(withoutMlxArm, ltx, `${mutation.model}: mutation must change ltx.rs`);
+    await assert.rejects(
+      () => buildMatrix({ publish: false, sourceOverrides: { videoRouteLtx: withoutMlxArm } }),
+      new RegExp(
+        `${mutation.model}: the routing catalog routes mlx, but no mlx provider resolved — expected an arm in ltx_engine_id`,
+      ),
+    );
+
+    // The named resolver is per BACKEND, not one generic complaint: losing the Candle arm must
+    // point at `candle_video_engine_id` rather than hiding behind the surviving MLX declaration.
+    const withoutCandleArm = candle.replace(mutation.candleFrom, mutation.candleTo);
+    assert.notEqual(withoutCandleArm, candle, `${mutation.model}: mutation must change candle.rs`);
+    await assert.rejects(
+      () => buildMatrix({ publish: false, sourceOverrides: { videoRouteCandle: withoutCandleArm } }),
+      new RegExp(
+        `${mutation.model}: the routing catalog routes candle, but no candle provider resolved — expected an arm in candle_video_engine_id`,
+      ),
+    );
+  }
 });
 
 test("the union-only MLX fallback is an allowlist, not a shape (sc-18815)", async () => {
