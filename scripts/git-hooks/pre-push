@@ -8,17 +8,16 @@
 # Only runs when the pushed commits touch Rust. Skip with SKIP_NEITHER_CHECK=1 / SKIP_CANDLE_CHECK=1
 # or `git push --no-verify`. See CONTRIBUTING.md ("The base.rs / candle cfg rule").
 #
-# sc-16268: `docs/generated/{memory-matrix,tier-integrity}.*` are DERIVED
-# from those same Rust sources — plus the model manifest and the calibration plan — so a push that
-# touches any of them also runs `check:rust-derived-docs`. It gets its own trigger rather than
-# riding on `rust_changed`: a manifest-only push can land a stale artifact too, and it must not drag
-# in the two multi-minute Docker builds, which really are Rust-only. Sub-second and auto-fixable, so
-# it runs first.
+# sc-16268: `docs/generated/tier-integrity.*` is derived from Rust routing, the model manifest, and
+# its checked-in ledger, so a push touching any input also runs `check:rust-derived-docs`. The memory
+# matrix is deliberately absent: its revision records are epic-end measurement provenance, not a
+# per-pin freshness gate. The tier check gets its own trigger because a manifest-only push must not
+# drag in the two multi-minute Docker builds, which really are Rust-only.
 set -eu
 
 zero="0000000000000000000000000000000000000000"
 rust_changed=0
-derived_docs_changed=0
+tier_integrity_changed=0
 
 # stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being pushed.
 while read -r _local_ref local_sha _remote_ref remote_sha; do
@@ -42,26 +41,18 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   if printf '%s\n' "$changed" \
     | grep -Eq '(^|/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$|^\.cargo/.*\.toml$'; then
     rust_changed=1
-    derived_docs_changed=1
+    tier_integrity_changed=1
   fi
 
-  # The non-Rust inputs to the same generated docs: the catalog and plan they read, the generators
-  # themselves, and the artifacts one generator consumes from another.
-  #
-  # sc-18098: `inference-provider-closures.json` and `rung4-applicability-survey.json` are both
-  # hashed sources of the matrix (`generate-memory-matrix.mjs#SOURCE_PATHS`) and were missing here,
-  # so the exact PR shape epic 18093 cares about — a pin bump that re-derives one lane's closure
-  # digest — pushed clean and learned about the stale matrix from `parity` a quarter of an hour
-  # later. This is the SAME sub-second regeneration check fired on a source that already required
-  # it; it adds no gate and demands no measurement. `platform-review-contracts.test.mjs` derives the
-  # coverage from SOURCE_PATHS so the next added source cannot go missing the same way.
+  # The non-Rust inputs and outputs of the tier-integrity audit. Memory-matrix inputs do not belong
+  # here: pin bumps and ordinary code changes must never demand an epic-end measurement restamp.
   if printf '%s\n' "$changed" | grep -Eq \
-    '^(config/manifests/builtin\.models\.jsonc|config/(memory-calibration-plan|tier-integrity)\.jsonc?|config/(inference-provider-closures|rung4-applicability-survey|rung4-contract-prerequisites)\.json|config/engine-capabilities/capabilities\.(mlx|candle)\.json|scripts/(generate-memory-matrix|check-tier-integrity|memory-calibration-harness)\.mjs|scripts/lib/(source-revision|jsonc|memory-contract-reconciliation)\.mjs|docs/generated/(memory-matrix\.json|memory-calibration-evidence\.json))$'; then
-    derived_docs_changed=1
+    '^(config/manifests/builtin\.models\.jsonc|config/tier-integrity\.jsonc|packages/schemas/tier-integrity\.schema\.json|scripts/(check-tier-integrity|tier-integrity-measurement-receipts)\.mjs|scripts/lib/jsonc\.mjs|docs/generated/tier-integrity\.(json|md))$'; then
+    tier_integrity_changed=1
   fi
 done
 
-[ "$rust_changed" = "0" ] && [ "$derived_docs_changed" = "0" ] && exit 0
+[ "$rust_changed" = "0" ] && [ "$tier_integrity_changed" = "0" ] && exit 0
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "npm is required to run the pre-push Rust checks. Install Node/npm or add it to PATH."
@@ -70,9 +61,8 @@ fi
 
 if ! npm run --silent check:rust-derived-docs; then
   echo
-  echo "A generated doc derived from the sources you are pushing is stale. Regenerate and commit it"
-  echo "(this is the parity failure that would otherwise arrive ~15 minutes from now):"
-  echo "  npm run generate:memory-matrix && npm run generate:tier-integrity"
+  echo "The generated tier-integrity audit is stale. Regenerate and commit it:"
+  echo "  npm run generate:tier-integrity"
   exit 1
 fi
 

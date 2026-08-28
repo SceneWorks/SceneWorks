@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
-import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
 import { buildPlans as buildLtxPlans } from "./generate-ltx-sc18946-plan.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
@@ -1310,54 +1309,46 @@ test("Z-Image cleanup attestation bounds retained bytes and recovery peaks again
   }
 });
 
-test("the Rust gate verifies the generated docs derived from Rust sources", async () => {
-  // sc-16268: `check:memory-matrix` and `check:tier-integrity` both read Rust sources, but lived
-  // only in `npm run check` — so a Rust-only change passed the gate contributors are told to run and
-  // failed `parity` in CI. The fix is one string in `rust:check`, which is exactly the kind of
-  // wiring a later edit silently undoes; this pins it. (sc-18100 removed the third member,
-  // `check:calibration-cost-model`, along with its generator and artifacts.)
+test("the Rust gate verifies tier integrity without gating the epic-end memory matrix", async () => {
+  // `check:memory-matrix` remains an explicit command for epic-end measurement reconciliation. It
+  // must not ride `rust:check`: an inference pin bump otherwise invalidates historical provenance
+  // and fails every ordinary PR until somebody performs a provenance-only artifact restamp.
   const scripts = JSON.parse(await source("package.json")).scripts;
-  for (const sub of [
-    "check:memory-matrix",
-    "check:tier-integrity",
-  ]) {
-    assert.match(scripts["check:rust-derived-docs"], new RegExp(`\\b${sub}\\b`), sub);
-  }
+  assert.equal(scripts["check:rust-derived-docs"], "npm run check:tier-integrity");
+  assert.doesNotMatch(scripts["check:rust-derived-docs"], /check:memory-matrix/);
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  // sc-19758 removed the `npm run check` arm of this. That chain was 18 steps of pin-keyed gates
-  // and is now the unit tests alone; the derived-docs check keeps its two other entry points, the
-  // `rust:check` gate above and the pre-push hook below, both of which still run it.
-  // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
   assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
 
-test("the pre-push derived-docs trigger covers every non-Rust source the matrix is hashed from", async () => {
-  // sc-18098. `check:rust-derived-docs` catches a stale matrix in under a second; the pre-push hook
-  // only runs it when the pushed diff LOOKS like it touched an input. Its Rust/Cargo arm covers the
-  // `.rs` and `Cargo.toml` entries of `generate-memory-matrix.mjs#SOURCE_PATHS`; this arm has to
-  // cover the rest, and two of them — the closure table and the rung-4 survey — were missing, so a
-  // pin bump that re-derived one lane's closure digest pushed clean and heard about the stale matrix
-  // from `parity` fifteen minutes later.
-  //
-  // Derived from SOURCE_PATHS rather than restated, so a NEW hashed source is covered or this reds
-  // (the epic-18093 slices are actively adding and removing them).
+test("the pre-push derived-docs trigger is scoped to tier integrity, not memory evidence", async () => {
   const hook = await source("scripts/git-hooks/pre-push");
   const pattern = hook.match(/'(\^\(config\/manifests[^']+)'/)?.[1];
   assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
   const trigger = new RegExp(pattern);
-  const rustArm = /(^|\/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$/;
-  // Imported reconciliation logic also changes the generated summary/gate even though it is code,
-  // not a hashed data source, so a module-only edit must run the same stale-artifact check.
-  const derivedInputs = [
-    ...Object.values(SOURCE_PATHS),
-    "scripts/lib/memory-contract-reconciliation.mjs",
-  ];
-  for (const relative of derivedInputs) {
-    if (rustArm.test(relative)) continue;
-    assert.ok(trigger.test(relative), `${relative} must trigger the pre-push derived-docs check`);
+  for (const relative of [
+    "config/manifests/builtin.models.jsonc",
+    "config/tier-integrity.jsonc",
+    "packages/schemas/tier-integrity.schema.json",
+    "scripts/check-tier-integrity.mjs",
+    "scripts/tier-integrity-measurement-receipts.mjs",
+    "scripts/lib/jsonc.mjs",
+    "docs/generated/tier-integrity.json",
+    "docs/generated/tier-integrity.md",
+  ]) {
+    assert.ok(trigger.test(relative), `${relative} must trigger the tier-integrity check`);
   }
-  // The pattern is anchored, not a substring sweep: a same-named file elsewhere must not fire it.
-  assert.equal(trigger.test("vendor/config/inference-provider-closures.json"), false);
+  for (const epicEndArtifact of [
+    "config/inference-provider-closures.json",
+    "config/rung4-contract-prerequisites.json",
+    "docs/generated/memory-matrix.json",
+    "docs/generated/memory-calibration-evidence.json",
+  ]) {
+    assert.equal(
+      trigger.test(epicEndArtifact),
+      false,
+      `${epicEndArtifact} must not wire the memory-matrix freshness gate back into pre-push`,
+    );
+  }
 });
 
 test("macOS lanes lint every crate they ship, in the configuration they ship it", async () => {
