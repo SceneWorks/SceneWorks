@@ -1363,3 +1363,43 @@ jobs:
           if ($notSuccessful.Count -gt 0) {
             throw "epic-20738 terminal evidence failed after upload: $($outcomes -join ', ')"
           }
+
+  imported-nvfp4-worker-smoke:
+    # Real weights are required for this one executable acceptance (sc-21716). Keep it separate
+    # from candle-worker so ordinary compile/test traffic retains the full four-runner CUDA pool;
+    # the dependency serializes the two jobs on the shared physical GPU host.
+    needs: candle-worker
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 120
+    env:
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\huggingface\hub\models--Comfy-Org--Krea-2\snapshots\952f49d49653cb42e7d6cf7cbfad74738073ec7d\diffusion_models\krea2_turbo_nvfp4.safetensors'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the imported NVFP4 smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Isolate Cargo dependency checkout for the imported NVFP4 smoke
+        shell: powershell
+        run: |
+          $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home-nvfp4-smoke'
+          New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
+      - name: Fetch the pinned inference release for the imported NVFP4 smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Run the imported NVFP4 worker smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
