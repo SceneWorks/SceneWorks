@@ -544,7 +544,13 @@ impl PreparedTrainingInputs {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )
+    ))]
     fn with_after_publish(
         hook: impl FnMut(&Path, &Path) -> std::io::Result<()> + Send + 'static,
     ) -> Self {
