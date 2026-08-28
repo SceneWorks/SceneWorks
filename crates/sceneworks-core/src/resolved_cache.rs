@@ -1110,9 +1110,9 @@ impl ResolvedCacheStore {
     }
 
     /// Full runtime listing: complete entries are validated on identity, shape, confinement, file
-    /// presence and sizes (not content — see [`EntryListing`]), and any entry that fails fails the
-    /// whole listing. Recovery, staging cleanup and byte accounting depend on that fail-fast
-    /// semantics, so it is the internal default.
+    /// presence and sizes (not content — see [`EntryListing`]). A malformed app-owned entry is
+    /// reported as corrupt without hiding unrelated entries; recovery and retention can then
+    /// handle that one entry without disabling the whole cache.
     pub fn enumerate(&self) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
         self.list(EntryListing::Runtime)
     }
@@ -1133,27 +1133,26 @@ impl ResolvedCacheStore {
         let mut entries = Vec::new();
         for item in std::fs::read_dir(self.inner.root.join("entries"))? {
             let item = item?;
-            if !item.file_type()?.is_dir() {
-                return Err(ResolvedCacheError::new(format!(
-                    "unmanaged resolved-cache entry {}",
-                    item.path().display()
-                )));
-            }
-            let digest = item
+            let Some(digest) = item
                 .file_name()
                 .to_str()
                 .filter(|value| is_lower_hex_64(value))
-                .ok_or_else(|| ResolvedCacheError::new("invalid resolved-cache entry name"))?
-                .to_owned();
+                .map(str::to_owned)
+            else {
+                tracing::debug!(entry = %item.path().display(), "ignoring foreign resolved-cache entry");
+                continue;
+            };
+            if !item.file_type()?.is_dir() {
+                tracing::debug!(entry = %item.path().display(), "ignoring foreign resolved-cache entry");
+                continue;
+            }
             // The exclusive metadata lock is scoped to the journal READ; the entry is then judged
-            // unlocked (sc-19712). `EntryListing::Runtime` validates at full strength, so holding
-            // the lock across that judgement put a whole-bundle re-hash underneath it — and
-            // `valid_local_artifacts`, the availability read behind every job submission, takes
-            // the same per-entry lock. Measured: with the worker mid-checkpoint, one submission
-            // took 33.2 s and the next had not returned after ~11 minutes, with the API at 0 % CPU
-            // parked on `flock` and the worker at 99 % CPU hashing. Nothing is read twice here —
-            // the judgement is made against the value the read returned, and every caller that
-            // ACTS on a summary (`recover`, retention) re-proves it under fresh locks first.
+            // unlocked (sc-19712). Listings validate only paths and sizes, but keeping even that
+            // judgement outside the lock prevents `valid_local_artifacts`, the availability read
+            // behind every job submission, from parking behind a maintenance sweep. Nothing is
+            // read twice here — the judgement is made against the value the read returned, and
+            // every caller that ACTS on a summary (`recover`, retention) re-proves it under fresh
+            // locks first.
             let journal = {
                 let _metadata_lock = self.lock_metadata(&digest)?;
                 self.read_metadata_unlocked(&digest)
@@ -1178,7 +1177,6 @@ impl ResolvedCacheStore {
                             state: metadata.state.clone(),
                             metadata: Some(*metadata),
                         },
-                        Err(error) if listing == EntryListing::Runtime => return Err(error),
                         Err(_) => corrupt(&digest),
                     }
                 }
@@ -1315,6 +1313,23 @@ impl ResolvedCacheStore {
                     had_invalid_slot,
                 }) => {
                     let mut changed = false;
+                    // The opening listing found a structurally damaged Complete entry. Persist a
+                    // per-entry observation so it remains visible for manual recovery, but do
+                    // not let this one residue prevent recovery of the rest of the cache. This
+                    // stays paths-and-sizes only: `acquire_complete` is still the sole strict
+                    // digest boundary before any artifact reaches a runtime.
+                    if summary.state == ResolvedCacheEntryState::Corrupt
+                        && metadata.state == ResolvedCacheEntryState::Complete
+                        && validate_complete_metadata_inner(
+                            self,
+                            &metadata,
+                            ContentVerification::PathsAndSizesOnly,
+                        )
+                        .is_err()
+                    {
+                        self.write_corrupt_marker(&digest)?;
+                        continue;
+                    }
                     if had_invalid_slot {
                         // FULL STRENGTH before the pin (sc-21534, same defense as the receipt
                         // resurrection below): this branch re-pins a Complete entry recovered
@@ -2682,13 +2697,13 @@ fn validate_complete_metadata(
     validate_complete_metadata_inner(store, metadata, ContentVerification::RehashEveryFile)
 }
 
-/// How a whole-store listing treats complete entries. `Runtime` is the strict internal listing
-/// (recovery, staging cleanup, byte accounting); `Inspect` is the read-only status listing. Both
+/// How a whole-store listing treats complete entries. `Runtime` is the internal listing used by
+/// recovery, staging cleanup and byte accounting; `Inspect` is the read-only status listing. Both
 /// validate on paths and sizes only (sc-21534: recovery re-hashed every complete entry in the
 /// cache at startup, the same whole-cache cost sc-19712 F-3 removed from job submission; byte
 /// accounting needs sizes, and every caller that ACTS on a summary re-proves it under fresh
-/// locks). They differ in failure semantics: a `Runtime` listing fails on the first invalid
-/// entry, an `Inspect` listing degrades that entry to `Corrupt` and keeps going.
+/// locks). An invalid managed entry degrades to `Corrupt` in either mode so it cannot hide valid
+/// entries or stop their recovery/retention; load acquisition still re-hashes every file.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryListing {
     Runtime,

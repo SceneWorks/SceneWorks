@@ -2120,9 +2120,7 @@ async fn remove_whole_model_artifacts(
     let exclusive = all_paths
         .into_iter()
         .filter(|path| {
-            // `is_some_and` rather than `is_none_or`: the latter is stable only since 1.82 and the
-            // workspace MSRV is 1.80 (`clippy::incompatible_msrv` is denied).
-            path != &managed_dir && !repo_cache.as_ref().is_some_and(|cache| path == cache)
+            path != &managed_dir && repo_cache.as_ref().is_none_or(|cache| path != cache)
         })
         .collect::<Vec<_>>();
     let mut removal = remove_owned_artifacts(exclusive, allowed_roots, permanent).await?;
@@ -4256,7 +4254,7 @@ mod import_gate_tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&header_bytes);
-        bytes.extend(std::iter::repeat(0_u8).take(entries.len() * 4));
+        bytes.extend(std::iter::repeat_n(0_u8, entries.len() * 4));
         std::fs::write(path, bytes).expect("write safetensors");
     }
 
@@ -9042,7 +9040,7 @@ pub(crate) async fn resolve_model_manifest_entry(
         None
     };
     let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
-    if entry.as_object().map_or(true, JsonObject::is_empty) {
+    if entry.as_object().is_none_or(JsonObject::is_empty) {
         // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
         // the face stack) for job admission even when the configured manifest directory is
         // missing or trimmed — the compiled-in builtin manifest is the complete fallback so a

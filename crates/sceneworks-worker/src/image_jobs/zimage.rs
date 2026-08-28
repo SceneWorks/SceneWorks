@@ -318,12 +318,13 @@ async fn generate_zimage_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = attach_manifest_text_encoder(
+    let attached_spec = attach_manifest_text_encoder(
         zimage_control_spec(weights_dir, control_weights, quant, adapters),
         ZIMAGE_CONTROL_ENGINE_ID,
         request,
         settings,
     )?;
+    let spec = attached_spec.into_load_spec();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         ZIMAGE_CONTROL_ENGINE_ID,
@@ -580,12 +581,13 @@ async fn generate_zimage_base_control_stream(
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    let spec = attach_manifest_text_encoder(
+    let attached_spec = attach_manifest_text_encoder(
         zimage_control_spec(weights_dir, control_weights, quant, adapters),
         ZIMAGE_BASE_CONTROL_ENGINE_ID,
         request,
         settings,
     )?;
+    let spec = attached_spec.into_load_spec();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         ZIMAGE_BASE_CONTROL_ENGINE_ID,

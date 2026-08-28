@@ -17,8 +17,8 @@ use sceneworks_core::checkpoint_inspector::{
 };
 use sceneworks_core::checkpoint_plan_store::{
     linked_checkpoint_id, managed_checkpoint_id, CheckpointPlanError, CheckpointPlanStore,
-    APPROVED_ROOTS_FILE, BINDINGS_DIR, CHECKPOINTS_DIR, INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX,
-    STORE_LOCK_FILE,
+    CheckpointPlanVerificationEventV1, APPROVED_ROOTS_FILE, BINDINGS_DIR, CHECKPOINTS_DIR,
+    INVENTORY_FILE, PLANS_DIR, PLAN_ID_PREFIX, STORE_LOCK_FILE,
 };
 
 fn fixture_dir(label: &str) -> TempDir {
@@ -327,6 +327,91 @@ fn semantic_digest_is_locator_independent_but_source_binding_is_not() {
         other_plan.plan.semantic_digest().unwrap(),
         linked.plan.semantic_digest().unwrap()
     );
+}
+
+/// A same-size source replacement after verification hashing but before the binding stamp is
+/// sampled must not persist the replacement's stamp: otherwise the next resolve would skip the
+/// hash and trust bytes that were never compared to this plan's digest.
+#[test]
+fn same_size_replacement_between_verification_hash_and_stamp_refuses_without_persistence() {
+    let fx = fixture("stamp-toctou");
+    let file = fx.library_dir.join("kreamania.safetensors");
+    write_krea_native_file(&file, 0x5a);
+    let original = fs::read(&file).unwrap();
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let checkpoint_id = linked_checkpoint_id(&root.root_id, "kreamania.safetensors");
+    let inspected = inspect_checkpoint(
+        &CheckpointInspectionRequestV1::linked(
+            checkpoint_id.clone(),
+            fx.library_dir.clone(),
+            "kreamania.safetensors",
+            &root.root_id,
+        )
+        .unwrap(),
+    );
+    let expected_sha256 = inspected.evidence[0].sha256.clone();
+    assert!(inspected.is_runnable(), "{:?}", inspected.diagnostics);
+
+    let mut replacement = original.clone();
+    let last = replacement.len() - 1;
+    replacement[last] ^= 0xff;
+    assert_eq!(replacement.len(), original.len());
+    let mut hook_ran = false;
+    let error = fx
+        .store
+        .compile_linked_with_hook(&root.root_id, "kreamania.safetensors", |event| {
+            assert_eq!(event, CheckpointPlanVerificationEventV1::LayerHashComplete);
+            hook_ran = true;
+            fs::write(&file, &replacement).unwrap();
+        })
+        .expect_err("replacement after hash must not publish an unchecked stamp");
+    assert!(hook_ran, "fixture must replace the source after hashing");
+    assert_eq!(
+        fs::metadata(&file).unwrap().len(),
+        u64::try_from(original.len()).unwrap()
+    );
+    match error {
+        CheckpointPlanError::SourceDrifted {
+            checkpoint_id: actual_checkpoint_id,
+            relative_path,
+            expected_sha256: actual_expected,
+            actual_sha256,
+        } => {
+            assert_eq!(actual_checkpoint_id, checkpoint_id);
+            assert_eq!(relative_path, "kreamania.safetensors");
+            assert_eq!(actual_expected, expected_sha256);
+            assert_ne!(actual_sha256, expected_sha256);
+        }
+        other => panic!("TOCTOU replacement must refuse as source drift, got {other:?}"),
+    }
+    assert!(fx.store.inventory().unwrap().records.is_empty());
+    assert!(matches!(
+        fx.store.record(&checkpoint_id),
+        Err(CheckpointPlanError::UnknownCheckpoint { .. })
+    ));
+
+    // A stationary original source still compiles and resolves with its original digest and linked
+    // provenance; the guard rejects only an unbound stamp, not a valid checkpoint.
+    fs::write(&file, &original).unwrap();
+    let compiled = fx
+        .store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    match &compiled.plan.layers[0].source {
+        SourceLocatorV1::Linked {
+            root_id,
+            relative_path,
+            fingerprint,
+            ..
+        } => {
+            assert_eq!(root_id, &root.root_id);
+            assert_eq!(relative_path, "kreamania.safetensors");
+            assert_eq!(fingerprint, &expected_sha256);
+        }
+        other => panic!("linked compile must retain linked provenance, got {other:?}"),
+    }
+    let resolved = fx.store.resolve(&checkpoint_id).unwrap();
+    assert!(!resolved.layers[0].rehashed);
 }
 
 #[test]

@@ -371,8 +371,10 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
     let strategy_spec = apply_candle_image_load_shape(memory_provider, strategy_spec);
-    let strategy_spec =
-        attach_manifest_text_encoder(strategy_spec, memory_provider, request, settings)?;
+    let unattached_strategy_spec = strategy_spec;
+    let attached_strategy_spec =
+        attach_manifest_text_encoder(unattached_strategy_spec, memory_provider, request, settings)?;
+    let strategy_spec = attached_strategy_spec.into_load_spec();
     let mut generation_memory = gen_core::GenerationMemory::default();
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,

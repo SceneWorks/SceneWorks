@@ -695,6 +695,29 @@ if (process.argv.includes("--self-test")) {
       'crate "crates/media/mlx-gen/mlx-gen-inherits" in the pinned inference revision is UNCLASSIFIED',
     ]);
   }
+  // 2c. The root Cargo manifest is represented by the exact `.` label, never the old empty prefix.
+  //     Classifying that label must not classify a nested sibling crate by prefix accident. This
+  //     catches the tempting but unsafe implementation where root becomes "" and match-all logic
+  //     lets one root decision swallow every crate in the repository.
+  {
+    const sibling = "crates/media/mlx-gen/mlx-gen-root-sibling";
+    const crates = [".", ...committedCrates, sibling].sort();
+    const rootClassified = withCrateInventory(sourceAudit, crates);
+    rootClassified.crateDispositions = [
+      ...rootClassified.crateDispositions,
+      {
+        prefix: ".",
+        disposition: "first-party-original",
+        evidence: "self-test root crate fixture",
+      },
+    ];
+    crateMutations.push([
+      "root disposition cannot swallow a sibling crate",
+      rootClassified,
+      renderCrates(crates),
+      `crate "${sibling}" in the pinned inference revision is UNCLASSIFIED`,
+    ]);
+  }
   // 3. Dropping a decision for a crate that is still there must fail — exemptions cannot rot away.
   {
     const stripped = structuredClone(sourceAudit);

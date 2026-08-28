@@ -3298,9 +3298,10 @@ fn evaluate_request_with_budget_using_bundle(
         .lower_alternative
         .as_ref()
         .is_some_and(|alternative| {
-            contract.calibration.as_ref().map_or(true, |identity| {
-                alternative.load_shape != identity.load_shape
-            })
+            contract
+                .calibration
+                .as_ref()
+                .is_none_or(|identity| alternative.load_shape != identity.load_shape)
         })
     {
         admission.lower_alternative = None;
@@ -3315,7 +3316,7 @@ fn evaluate_request_with_budget_using_bundle(
             }) && admission
                 .lower_alternative
                 .as_ref()
-                .map_or(true, |alternative| {
+                .is_none_or(|alternative| {
                     identity.abi == alternative.calibration_abi
                         && identity.fingerprint == alternative.calibration_fingerprint
                         && contract.engaged_composition_for_selection(&MemorySelection {
@@ -4443,18 +4444,62 @@ struct ResolvedTextEncoderSource {
     direct_shard_bytes: u64,
 }
 
-/// Resolve the selected encoder exactly as gen-core's loader does. In particular, a complete
-/// snapshot remains the requested `LoadSpec` source for identity/replay, while admission follows
-/// only its direct `text_encoder/` shards and never recursively prices sibling transformer/VAE
-/// trees.
+fn text_encoder_discovery_roots(source: &WeightsSource) -> gen_core::Result<Vec<PathBuf>> {
+    let entry = std::path::absolute(weights_source_path(source))?;
+    let lexical_root = match source {
+        WeightsSource::Dir(_) => entry.clone(),
+        WeightsSource::File(_) => entry.parent().map(Path::to_path_buf).ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "selected text-encoder file has no lexical parent directory".into(),
+            )
+        })?,
+    };
+    let canonical = std::fs::canonicalize(&entry)?;
+    let canonical_root = match source {
+        WeightsSource::Dir(_) => canonical,
+        WeightsSource::File(_) => canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "selected text-encoder file has no canonical parent directory".into(),
+            )
+        })?,
+    };
+    let mut roots = vec![lexical_root, canonical_root];
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+/// Resolve path-free planning facts exactly as gen-core's loader does. A prepared spec reuses its
+/// retained acquisition receipt; compatibility mode uses bounded metadata discovery. Neither path
+/// acquires or discards an executable artifact seal.
 fn resolved_text_encoder_source(
+    spec: &LoadSpec,
     source: &WeightsSource,
 ) -> gen_core::Result<ResolvedTextEncoderSource> {
-    gen_core::read_text_encoder_source_unchanged(source, |resolved| {
-        Ok(ResolvedTextEncoderSource {
-            path: weights_source_path(resolved).to_path_buf(),
-            direct_shard_bytes: gen_core::text_encoder_source_bytes(resolved)?,
-        })
+    let facts = match spec.prepared_text_encoder_planning_facts()? {
+        Some(facts) => facts,
+        None => gen_core::text_encoder_planning_facts_for_discovery(
+            source,
+            &text_encoder_discovery_roots(source)?,
+        )?,
+    };
+    let path = match (source, facts.source_layout()) {
+        (WeightsSource::File(path), gen_core::TextEncoderSourceLayout::File)
+        | (WeightsSource::Dir(path), gen_core::TextEncoderSourceLayout::DirectDirectory) => {
+            path.clone()
+        }
+        (WeightsSource::Dir(path), gen_core::TextEncoderSourceLayout::CompleteSnapshot) => {
+            path.join("text_encoder")
+        }
+        _ => {
+            return Err(gen_core::Error::Unsupported(
+                "selected text-encoder planning layout does not match its LoadSpec source".into(),
+            ));
+        }
+    };
+    Ok(ResolvedTextEncoderSource {
+        path,
+        direct_shard_bytes: facts.direct_shard_bytes(),
     })
 }
 
@@ -5212,7 +5257,7 @@ fn spec_component_bytes_with_provider_footprint(
     // resolve through gen-core; an invalid ad-hoc spec retains the old conservative recursive
     // estimate and will still fail contract validation before a real provider load.
     let selected_text_encoder = spec.text_encoder.as_ref().map(|source| {
-        resolved_text_encoder_source(source).unwrap_or_else(|_| ResolvedTextEncoderSource {
+        resolved_text_encoder_source(spec, source).unwrap_or_else(|_| ResolvedTextEncoderSource {
             path: weights_source_path(source).to_path_buf(),
             direct_shard_bytes: weights_source_bytes(source),
         })
@@ -5421,7 +5466,7 @@ fn spec_component_bytes_with_provider_footprint_checked(
     let selected_text_encoder = spec
         .text_encoder
         .as_ref()
-        .map(resolved_text_encoder_source)
+        .map(|source| resolved_text_encoder_source(spec, source))
         .transpose()?;
     // Fill a File slot the provider left EMPTY with the exact prepared target size — and only such a
     // slot. A non-zero value in a File slot is a provider fact about the assembly it will actually
@@ -9698,40 +9743,20 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission() {
-        fn fixture_spec(root: &std::path::Path, policy: OffloadPolicy) -> LoadSpec {
-            let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
-                .expect("Krea owns an encoder contract");
-            gen_core_testkit::write_encoder_contract_fixture_with_quant(
-                &root.join("text_encoder"),
-                contract,
-                Some(4),
-            )
-            .expect("registry-owned Krea encoder fixture");
-            for component in ["transformer", "vae"] {
-                let directory = root.join(component);
-                std::fs::create_dir_all(&directory).unwrap();
-                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
-                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
-                bytes.extend_from_slice(header);
-                bytes.extend_from_slice(&0_f32.to_le_bytes());
-                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
-            }
-            std::fs::write(
-                root.join("transformer").join("config.json"),
-                r#"{"quantization":{"bits":4,"group_size":64}}"#,
-            )
-            .unwrap();
-            LoadSpec::new(WeightsSource::Dir(root.to_owned()))
-                .with_quant(gen_core::Quant::Q4)
-                .with_offload_policy(policy)
-                .with_load_shape(gen_core::LoadShape::DeferredMaterialization)
-        }
-
-        fn contract(root: &std::path::Path, policy: OffloadPolicy) -> MemoryProviderContract {
+        fn contract(policy: OffloadPolicy) -> MemoryProviderContract {
             let mut contract = crate::inference_runtime::media()
-                .memory_strategy_contract("krea_2_turbo", &fixture_spec(root, policy))
-                .unwrap()
-                .expect("the shipped plain Krea registry contract");
+                .memory_contract_surfaces()
+                .expect("the shipped weights-free contract inventory")
+                .into_iter()
+                .find(|surface| {
+                    surface.contract.provider_id == "krea_2_turbo"
+                        && surface.selector.tier == gen_core::MemoryContractSurfaceTier::Q4
+                        && surface.selector.offload_policy == policy
+                        && surface.selector.load_shape
+                            == gen_core::LoadShape::DeferredMaterialization
+                })
+                .expect("the shipped plain Krea q4/deferred contract surface")
+                .contract;
             // Preserve the shipped contract, composition, parameters and load shape while making
             // the pure selector arithmetic legible: a 6 GiB base consists of a 1 GiB conditioner
             // and 5 GiB DiT. With 6 GiB of request headroom, only the windowed composition fits an
@@ -9760,7 +9785,6 @@ mod tests {
             }
         }
 
-        let root = tempfile::tempdir().unwrap();
         let plan = MlxRequestPlan {
             engine_id: "krea_2_turbo",
             model_id: "krea_2_turbo".to_owned(),
@@ -9780,7 +9804,7 @@ mod tests {
         let inputs = fixture_inputs(1024, 1024);
 
         let resident = evaluate_request_with_budget(
-            &generator(contract(root.path(), OffloadPolicy::Resident)),
+            &generator(contract(OffloadPolicy::Resident)),
             &plan,
             &inputs,
             MemoryCacheState::Cold,
@@ -9801,7 +9825,7 @@ mod tests {
         );
 
         let constrained = evaluate_request_with_budget(
-            &generator(contract(root.path(), OffloadPolicy::Sequential)),
+            &generator(contract(OffloadPolicy::Sequential)),
             &plan,
             &inputs,
             MemoryCacheState::Cold,
@@ -13529,19 +13553,26 @@ mod tests {
             )
             .expect("source-bound audit spec");
             let media = crate::inference_runtime::media();
-            let provider_footprint = media
-                .footprint(cell.provider_id, &spec)
-                .expect("source-bound provider footprint");
+            assert!(
+                !matches!(cell.provider_id, "lens" | "lens_turbo"),
+                "Lens materialization can change the resident total and must not enter the raw-source audit"
+            );
             let activation_anchor_bytes = media
                 .activation_memory_bytes_1024(cell.provider_id)
                 .expect("source-bound activation query");
+            // Every audited spec is directory-backed, and for these non-Lens providers the
+            // provider footprint can only refine the text-encoder split; it cannot change the
+            // total used by the Resident path below. Let the production planner derive that total
+            // from the sparse source sizes directly. Asking the provider registry for a redundant
+            // split would correctly content-pin and SHA-256 these synthetic multi-GiB sparse files,
+            // turning a metadata-only budget audit into tens of minutes of hashing.
             let plan = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
                 cell.provider_id,
                 &cell.manifest_id,
                 &spec,
                 None,
                 None,
-                provider_footprint,
+                None,
                 activation_anchor_bytes,
             );
             assert_eq!(

@@ -2885,7 +2885,7 @@ fn upsert_search_projection<'a>(
                     .map_or(SqlValue::Null, SqlValue::Text),
             ]);
         }
-        let requires_upsert = existing_record_ids.map_or(true, |existing| {
+        let requires_upsert = existing_record_ids.is_none_or(|existing| {
             unique
                 .iter()
                 .any(|record| existing.contains(record.id.as_str()))
@@ -2918,7 +2918,7 @@ fn upsert_search_projection<'a>(
         let replaced = unique
             .iter()
             .filter(|record| {
-                existing_record_ids.map_or(true, |existing| existing.contains(record.id.as_str()))
+                existing_record_ids.is_none_or(|existing| existing.contains(record.id.as_str()))
             })
             .collect::<Vec<_>>();
         if !replaced.is_empty() {

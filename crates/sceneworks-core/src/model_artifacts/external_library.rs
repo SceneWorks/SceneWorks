@@ -1805,7 +1805,7 @@ pub fn local_artifact_for_requirements(
                     && primary
                         .revision
                         .as_deref()
-                        .map_or(true, |revision| artifact.identity.revision == revision)
+                        .is_none_or(|revision| artifact.identity.revision == revision)
                     && artifact.identity.variant == primary.variant
                     && artifact.closure.members.iter().any(|member| {
                         member.role == super::ArtifactMemberRole::Primary
@@ -1823,7 +1823,7 @@ pub fn local_artifact_for_requirements(
                             && requirement
                                 .revision
                                 .as_deref()
-                                .map_or(true, |expected| member.source.revision == expected)
+                                .is_none_or(|expected| member.source.revision == expected)
                             && member.source.variant == requirement.variant
                     })
                     .flat_map(|member| {

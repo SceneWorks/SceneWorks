@@ -2505,7 +2505,7 @@ fn evaluate_declared_mlx_load_shape_with(
 }
 
 #[cfg(test)]
-fn evaluate_declared_mlx_load_shape_for_request_with(
+pub(crate) fn evaluate_declared_mlx_load_shape_for_request_with(
     provider: &str,
     resolved_tier: Option<&str>,
     mode: Option<MemoryRouteMode>,

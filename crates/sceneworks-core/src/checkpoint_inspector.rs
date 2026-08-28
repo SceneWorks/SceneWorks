@@ -1486,7 +1486,7 @@ fn discover_safetensors_header(
     }
     if 8_u64
         .checked_add(header_len)
-        .map_or(true, |end| end > file_len)
+        .is_none_or(|end| end > file_len)
     {
         return Err(SafetensorsDiscoveryError {
             code: CheckpointDiagnosticCodeV1::TruncatedHeader,
@@ -1939,9 +1939,7 @@ fn validate_json_descriptor(
                 ));
             } else if std::fs::canonicalize(&component_path)
                 .ok()
-                .map_or(true, |canonical| {
-                    !canonical.starts_with(&resolved.canonical_root)
-                })
+                .is_none_or(|canonical| !canonical.starts_with(&resolved.canonical_root))
             {
                 diagnostics.push(CheckpointDiagnosticV1::error(
                     CheckpointDiagnosticCodeV1::PathEscapesRoot,

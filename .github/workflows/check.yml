@@ -37,7 +37,8 @@ jobs:
         run: npm --prefix apps/web run build
 
   # `parity` IS THE REQUIRED STATUS CHECK, and it is an aggregator — the work fans out into
-  # the four `parity-*` jobs below. They are mutually independent, and running them serially
+  # the four `parity-*` jobs below plus the dependency-advisory gate. They are mutually
+  # independent, and running them serially
   # in one job meant everything queued behind the Rust compile for no reason. Measured
   # 2026-08-11 over 12 runs: rust 6.8m, closure digests 4.0m, scaffold 1.6m, docker smoke
   # 6.8m when it fires (4/12) — a 14.2m median job whose longest single member is 6.8m.
@@ -45,8 +46,34 @@ jobs:
   # Keeping ONE required context (rather than promoting each split job to its own) means the
   # ruleset needs no change, and there is no window in which a split-out check has stopped
   # being covered by `parity` but is not yet required on its own.
+  supply-chain:
+    name: dependency policy + advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          shared-key: cargo-deny-0.19.9
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          cache-bin: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install cargo-deny
+        run: command -v cargo-deny >/dev/null || cargo install cargo-deny --locked --version 0.19.9
+      - name: Validate advisory exception governance
+        run: python3 scripts/ci/check_advisory_policy.py
+      - name: Audit Rust dependency advisories
+        run: cargo deny --locked check advisories
+
   parity:
-    needs: [parity-rust, parity-digests, parity-scaffold, parity-docker]
+    needs: [parity-rust, parity-digests, parity-scaffold, parity-docker, supply-chain]
     # FAIL CLOSED. Without `if: always()` this job is SKIPPED whenever any `needs:` job fails
     # or is skipped — and a skipped job reports **Success** to a required status check, which
     # is exactly the false-green shape documented at the top of changed-paths.yml. So it runs
@@ -58,16 +85,16 @@ jobs:
       - name: Assert every parity job succeeded
         env:
           RESULTS: ${{ toJSON(needs) }}
-        # Iterates whatever is in `needs` rather than naming the four jobs, so adding a fifth
-        # `parity-*` job cannot silently go ungraded. The count floor is the other half of
+        # Iterates whatever is in `needs` rather than naming the upstream jobs, so adding a sixth
+        # job cannot silently go ungraded. The count floor is the other half of
         # that: deleting a `needs:` entry would otherwise shrink the assertion to a green
         # no-op instead of failing.
         run: |
           set -euo pipefail
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
           count="$(jq -r 'length' <<<"$RESULTS")"
-          if [ "$count" -lt 4 ]; then
-            echo "::error::parity expects at least 4 upstream jobs, saw ${count} — a needs: entry was removed"
+          if [ "$count" -lt 5 ]; then
+            echo "::error::parity expects at least 5 upstream jobs, saw ${count} — a needs: entry was removed"
             exit 1
           fi
           if [ "$(jq -r '[to_entries[] | select(.value.result != "success")] | length' <<<"$RESULTS")" != "0" ]; then

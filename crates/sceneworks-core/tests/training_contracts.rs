@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use sceneworks_core::training::{
     build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
     TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
-    TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetRegistry,
-    TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
+    TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetLimitError,
+    TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -1433,5 +1433,190 @@ fn build_training_plan_rejects_invalid_config() {
     })
     .expect_err("zero rank is rejected");
 
-    assert!(matches!(error, TrainingPlanError::InvalidConfig(_)));
+    assert!(matches!(
+        error,
+        TrainingPlanError::TargetLimit(TrainingTargetLimitError::BelowMinimum { ref field, .. })
+            if field == "rank"
+    ));
+}
+
+fn build_plan_for_target(
+    target: &sceneworks_core::training::TrainingTarget,
+    config: TrainingConfig,
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_target_limit",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_target_limit",
+        base_model_path: "/data/models/target".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_target_limit"),
+        file_name: "target_limit.safetensors".to_owned(),
+        created_at: "2026-08-26T00:00:00Z".to_owned(),
+    })
+}
+
+fn set_training_numeric_field(config: &mut TrainingConfig, field: &str, value: u32) {
+    match field {
+        "rank" => config.rank = value,
+        "alpha" => config.alpha = value,
+        "steps" => config.steps = value,
+        "batchSize" => config.batch_size = value,
+        "resolutions" => config.resolution = value,
+        other => panic!("missing test mutation for advertised numeric limit {other}"),
+    }
+}
+
+/// The target registry is the public trainer-capability contract. Each table
+/// row mutates exactly one submitted field; the shared plan builder is the same
+/// boundary used by the API before it allocates a training job.
+#[test]
+fn trainer_capability_numeric_boundaries_are_typed_and_preserved() {
+    let registry = builtin_training_targets();
+
+    for target in &registry.targets {
+        for (field, advertised) in target.limits.iter().filter(|(_, value)| {
+            value
+                .as_array()
+                .is_some_and(|values| values.iter().any(Value::is_number))
+        }) {
+            let values = advertised
+                .as_array()
+                .expect("numeric target limit is an array")
+                .iter()
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .expect("numeric target limit is an unsigned integer")
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                matches!(
+                    field.as_str(),
+                    "rank" | "alpha" | "steps" | "batchSize" | "resolutions"
+                ),
+                "{}/{} is advertised but has no shared request-field validator",
+                target.id,
+                field
+            );
+
+            let mut boundary_values = values.clone();
+            boundary_values.sort_unstable();
+            boundary_values.dedup();
+            for boundary in boundary_values {
+                let boundary = u32::try_from(boundary).expect("builtin bound fits u32");
+                let mut config = target.defaults.clone();
+                set_training_numeric_field(&mut config, field, boundary);
+                let plan = build_plan_for_target(target, config.clone()).unwrap_or_else(|error| {
+                    panic!(
+                        "{}/{}={boundary} should reach the trainer: {error}",
+                        target.id, field
+                    )
+                });
+                assert_eq!(
+                    plan.config, config,
+                    "{}/{} boundary must reach the intended trainer unchanged",
+                    target.id, field
+                );
+            }
+
+            let minimum = *values.iter().min().expect("numeric limit has a bound");
+            let maximum = *values.iter().max().expect("numeric limit has a bound");
+            for (direction, attempted) in [
+                ("below", minimum.saturating_sub(1)),
+                ("above", maximum.saturating_add(1)),
+            ] {
+                let mut config = target.defaults.clone();
+                set_training_numeric_field(
+                    &mut config,
+                    field,
+                    u32::try_from(attempted).expect("test value fits u32"),
+                );
+                let error = build_plan_for_target(target, config)
+                    .expect_err("a value outside an advertised target capability must be rejected");
+                match (field.as_str(), direction, error) {
+                    (
+                        "resolutions",
+                        _,
+                        TrainingPlanError::TargetLimit(
+                            TrainingTargetLimitError::UnsupportedNumericValue {
+                                field: error_field,
+                                value,
+                                ..
+                            },
+                        ),
+                    ) => {
+                        assert_eq!(error_field, "resolution");
+                        assert_eq!(value, attempted);
+                    }
+                    (
+                        _,
+                        "below",
+                        TrainingPlanError::TargetLimit(TrainingTargetLimitError::BelowMinimum {
+                            field: error_field,
+                            value,
+                            minimum: error_minimum,
+                        }),
+                    ) => {
+                        assert_eq!(error_field, field.as_str());
+                        assert_eq!(value, attempted);
+                        assert_eq!(error_minimum, minimum);
+                    }
+                    (
+                        _,
+                        "above",
+                        TrainingPlanError::TargetLimit(TrainingTargetLimitError::AboveMaximum {
+                            field: error_field,
+                            value,
+                            maximum: error_maximum,
+                        }),
+                    ) => {
+                        assert_eq!(error_field, field.as_str());
+                        assert_eq!(value, attempted);
+                        assert_eq!(error_maximum, maximum);
+                    }
+                    (_, _, other) => panic!(
+                        "{}/{} {direction} bound returned the wrong typed error: {other:?}",
+                        target.id, field
+                    ),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn trainer_capability_optimizer_and_unknown_numeric_limits_fail_closed() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .first()
+        .expect("a builtin trainer target exists");
+
+    let mut unsupported_optimizer = target.defaults.clone();
+    unsupported_optimizer.optimizer = "not-advertised".to_owned();
+    let error = build_plan_for_target(target, unsupported_optimizer)
+        .expect_err("an optimizer absent from the advertised target list must fail");
+    assert!(matches!(
+        error,
+        TrainingPlanError::TargetLimit(TrainingTargetLimitError::UnsupportedValue { ref field, .. })
+            if field == "optimizer"
+    ));
+
+    let mut provider_target = target.clone();
+    provider_target
+        .limits
+        .insert("futureNumericBudget".to_owned(), json!([1, 2]));
+    let error = build_plan_for_target(&provider_target, provider_target.defaults.clone())
+        .expect_err("a provider cannot advertise a numeric limit the shared validator ignores");
+    assert!(matches!(
+        error,
+        TrainingPlanError::TargetLimit(TrainingTargetLimitError::UnsupportedNumericLimit {
+            ref field
+        }) if field == "futureNumericBudget"
+    ));
 }

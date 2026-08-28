@@ -1209,8 +1209,7 @@ fn checkpoint_plan_entry_routes_to(entry: &JsonObject, family: &str) -> bool {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|declared| !declared.is_empty())
-        // `is_none_or` is stable only since 1.82; this workspace's MSRV is 1.80.
-        .map_or(true, |declared| declared == family)
+        .is_none_or(|declared| declared == family)
 }
 
 /// The importer-stamped structural dialect of one plan-backed manifest entry.
