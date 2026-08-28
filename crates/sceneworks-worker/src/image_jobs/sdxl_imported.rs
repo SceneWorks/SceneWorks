@@ -485,7 +485,10 @@ fn mirror_cached_sdxl_component_file_with_copy(
     // incapable of becoming a later task's live write target.
     let staging = destination_dir.join(format!("{file}.{}.partial", Uuid::new_v4().simple()));
     copy_source(&cached, &staging)
-        .and_then(|_| std::fs::File::open(&staging))
+        // Windows' FlushFileBuffers requires a write-capable handle. File::open is
+        // read-only there and returns AccessDenied from sync_all even though the
+        // copy itself succeeded.
+        .and_then(|_| std::fs::OpenOptions::new().write(true).open(&staging))
         .and_then(|file| file.sync_all())
         .and_then(|_| {
             sdxl_component_files_match(&cached, &staging).and_then(|matches| {
