@@ -453,7 +453,7 @@ pub(crate) struct KreaRuntimeEvidenceContext {
     artifact_repository: String,
     resolved_revision: String,
     tier_root: String,
-    resolved_artifact_root: std::path::PathBuf,
+    provider_contract: Option<gen_core::MemoryProviderContract>,
 }
 
 impl KreaRuntimeEvidenceContext {
@@ -471,6 +471,74 @@ impl KreaRuntimeEvidenceContext {
         pinned_snapshot_root: &std::path::Path,
     ) -> Option<Self> {
         let compute_capability = compute_capability?;
+        Self::inspect_artifact_structure(tier_root, resolved_artifact_root, pinned_snapshot_root)?;
+        Some(Self {
+            resolved_route: resolved_route.to_owned(),
+            backend: backend.to_owned(),
+            gpu_id: gpu_id.to_owned(),
+            compute_capability,
+            artifact_provider: artifact_provider.to_owned(),
+            artifact_repository: artifact_repository.to_owned(),
+            resolved_revision: resolved_revision.to_owned(),
+            tier_root: tier_root.to_owned(),
+            provider_contract: None,
+        })
+    }
+
+    /// Inspect the stock Turbo artifact and acquire its full registered provider contract once.
+    ///
+    /// Krea Control also uses [`Self::inspect`] for structural base-snapshot validation, but its
+    /// execution contract is different. Keep that path metadata-only; only the Turbo fit ladder
+    /// needs this sealed, reusable provider contract.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn inspect_turbo_fit(
+        resolved_route: &str,
+        backend: &str,
+        gpu_id: &str,
+        compute_capability: Option<f32>,
+        artifact_provider: &str,
+        artifact_repository: &str,
+        resolved_revision: &str,
+        tier_root: &str,
+        resolved_artifact_root: &std::path::Path,
+        pinned_snapshot_root: &std::path::Path,
+    ) -> Option<Self> {
+        let mut context = Self::inspect(
+            resolved_route,
+            backend,
+            gpu_id,
+            compute_capability,
+            artifact_provider,
+            artifact_repository,
+            resolved_revision,
+            tier_root,
+            resolved_artifact_root,
+            pinned_snapshot_root,
+        )?;
+        // The registered lookup performs complete production load-source validation, including
+        // encoder ArtifactSeal acquisition. The path-free result is safe to reuse for every fit
+        // against this inspected request-local artifact; the eventual provider load independently
+        // validates its retained seals before opening model bytes.
+        let provider_contract = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+                    resolved_artifact_root.to_owned(),
+                )),
+            )
+            .ok()
+            .flatten()?;
+        context.provider_contract = Some(provider_contract);
+        Some(context)
+    }
+
+    /// Cheap snapshot-layout validation kept separate from the provider's full sealed-source
+    /// validation so its missing-shard behavior can be exercised with a tiny structural fixture.
+    fn inspect_artifact_structure(
+        tier_root: &str,
+        resolved_artifact_root: &std::path::Path,
+        pinned_snapshot_root: &std::path::Path,
+    ) -> Option<()> {
         let expected = pinned_snapshot_root.join(tier_root);
         if resolved_artifact_root.canonicalize().ok()? != expected.canonicalize().ok()? {
             return None;
@@ -531,17 +599,7 @@ impl KreaRuntimeEvidenceContext {
         {
             return None;
         }
-        Some(Self {
-            resolved_route: resolved_route.to_owned(),
-            backend: backend.to_owned(),
-            gpu_id: gpu_id.to_owned(),
-            compute_capability,
-            artifact_provider: artifact_provider.to_owned(),
-            artifact_repository: artifact_repository.to_owned(),
-            resolved_revision: resolved_revision.to_owned(),
-            tier_root: tier_root.to_owned(),
-            resolved_artifact_root: resolved_artifact_root.to_owned(),
-        })
+        Some(())
     }
 
     #[cfg(test)]
@@ -555,7 +613,7 @@ impl KreaRuntimeEvidenceContext {
             artifact_repository: "SceneWorks/krea-2-turbo-mlx".into(),
             resolved_revision: "d009674080cc1bccf2b629d834c34bf5eccdb723".into(),
             tier_root: tier_root.into(),
-            resolved_artifact_root: krea_test_artifact_root(tier_root),
+            provider_contract: Some(krea_test_provider_contract(tier_root).clone()),
         }
     }
 }
@@ -638,6 +696,32 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
 #[cfg(test)]
 fn krea_test_load_spec(tier: &str) -> gen_core::LoadSpec {
     gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(krea_test_artifact_root(tier)))
+}
+
+/// One complete provider validation per immutable test tier.
+///
+/// ArtifactSeal acquisition deliberately hashes the full logical encoder payload. The shared
+/// Krea fixture is process-lifetime immutable, so reacquiring that same seal on every fit only
+/// repeats multi-gigabyte I/O without testing another state. Production contexts acquire their
+/// contract in [`KreaRuntimeEvidenceContext::inspect_turbo_fit`]; this cache is the test equivalent.
+#[cfg(test)]
+fn krea_test_provider_contract(tier: &str) -> &'static gen_core::MemoryProviderContract {
+    static CONTRACTS: std::sync::OnceLock<[gen_core::MemoryProviderContract; 3]> =
+        std::sync::OnceLock::new();
+    let contracts = CONTRACTS.get_or_init(|| {
+        ["q4", "q8", "bf16"].map(|fixture_tier| {
+            crate::inference_runtime::media()
+                .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec(fixture_tier))
+                .expect("Krea contract lookup succeeds")
+                .expect("Krea contract exists")
+        })
+    });
+    match tier {
+        "q4" => &contracts[0],
+        "q8" => &contracts[1],
+        "bf16" => &contracts[2],
+        _ => panic!("unsupported Krea fixture tier {tier}"),
+    }
 }
 
 /// Read a measured phase curve `fixedGb + perMpxGb * megapixels + perMpxFrameGb * megapixels *
@@ -921,16 +1005,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             reason: MemoryEvidenceVerdict::Unverified,
         });
     }
-    let load_root = runtime
-        .map(|runtime| runtime.resolved_artifact_root.clone())
-        .unwrap_or_default();
-    let provider_contract = crate::inference_runtime::media()
-        .memory_strategy_contract(
-            "krea_2_turbo",
-            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(load_root)),
-        )
-        .ok()
-        .flatten()?;
+    let provider_contract = runtime.and_then(|runtime| runtime.provider_contract.as_ref())?;
     let numeric_tier = gen_core::MemoryNumericTier {
         precision: gen_core::Precision::Bf16,
         quant: match tier {
@@ -1376,7 +1451,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 Some(record),
                 anchor_geometry,
             )
-            .optimized_eligibility(&provider_contract)
+            .optimized_eligibility(provider_contract)
             .is_ok()
         };
         // FAIL CLOSED ON THE WHOLE TIER (sc-18097 review, major finding). The tier's phase curves
@@ -1504,7 +1579,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     }));
     let selection = memory_strategy::select_strategy(
         request,
-        &provider_contract,
+        provider_contract,
         Some(Budget {
             available_gb: budget.free_gb,
             reclaimable_gb: 0.0,
@@ -3269,10 +3344,7 @@ mod tests {
         let turbo_fit = manifest["candle"]["turboFit"]
             .as_object()
             .expect("Krea turbo fit");
-        let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec("q4"))
-            .expect("Krea contract lookup succeeds")
-            .expect("Krea contract exists");
+        let provider_contract = krea_test_provider_contract("q4");
         let identity = provider_contract
             .calibration
             .as_ref()
@@ -3347,7 +3419,7 @@ mod tests {
         };
 
         let decision = gen_core::standard_memory_strategy_safety_check(
-            &provider_contract,
+            provider_contract,
             &context,
             None,
             None,
@@ -3606,6 +3678,13 @@ mod tests {
 
     #[test]
     fn krea_runtime_context_is_required_and_hardware_and_artifact_bound() {
+        assert!(
+            std::ptr::eq(
+                krea_test_provider_contract("q4"),
+                krea_test_provider_contract("q4")
+            ),
+            "the immutable fixture tier must reuse one fully validated provider contract"
+        );
         let manifest = krea_fit_manifest();
         let budget = Some(VramBudget {
             free_gb: 20.0,
@@ -3633,6 +3712,21 @@ mod tests {
                 reason: gen_core::MemoryEvidenceVerdict::Unverified,
             })
         ));
+
+        let mut wrong_contract = KreaRuntimeEvidenceContext::verified_for_test("q4");
+        wrong_contract
+            .provider_contract
+            .as_mut()
+            .and_then(|contract| contract.calibration.as_mut())
+            .expect("Krea provider calibration")
+            .fingerprint = "krea-turbo-cuda-phase-curves-mutated".into();
+        assert_eq!(
+            run(Some(&wrong_contract)),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "fit must consume the artifact-scoped contract instead of repeating registry lookup"
+        );
     }
 
     #[test]
@@ -3967,10 +4061,7 @@ mod tests {
             "a stale-closure record must not seed a fitted extrapolation"
         );
 
-        let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec("q4"))
-            .expect("Krea contract lookup succeeds")
-            .expect("Krea contract exists");
+        let provider_contract = krea_test_provider_contract("q4");
         assert!(
             provider_contract.conformance_errors().is_empty(),
             "the loaded contract must be conformance-clean so the fingerprint arm exercises the \
@@ -3999,10 +4090,7 @@ mod tests {
             .expect("manifest calibration fingerprint");
         assert_eq!(manifest_fingerprint, "krea-turbo-cuda-phase-curves-v1");
 
-        let provider_contract = crate::inference_runtime::media()
-            .memory_strategy_contract("krea_2_turbo", &krea_test_load_spec("q4"))
-            .expect("Krea contract lookup succeeds")
-            .expect("Krea contract exists");
+        let provider_contract = krea_test_provider_contract("q4");
         let provider_fingerprint = provider_contract
             .calibration
             .as_ref()
