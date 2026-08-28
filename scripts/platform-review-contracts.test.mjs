@@ -356,6 +356,7 @@ test("windows-candle captures and schema-checks the SC-21714 certifying Krea rec
     workflow,
     "Build and run the Candle Krea diagnostic and certifying captures",
   );
+  assert.match(capture, /CUDA_VISIBLE_DEVICES: "1"/);
   assert.match(capture, /--fixture krea-q4-1024-seed42 --fresh-per-case/);
   assert.match(capture, /--output "%RUNNER_TEMP%\\sc-21714-candle-certifying\.json"/);
   assert.match(

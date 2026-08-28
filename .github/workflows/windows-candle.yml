@@ -819,6 +819,9 @@ jobs:
           # renamed alongside the dispatch inputs; see the workflow_dispatch header.
           SCENEWORKS_KREA_REPOSITORY: ${{ inputs.provision_repository }}
           SCENEWORKS_KREA_REVISION: ${{ inputs.provision_revision }}
+          # SC-21714 certifies on the second physical Blackwell card. Candle still sees logical
+          # cuda:0, while the adapter's nvidia-smi probe records physical device 1.
+          CUDA_VISIBLE_DEVICES: "1"
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
