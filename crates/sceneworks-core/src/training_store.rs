@@ -1132,7 +1132,7 @@ fn validate_prepared_tensor_header(name: &str, value: &Value) -> ProjectStoreRes
     if shape.is_empty()
         || shape
             .iter()
-            .any(|axis| axis.as_u64().is_none_or(|axis| axis == 0))
+            .any(|axis| axis.as_u64().map_or(true, |axis| axis == 0))
     {
         return Err(invalid_prepared_bundle(&format!(
             "tensor {name} shape must contain positive integer axes"

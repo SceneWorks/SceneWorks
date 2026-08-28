@@ -2654,11 +2654,7 @@ pub fn validate_lora_compatibility(
         let lora_id = lora_display_id(lora, index);
         let declared_model_ids = lora_declared_model_ids(lora);
         if let Some(model_id) = model_id {
-            if !declared_model_ids.is_empty()
-                && !declared_model_ids
-                    .iter()
-                    .any(|declared| *declared == model_id)
-            {
+            if !declared_model_ids.is_empty() && !declared_model_ids.contains(&model_id) {
                 return Err(format!(
                     "LoRA {lora_id} is declared for model {}, not {model_id}.",
                     declared_model_ids.join(" or ")
