@@ -311,6 +311,12 @@ jobs:
   candle-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # The real-weight listeners share one physical GPU. Serialize only manual jobs that mutate or
+    # measure that shared state with the imported-NVFP4 smoke's fixed group; ordinary compile/test
+    # runs retain a unique group and therefore the full four-listener pool.
+    concurrency:
+      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}
+      cancel-in-progress: false
     # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
     # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
     # adds `weights` for `run_memory_calibration || run_five_rung_reference` and is the convention
@@ -1367,9 +1373,12 @@ jobs:
   imported-nvfp4-worker-smoke:
     # Real weights are required for this one executable acceptance (sc-21716). Keep it separate
     # from candle-worker so ordinary compile/test traffic retains the full four-runner CUDA pool;
-    # the dependency serializes the two jobs on the shared physical GPU host.
+    # the dependency orders this run, and the fixed group excludes other runs that use real weights.
     needs: candle-worker
     if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 120
     env:

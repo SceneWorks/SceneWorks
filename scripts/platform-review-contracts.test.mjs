@@ -375,6 +375,13 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
     candleWorker,
     /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
   );
+  assert.ok(
+    candleWorker.includes(
+      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}",
+    ),
+    "real-weight dispatch profiles must share the GPU lock while ordinary runs remain unique",
+  );
+  assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
 });
 
 test("windows-candle runs the imported NVFP4 worker acceptance on the real-weights host", async () => {
@@ -384,6 +391,8 @@ test("windows-candle runs the imported NVFP4 worker acceptance on the real-weigh
   const job = workflow.slice(at);
 
   assert.match(job, /^ {4}needs: candle-worker$/m);
+  assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
+  assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
   assert.match(job, /github\.event_name == 'push'/);
   assert.match(job, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
