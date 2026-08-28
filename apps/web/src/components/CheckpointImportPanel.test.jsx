@@ -223,6 +223,21 @@ describe("CheckpointImportPanel", () => {
     expect(library.remove).toHaveBeenCalledWith("tok", "root-a");
   });
 
+  it("keeps the add-library name draft while a library is renamed", async () => {
+    const library = libraryStub();
+    await render({ library });
+    await type(labelled("Library folder"), "/Volumes/New");
+    await type(labelled("Name"), "New library");
+
+    await click(buttonNamed("Rename"));
+    await type(labelled("New name"), "Renamed existing library");
+    await click(buttonNamed("Save name"));
+    expect(library.update).toHaveBeenLastCalledWith("tok", "root-a", { label: "Renamed existing library" });
+
+    await click(buttonNamed("Add library"));
+    expect(library.approve).toHaveBeenCalledWith("tok", { path: "/Volumes/New", label: "New library" });
+  });
+
   it("uses the desktop bridge folder picker when one is available", async () => {
     const pickFolder = vi.fn(async () => "/Volumes/Picked");
     const library = libraryStub();

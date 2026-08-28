@@ -591,9 +591,11 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
   let invoke;
   let SettingsScreen;
   const GIB = 1024 * 1024 * 1024;
+  let telemetry;
 
   beforeEach(async () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    telemetry = { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
     invoke = vi.fn(async (command) => {
       switch (command) {
         case "get_app_settings":
@@ -605,7 +607,7 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
         case "get_remote_access":
           return null;
         case "get_gpu_telemetry":
-          return { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
+          return telemetry;
         case "set_gpu_memory_limit":
           return { gpuMemoryLimitFraction: 0.5 };
         default:
@@ -644,16 +646,27 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     await render();
     expect(invoke).toHaveBeenCalledWith("get_gpu_telemetry", undefined);
     expect(container.textContent).toContain("Live MLX memory");
-    expect(container.textContent).toContain("20.0 GB");
-    expect(container.textContent).toContain("40.0 GB");
-    expect(container.textContent).toContain("64 GB");
+    expect(container.textContent).toContain("20.0 GiB");
+    expect(container.textContent).toContain("40.0 GiB");
+    expect(container.textContent).toContain("64 GiB");
+  });
+
+  it("marks missing telemetry fields unavailable while preserving a reported zero", async () => {
+    telemetry = { activeBytes: 0, limitBytes: 0 };
+    await render();
+    expect(container.textContent).toContain("0.0 GiB");
+    expect(container.textContent).toContain("0 GiB");
+    expect(container.textContent).toContain("Unavailable");
+    const rows = [...container.querySelectorAll(".settings-kv")];
+    expect(rows.find((row) => row.textContent.includes("Active"))?.textContent).toContain("0.0 GiB");
+    expect(rows.find((row) => row.textContent.includes("Peak"))?.textContent).toContain("Unavailable");
   });
 
   it("summarises this machine from the detected GPU and the worker registry", async () => {
     await render();
     expect(container.textContent).toContain("Engine");
     expect(container.textContent).toContain("Unified memory");
-    expect(container.textContent).toContain("128 GB");
+    expect(container.textContent).toContain("128 GiB");
   });
 
   it("applies the GPU memory target live, without restarting the worker", async () => {

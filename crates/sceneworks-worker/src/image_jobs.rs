@@ -2491,10 +2491,34 @@ pub(crate) fn write_image_asset(
     height: u32,
     pixels: Vec<u8>,
     adapter: &str,
-    raw_settings: JsonObject,
+    mut raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
+    // The three checkpoint facts (sc-21484, epic 11037), stamped here because EVERY generated image
+    // asset funnels through this one function — so the source codec a checkpoint stores, the host's
+    // native-execution capability, and what the load actually materialized reach the receipt from
+    // every lane rather than only the two that happen to build them themselves.
+    //
+    // A lane that already assembled its own set keeps it: `krea_imported` resolves the DiT path and
+    // can therefore tie the facts to a source BINDING, which is strictly more than this site can
+    // state. Never overwrite a richer fact set with a poorer one.
+    //
+    // Nothing is inserted at all when the model carries no verified source classification. That
+    // absence is the honest answer for a builtin turnkey tier and a diffusers-tree import, and it
+    // is the one a consumer must handle anyway — filling it from `advanced.quantTier` would put the
+    // requested TIER into a field that means the stored CODEC.
+    if !raw_settings.contains_key(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY) {
+        crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
+            &mut raw_settings,
+            crate::checkpoint_weight_facts_host::imported_checkpoint_facts(
+                &request.model_manifest_entry,
+                None,
+                crate::checkpoint_weight_facts_host::materialization_from_runtime(None),
+            )
+            .as_ref(),
+        );
+    }
     let rgb_image = image::RgbImage::from_raw(width, height, pixels)
         .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
 

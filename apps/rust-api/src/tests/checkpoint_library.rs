@@ -561,3 +561,268 @@ async fn library_root_refusals_are_typed_and_status_mapped() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert_eq!(body["context"]["reason"], json!("invalid-relative-path"));
 }
+
+// ---- managed NVFP4 variants at the wire (sc-11043, epic 11037) ---------------------------------
+
+/// The registered variant ids. Written literally here rather than read from the registry so a
+/// silent edit to either is red at the HTTP boundary too.
+const KREA_VARIANT_ID: &str = "nvfp4-krea-2-turbo";
+const KLEIN_VARIANT_ID: &str = "nvfp4-flux2-klein-9b-true-v2";
+
+/// `GET /api/v1/models/managed-variants` answers 200 with the whole registered cohort.
+///
+/// The route is static and takes no state, but it is still a ROUTE: without an HTTP-level test
+/// nothing proves it is mounted under that path, ahead of `/api/v1/models/:model_id`, and serving
+/// the typed view rather than 404ing or being swallowed by the id-parameterized route.
+///
+/// Failing mutation: remove the `/api/v1/models/managed-variants` route from `create_app`.
+#[tokio::test]
+async fn the_managed_variants_route_lists_both_registered_variants() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    seed_manifests(&temp_dir.path().join("config"));
+    let settings = test_settings(&temp_dir);
+    std::fs::create_dir_all(&settings.data_dir).expect("data dir creates");
+    let app = create_app(settings).expect("app creates");
+
+    let (status, body) = request(app, "GET", "/api/v1/models/managed-variants", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let rows = body["variants"].as_array().expect("variants array");
+    assert_eq!(rows.len(), 2, "{body:?}");
+    assert_eq!(rows[0]["variantId"], json!(KREA_VARIANT_ID));
+    assert_eq!(rows[1]["variantId"], json!(KLEIN_VARIANT_ID));
+    for row in rows {
+        // A listing, never a chooser: each row names its tier explicitly and carries the pin in
+        // the body that installs it.
+        assert_eq!(row["quantTier"], json!("nvfp4"));
+        assert_eq!(row["sourceCodec"], json!("nvfp4-v1"));
+        assert_eq!(row["importRequest"]["ownershipMode"], json!("managed"));
+        assert_eq!(row["importRequest"]["modelId"], row["variantId"]);
+        assert_eq!(
+            row["importRequest"]["expectedSha256"],
+            row["pinnedArtifact"]["sha256"]
+        );
+        assert!(row["sizeBytes"].as_u64().expect("a size") > 0);
+    }
+}
+
+/// The advertised import body is a CONVENIENCE; the pin is enforced server-side.
+///
+/// A client that posts a managed variant's `modelId` with a hostile repo/revision/file, or with a
+/// wrong `expectedSha256`, is refused — and one that simply OMITS the checksum (which the worker's
+/// `if let Some(..)` verification treats as "nothing to verify") still gets the registration's
+/// digest, repo, revision and file written onto the queued job. Either way, unverified bytes
+/// cannot be recorded under a curated variant's identity, and there is still only one import
+/// pipeline.
+///
+/// Failing mutation: delete the `resolve_managed_variant_pin(&mut payload)?` call at the top of
+/// `queue_model_import_job` — the omitted-checksum case then queues a job with no `expectedSha256`
+/// and every substituted-source case is accepted.
+#[tokio::test]
+async fn a_managed_variant_import_cannot_be_talked_out_of_its_pin() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    seed_manifests(&temp_dir.path().join("config"));
+    let settings = test_settings(&temp_dir);
+    std::fs::create_dir_all(&settings.data_dir).expect("data dir creates");
+    let app = create_app(settings).expect("app creates");
+
+    let (_, listed) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/models/managed-variants",
+        Value::Null,
+    )
+    .await;
+    let pinned = listed["variants"][0]["pinnedArtifact"].clone();
+    let repo = pinned["repo"].as_str().expect("repo").to_owned();
+    let revision = pinned["revision"].as_str().expect("revision").to_owned();
+    let file = pinned["file"].as_str().expect("file").to_owned();
+    let sha256 = pinned["sha256"].as_str().expect("sha256").to_owned();
+
+    // 1. The checksum is OMITTED entirely — the client-cooperative bypass. The job still carries
+    //    the pin, so the worker has something to verify against.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": KREA_VARIANT_ID,
+            "source": {"kind": "huggingFace", "repo": repo, "revision": revision},
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert_eq!(
+        job["payload"]["expectedSha256"],
+        json!(sha256),
+        "an omitted checksum must be filled in from the registration: {job:?}"
+    );
+    assert_eq!(job["payload"]["repo"], json!(repo));
+    assert_eq!(job["payload"]["revision"], json!(revision));
+    assert_eq!(job["payload"]["files"], json!([file]));
+
+    // 2. A DIFFERENT checksum under the variant's identity is refused, not silently rewritten.
+    //    Posted under KREA_VARIANT_ID — the id whose repo/revision these are — so the CHECKSUM
+    //    branch is what fires; under KLEIN's id the repo comparison refused it first and this case
+    //    proved nothing about checksums.
+    //
+    //    Failing mutation: delete the `expected_sha256` comparison branch in
+    //    `resolve_managed_variant_pin`.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": KREA_VARIANT_ID,
+            "source": {"kind": "huggingFace", "repo": repo, "revision": revision},
+            "expectedSha256": "0".repeat(64),
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body.to_string().contains("asserts checksum"),
+        "the checksum branch is what must refuse this: {body:?}"
+    );
+
+    // The KLEIN variant is equally pinned — proved through its OWN pin, so the loop below can stay
+    // on one variant without leaving the second registration untested.
+    let klein = listed["variants"][1]["pinnedArtifact"].clone();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": KLEIN_VARIANT_ID,
+            "source": {"kind": "huggingFace", "repo": klein["repo"], "revision": klein["revision"]},
+            "expectedSha256": "0".repeat(64),
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(body.to_string().contains("asserts checksum"), "{body:?}");
+
+    // 3. So is a substituted repo, revision, or file — and any ownership mode that does not fetch
+    //    the pinned bytes at all.
+    //
+    // Each hostile body is posted against the variant its pin belongs to. Posting KREA's repo under
+    // KLEIN's id (the original shape of this loop) made the very first check — the repo comparison —
+    // fire for all three Hugging Face rows, so the revision and file branches were never reached
+    // and only one of the four was actually under test.
+    //
+    // Failing mutations, one per row: delete the corresponding `claim(...)` branch in
+    // `resolve_managed_variant_pin` (repo / revision / file / non-fetching source) — that row alone
+    // turns green-to-red.
+    for hostile in [
+        json!({"kind": "huggingFace", "repo": "attacker/lookalike"}),
+        json!({"kind": "huggingFace", "repo": repo, "revision": "a".repeat(40)}),
+        json!({"kind": "huggingFace", "repo": repo, "revision": revision, "files": ["other.safetensors"]}),
+        json!({"kind": "url", "url": "https://example.com/model.safetensors"}),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                // KREA_VARIANT_ID, because `repo`/`revision` above were read from `variants[0]`.
+                "modelId": KREA_VARIANT_ID,
+                "source": hostile.clone(),
+                "type": "image"
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{hostile} must not install under a managed variant's identity: {body:?}"
+        );
+    }
+}
+
+/// A managed variant's id is its install DIRECTORY name and its checkpoint identity, and the
+/// directory resolver preserves case while NTFS and a default APFS volume do not. So a case-variant
+/// id — `"NVFP4-Krea-2-Turbo"` — used to miss the registry entirely: no repo, revision, file or
+/// checksum was pinned, `expectedSha256` could be omitted outright, the distinct-id collision check
+/// saw a brand-new id, and the bytes landed in the curated variant's own directory under the
+/// curated variant's own identity.
+///
+/// It is REFUSED rather than normalized: rewriting the id would install something the request did
+/// not name. The exact id still works, so this is a near-miss guard and not a blanket ban.
+///
+/// Failing mutation: make the lookup case-SENSITIVE again — replace the
+/// `match_managed_nvfp4_variant_id` call in `resolve_managed_variant_pin` with the old
+/// `.map(str::trim).and_then(managed_nvfp4_variant)`. Every case row below then returns 201 with no
+/// `expectedSha256` on the queued job.
+#[tokio::test]
+async fn a_case_variant_of_a_managed_variant_id_cannot_dodge_the_pin() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    seed_manifests(&temp_dir.path().join("config"));
+    let settings = test_settings(&temp_dir);
+    std::fs::create_dir_all(&settings.data_dir).expect("data dir creates");
+    let app = create_app(settings).expect("app creates");
+
+    for cased in [
+        "NVFP4-Krea-2-Turbo",
+        "NVFP4-KREA-2-TURBO",
+        "nvfp4-Krea-2-turbo",
+        "NVFP4-flux2-Klein-9B-True-V2",
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "modelId": cased,
+                // The hostile shape the blocker described: an arbitrary source and NO checksum,
+                // which the worker's `if let Some(..)` verification treats as nothing to verify.
+                "sourceUrl": "https://example.com/anything.safetensors",
+                "type": "image"
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{cased} must not install under a managed variant's identity: {body:?}"
+        );
+        assert!(
+            body.to_string().contains("differs only in case"),
+            "{cased} must be refused as a case near-miss, not by some later check: {body:?}"
+        );
+    }
+
+    // The EXACT id is unaffected: it still resolves and is still pinned.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({ "modelId": KREA_VARIANT_ID, "type": "image" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert!(
+        job["payload"]["expectedSha256"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 64),
+        "the exact id still gets the registration's digest: {job:?}"
+    );
+
+    // And an ordinary id that merely SHARES a prefix is not a near miss at all.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({
+            "modelId": "nvfp4-krea-2-turbo-mine",
+            "sourceUrl": "https://example.com/anything.safetensors",
+            "type": "image"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+}

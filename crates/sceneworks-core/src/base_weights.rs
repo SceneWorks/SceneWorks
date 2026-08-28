@@ -36,7 +36,7 @@
 //! `ComfyUI-keys → VarBuilder` remap seam, the per-family key tables, and the
 //! actual dequant kernels.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -164,6 +164,67 @@ impl QuantFormat {
             Self::UnrecognizedScaling => "unrecognized_scaling",
         }
     }
+
+    /// Parse the [`Self::as_str`] spelling back.
+    ///
+    /// The inverse of `as_str`, needed because the classification is *persisted* — a manifest
+    /// entry's `importQuantFormat` is this string, written at import time by the header gate that
+    /// proved it, and read back on every later request. Matching is exact and case-sensitive:
+    /// these are values this code wrote, not user input, and a lenient parse would let a
+    /// near-miss (`"NVFP4"`, `"nvfp4-v1"`) resolve to a classification nothing verified.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "bf16" => Some(Self::Bf16),
+            "f16" => Some(Self::F16),
+            "f32" => Some(Self::F32),
+            "fp8_e4m3" => Some(Self::Fp8E4m3),
+            "scaled_fp8_companion" => Some(Self::ScaledFp8Companion),
+            "fp8_inline_scale" => Some(Self::Fp8InlineScale),
+            "comfy_quant_packed" => Some(Self::ComfyQuantPacked),
+            "int8_tensorwise_per_row" => Some(Self::Int8TensorwisePerRow),
+            "nvfp4" => Some(Self::Nvfp4),
+            "gguf" => Some(Self::Gguf),
+            "unrecognized_scaling" => Some(Self::UnrecognizedScaling),
+            _ => None,
+        }
+    }
+
+    /// The engine's stable **source-codec id** for this classification, when the two vocabularies
+    /// name the same thing (sc-21484, epic 11037).
+    ///
+    /// This is the one sanctioned bridge from SceneWorks' header classification to the cross-repo
+    /// codec vocabulary in [`crate::checkpoint_weight_facts`]. It is a *lookup on the verified
+    /// verdict*, never a derivation from a bit count: [`Self::Nvfp4`] is only ever reached through
+    /// `metadata_declares_nvfp4(..) && has_nvfp4_triplets(..)`, both halves required, and
+    /// the codec id inherits exactly that proof. Nothing here reads `mlxQuantize`, a tier name, or
+    /// a dtype width.
+    ///
+    /// # Why several arms are `None`
+    ///
+    /// `None` means "this build cannot name the engine codec for that classification", not "the
+    /// file is dense". The fp8 family is the reason it exists: SceneWorks tells apart four fp8
+    /// conventions by *marker shape* ([`Self::Fp8E4m3`], [`Self::ScaledFp8Companion`],
+    /// [`Self::Fp8InlineScale`], [`Self::ComfyQuantPacked`]) while the engine's registered codecs
+    /// are keyed by *scale topology* (`fp8-e4m3-scalar-v1`, `mxfp8-v1`, …). The two partitions do
+    /// not line up one-to-one, and guessing a mapping would put a codec id that was never proved
+    /// into a persisted fact a user reads. A caller that gets `None` must omit the source-codec
+    /// fact, never substitute a request tier for it.
+    pub fn source_codec_id(self) -> Option<&'static str> {
+        use crate::checkpoint_weight_facts as facts;
+        match self {
+            Self::Bf16 => Some(facts::DENSE_BF16_CODEC_ID),
+            Self::F16 => Some(facts::DENSE_F16_CODEC_ID),
+            Self::F32 => Some(facts::DENSE_F32_CODEC_ID),
+            Self::Int8TensorwisePerRow => Some(facts::INT8_PER_ROW_CODEC_ID),
+            Self::Nvfp4 => Some(facts::NVFP4_CODEC_ID),
+            Self::Gguf => Some(facts::GGUF_CONTAINER_CODEC_ID),
+            Self::Fp8E4m3
+            | Self::ScaledFp8Companion
+            | Self::Fp8InlineScale
+            | Self::ComfyQuantPacked
+            | Self::UnrecognizedScaling => None,
+        }
+    }
 }
 
 impl std::fmt::Display for QuantFormat {
@@ -206,12 +267,18 @@ pub enum BaseWeightDetection {
 /// detector recognizes by its `txtfusion.` marker, whose builtins already route to the Krea MLX
 /// engine. Grows one entry per landed loader; keep it aligned with [`import_supported`]'s arms and
 /// with `MLX_ROUTED_FAMILIES` (routing).
-/// `mage-flow` (sc-15036, epic 14034 F6) is the DIRECTORY-shaped member: unlike the two single-file
-/// families, a loadable Mage-Flow backbone is a diffusers **transformer component directory**
+/// `mage-flow` (sc-15036, epic 14034 F6) is the DIRECTORY-shaped member: unlike the other three —
+/// the single-file families `flux2`, `krea_2` and `sdxl` — a loadable Mage-Flow backbone is a
+/// diffusers **transformer component directory**
 /// ([`is_mage_flow_transformer_dir`]) — `config.json` plus its weight file — because the loader
 /// reads its architecture from that config rather than inferring it from a base tier. A bare
 /// `.safetensors` with no config sibling is therefore refused, which is what the arm below says.
-pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
+/// `flux2` (sc-11043, epic 11037) is the NVFP4-only member: the single-file FLUX.2 Klein BFL
+/// topology reaches a loader only through the shared `nvfp4-v1` codec and the Klein `bfl` dialect
+/// sc-21485 bound to `flux2_klein_9b`. A dense or fp8 FLUX.2 single file has no import loader and
+/// is still refused by [`import_supported`]'s `flux2` quant arm — this constant names the family,
+/// never the encodings.
+pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
 
 /// The file a Mage-Flow transformer component directory carries its weights in (the diffusers
 /// name the trainer's full-fine-tune writer emits).
@@ -299,7 +366,10 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// quant (the S0c assembly slice and the epic's later families) is a single added arm, not a
 /// rewrite. Today a Krea 2 transformer is loadable as dense `bf16`, descriptor-gated
 /// [`QuantFormat::Int8TensorwisePerRow`], or Kitchen [`QuantFormat::Nvfp4`]; all three reuse the
-/// existing Krea engine via the family-routing path. Everything else — an unrecognized/absent family, a
+/// existing Krea engine via the family-routing path. A FLUX.2 transformer (sc-11043, epic 11037)
+/// is loadable as [`QuantFormat::Nvfp4`] and nothing else — the single-file Klein BFL export
+/// through the shared `nvfp4-v1` codec — an SDXL all-in-one checkpoint as `f16`/`bf16`/`f32`, and a
+/// Mage-Flow transformer DIRECTORY as dense `bf16`. Everything else — an unrecognized/absent family, a
 /// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
 /// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF) — is refused with a specific reason.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
@@ -310,6 +380,12 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             ComponentRole::Transformer,
             QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow | QuantFormat::Nvfp4,
         ) => Ok(()),
+        // sc-11043 (epic 11037): the FLUX.2 Klein single-file BFL export, NVFP4 only. Its
+        // architecture mapping (fused QKV rows, the AdaLN half-swap) rides sc-21485's declarative
+        // transforms over the shared reader, so this gate names the family and the source codec and
+        // nothing else. Dense/fp8 FLUX.2 single files are refused below: they have no import
+        // loader, and admitting them here would claim a lane nothing serves.
+        (Some("flux2"), ComponentRole::Transformer, QuantFormat::Nvfp4) => Ok(()),
         (
             Some("sdxl"),
             ComponentRole::Checkpoint,
@@ -329,6 +405,15 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         (Some(family), _, _) if !IMPORT_SUPPORTED_FAMILIES.contains(&family) => Err(format!(
             "Model import does not yet support the '{family}' family. Supported today: {}.",
             IMPORT_SUPPORTED_FAMILIES.join(", ")
+        )),
+        (Some("flux2"), component, _) if component != ComponentRole::Transformer => Err(format!(
+            "Model import for the 'flux2' family requires a diffusion transformer, not a \
+             {component} file."
+        )),
+        (Some("flux2"), _, quant) => Err(format!(
+            "Model import for the 'flux2' family supports the NVFP4 single-file Klein export, not \
+             {quant}. Dense and fp8 FLUX.2 tiers are installed through the model catalog, not \
+             imported."
         )),
         (Some("krea_2"), component, _) if component != ComponentRole::Transformer => Err(format!(
             "Model import for the 'krea_2' family requires a diffusion transformer, not a \
@@ -479,8 +564,11 @@ fn any_key_contains(keys: &[&str], needle: &str) -> bool {
 /// conventions share the `F8_E4M3` dtype and are separable only by the scale
 /// tensors that ride alongside:
 ///
-/// 1. explicit Kitchen `quant_format=NVFP4` metadata plus an exact U8/F8/F32 triplet surface →
-///    [`QuantFormat::Nvfp4`]. Both pieces are required; metadata alone is never trusted.
+/// 1. an explicit NVFP4 declaration in the file's own global metadata — Kitchen's
+///    `quant_format=NVFP4`, or a `_quantization_metadata` `layers` map whose every entry is
+///    `nvfp4` — plus an exact U8/F8/F32 triplet surface → [`QuantFormat::Nvfp4`]. Both pieces are
+///    required; metadata alone is never trusted, and a `.comfy_quant` descriptor is tolerated only
+///    over a projection whose triplet already proved out (see [`has_nvfp4_triplets`]).
 /// 2. `.comfy_quant` present → split by dtype: bulk `I8` weights ⇒ int8-tensorwise
 ///    per-row ([`QuantFormat::Int8TensorwisePerRow`], a loadable-in-principle quant);
 ///    otherwise fp4/mxfp4-packed `U8` nibbles ([`QuantFormat::ComfyQuantPacked`]).
@@ -509,7 +597,7 @@ fn detect_quant_format(
     // A `>4` floor (matching `packed_u8`) shrugs off a stray bookkeeping `I8`.
     let int8_bulk = count("I8") > 4;
 
-    if metadata_declares_nvfp4(entries) && has_kitchen_nvfp4_triplets(entries) {
+    if metadata_declares_nvfp4(entries) && has_nvfp4_triplets(entries) {
         return QuantFormat::Nvfp4;
     }
 
@@ -560,13 +648,81 @@ fn detect_quant_format(
     QuantFormat::UnrecognizedScaling
 }
 
+/// Whether the file's own global metadata DECLARES that its packed projections are NVFP4.
+///
+/// Two spellings, both observed on shipping artifacts. Neither is trusted on its own — the caller
+/// pairs this with [`has_nvfp4_triplets`], which proves the declared surface is actually present.
+///
+/// 1. `__metadata__.quant_format = "NVFP4"` — the NVIDIA Kitchen converter's single global marker.
+/// 2. `__metadata__._quantization_metadata` — a JSON **string** carrying a `layers` map, one entry
+///    per quantized projection with its own `format`. This is the spelling BOTH artifacts epic
+///    11037 pins use (`Comfy-Org/Krea-2 diffusion_models/krea2_turbo_nvfp4.safetensors` and
+///    `wikeeyang/Flux2-Klein-9B-True-V2 Flux2-Klein-9B-True-v2-nvfp4mixed.safetensors`), and
+///    neither carries `quant_format`, so before sc-11043 both classified as something else
+///    entirely: the Krea export as [`QuantFormat::Fp8InlineScale`] (its `.weight_scale` companions
+///    matched the flux2 inline-fp8 arm) and the Klein export as [`QuantFormat::ComfyQuantPacked`]
+///    (the unloadable bucket). Registering them as NVFP4 variants starts here.
+///
+/// **EVERY declared layer must say `nvfp4`.** A `layers` map that mixes formats is a multi-codec
+/// export this classifier has no single answer for, and claiming the whole file as NVFP4 because
+/// most of it is would hand the codec bytes it cannot decode. "nvfp4mixed" in the Klein filename
+/// is about mixing packed and *dense* layers — the dense ones simply carry no `layers` entry —
+/// not about mixing quantization formats; the pinned file declares `nvfp4` for all 112 of them.
 fn metadata_declares_nvfp4(entries: &serde_json::Map<String, Value>) -> bool {
-    entries
-        .get("__metadata__")
-        .and_then(Value::as_object)
-        .and_then(|metadata| metadata.get("quant_format"))
+    let Some(metadata) = entries.get("__metadata__").and_then(Value::as_object) else {
+        return false;
+    };
+    if metadata
+        .get("quant_format")
         .and_then(Value::as_str)
         .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
+    {
+        return true;
+    }
+    let Some(raw) = metadata
+        .get("_quantization_metadata")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return false;
+    };
+    let Some(layers) = parsed.get("layers").and_then(Value::as_object) else {
+        return false;
+    };
+    !layers.is_empty() && layers.values().all(nvfp4_layer_descriptor_is_decodable)
+}
+
+/// The block size `nvfp4-v1` decodes: 16 E2M1 values per FP8 block scale.
+///
+/// Not a tunable. It is baked into [`has_nvfp4_triplets`]'s shape arithmetic (`cols / 16` blocks
+/// per row, rounded to the 128×4 swizzle) and into the codec on the engine side.
+const NVFP4_GROUP_SIZE: u64 = 16;
+
+/// One `_quantization_metadata.layers` entry: `nvfp4` format, and a group size this build decodes.
+///
+/// The group size used to be READ by nobody. A converter emitting `group_size: 32` (the MXFP4 block
+/// size, and a plausible future NVFP4 variant) declared `format: "nvfp4"` and passed — and then the
+/// shape checks below, which assume 16, would either reject the file for the wrong reason or, where
+/// the arithmetic happened to line up, admit it and hand the codec blocks it decodes at the wrong
+/// stride. A declared size this build does not implement is refused explicitly (sc-11045 review).
+///
+/// An ABSENT `group_size` is accepted: the pinned Krea 2 artifact's descriptors carry one, but the
+/// field is optional in the converter's schema and its absence means "the codec default", which is
+/// 16. Only a size that is present and different is a refusal.
+fn nvfp4_layer_descriptor_is_decodable(layer: &Value) -> bool {
+    if !layer
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
+    {
+        return false;
+    }
+    match layer.get("group_size") {
+        None | Some(Value::Null) => true,
+        Some(value) => value.as_u64() == Some(NVFP4_GROUP_SIZE),
+    }
 }
 
 fn tensor_header<'a>(
@@ -591,15 +747,10 @@ fn round_up_u64(value: u64, multiple: u64) -> Option<u64> {
         .checked_mul(multiple)
 }
 
-/// Header-only proof of the exact Kitchen NVFP4 tensor surface the Candle Krea loader accepts.
+/// Header-only proof of the exact NVFP4 tensor surface the shared `nvfp4-v1` codec accepts.
 /// The global metadata prevents a coincidental U8 triplet scheme from being mislabeled, while these
 /// shape/dtype checks prevent a forged or stale metadata string from opening the loader.
-fn has_kitchen_nvfp4_triplets(entries: &serde_json::Map<String, Value>) -> bool {
-    // The current Kitchen converter writes no per-layer descriptors. Descriptor-gated NVFP4 belongs
-    // to the generic ComfyQuant bucket until its extra key surface has a consumer.
-    if entries.keys().any(|name| name.ends_with(".comfy_quant")) {
-        return false;
-    }
+fn has_nvfp4_triplets(entries: &serde_json::Map<String, Value>) -> bool {
     let u8_weights = entries
         .iter()
         .filter(|(name, tensor)| {
@@ -650,8 +801,11 @@ fn has_kitchen_nvfp4_triplets(entries: &serde_json::Map<String, Value>) -> bool 
         let block_values = block_shape
             .iter()
             .try_fold(1u64, |product, dim| product.checked_mul(*dim));
+        // `NVFP4_GROUP_SIZE` values per block scale — the same 16 the layer descriptor is validated
+        // against in `nvfp4_layer_descriptor_is_decodable`, so the two cannot drift apart.
         let expected_blocks = round_up_u64(*rows, 128).and_then(|scale_rows| {
-            round_up_u64(cols / 16, 4).and_then(|scale_cols| scale_rows.checked_mul(scale_cols))
+            round_up_u64(cols / NVFP4_GROUP_SIZE, 4)
+                .and_then(|scale_cols| scale_rows.checked_mul(scale_cols))
         });
         if !matches!((block_values, expected_blocks), (Some(actual), Some(expected)) if actual == expected)
             || !matches!(
@@ -668,11 +822,33 @@ fn has_kitchen_nvfp4_triplets(entries: &serde_json::Map<String, Value>) -> bool 
         )
     };
 
-    u8_weights.iter().all(|name| valid_weight(name))
-        && scale_2.iter().all(|name| {
+    if !u8_weights.iter().all(|name| valid_weight(name))
+        || !scale_2.iter().all(|name| {
             name.strip_suffix(".weight_scale_2")
                 .is_some_and(|base| valid_weight(&format!("{base}.weight")))
         })
+    {
+        return false;
+    }
+
+    // Per-layer `.comfy_quant` descriptors used to disqualify a file outright: nothing consumed
+    // them, so a descriptor-gated export belonged in the generic ComfyQuant bucket. The FLUX.2
+    // Klein `nvfp4mixed` artifact epic 11037 pins carries one beside every packed projection and IS
+    // consumed now — sc-21485 bound that single-file topology to `flux2_klein_9b` through the
+    // shared reader's `nvfp4-v1` codec — so a descriptor is no longer disqualifying on its own.
+    //
+    // It is tolerated only where it annotates a projection the checks above have ALREADY proved is
+    // a complete NVFP4 triplet. A descriptor sitting over anything else keeps the whole file in the
+    // unloadable packed bucket, which is what still separates a `.comfy_quant` fp4/mxfp4 export
+    // (packed `U8` nibbles, no `.weight_scale_2`) from this arm.
+    let packed_bases = u8_weights
+        .iter()
+        .filter_map(|name| name.strip_suffix(".weight"))
+        .collect::<BTreeSet<_>>();
+    entries
+        .keys()
+        .filter_map(|name| name.strip_suffix(".comfy_quant"))
+        .all(|base| packed_bases.contains(base))
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1224,88 @@ mod tests {
         assert_eq!(verdict.quant, QuantFormat::Int8TensorwisePerRow);
     }
 
+    /// The header classification → engine codec-id bridge (sc-21484). Pinned rather than left to
+    /// the match arms because the whole point of the bridge is that `Nvfp4` reaches the codec
+    /// vocabulary as `"nvfp4-v1"` and NEVER as the request tier `"nvfp4"` or as a `q4` alias.
+    #[test]
+    fn quant_format_maps_to_the_engine_source_codec_id() {
+        use crate::checkpoint_weight_facts::{is_codec_id, NVFP4_CODEC_ID};
+
+        assert_eq!(QuantFormat::Nvfp4.source_codec_id(), Some(NVFP4_CODEC_ID));
+        assert_eq!(QuantFormat::Nvfp4.source_codec_id(), Some("nvfp4-v1"));
+        assert_ne!(
+            QuantFormat::Nvfp4.source_codec_id(),
+            Some(QuantFormat::Nvfp4.as_str()),
+            "the codec id and the tier/verdict spelling must stay different strings"
+        );
+        assert_eq!(
+            QuantFormat::Int8TensorwisePerRow.source_codec_id(),
+            Some("int8-per-row-v1")
+        );
+        assert_eq!(QuantFormat::Bf16.source_codec_id(), Some("dense-bf16-v1"));
+        assert_eq!(
+            QuantFormat::Gguf.source_codec_id(),
+            Some("gguf-container-v1")
+        );
+
+        // The fp8 family has no proved one-to-one mapping, so it stays absent rather than guessing.
+        for unmapped in [
+            QuantFormat::Fp8E4m3,
+            QuantFormat::ScaledFp8Companion,
+            QuantFormat::Fp8InlineScale,
+            QuantFormat::ComfyQuantPacked,
+            QuantFormat::UnrecognizedScaling,
+        ] {
+            assert_eq!(
+                unmapped.source_codec_id(),
+                None,
+                "{unmapped} has no proved codec id and must not invent one"
+            );
+        }
+
+        // `as_str` round trips through `from_label` for every variant, so a persisted
+        // `importQuantFormat` resolves back to the classification that wrote it.
+        for quant in [
+            QuantFormat::Bf16,
+            QuantFormat::F16,
+            QuantFormat::F32,
+            QuantFormat::Fp8E4m3,
+            QuantFormat::ScaledFp8Companion,
+            QuantFormat::Fp8InlineScale,
+            QuantFormat::ComfyQuantPacked,
+            QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Nvfp4,
+            QuantFormat::Gguf,
+            QuantFormat::UnrecognizedScaling,
+        ] {
+            assert_eq!(QuantFormat::from_label(quant.as_str()), Some(quant));
+        }
+        // A near-miss never resolves — including the codec id, which is a different vocabulary.
+        for stranger in ["NVFP4", "nvfp4-v1", "q4", "", "int8-per-row-v1"] {
+            assert_eq!(
+                QuantFormat::from_label(stranger),
+                None,
+                "{stranger:?} must not parse as a verified classification"
+            );
+        }
+
+        // Whatever is produced is always a real codec id.
+        for quant in [
+            QuantFormat::Bf16,
+            QuantFormat::F16,
+            QuantFormat::F32,
+            QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Nvfp4,
+            QuantFormat::Gguf,
+        ] {
+            let codec_id = quant.source_codec_id().expect("mapped");
+            assert!(
+                is_codec_id(codec_id),
+                "{quant} produced a non-codec {codec_id:?}"
+            );
+        }
+    }
+
     #[test]
     fn krea2_kitchen_nvfp4_single_file_is_transformer() {
         let mut map = serde_json::Map::new();
@@ -1120,6 +1378,262 @@ mod tests {
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Nvfp4);
         import_supported(&verdict).expect("the real NVFP4 checkpoint must be importable");
+    }
+
+    /// A `_quantization_metadata`-declaring NVFP4 export, the spelling BOTH artifacts epic 11037
+    /// pins actually use. `descriptors` reproduces the FLUX.2 Klein `nvfp4mixed` shape, which
+    /// carries a `.comfy_quant` blob beside every packed projection.
+    ///
+    /// `layer_formats` is declared PER LAYER (layer `i` takes `layer_formats[i % len]`), so a
+    /// fixture can build the case that matters most here: a file that is *mostly* nvfp4 with a
+    /// single foreign layer. A one-element slice declares the same format for every layer.
+    fn quantization_metadata_nvfp4_header(
+        marker: &str,
+        layers: usize,
+        descriptors: bool,
+        layer_formats: &[&str],
+    ) -> Value {
+        assert!(
+            !layer_formats.is_empty(),
+            "a declared layer needs a format to declare"
+        );
+        let mut map = serde_json::Map::new();
+        let mut declared = serde_json::Map::new();
+        for index in 0..layers {
+            declared.insert(
+                format!("blocks.{index}.attn.wq"),
+                json!({"format": layer_formats[index % layer_formats.len()], "group_size": 16}),
+            );
+        }
+        map.insert(
+            "__metadata__".to_owned(),
+            json!({
+                "format": "pt",
+                "_quantization_metadata": serde_json::to_string(&json!({"layers": declared}))
+                    .unwrap(),
+            }),
+        );
+        map.insert(
+            marker.to_owned(),
+            json!({"dtype": "BF16", "shape": [128, 128]}),
+        );
+        for index in 0..layers {
+            let base = format!("blocks.{index}.attn.wq");
+            // rows 128, packed cols 32 -> 64 real cols -> 4 block scales per row, padded to
+            // round_up(128, 128) * round_up(4, 4) = 512 values.
+            map.insert(
+                format!("{base}.weight"),
+                json!({"dtype": "U8", "shape": [128, 32]}),
+            );
+            map.insert(
+                format!("{base}.weight_scale"),
+                json!({"dtype": "F8_E4M3", "shape": [128, 4]}),
+            );
+            map.insert(
+                format!("{base}.weight_scale_2"),
+                json!({"dtype": "F32", "shape": []}),
+            );
+            if descriptors {
+                map.insert(
+                    format!("{base}.comfy_quant"),
+                    json!({"dtype": "U8", "shape": [64]}),
+                );
+            }
+        }
+        Value::Object(map)
+    }
+
+    /// sc-11043: the Comfy-Org Krea 2 NVFP4 export declares NVFP4 only through
+    /// `_quantization_metadata`. Before this it matched the flux2 inline-fp8 arm on its
+    /// `.weight_scale` companions and classified as `Fp8InlineScale` — an NVFP4 checkpoint
+    /// represented as something it is not.
+    #[test]
+    fn quantization_metadata_nvfp4_without_descriptors_is_nvfp4() {
+        let header = quantization_metadata_nvfp4_header(
+            "model.diffusion_model.txtfusion.projector.weight",
+            6,
+            false,
+            &["nvfp4"],
+        );
+        let verdict = recognized(classify_base_header(&header));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Nvfp4);
+        import_supported(&verdict).expect("a krea_2 NVFP4 transformer is importable");
+    }
+
+    /// sc-11043: the FLUX.2 Klein `nvfp4mixed` export carries a `.comfy_quant` descriptor beside
+    /// every packed projection. That used to force the unloadable `ComfyQuantPacked` bucket; it is
+    /// now tolerated exactly where a complete NVFP4 triplet already proved out.
+    #[test]
+    fn quantization_metadata_nvfp4_with_descriptors_over_proven_triplets_is_nvfp4() {
+        let header = quantization_metadata_nvfp4_header(
+            "double_stream_modulation_lin.weight",
+            6,
+            true,
+            &["nvfp4"],
+        );
+        let verdict = recognized(classify_base_header(&header));
+        assert_eq!(verdict.family.as_deref(), Some("flux2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Nvfp4);
+        import_supported(&verdict).expect("a flux2 NVFP4 transformer is importable");
+    }
+
+    /// The widening is a declaration plus a proof, never either alone. A `layers` map that names
+    /// any non-NVFP4 format is a multi-codec export with no single answer, so the file drops back
+    /// to whatever its tensor surface says it is — never a partial NVFP4 claim.
+    #[test]
+    fn a_mixed_format_quantization_metadata_declaration_is_not_nvfp4() {
+        let header = quantization_metadata_nvfp4_header(
+            "model.diffusion_model.txtfusion.projector.weight",
+            6,
+            false,
+            &["mxfp4"],
+        );
+        let verdict = recognized(classify_base_header(&header));
+        assert_ne!(verdict.quant, QuantFormat::Nvfp4);
+        assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
+    }
+
+    /// The predicate is **every declared layer**, not "some layer". A file whose `layers` map is
+    /// nvfp4 for five of six projections and `mxfp4` for the sixth — complete, valid triplets
+    /// under all of them, so the tensor-surface proof passes — is still a multi-codec export the
+    /// single `nvfp4-v1` codec cannot decode, and must NOT classify as NVFP4.
+    ///
+    /// This is the case the all-`mxfp4` fixture above cannot see: with no nvfp4 layer at all, a
+    /// `.all` → `.any` mutation in [`metadata_declares_nvfp4`] leaves it green. Here `.any` finds
+    /// the five nvfp4 layers, declares the whole file NVFP4, and both assertions below go red.
+    ///
+    /// Failing mutation: `layers.values().all(...)` -> `layers.values().any(...)`.
+    #[test]
+    fn a_mostly_nvfp4_declaration_with_one_foreign_layer_is_not_nvfp4() {
+        let header = quantization_metadata_nvfp4_header(
+            "model.diffusion_model.txtfusion.projector.weight",
+            6,
+            false,
+            &["nvfp4", "mxfp4", "nvfp4", "nvfp4", "nvfp4", "nvfp4"],
+        );
+        let verdict = recognized(classify_base_header(&header));
+        assert_ne!(
+            verdict.quant,
+            QuantFormat::Nvfp4,
+            "a mostly-nvfp4 export with one foreign layer must not be handed to the nvfp4-v1 codec"
+        );
+        assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
+        // And the import gate must not admit it under the krea_2 NVFP4 arm either.
+        assert!(import_supported(&verdict).is_err());
+    }
+
+    /// The declared `group_size` is CHECKED against the 16 this build decodes (sc-11045 review).
+    ///
+    /// The descriptor carries it and nothing read it. `nvfp4-v1` is a 16-value block codec, and the
+    /// triplet proof below hard-codes that stride (`cols / 16` block scales per row, padded to the
+    /// 128x4 swizzle). A converter emitting `group_size: 32` — the MXFP4 block size, and the most
+    /// plausible shape a future NVFP4 variant takes — declared `format: "nvfp4"` and passed the
+    /// declaration check unread, leaving only the shape arithmetic between it and the codec.
+    ///
+    /// An ABSENT size still means "the codec default", so it is accepted; only a present-and-wrong
+    /// one is refused.
+    ///
+    /// Failing mutation (run): drop the `group_size` arm from
+    /// `nvfp4_layer_descriptor_is_decodable` (return `true` after the format check). Every
+    /// mis-sized row below then classifies as `Nvfp4`.
+    #[test]
+    fn a_declared_group_size_this_build_does_not_decode_is_not_nvfp4() {
+        // Re-declare the layer map with a chosen `group_size`, everything else identical to the
+        // fixture the two passing tests above use.
+        let with_group_size = |group_size: Option<Value>| {
+            let Value::Object(mut map) = quantization_metadata_nvfp4_header(
+                "model.diffusion_model.txtfusion.projector.weight",
+                6,
+                false,
+                &["nvfp4"],
+            ) else {
+                unreachable!("the fixture builds an object")
+            };
+            let mut declared = serde_json::Map::new();
+            for index in 0..6 {
+                let mut layer = serde_json::Map::new();
+                layer.insert("format".to_owned(), json!("nvfp4"));
+                if let Some(group_size) = group_size.clone() {
+                    layer.insert("group_size".to_owned(), group_size);
+                }
+                declared.insert(format!("blocks.{index}.attn.wq"), Value::Object(layer));
+            }
+            map.insert(
+                "__metadata__".to_owned(),
+                json!({
+                    "format": "pt",
+                    "_quantization_metadata":
+                        serde_json::to_string(&json!({"layers": declared})).unwrap(),
+                }),
+            );
+            recognized(classify_base_header(&Value::Object(map))).quant
+        };
+
+        // The size this build decodes, and its absence (the codec default), both classify NVFP4.
+        assert_eq!(with_group_size(Some(json!(16))), QuantFormat::Nvfp4);
+        assert_eq!(with_group_size(None), QuantFormat::Nvfp4);
+        assert_eq!(with_group_size(Some(Value::Null)), QuantFormat::Nvfp4);
+
+        // Anything else is refused, and the file drops back to what its tensor surface says it is
+        // rather than being handed to a codec that would decode it at the wrong stride.
+        for group_size in [json!(32), json!(8), json!(64), json!(0), json!("16")] {
+            assert_eq!(
+                with_group_size(Some(group_size.clone())),
+                QuantFormat::Fp8InlineScale,
+                "group_size {group_size} is not one this build decodes as nvfp4-v1"
+            );
+        }
+    }
+
+    /// A descriptor that annotates something with no proven triplet under it keeps the WHOLE file
+    /// in the packed bucket. This is what stops the relaxation from admitting a `.comfy_quant`
+    /// fp4/mxfp4 export that merely borrowed the metadata string.
+    #[test]
+    fn a_descriptor_without_a_proven_triplet_stays_packed() {
+        let Value::Object(mut map) = quantization_metadata_nvfp4_header(
+            "model.diffusion_model.txtfusion.projector.weight",
+            6,
+            true,
+            &["nvfp4"],
+        ) else {
+            unreachable!("the fixture builds an object")
+        };
+        map.insert(
+            "blocks.9.mlp.up.comfy_quant".to_owned(),
+            json!({"dtype": "U8", "shape": [64]}),
+        );
+        let verdict = recognized(classify_base_header(&Value::Object(map)));
+        assert_eq!(verdict.quant, QuantFormat::ComfyQuantPacked);
+    }
+
+    /// The two artifacts epic 11037 pins as its initial managed NVFP4 provider cohort (sc-11043),
+    /// classified from their real headers. Both are single pinned files; the env vars name the
+    /// exact revisions recorded in `managed_checkpoint_variants`.
+    #[test]
+    #[ignore = "requires KREA2_TURBO_NVFP4 / FLUX2_KLEIN_NVFP4 to point at the pinned checkpoints"]
+    fn validate_real_pinned_nvfp4_provider_cohort() {
+        for (variable, family) in [
+            ("KREA2_TURBO_NVFP4", "krea_2"),
+            ("FLUX2_KLEIN_NVFP4", "flux2"),
+        ] {
+            let path =
+                PathBuf::from(std::env::var(variable).unwrap_or_else(|_| panic!("set {variable}")));
+            let verdict =
+                recognized(detect_base_weight_file(&path).expect("read safetensors header"));
+            assert_eq!(verdict.family.as_deref(), Some(family), "{variable}");
+            assert_eq!(verdict.component, ComponentRole::Transformer, "{variable}");
+            assert_eq!(verdict.quant, QuantFormat::Nvfp4, "{variable}");
+            assert_eq!(
+                verdict.quant.source_codec_id(),
+                Some(crate::checkpoint_weight_facts::NVFP4_CODEC_ID),
+                "{variable}"
+            );
+            import_supported(&verdict)
+                .unwrap_or_else(|reason| panic!("{variable} must be importable: {reason}"));
+        }
     }
 
     #[test]
@@ -1925,16 +2439,69 @@ mod tests {
     #[test]
     fn import_supported_families_are_a_subset_of_the_ok_arms() {
         // Guardrail: every family the gate advertises must actually have an Ok triple, so the
-        // advertised set and the `match` arms can never drift (add the family here + its arm together).
-        for family in IMPORT_SUPPORTED_FAMILIES {
-            let component = if *family == "sdxl" {
-                ComponentRole::Checkpoint
-            } else {
-                ComponentRole::Transformer
-            };
-            assert!(
-                import_supported(&verdict(Some(family), component, QuantFormat::Bf16)).is_ok(),
-                "IMPORT_SUPPORTED_FAMILIES lists {family} but no bf16 transformer arm accepts it"
+        // advertised set and the `match` arms can never drift (add the family here + its arm
+        // together).
+        //
+        // The probe sweeps the whole quant surface and asserts the accepted set BY VALUE, per
+        // family. A family does not have to be dense-loadable to be import-supported: `flux2`
+        // (sc-11043) reaches a loader ONLY as NVFP4, through the shared codec and the Klein
+        // dialect, so a bf16-shaped guardrail would have forced either a dense arm nothing serves
+        // or leaving the family unadvertised. But an existence check ("some arm accepts it") is
+        // too weak in the other direction: narrowing krea_2 to NVFP4 alone, or widening flux2 to
+        // dense, would both stay green under it. Naming the exact set makes each such change red,
+        // and makes adding a family an explicit row here rather than a silent pass.
+        //
+        // Failing mutations: drop `QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow` from the
+        // krea_2 arm; add a dense arm for flux2; add a family to IMPORT_SUPPORTED_FAMILIES without
+        // a row below.
+        let expected: &[(&str, ComponentRole, &[QuantFormat])] = &[
+            (
+                "krea_2",
+                ComponentRole::Transformer,
+                &[
+                    QuantFormat::Bf16,
+                    QuantFormat::Int8TensorwisePerRow,
+                    QuantFormat::Nvfp4,
+                ],
+            ),
+            (
+                "sdxl",
+                ComponentRole::Checkpoint,
+                &[QuantFormat::Bf16, QuantFormat::F16, QuantFormat::F32],
+            ),
+            (
+                "mage-flow",
+                ComponentRole::Transformer,
+                &[QuantFormat::Bf16],
+            ),
+            ("flux2", ComponentRole::Transformer, &[QuantFormat::Nvfp4]),
+        ];
+        let mut rows = expected
+            .iter()
+            .map(|(family, _, _)| *family)
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        let mut advertised = IMPORT_SUPPORTED_FAMILIES.to_vec();
+        advertised.sort_unstable();
+        assert_eq!(
+            rows, advertised,
+            "every advertised family needs an explicit expected-encoding row here"
+        );
+
+        for (family, component, expected_quants) in expected {
+            let accepted = [
+                QuantFormat::Bf16,
+                QuantFormat::F16,
+                QuantFormat::F32,
+                QuantFormat::Int8TensorwisePerRow,
+                QuantFormat::Nvfp4,
+            ]
+            .into_iter()
+            .filter(|quant| import_supported(&verdict(Some(family), *component, *quant)).is_ok())
+            .collect::<Vec<_>>();
+            assert_eq!(
+                accepted, *expected_quants,
+                "{family}: the Ok arms accept a different encoding set than this guardrail declares"
             );
         }
     }

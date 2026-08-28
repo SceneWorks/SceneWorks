@@ -15,6 +15,8 @@ import {
   tintMaskRgbaInPlace,
   maskHasContent,
 } from "./maskShared.js";
+import { appendMaskStrokePoint } from "./maskStroke.js";
+import { createLatestMaskAssetLoader } from "./maskAssetLoader.js";
 
 // Inpaint-mask brush + smart-select tool (sc-2436 / sc-3751 / sc-6110) extracted from
 // ImageEditor.jsx (sc-9752, F-052 follow-up). Owns the brush-stroke + smart-select-base
@@ -54,6 +56,7 @@ export function useMaskTool({
   // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
   // of the AI Edit tool (Stage panning is suspended while it's on).
   const [maskLines, setMaskLines] = useState([]); // [{ points:[x,y,…], size, erase }]
+  const maskLinesRef = useRef([]);
   const [maskMode, setMaskMode] = useState(false);
   const [maskBrush, setMaskBrush] = useState(64);
   const [maskErase, setMaskErase] = useState(false);
@@ -72,6 +75,22 @@ export function useMaskTool({
   const [selectDraft, setSelectDraft] = useState(null); // live selection rect during a drag
   const selectDrawingRef = useRef(false);
   const selectStartRef = useRef(null);
+  const smartSelectLoaderRef = useRef(null);
+  if (!smartSelectLoaderRef.current) {
+    smartSelectLoaderRef.current = createLatestMaskAssetLoader({ assetUrlFor: assetUrl, blobToImage });
+  }
+
+  function replaceMaskLines(next) {
+    maskLinesRef.current = next;
+    setMaskLines(next);
+  }
+
+  useEffect(
+    () => () => {
+      smartSelectLoaderRef.current.invalidate();
+    },
+    [],
+  );
 
   // Leave paint mode (restoring Stage panning) when the edit tool is closed or the
   // model can't inpaint — otherwise the canvas would stay in a paint state with no UI.
@@ -82,7 +101,8 @@ export function useMaskTool({
   // Reset the per-bitmap mask state (called by the editor's resetEditorOverlays). Mirrors
   // the exact mask-clearing lines from the inline resetEditorOverlays.
   function resetMaskState() {
-    setMaskLines([]);
+    smartSelectLoaderRef.current.invalidate();
+    replaceMaskLines([]);
     setMaskMode(false);
     setMaskBaseImage(null);
     setMaskOverlay(null);
@@ -97,18 +117,14 @@ export function useMaskTool({
     const pt = stagePointToImage(event);
     if (!pt) return;
     maskPaintingRef.current = true;
-    setMaskLines((prev) => [...prev, { points: [pt.x, pt.y], size: maskBrush, erase: maskErase }]);
+    replaceMaskLines([...maskLinesRef.current, { points: [pt.x, pt.y], size: maskBrush, erase: maskErase }]);
   }
 
   function maskPointerMove(event) {
     if (!maskMode || maskSubTool !== "brush" || !maskPaintingRef.current) return;
     const pt = stagePointToImage(event);
     if (!pt) return;
-    setMaskLines((prev) => {
-      if (!prev.length) return prev;
-      const last = prev[prev.length - 1];
-      return [...prev.slice(0, -1), { ...last, points: [...last.points, pt.x, pt.y] }];
-    });
+    replaceMaskLines(appendMaskStrokePoint(maskLinesRef.current, pt));
   }
 
   function maskPointerUp() {
@@ -116,7 +132,8 @@ export function useMaskTool({
   }
 
   function clearMask() {
-    setMaskLines([]);
+    smartSelectLoaderRef.current.invalidate();
+    replaceMaskLines([]);
     setMaskBaseImage(null);
     setMaskOverlay(null);
   }
@@ -252,7 +269,7 @@ export function useMaskTool({
     octx.putImageData(data, 0, 0);
     setMaskBaseImage(maskCanvas);
     setMaskOverlay(overlay);
-    setMaskLines([]);
+    replaceMaskLines([]);
   }
 
   // Mask refinement (sc-6110): flatten the current mask, run a pure pixel op
@@ -283,6 +300,7 @@ export function useMaskTool({
   // except for the mask layer; the brush/eraser then refines it before Inpaint.
   function runSmartSelect(rect) {
     if (!working || aiOp || !canMask) return;
+    const requestGeneration = smartSelectLoaderRef.current.invalidate();
     const box = rectToSegmentBox(rect);
     runAiOp({
       label: "smart select",
@@ -296,15 +314,13 @@ export function useMaskTool({
           displayName: working?.source?.name,
         }),
       onComplete: async (resultAsset) => {
-        const res = await fetch(assetUrl(resultAsset));
-        if (!res.ok) throw new Error(`Failed to load mask (${res.status})`);
-        const { image, objectUrl } = await blobToImage(await res.blob());
-        loadMaskBase(image);
-        URL.revokeObjectURL(objectUrl); // the pixels are copied into the base/overlay canvases
-        // Return to the mask tool so the auto-mask can be refined with the brush/eraser.
-        setTool("edit");
-        setMaskMode(true);
-        setMaskSubTool("brush");
+        await smartSelectLoaderRef.current.load(resultAsset, requestGeneration, (image) => {
+          loadMaskBase(image);
+          // Return to the mask tool so the auto-mask can be refined with the brush/eraser.
+          setTool("edit");
+          setMaskMode(true);
+          setMaskSubTool("brush");
+        });
       },
     });
   }

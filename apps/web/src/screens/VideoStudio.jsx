@@ -778,6 +778,7 @@ export function VideoStudio() {
     autoTier,
     useGenerationQuality: true,
     reseedOnModelChange: true,
+    preferencesHydrated,
   });
   const availableTierKey = availableTiers.join(",");
   const recipeTierTargetModel = recipeTierRequest
