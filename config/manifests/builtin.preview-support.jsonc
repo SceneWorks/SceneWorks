@@ -8,10 +8,10 @@
   "generatedFrom": {
     "candle": {
       "inferenceRevision": "624fed20c1969b851b60265e3b9dac951068c1f5",
-      "audioInferenceRevision": "28f0563baa03640ade1635356d2d54fe8a477f1a"
+      "audioInferenceRevision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a"
     },
     "mlx": {
-      "inferenceRevision": "490579320fd1d2c1cf71c749134a04af8711a969"
+      "inferenceRevision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a"
     }
   },
   "models": {

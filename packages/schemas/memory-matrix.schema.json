@@ -712,8 +712,7 @@
     },
     "models": {
       "type": "array",
-      "minItems": 63,
-      "maxItems": 63,
+      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,

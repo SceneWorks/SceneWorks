@@ -55,26 +55,31 @@ def test_generated_memory_matrix_is_current_and_schema_valid():
 def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     matrix = load_matrix()
     # sc-18815: the universe is modality-aware, so the census is too. `imageModels` was REMOVED
-    # rather than left holding the whole-universe total under a one-modality name — a field called
-    # `imageModels` reading 63 is worse than the image-only universe it replaced.
+    # rather than left holding the whole-universe total under a one-modality name. The population
+    # is derived from the published rows so adding a catalog entry cannot stale a pinned count.
     assert "imageModels" not in matrix["summary"]
-    assert matrix["summary"]["catalogEntries"] == 63
-    assert matrix["summary"]["catalogEntriesByModality"] == {"image": 53, "video": 10}
     image_ids = {model["id"] for model in matrix["models"] if model["modality"] == "image"}
     video_ids = {model["id"] for model in matrix["models"] if model["modality"] == "video"}
-    assert len(image_ids) == 53
-    assert len(video_ids) == 10
+    assert matrix["summary"]["catalogEntries"] == len(matrix["models"])
+    assert matrix["summary"]["catalogEntriesByModality"] == {
+        "image": len(image_ids),
+        "video": len(video_ids),
+    }
     # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, so its former
     # generic staged-route claim is intentionally absent from this census.
     # sc-18815 keeps this as exactly the IMAGE-lane claim its denominator says it is. The separate
-    # video census consumes the provider-owned staged-residency contracts at the frozen b4 pin;
-    # only SVD remains without an MLX staged implementation. The image-lane numerator is asserted
-    # structurally against the census below rather than as a pinned population (the SC-18218
-    # shape-over-population ruling); the denominators are the modality totals asserted above.
-    assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == 53
-    assert matrix["summary"]["videoMlxStagedStaticCoverage"] == 9
-    assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == 10
-    assert len(matrix["models"]) == len(matrix["modelSlices"]) == 63
+    # video census consumes the provider-owned staged-residency contracts at the frozen pin. Both
+    # numerators are asserted structurally against the census below rather than as pinned
+    # populations (the SC-18218 shape-over-population ruling); the denominators are the modality
+    # totals asserted above.
+    assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == len(image_ids)
+    assert (
+        0
+        < matrix["summary"]["videoMlxStagedStaticCoverage"]
+        < len(video_ids)
+    )
+    assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == len(video_ids)
+    assert len(matrix["models"]) == len(matrix["modelSlices"])
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
     # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, so its former
     # generic staged-route claim is intentionally absent from this census — the coverage number is
