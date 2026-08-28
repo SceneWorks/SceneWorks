@@ -163,9 +163,12 @@ fn every_specialized_text_encoder_engine_rejects_an_unresolved_selection_before_
         "z_image_turbo_control",
         "z_image_control",
         "flux2_klein_9b",
+        #[cfg(target_os = "macos")]
         "flux2_klein_9b_edit",
+        #[cfg(target_os = "macos")]
         "flux2_klein_9b_kv_edit",
         "flux2_dev",
+        #[cfg(target_os = "macos")]
         "flux2_dev_edit",
         "flux2_dev_control",
     ] {

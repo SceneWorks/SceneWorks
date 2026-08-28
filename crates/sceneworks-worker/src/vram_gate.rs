@@ -3719,7 +3719,14 @@ mod tests {
             .as_mut()
             .and_then(|contract| contract.calibration.as_mut())
             .expect("Krea provider calibration")
-            .fingerprint = "krea-turbo-cuda-phase-curves-mutated".into();
+            .fingerprint = "krea-turbo-cuda-phase-curves-v2".into();
+        assert!(
+            wrong_contract
+                .provider_contract
+                .as_ref()
+                .is_some_and(|contract| contract.conformance_errors().is_empty()),
+            "the mutation must remain a valid contract so it isolates identity mismatch"
+        );
         assert_eq!(
             run(Some(&wrong_contract)),
             Some(KreaTurboFit::Unverified {
