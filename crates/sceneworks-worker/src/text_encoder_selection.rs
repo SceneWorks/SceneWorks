@@ -335,10 +335,11 @@ fn candidates_for_model(
     let roots = allowed_roots(data_dir, external_roots);
     let mut candidates = Vec::new();
     for (_, (source, scope)) in collect_sources(catalog, data_dir, external_roots) {
-        let Ok(validated) = route.contract.validate_source_for_planning(&source) else {
-            continue;
-        };
-        if validated.ensure_confined_to(&roots).is_err() {
+        if route
+            .contract
+            .validate_source_for_discovery(&source, &roots)
+            .is_err()
+        {
             continue;
         }
         let id = opaque_id(&source).map_err(|error| error.to_string())?;
