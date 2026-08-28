@@ -2694,7 +2694,7 @@ test("a structurally-N/A rung 1 satisfies the provider's own rung-4 edge vacuous
   }
 });
 
-test("the rung-4 prerequisite records cover every advertised lane, exactly and currently", async () => {
+test("the rung-4 prerequisite records cover every advertised lane and retain provenance", async () => {
   const matrix = await buildMatrix({ publish: false });
   // The IMAGE half of the universe, matching the fence's own scope: the derivation script walks
   // the 20 image families, and the video lanes sc-18815 admitted fall back to the direct
@@ -2709,9 +2709,7 @@ test("the rung-4 prerequisite records cover every advertised lane, exactly and c
   const parse = (mutate) => {
     const records = JSON.parse(JSON.stringify(base));
     mutate(records);
-    return parseRung4ContractPrerequisites(JSON.stringify(records), {
-      pin: records.inferenceRevision,
-    });
+    return parseRung4ContractPrerequisites(JSON.stringify(records));
   };
   const cover = (mutate) =>
     assertRung4PrerequisiteRecordsCoverEveryFamily(parse(mutate), matrix.models);
@@ -2742,10 +2740,10 @@ test("the rung-4 prerequisite records cover every advertised lane, exactly and c
   );
   assert.throws(
     () =>
-      parseRung4ContractPrerequisites(JSON.stringify(base), {
-        pin: "0".repeat(40),
+      parse((records) => {
+        records.inferenceRevision = "not-a-full-revision";
       }),
-    /is keyed to .* but Cargo pins/,
+    /must record the full inference revision/,
   );
   assert.throws(
     () =>
@@ -3331,11 +3329,14 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // sc-19751/sc-19758 removed elsewhere. The load-bearing assertion is `notEqual(revision, pin)`
   // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
   // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
-  const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
-  // The pinned revision is the current committed inference-main head. Keep this literal
-  // alongside the current generated receipt: the assertion below only means something while the
-  // pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "624fed20c1969b851b60265e3b9dac951068c1f5");
+  const pin = cargo.match(
+    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]{40})"/,
+  )?.[1];
+  assert.match(
+    pin ?? "",
+    /^[0-9a-f]{40}$/,
+    "the test must resolve the current full inference pin before comparing survey revisions",
+  );
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
@@ -4523,13 +4524,9 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     mutate(next.providers);
     return JSON.stringify(next, null, 2);
   };
-  // sc-19542: the rung-4 prerequisite records are keyed to the pin the same way the closures are, so
-  // a moved-pin fixture has to re-key both or generation fails on the stale-config guard before it
-  // reaches the currency question this test is about.
-  const prerequisitesOnMovedPin = JSON.stringify({
-    ...(await prerequisitesFixture()),
-    inferenceRevision: movedPin,
-  });
+  // The rung-4 prerequisite record intentionally stays at the revision where its provider graph was
+  // inspected. Re-keying it here would hide the regression where an ordinary pin move turns that
+  // historical evidence into a live freshness gate.
 
   const pinOnlyQwen = await buildMatrix({
     publish: false,
@@ -4537,7 +4534,6 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
-      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures(() => {}),
       ...movedMemoryContractSources,
     },
@@ -4554,7 +4550,6 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
-      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:z_image_turbo"].digest = "f".repeat(64);
       }),
@@ -4573,7 +4568,6 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
-      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:qwen_image"].digest = "e".repeat(64);
       }),
