@@ -212,7 +212,7 @@ test("video curve generation leaves the image calibration corpus byte-identical"
   // before/after equality below; this pin only names the reviewed snapshot.
   assert.equal(
     before,
-    "a02d1e237e880a123d21f38d55cbc7ad31c4d85033322ed70e0a406abf5edd2b",
+    "a96ad01ea477d56e24891cf41b6398918bc465f67d6120df22ab7ddf4826211a",
     "the explicit pre-video image evidence outcome remains the reviewed corpus",
   );
   const output = mkdtempSync(path.join(tmpdir(), "sceneworks-video-curves-"));

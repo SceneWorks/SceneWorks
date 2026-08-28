@@ -7123,13 +7123,13 @@
           // `gen-core/src/memory_strategy.rs`. The fingerprint is unchanged because the provider's tensor
           // layout, quantization floors and execution structure did not move - only the shared contract
           // ABI did, which is precisely the split the two identity fields exist to express.
-          // sc-21714 re-certified the q4 1024² deepest bounded request at a691b579 with the complete
+          // sc-21714 re-certified the q4 1024² deepest bounded request at 3775a5f8 with the complete
           // quality, negative-mutation, admission and lifecycle suite. It moves these shipped bindings
           // without pretending that its singleton exact-request sweep refit the older multi-geometry curves.
-          "inferenceRevision": "a691b579bfc244e3d469513c2b6ea57791958703",
+          "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
           // sc-17774: the currency term. `inferenceRevision` above is capture provenance and is
           // no longer compared — the digest of `candle-gen-krea`'s compile closure is.
-          "inferenceClosureDigest": "2bfbcd76fdc4907a10adc3690045131c22a67c57d7fdf45d9b6236fb0b2855ea",
+          "inferenceClosureDigest": "5b0457b11456bb26e95bab62c0be3750c0891b7c3a9a5ab99de44051b7a0aa5d",
           // sc-17989: names the closure lane (`candle:` + this) so `backfill-closure-digests.mjs`
           // can pair the two keys above and re-derive the digest under `--verify`, like every
           // per-binding calibration. Before this key the digest was maintained by hand, ungraded.

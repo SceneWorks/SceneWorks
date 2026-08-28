@@ -390,14 +390,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     current_full_runs = [run for run in full_runs if run["semantics"] == "current"]
     assert {run["semantics"] for run in full_runs} == {"current", "historical"}
     assert {run["record"]["id"] for run in current_full_runs} == {
-        "imc-52dfecd6369fa7264e61"
+        "imc-06fbd2ff6dcba95f8555"
     }
     assert all(
         run["semantics"] == "historical"
         for run in full_runs
-        if run["record"]["id"] != "imc-52dfecd6369fa7264e61"
+        if run["record"]["id"] != "imc-06fbd2ff6dcba95f8555"
     )
-    krea_certifying = evidence_by_id["imc-52dfecd6369fa7264e61"]
+    krea_certifying = evidence_by_id["imc-06fbd2ff6dcba95f8555"]
     assert (
         krea_certifying["backend"],
         krea_certifying["target"]["modelId"],
@@ -943,7 +943,7 @@ def test_only_the_sc21714_coordinate_is_verified_after_the_provider_contract_adv
         item["source"]
         for item in current_krea[0]["evidence"]["currentEnvironmentVerification"]
     ] == [
-        "docs/generated/memory-calibration-evidence.json#imc-52dfecd6369fa7264e61"
+        "docs/generated/memory-calibration-evidence.json#imc-06fbd2ff6dcba95f8555"
     ]
     current_z_image_turbo = [
         cell

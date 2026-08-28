@@ -6,9 +6,9 @@ published separately at `docs/generated/krea-candle-five-rung-sc-11045.json`, ou
 admission bundle, following the SC-15817 precedent.
 
 SC-21714 supplies the promotion evidence that this diagnostic intentionally omitted. Its
-`imc-52dfecd6369fa7264e61` record is committed in
+`imc-06fbd2ff6dcba95f8555` record is committed in
 `docs/generated/memory-calibration-evidence.json` from guarded GPU 1
-[run 33198657155](https://github.com/SceneWorks/SceneWorks/actions/runs/33198657155): it repeats the
+[run 33211644003](https://github.com/SceneWorks/SceneWorks/actions/runs/33211644003): it repeats the
 exact q4/1024 request with the full promotion-quality, negative-mutation, admission, cancellation,
 error, warm-recovery, loadability, and overlay suite and lands `status: "complete"`. That record
 supersedes SC-11045 **for promotion and shipped-binding currency only**. The five-rung artifact here
@@ -112,8 +112,8 @@ comparison and batched bundles are retained on the run artifact
 ## What made this lane current
 
 SC-21714 performed the missing certifying capture and the binding half in §7d of the calibration
-runbook. The shipped binding now names inference `a691b579bfc244e3d469513c2b6ea57791958703`
-and derived closure digest `2bfbcd76fdc4907a10adc3690045131c22a67c57d7fdf45d9b6236fb0b2855ea`.
+runbook. The shipped binding now names inference `3775a5f80a07a38071c7859f6ac565bcab5d1c7b`
+and derived closure digest `5b0457b11456bb26e95bab62c0be3750c0891b7c3a9a5ab99de44051b7a0aa5d`.
 After regeneration, `npm run report:stale-lanes` lists `candle:krea_2_turbo` under
 `CURRENT (no widening applied)`; the five SC-11045 records remain `gated` and do not participate in
 that promotion.
