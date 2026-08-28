@@ -273,7 +273,13 @@ pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
         .find(|descriptor| descriptor.id == id)
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 std::thread_local! {
     static TEST_MEDIA_ENCODER_CONTRACT: std::cell::Cell<
         Option<(&'static [&'static str], gen_core::EncoderContract)>
@@ -282,19 +288,37 @@ std::thread_local! {
 
 /// Scoped compact contract override for tests that exercise the production sealed-source path.
 /// Production builds cannot install an override, and the guard restores a nested predecessor.
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 pub(crate) struct TestMediaEncoderContractGuard {
     previous: Option<(&'static [&'static str], gen_core::EncoderContract)>,
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 impl Drop for TestMediaEncoderContractGuard {
     fn drop(&mut self) {
         TEST_MEDIA_ENCODER_CONTRACT.set(self.previous);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
 pub(crate) fn scoped_test_media_encoder_contract(
     ids: &'static [&'static str],
     contract: gen_core::EncoderContract,
