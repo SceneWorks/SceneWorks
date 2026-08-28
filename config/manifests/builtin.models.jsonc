@@ -7123,10 +7123,13 @@
           // `gen-core/src/memory_strategy.rs`. The fingerprint is unchanged because the provider's tensor
           // layout, quantization floors and execution structure did not move - only the shared contract
           // ABI did, which is precisely the split the two identity fields exist to express.
-          "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+          // sc-21714 re-certified the q4 1024² deepest bounded request at a691b579 with the complete
+          // quality, negative-mutation, admission and lifecycle suite. It moves these shipped bindings
+          // without pretending that its singleton exact-request sweep refit the older multi-geometry curves.
+          "inferenceRevision": "a691b579bfc244e3d469513c2b6ea57791958703",
           // sc-17774: the currency term. `inferenceRevision` above is capture provenance and is
           // no longer compared — the digest of `candle-gen-krea`'s compile closure is.
-          "inferenceClosureDigest": "bdf379ae9f95302f2010f859eae6806b6382c22d9dffd36c51059d440548f03f",
+          "inferenceClosureDigest": "2bfbcd76fdc4907a10adc3690045131c22a67c57d7fdf45d9b6236fb0b2855ea",
           // sc-17989: names the closure lane (`candle:` + this) so `backfill-closure-digests.mjs`
           // can pair the two keys above and re-derive the digest under `--verify`, like every
           // per-binding calibration. Before this key the digest was maintained by hand, ungraded.
@@ -7134,10 +7137,10 @@
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
-            "stories": ["sc-15117", "sc-15205", "sc-15206", "sc-17097"],
-            "method": "exclusive rendered-device phase peaks at 768x768 and 1024x1024",
+            "stories": ["sc-15117", "sc-15205", "sc-15206", "sc-17097", "sc-21714"],
+            "method": "exclusive rendered-device phase peaks at 768x768 and 1024x1024; sc-21714 certifying exact q4/1024 request on guarded GPU 1",
             "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB; every fitted curve pinned at or above BOTH measured geometries after rounding, so no measured point can be under-predicted",
-            "outputParity": "ordinary CUDA text-to-image retains tier and output bytes; sc-17097 additionally compares a resident render against the deepest bounded rung from one loaded generator per tier, after proving the resident A-B-A repeat is bit-identical"
+            "outputParity": "ordinary CUDA text-to-image retains tier and output bytes; sc-17097 compares resident against the deepest bounded rung per tier, and sc-21714 repeats resident A-B-A, bounded parity, six post-fault warm recoveries, and a deliberately failing negative mutation"
           },
           // Machine-readable evidence cells. Each row's `sceneWorksCommit` / `capturedAt` name its
           // PHASE capture; the `parity` block on an `exact_request` row comes from a second run of the

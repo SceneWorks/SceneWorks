@@ -4815,39 +4815,38 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     );
   }
 
-  // Six of the seven arms must actually carry cells of their own. An arm that admitted nothing would
+  // Every arm must actually carry cells of its own. An arm that admitted nothing would
   // be a dead clause, and the predicate would then mean something narrower than it says.
   for (const [name, arm] of [
     ["planned", (cell) => planned.has(cell.id)],
     ["bound to a record", (cell) => calibrationRunCellIds.has(cell.id)],
     ["measured", (cell) => cell.memoryCharacterization.status !== "unmeasured"],
     ["historical evidence", (cell) => cell.evidence.historicalVerification.length > 0],
+    ["current evidence", (cell) => cell.evidence.currentEnvironmentVerification.length > 0],
     ["strategy parameters", (cell) => cell.evidence.strategyParameterVerification.length > 0],
     ["structural evidence", (cell) => cell.evidence.structural.length > 0],
   ]) {
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, admits NOTHING at the sc-20523 pin: it moved
-  // every provider closure past every retained capture — SC-18218's and sc-19721's FLUX.2 cohorts,
-  // the Qwen ladder re-capture, and SC-19753's Z-Image rungs alike — so every capture is historical
-  // until the bump-time re-capture. Two facts keep this assertion useful:
+  // SC-21714 makes the `currentEnvironmentVerification` arm admit exactly one coordinate: Candle
+  // Krea q4/1024 at the deepest bounded rung. Every older cohort remains historical after its
+  // provider closure moved. Two facts keep this assertion useful:
   //
-  //   1. It is exact: NO row may survive the closure change as current — a record silently keeping
-  //      currency across a pin bump is the failure this pins.
+  //   1. It is exact: only the newly captured row may be current — an older record silently keeping
+  //      currency across a pin bump, or the certified row disappearing, both fail here.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm therefore cannot uniquely admit or elide anything.
   //
-  // Asserted as an exact set so a recapture flips this test rather than silently passing, and
-  // the field's presence is asserted separately so a rename cannot make the arm quietly vanish.
+  // The field's presence is asserted separately so a rename cannot make the arm quietly vanish.
   assert.deepEqual(
     resolved.cells
       .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
       .map((cell) => cell.id)
       .sort(),
-    [],
-    "no retained capture may carry current evidence at a pin whose closures have moved past it; a historical row surviving as current is the failure this pins",
+    ["krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_transformer_residency"],
+    "only SC-21714's exact Candle Krea coordinate may carry current evidence",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),

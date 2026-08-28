@@ -5,7 +5,16 @@ Krea Candle cell to Verified**, and it does not move any shipped calibration bin
 published separately at `docs/generated/krea-candle-five-rung-sc-11045.json`, outside the runtime
 admission bundle, following the SC-15817 precedent.
 
-## Why this capture certifies nothing
+SC-21714 supplies the promotion evidence that this diagnostic intentionally omitted. Its
+`imc-52dfecd6369fa7264e61` record is committed in
+`docs/generated/memory-calibration-evidence.json` from guarded GPU 1
+[run 33198657155](https://github.com/SceneWorks/SceneWorks/actions/runs/33198657155): it repeats the
+exact q4/1024 request with the full promotion-quality, negative-mutation, admission, cancellation,
+error, warm-recovery, loadability, and overlay suite and lands `status: "complete"`. That record
+supersedes SC-11045 **for promotion and shipped-binding currency only**. The five-rung artifact here
+remains the authoritative per-rung diagnostic and fresh-versus-reused comparison.
+
+## Why the SC-11045 capture certifies nothing
 
 Every record carries `status: "gated"` by the harness's own declaration. Each one states the reason
 in `diagnostics.blockers`:
@@ -100,9 +109,11 @@ phase boundaries the ladder measures, so `--fresh-per-case` remains the authorit
 comparison and batched bundles are retained on the run artifact
 (`sc-16059-candle-reuse-33000590976`); only the authoritative fresh capture is committed.
 
-## What would make this lane current
+## What made this lane current
 
-A certifying capture — one that also runs the promotion-quality, negative-mutation, and lifecycle
-scenario suite so the records land `complete` rather than `gated` — followed by the binding half in
-§7d of the calibration runbook. Until then `candle:krea_2_turbo` keeps serving its measured numbers
-behind the widened 2.00% margin, which is a signal and not a gate.
+SC-21714 performed the missing certifying capture and the binding half in §7d of the calibration
+runbook. The shipped binding now names inference `a691b579bfc244e3d469513c2b6ea57791958703`
+and derived closure digest `2bfbcd76fdc4907a10adc3690045131c22a67c57d7fdf45d9b6236fb0b2855ea`.
+After regeneration, `npm run report:stale-lanes` lists `candle:krea_2_turbo` under
+`CURRENT (no widening applied)`; the five SC-11045 records remain `gated` and do not participate in
+that promotion.
