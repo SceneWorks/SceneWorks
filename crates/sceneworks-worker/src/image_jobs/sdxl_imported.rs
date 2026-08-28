@@ -509,40 +509,11 @@ fn mirror_cached_sdxl_component_file_with_copy(
 
 fn promote_cached_sdxl_component(staging: &Path, destination: &Path) -> std::io::Result<()> {
     // Readers see either the prior complete component or the newly copied one. The
-    // platform operations below both replace in one call; never unlink the visible
-    // destination before the staged file takes its place.
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(staging, destination)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt as _;
-        use windows_sys::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        };
-
-        let staging: Vec<u16> = staging.as_os_str().encode_wide().chain(Some(0)).collect();
-        let destination: Vec<u16> = destination
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        // SAFETY: both buffers are owned, NUL-terminated UTF-16 paths and remain
-        // alive for the duration of this synchronous Win32 call.
-        let replaced = unsafe {
-            MoveFileExW(
-                staging.as_ptr(),
-                destination.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if replaced == 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
+    // tempfile's safe platform implementation atomically replaces an existing
+    // destination on both Unix and Windows. Never unlink the visible destination
+    // before the staged file takes its place.
+    tempfile::TempPath::try_from_path(staging)?.persist(destination)
+        .map_err(|error| error.error)
 }
 
 /// Compare the staged copy with its resolved pinned-HF source without buffering a
