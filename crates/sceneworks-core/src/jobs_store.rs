@@ -98,7 +98,6 @@ pub const JOB_STATUSES: &[&str] = &[
     "interrupted",
 ];
 pub const NON_GPU_JOB_TYPES: &[&str] = &[
-    "vector_generate",
     "model_download",
     "model_import",
     "model_convert",
@@ -4781,6 +4780,11 @@ fn is_real_training_job(job: &JobSnapshot) -> bool {
 /// placeholder. Mirrors the dry-run training capability split.
 fn required_capability(job: &JobSnapshot) -> &str {
     match job.job_type {
+        JobType::VectorGenerate => match job.payload.get("mode").and_then(Value::as_str) {
+            Some("image_to_svg") => WorkerCapability::VectorImageToSvg.as_str(),
+            Some("text_to_svg") => WorkerCapability::VectorTextToSvg.as_str(),
+            _ => JobType::VectorGenerate.as_str(),
+        },
         JobType::PersonDetect if person_job_is_preview(job) => {
             WorkerCapability::PersonDetectPreview.as_str()
         }
@@ -5032,6 +5036,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::ImageEdit
             | JobType::ImageVqa
             | JobType::ImageInterleave
+            | JobType::VectorGenerate
             | JobType::ImageUpscale
             | JobType::ImageDetail
             | JobType::ImageSegment

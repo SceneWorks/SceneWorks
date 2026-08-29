@@ -2746,6 +2746,18 @@ fn validate_probe_structure(
             require(nonempty("model"), "model is required")?;
             require(nonempty("prompt"), "prompt is required")?;
         }
+        JobType::VectorGenerate => {
+            require(nonempty("model"), "model is required")?;
+            require(
+                matches!(mode, Some("image_to_svg" | "text_to_svg")),
+                "mode must be image_to_svg or text_to_svg",
+            )?;
+            if mode == Some("image_to_svg") {
+                require(nonempty("sourceAssetId"), "sourceAssetId is required")?;
+            } else {
+                require(nonempty("prompt"), "prompt is required")?;
+            }
+        }
         JobType::VideoGenerate => {
             require(nonempty("model"), "model is required")?;
             require(
@@ -3146,6 +3158,38 @@ fn gpu_job_rows(
             )?],
         });
     }
+    // Vector providers are added by sc-22256. Keep both request modes visible in the product
+    // matrix now, but derive support exclusively from their mode-specific worker capabilities so
+    // the current runtime facts remain a truthful fail-closed false/false rather than inheriting a
+    // generic text or image capability.
+    let vector_model = "starvector_contract_probe";
+    let mut vector_requests = Vec::new();
+    for (mode, payload) in [
+        (
+            "image_to_svg",
+            json!({ "mode": "image_to_svg", "sourceAssetId": "probe" }),
+        ),
+        (
+            "text_to_svg",
+            json!({ "mode": "text_to_svg", "prompt": "probe" }),
+        ),
+    ] {
+        let job = probe_job(JobType::VectorGenerate, vector_model, payload)?;
+        vector_requests.push(routed_cell(
+            mode,
+            vector_model,
+            "operation",
+            &job,
+            mlx_facts,
+            candle_facts,
+            false,
+        )?);
+    }
+    rows.push(JobCapabilityRow {
+        job_type: "vector_generate".to_owned(),
+        category: "per-model".to_owned(),
+        requests: vector_requests,
+    });
     let mut upscale_requests = Vec::new();
     for (capability, engine) in [
         ("engine:real-esrgan", "real-esrgan"),

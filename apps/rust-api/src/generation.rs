@@ -271,31 +271,184 @@ pub(crate) async fn create_image_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Create the CPU-only fixture vectorization job. The worker owns SVG parsing, sanitization,
-/// canonicalization, preview rasterization, and publication; this route only validates the typed
-/// envelope and prevents accidental use of the raw generic queue API.
-pub(crate) async fn create_image_to_svg_job(
-    State(state): State<AppState>,
-    ApiJson(payload): ApiJson<ImageToSvgJobRequest>,
-) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+const MIN_VECTOR_SVG_BYTES: u32 = 1_024;
+const MAX_VECTOR_SVG_BYTES: u32 = 256 * 1_024;
+
+fn validate_vector_request(payload: &VectorRequest) -> Result<(), ApiError> {
     if payload.project_id.trim().is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.fixture_svg.trim().is_empty() {
-        return Err(ApiError::bad_request("fixtureSvg is required"));
+    validate_model_id(&payload.model)?;
+    let prompt = payload.prompt.trim();
+    if prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "prompt must not exceed {MAX_PROMPT_CHARS} characters"
+        )));
     }
+    match payload.mode {
+        VectorMode::ImageToSvg => {
+            if payload
+                .source_asset_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+            {
+                return Err(ApiError::bad_request(
+                    "sourceAssetId is required for image_to_svg",
+                ));
+            }
+        }
+        VectorMode::TextToSvg => {
+            if prompt.is_empty() {
+                return Err(ApiError::bad_request("prompt is required for text_to_svg"));
+            }
+            if payload.source_asset_id.is_some() {
+                return Err(ApiError::bad_request(
+                    "sourceAssetId is not accepted for text_to_svg",
+                ));
+            }
+        }
+    }
+    let sampling = &payload.sampling;
+    if !sampling.temperature.is_finite() || !(0.0..=2.0).contains(&sampling.temperature) {
+        return Err(ApiError::bad_request(
+            "sampling.temperature must be between 0 and 2",
+        ));
+    }
+    if !sampling.top_p.is_finite() || !(0.0 < sampling.top_p && sampling.top_p <= 1.0) {
+        return Err(ApiError::bad_request(
+            "sampling.topP must be greater than 0 and at most 1",
+        ));
+    }
+    if sampling.top_k > 1_000 {
+        return Err(ApiError::bad_request("sampling.topK must be at most 1000"));
+    }
+    if !sampling.repetition_penalty.is_finite()
+        || !(0.1..=2.0).contains(&sampling.repetition_penalty)
+    {
+        return Err(ApiError::bad_request(
+            "sampling.repetitionPenalty must be between 0.1 and 2",
+        ));
+    }
+    if sampling.repetition_context > 32_768 {
+        return Err(ApiError::bad_request(
+            "sampling.repetitionContext must be at most 32768",
+        ));
+    }
+    let budget = &payload.detail_budget;
+    if !(16..=32_768).contains(&budget.max_new_tokens) {
+        return Err(ApiError::bad_request(
+            "detailBudget.maxNewTokens must be between 16 and 32768",
+        ));
+    }
+    if !(MIN_VECTOR_SVG_BYTES..=MAX_VECTOR_SVG_BYTES).contains(&budget.max_svg_bytes) {
+        return Err(ApiError::bad_request(format!(
+            "detailBudget.maxSvgBytes must be between {MIN_VECTOR_SVG_BYTES} and {MAX_VECTOR_SVG_BYTES}"
+        )));
+    }
+    if !(1_000..=600_000).contains(&budget.max_wall_time_ms) {
+        return Err(ApiError::bad_request(
+            "detailBudget.maxWallTimeMs must be between 1000 and 600000",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_vector_model_manifest(
+    model_id: &str,
+    mode: VectorMode,
+    manifest: &Value,
+) -> Result<(), ApiError> {
+    if manifest.get("type").and_then(Value::as_str) != Some("vector") {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} is not a vector model (type: \"vector\" required)"
+        )));
+    }
+    let adapter = manifest
+        .get("adapter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|adapter| !adapter.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Model {model_id} has no declared vector provider adapter"
+            ))
+        })?;
+    let supported = manifest
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability.as_str() == Some(mode.as_str()))
+        });
+    if !supported {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} provider {adapter} does not declare the {} capability; the request was not queued",
+            mode.as_str()
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_vector_source_asset(
+    state: AppState,
+    project_id: String,
+    source_asset_id: String,
+) -> Result<(), ApiError> {
+    let (asset, media_path) = project_call(state, move |store| {
+        let asset = store.get_asset(&project_id, &source_asset_id)?;
+        let media_path = store.resolve_asset_media_path(&project_id, &source_asset_id)?;
+        Ok((asset, media_path))
+    })
+    .await?;
+    let media_type = asset
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mime = asset
+        .pointer("/file/mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+        return Err(ApiError::bad_request(
+            "sourceAssetId must name a raster image owned by projectId",
+        ));
+    }
+    if !media_path.is_file() {
+        return Err(ApiError::bad_request(
+            "sourceAssetId media is missing from its project",
+        ));
+    }
+    Ok(())
+}
+
+/// Create a typed Vector Studio job. The API resolves all caller-owned identifiers and model
+/// capability facts before enqueue; the worker alone owns provider streaming, SVG sanitization,
+/// preview rasterization, and atomic publication.
+pub(crate) async fn create_vector_job(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<VectorRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    validate_vector_request(&payload)?;
+    if let Some(source_asset_id) = payload.source_asset_id.clone() {
+        validate_vector_source_asset(state.clone(), payload.project_id.clone(), source_asset_id)
+            .await?;
+    }
+    let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
+    validate_vector_model_manifest(&payload.model, payload.mode, &model_manifest_entry)?;
+    let requested_gpu = payload.requested_gpu.clone();
+    let project_id = payload.project_id.clone();
+    let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
-    // The job type describes the CPU vector capability; the operation is an explicit payload
-    // mode so later StarVector/provider work can extend `vector_generate` without inventing a
-    // second job class.
-    job_payload.insert("mode".to_owned(), Value::String("image_to_svg".to_owned()));
+    job_payload.remove("requestedGpu");
+    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     let job = create_generation_job(
         state,
         JobType::VectorGenerate,
-        Some(payload.project_id),
-        payload.project_name,
+        Some(project_id),
+        project_name,
         job_payload,
-        "cpu".to_owned(),
+        requested_gpu,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))

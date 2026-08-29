@@ -283,31 +283,242 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
     }
 }
 
+fn write_vector_test_manifest(config_dir: &std::path::Path, capabilities: &[&str]) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "starvector_test",
+                "name": "StarVector test",
+                "type": "vector",
+                "family": "starvector",
+                "adapter": "starvector",
+                "capabilities": capabilities,
+                "downloads": [{ "provider": "huggingface", "repo": "SceneWorks/starvector-test" }],
+            }],
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models write");
+    write_empty_sibling_manifests(config_dir);
+}
+
 #[tokio::test]
-async fn fixture_vector_route_uses_vector_generate_with_image_to_svg_mode() {
+async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        &["image_to_svg", "text_to_svg"],
+    );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (status, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let source_asset_id = source["id"].as_str().expect("source id");
+
     let (status, created) = request(
-        app,
+        app.clone(),
         "POST",
         "/api/v1/image/vectorize/jobs",
         json!({
-            "projectId": "project-1",
-            "projectName": "Fixture",
-            "fixtureSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>",
+            "projectId": project_id,
+            "projectName": "Vector Project",
+            "mode": "image_to_svg",
+            "model": "starvector_test",
+            "sourceAssetId": source_asset_id,
+            "prompt": "keep the silhouette",
+            "sampling": { "temperature": 0.1, "topP": 0.95, "seed": 42 },
+            "detailBudget": { "maxNewTokens": 2048, "maxSvgBytes": 131072, "maxWallTimeMs": 90000 }
         }),
     )
     .await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(created["type"], "vector_generate");
-    assert_eq!(created["requestedGpu"], "cpu");
+    assert_eq!(created["requestedGpu"], "auto");
     assert_eq!(created["payload"]["mode"], "image_to_svg");
+    assert_eq!(created["payload"]["model"], "starvector_test");
+    assert_eq!(created["payload"]["sourceAssetId"], source_asset_id);
+    assert_eq!(created["payload"]["sampling"]["seed"], 42);
+    assert_eq!(created["payload"]["detailBudget"]["maxSvgBytes"], 131072);
     assert_eq!(
-        created["payload"]["fixtureSvg"],
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>"
+        created["payload"]["modelManifestEntry"]["adapter"],
+        "starvector"
     );
+    assert_eq!(
+        created["payload"]["modelManifestEntry"]["capabilities"],
+        json!(["image_to_svg", "text_to_svg"])
+    );
+    assert!(created["payload"].get("fixtureSvg").is_none());
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "text-only-vector-worker",
+            "gpuId": "test-gpu-1",
+            "gpuName": "Test GPU",
+            "capabilities": ["gpu", "vector_text_to_svg"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, wrong_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "text-only-vector-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(wrong_claim["job"].is_null());
+    claim_job_as_worker(
+        &app,
+        created["id"].as_str().expect("job id"),
+        "image-vector-worker",
+        &["gpu", "vector_image_to_svg"],
+    )
+    .await;
+
+    let (status, text_created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_svg",
+            "model": "starvector_test",
+            "prompt": "a minimal geometric fox"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(text_created["payload"]["mode"], "text_to_svg");
+    assert!(text_created["payload"]["sourceAssetId"].is_null());
+    let (status, text_claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "text-only-vector-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(text_claim["job"]["id"], text_created["id"]);
+}
+
+#[tokio::test]
+async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_before_enqueue() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project_a) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Project A" }),
+    )
+    .await;
+    let (_, project_b) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Project B" }),
+    )
+    .await;
+    let project_a_id = project_a["id"].as_str().expect("project A id");
+    let project_b_id = project_b["id"].as_str().expect("project B id");
+    let (_, raster) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_a_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let raster_id = raster["id"].as_str().expect("raster id");
+    let (status, video) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_a_id}/assets"),
+        "source.mp4",
+        "video/mp4",
+        b"mp4-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let video_id = video["id"].as_str().expect("video id");
+
+    for (body, expected_status) in [
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test"
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": video_id
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "projectId": project_b_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": raster_id
+            }),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "text_to_svg",
+                "model": "starvector_test",
+                "prompt": "a mark"
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": raster_id,
+                "fixtureSvg": "<svg/>"
+            }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let (status, _) = request(app.clone(), "POST", "/api/v1/image/vectorize/jobs", body).await;
+        assert_eq!(status, expected_status);
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs.as_array().expect("jobs array").len(), 0);
 }
 
 /// The other half of the guard: the job types the generic route legitimately serves keep

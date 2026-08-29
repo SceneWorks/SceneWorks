@@ -793,16 +793,84 @@ pub(crate) struct ImageJobRequest {
     pub(crate) advanced: JsonObject,
 }
 
-/// The deliberately narrow, fixture-only image-to-SVG intake used by the Vector Studio walking
-/// skeleton. Production raster/provider routing is a later story; keeping this input typed and
-/// separate prevents an arbitrary SVG from entering the generic raw-job route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VectorMode {
+    ImageToSvg,
+    TextToSvg,
+}
+
+impl VectorMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImageToSvg => "image_to_svg",
+            Self::TextToSvg => "text_to_svg",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ImageToSvgJobRequest {
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorSampling {
+    pub(crate) temperature: f32,
+    pub(crate) top_p: f32,
+    pub(crate) top_k: u32,
+    pub(crate) repetition_penalty: f32,
+    pub(crate) repetition_context: u32,
+    pub(crate) seed: Option<u64>,
+}
+
+impl Default for VectorSampling {
+    fn default() -> Self {
+        Self {
+            temperature: 0.2,
+            top_p: 0.9,
+            top_k: 0,
+            repetition_penalty: 1.0,
+            repetition_context: 0,
+            seed: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorDetailBudget {
+    pub(crate) max_new_tokens: u32,
+    pub(crate) max_svg_bytes: u32,
+    pub(crate) max_wall_time_ms: u64,
+}
+
+impl Default for VectorDetailBudget {
+    fn default() -> Self {
+        Self {
+            max_new_tokens: 4_096,
+            max_svg_bytes: 256 * 1_024,
+            max_wall_time_ms: 120_000,
+        }
+    }
+}
+
+/// Typed Vector Studio request. SVG source is provider output only; callers can supply raster and
+/// text conditioning, but never raw SVG for the worker to publish.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorRequest {
     pub(crate) project_id: String,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
-    pub(crate) fixture_svg: String,
+    pub(crate) mode: VectorMode,
+    pub(crate) model: String,
+    #[serde(default)]
+    pub(crate) source_asset_id: Option<String>,
+    #[serde(default)]
+    pub(crate) prompt: String,
+    #[serde(default)]
+    pub(crate) sampling: VectorSampling,
+    #[serde(default)]
+    pub(crate) detail_budget: VectorDetailBudget,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
