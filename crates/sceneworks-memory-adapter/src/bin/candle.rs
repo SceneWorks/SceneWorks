@@ -1223,14 +1223,28 @@ fn ltx25_official_dev_adapter(revision: &str) -> Result<AdapterSpec, String> {
     Ok(AdapterSpec::new(path, 1.0, AdapterKind::Lora).with_pass_scales(vec![0.0, 1.0]))
 }
 
+struct Ltx25LoadPlan {
+    repository: String,
+    revision: String,
+    inventory_sha256: String,
+    load_shape: LoadShape,
+    adapters: Vec<AdapterSpec>,
+    spec: LoadSpec,
+}
+
 fn ltx25_load_spec(
     request: &Value,
     target: &protocol::Ltx25CandleTarget,
-) -> Result<(String, String, LoadShape, Vec<AdapterSpec>, LoadSpec), String> {
+) -> Result<Ltx25LoadPlan, String> {
     let load_shape = ltx25_planned_load_shape(request, target.transformer_variant)?;
     let repository = protocol::required_env("SCENEWORKS_LTX25_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_LTX25_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::LTX_2_5_REPOSITORY)?;
+    protocol::validate_ltx25_artifact_identity(&repository, &revision)?;
+    let inventory_sha256 = protocol::required_env("SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256")?;
+    protocol::validate_lowercase_sha256(
+        &inventory_sha256,
+        "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256",
+    )?;
     let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
         "SCENEWORKS_LTX25_ROOT",
     )?))
@@ -1265,15 +1279,30 @@ fn ltx25_load_spec(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters.clone());
     }
-    Ok((repository, revision, load_shape, adapters, spec))
+    Ok(Ltx25LoadPlan {
+        repository,
+        revision,
+        inventory_sha256,
+        load_shape,
+        adapters,
+        spec,
+    })
 }
 
 /// Execute a real selected LTX-2.5 provider path while leaving promotion decisions outside this
-/// apparatus. `q8` reaches the pinned provider as `Quant::Q8`; its inference-owned receipt gate is
-/// never bypassed or re-created here.
+/// apparatus. The published `q8` tier is refused by the weight-free parser before this function;
+/// Candle's distinct INT8-ConvRot/NVFP4 evaluation selectors need an inference-owned producer and
+/// are never aliased to an ordinary bundle tier here.
 fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
     let target = protocol::ltx25_candle_target(request)?;
-    let (repository, revision, load_shape, adapters, spec) = ltx25_load_spec(request, &target)?;
+    let Ltx25LoadPlan {
+        repository,
+        revision,
+        inventory_sha256,
+        load_shape,
+        adapters,
+        spec,
+    } = ltx25_load_spec(request, &target)?;
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
     let mut vram = VramProbe::start_rendered().assert_idle(1.0);
@@ -1448,6 +1477,7 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
         peaks[index] = Some(vram.end_observed(sample));
     }
     vram.end_gen(generation_sample);
+    let cumulative_run_peak_bytes = decimal_gb_to_bytes(vram.report().peak_gb);
     if let Some(message) = phase_error {
         let _ = scope.finish(MemoryRunOutcome::Error {
             message: message.clone(),
@@ -1470,27 +1500,33 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
     scope
         .finish(MemoryRunOutcome::Complete)
         .map_err(|error| format!("finish {LTX25_ID} capture scope: {error}"))?;
-    match output {
-        GenerationOutput::Video { frames, fps, audio }
-            if frames.len() == target.frames as usize
-                && fps == target.fps
-                && audio.is_some() => {}
-        GenerationOutput::Video { frames, fps, audio } => {
-            return Err(format!(
-                "{LTX25_ID} returned {} frames at {fps} fps with audio={}, expected {} frames at {} fps with audio",
-                frames.len(),
-                audio.is_some(),
-                target.frames,
-                target.fps
-            ))
-        }
+    let (frames, fps, audio) = match output {
+        GenerationOutput::Video { frames, fps, audio } => (frames, fps, audio),
         GenerationOutput::Images(_) => {
             return Err(format!("{LTX25_ID} returned images, not a video clip"))
         }
         GenerationOutput::Audio(_) => {
             return Err(format!("{LTX25_ID} returned audio without video frames"))
         }
+    };
+    if fps != target.fps || audio.is_none() {
+        return Err(format!(
+            "{LTX25_ID} returned {fps} fps with audio={}, expected {} fps with audio",
+            audio.is_some(),
+            target.fps
+        ));
     }
+    let frame_shapes = frames
+        .iter()
+        .map(|frame| (frame.width, frame.height, frame.pixels.len()))
+        .collect::<Vec<_>>();
+    protocol::validate_ltx25_rgb_frames(
+        usize::try_from(target.frames)
+            .map_err(|_| "LTX-2.5 frame count does not fit usize".to_owned())?,
+        target.width,
+        target.height,
+        &frame_shapes,
+    )?;
     let conditioning_bytes = decimal_gb_to_bytes(
         peaks[0].ok_or_else(|| format!("{LTX25_ID} did not expose the conditioning boundary"))?,
     );
@@ -1500,10 +1536,13 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
     let decode_bytes = decimal_gb_to_bytes(
         peaks[2].ok_or_else(|| format!("{LTX25_ID} did not complete decode sampling"))?,
     );
-    let overall_bytes = conditioning_bytes.max(denoise_bytes).max(decode_bytes);
+    let overall_bytes = protocol::validated_cumulative_peak(
+        cumulative_run_peak_bytes,
+        [conditioning_bytes, denoise_bytes, decode_bytes],
+    )?;
     let blocker = concat!(
         "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains ",
-        "gated on terminal CUDA repetition/quality evidence and, for q8, an inference-owned accepted measurement receipt"
+        "gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned"
     );
     let mut fragment = protocol::plain_gated_fragment(
         request,
@@ -1511,7 +1550,11 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
         protocol::PlainGatedFragment {
             // Artifact variant retains the manifest/download identity. Transformer and decoder are
             // independent target axes and are stamped into the final record from `planned.target`.
-            artifact: artifact(&repository, &revision, &target.tier),
+            artifact: {
+                let mut artifact = artifact(&repository, &revision, &target.tier);
+                artifact["inventorySha256"] = json!(inventory_sha256);
+                artifact
+            },
             sweep: protocol::reference_sweep(request, "passed")?,
             blocker,
             quality: json!({ "result": "not_run" }),
