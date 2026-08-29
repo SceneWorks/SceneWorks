@@ -268,6 +268,14 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "video_generate"));
+    // The catalog/install surface lands before the one permanent feature-train inference pin.
+    // Neither mode is claimable until the terminal story wires the native provider.
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "vector_image_to_svg"));
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "vector_text_to_svg"));
     assert!(capabilities
         .iter()
         .any(|capability| capability.as_str() == "training_caption"));

@@ -6,6 +6,22 @@
   "type": "object",
   "required": ["schemaVersion", "models"],
   "$defs": {
+    "vectorProviderAvailability": {
+      "type": "object",
+      "required": ["id", "available"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "available": { "type": "boolean" },
+        "reason": {
+          "enum": [
+            "provider_not_linked",
+            "unsupported_platform",
+            "pending_terminal_inference_pin"
+          ]
+        }
+      }
+    },
     "staticMemoryStrategyCapability": {
       "type": "object",
       "required": ["parameters", "overlays"],
@@ -710,10 +726,29 @@
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "name": { "type": "string", "minLength": 1 },
-          "type": { "type": "string", "enum": ["image", "video", "audio", "utility"] },
+          "type": { "type": "string", "enum": ["image", "video", "audio", "vector", "utility"] },
           "family": { "type": "string" },
           "adapter": { "type": "string" },
           "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "vector": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["providers"],
+            "properties": {
+              "acceptsTextGuidance": { "type": "boolean" },
+              "maxNewTokens": { "type": "integer", "minimum": 1 },
+              "maxSvgBytes": { "type": "integer", "minimum": 1 },
+              "maxWallTimeMs": { "type": "integer", "minimum": 1 },
+              "providers": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "mlx": { "$ref": "#/$defs/vectorProviderAvailability" },
+                  "candle": { "$ref": "#/$defs/vectorProviderAvailability" }
+                }
+              }
+            }
+          },
           "precisionFloors": {
             "type": "array",
             "minItems": 1,

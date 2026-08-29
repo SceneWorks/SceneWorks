@@ -95,6 +95,9 @@ pub(crate) struct VectorProviderRequest {
 pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
     fn provider_id(&self) -> &str;
     fn supports_mode(&self, mode: VectorMode) -> bool;
+    fn unavailable_reason(&self) -> Option<&str> {
+        None
+    }
     fn generate_svg(
         &self,
         request: &VectorProviderRequest,
@@ -103,15 +106,19 @@ pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
     ) -> WorkerResult<()>;
 }
 
-struct UnavailableVectorProvider;
+struct PendingTerminalPinVectorProvider;
 
-impl MultimodalVectorProviderAdapter for UnavailableVectorProvider {
+impl MultimodalVectorProviderAdapter for PendingTerminalPinVectorProvider {
     fn provider_id(&self) -> &str {
-        "unavailable"
+        "starvector"
     }
 
-    fn supports_mode(&self, _mode: VectorMode) -> bool {
-        false
+    fn supports_mode(&self, mode: VectorMode) -> bool {
+        mode == VectorMode::ImageToSvg
+    }
+
+    fn unavailable_reason(&self) -> Option<&str> {
+        Some("pending_terminal_inference_pin")
     }
 
     fn generate_svg(
@@ -120,10 +127,19 @@ impl MultimodalVectorProviderAdapter for UnavailableVectorProvider {
         _cancel: &gen_core::CancelFlag,
         _on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
     ) -> WorkerResult<()> {
-        Err(WorkerError::Engine(
-            "no native vector provider bridge is registered".to_owned(),
+        Err(WorkerError::InvalidPayload(
+            "vector_backend_unavailable: pending_terminal_inference_pin".to_owned(),
         ))
     }
+}
+
+fn ensure_provider_available(provider: &dyn MultimodalVectorProviderAdapter) -> WorkerResult<()> {
+    if let Some(reason) = provider.unavailable_reason() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "vector_backend_unavailable: {reason}"
+        )));
+    }
+    Ok(())
 }
 
 fn manifest_declares_mode(payload: &VectorJobPayload) -> bool {
@@ -224,7 +240,13 @@ pub(crate) async fn run_vector_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    run_vector_job_with_provider(api, settings, job, Arc::new(UnavailableVectorProvider)).await
+    run_vector_job_with_provider(
+        api,
+        settings,
+        job,
+        Arc::new(PendingTerminalPinVectorProvider),
+    )
+    .await
 }
 
 pub(crate) async fn run_vector_job_with_provider(
@@ -251,6 +273,10 @@ pub(crate) async fn run_vector_job_with_provider(
             provider.provider_id()
         )));
     }
+    // Keep this before project lookup, heartbeat, or any status transition: the catalog may be
+    // installable before the feature train permanently pins the matching native providers, but a
+    // queued/stale job must never make an unavailable backend look claimed.
+    ensure_provider_available(provider.as_ref())?;
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.get_project(&payload.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -270,7 +296,6 @@ pub(crate) async fn run_vector_job_with_provider(
             ))
         }
     };
-
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
         api,
@@ -782,6 +807,18 @@ mod tests {
             on_source("<rect width=\"1\" height=\"1\"/></svg>", 1)?;
             Ok(())
         }
+    }
+
+    #[test]
+    fn production_provider_fails_closed_until_the_terminal_inference_pin() {
+        let provider = PendingTerminalPinVectorProvider;
+        assert!(provider.supports_mode(VectorMode::ImageToSvg));
+        let error = ensure_provider_available(&provider).expect_err("provider remains unavailable");
+        assert!(matches!(
+            error,
+            WorkerError::InvalidPayload(detail)
+                if detail == "vector_backend_unavailable: pending_terminal_inference_pin"
+        ));
     }
 
     #[test]

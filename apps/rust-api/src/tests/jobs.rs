@@ -284,7 +284,22 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
 }
 
 fn write_vector_test_manifest(config_dir: &std::path::Path, capabilities: &[&str]) {
+    write_vector_test_manifest_with_provider_state(config_dir, capabilities, true);
+}
+
+fn write_vector_test_manifest_with_provider_state(
+    config_dir: &std::path::Path,
+    capabilities: &[&str],
+    provider_available: bool,
+) {
     std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    let provider = |id| {
+        if provider_available {
+            json!({ "id": id, "available": true })
+        } else {
+            json!({ "id": id, "available": false, "reason": "pending_terminal_inference_pin" })
+        }
+    };
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         serde_json::to_vec_pretty(&json!({
@@ -296,13 +311,204 @@ fn write_vector_test_manifest(config_dir: &std::path::Path, capabilities: &[&str
                 "family": "starvector",
                 "adapter": "starvector",
                 "capabilities": capabilities,
-                "downloads": [{ "provider": "huggingface", "repo": "SceneWorks/starvector-test" }],
+                "vector": { "providers": {
+                    "mlx": provider("mlx-starvector-1b"),
+                    "candle": provider("candle-starvector-1b")
+                } },
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "SceneWorks/starvector-test",
+                    "files": ["config.json", "model.safetensors"]
+                }],
             }],
         }))
         .expect("manifest serializes"),
     )
     .expect("builtin models write");
     write_empty_sibling_manifests(config_dir);
+    let installed = config_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("test root")
+        .join("data/models/SceneWorks__starvector-test");
+    std::fs::create_dir_all(&installed).expect("test vector install dir creates");
+    std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
+        .expect("test vector receipt writes");
+    std::fs::write(installed.join("config.json"), b"{}").expect("test config writes");
+    std::fs::write(installed.join("model.safetensors"), b"weights").expect("test weights write");
+}
+
+#[tokio::test]
+async fn vector_route_reports_typed_unavailable_backend_before_enqueue() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest_with_provider_state(
+        &temp_dir.path().join("config/manifests"),
+        &["image_to_svg"],
+        false,
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "image_to_svg",
+            "model": "starvector_test",
+            "sourceAssetId": source["id"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "vector_backend_unavailable");
+    assert_eq!(body["context"]["reason"], "pending_terminal_inference_pin");
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs").is_empty());
+}
+
+#[test]
+fn builtin_starvector_manifest_is_the_exact_native_image_to_svg_closure() {
+    let model = crate::models::embedded_builtin_catalog_entry(|entry| {
+        entry.get("id").and_then(Value::as_str) == Some("starvector_1b")
+    })
+    .expect("embedded manifest parses")
+    .expect("StarVector entry exists");
+    assert_eq!(model["type"], "vector");
+    assert_eq!(model["capabilities"], json!(["image_to_svg"]));
+    assert_eq!(model["adapter"], "starvector");
+    assert_eq!(
+        model["vector"]["providers"]["mlx"]["id"],
+        "mlx-starvector-1b"
+    );
+    assert_eq!(
+        model["vector"]["providers"]["candle"]["id"],
+        "candle-starvector-1b"
+    );
+    for backend in ["mlx", "candle"] {
+        assert_eq!(model["vector"]["providers"][backend]["available"], false);
+        assert_eq!(
+            model["vector"]["providers"][backend]["reason"],
+            "pending_terminal_inference_pin"
+        );
+    }
+    let download = &model["downloads"][0];
+    assert_eq!(download["repo"], "starvector/starvector-1b-im2svg");
+    assert_eq!(
+        download["revision"],
+        "380ab95d25a8e9ab1dc825debe238b4953ae13b9"
+    );
+    assert_eq!(download["estimatedSizeBytes"], 5_147_481_592u64);
+    assert_eq!(download["footprint"]["diskSizeBytes"], 5_147_481_592u64);
+    assert_eq!(
+        download["files"],
+        json!([
+            "README.md",
+            "added_tokens.json",
+            "config.json",
+            "merges.txt",
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+            "model.safetensors.index.json",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.json"
+        ])
+    );
+    assert!(download["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .all(|file| !file.as_str().unwrap_or_default().ends_with(".py")));
+    assert_eq!(
+        model["licenseUrl"],
+        "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9"
+    );
+}
+
+#[tokio::test]
+async fn vector_route_reports_typed_missing_and_incomplete_model_manager_recovery() {
+    let _env = isolate_hf_cache();
+    for (cache_state, expected_reason) in [
+        ("missing", "model_missing"),
+        ("incomplete", "model_incomplete"),
+    ] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        write_vector_test_manifest(&config_dir, &["image_to_svg"]);
+        let installed = temp_dir
+            .path()
+            .join("data/models/SceneWorks__starvector-test");
+        std::fs::remove_file(installed.join(".sceneworks-download-complete.json"))
+            .expect("remove complete marker");
+        if cache_state == "incomplete" {
+            std::fs::remove_dir_all(&installed).expect("remove managed install");
+            let snapshot = temp_dir.path().join(
+                "data/cache/huggingface/hub/models--SceneWorks--starvector-test/snapshots/abc123",
+            );
+            std::fs::create_dir_all(&snapshot).expect("partial HF snapshot creates");
+            std::fs::write(snapshot.join("config.json"), "{}").expect("partial file writes");
+        } else {
+            std::fs::remove_dir_all(&installed).expect("missing install removes directory");
+        }
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Vector" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id");
+        let (_, source) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "source.png",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/vectorize/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": source["id"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{cache_state}: {body}");
+        assert_eq!(body["code"], "vector_model_unavailable");
+        assert_eq!(body["context"]["reason"], expected_reason);
+        assert_eq!(body["context"]["downloadable"], true);
+        assert!(body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Model Manager"));
+        let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+        assert!(jobs.as_array().expect("jobs").is_empty());
+    }
 }
 
 #[tokio::test]

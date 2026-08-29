@@ -271,6 +271,8 @@ struct ManifestModel {
     mlx: Value,
     #[serde(default)]
     candle: Value,
+    #[serde(default)]
+    vector: ManifestVectorConfig,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
     /// Declarative non-routability (sc-19708): the entry is an installable component bundle
@@ -278,6 +280,19 @@ struct ManifestModel {
     /// adding component entries never adds a model-id branch here.
     #[serde(rename = "componentOnly", default)]
     component_only: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ManifestVectorConfig {
+    #[serde(default)]
+    providers: BTreeMap<String, ManifestProviderAvailability>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestProviderAvailability {
+    available: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +417,13 @@ fn backend_capability_matrix_from_runtime_sources(
 
     let mut models = Vec::with_capacity(manifest.models.len());
     for model in &manifest.models {
+        // Catalog entries awaiting the feature train's one permanent inference pin are
+        // installable, but are not shipped runtime generators yet. Excluding this exact typed
+        // state keeps the capability matrix honest without weakening the invariant that every
+        // shipped utility/audio model must have a runtime provider or canonical request.
+        if model_is_pending_terminal_vector_install(model) {
+            continue;
+        }
         models.push(model_row(
             model,
             preview.models.get(&model.id),
@@ -439,6 +461,15 @@ fn backend_capability_matrix_from_runtime_sources(
         training_kernels,
         exceptions: exceptions.records,
     })
+}
+
+fn model_is_pending_terminal_vector_install(model: &ManifestModel) -> bool {
+    model.model_type == "vector"
+        && !model.vector.providers.is_empty()
+        && model.vector.providers.values().all(|provider| {
+            !provider.available
+                && provider.reason.as_deref() == Some("pending_terminal_inference_pin")
+        })
 }
 
 fn matrix_summary(
@@ -3670,6 +3701,33 @@ mod tests {
     }
 
     #[test]
+    fn pending_terminal_vector_install_is_not_projected_as_a_shipped_generator() {
+        let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        let starvector = manifest
+            .models
+            .iter()
+            .find(|model| model.id == "starvector_1b")
+            .expect("StarVector remains in the installable catalog");
+        assert!(model_is_pending_terminal_vector_install(starvector));
+
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        assert!(matrix
+            .models
+            .iter()
+            .all(|model| model.id != "starvector_1b"));
+
+        let job = matrix
+            .gpu_job_types
+            .iter()
+            .find(|job| job.job_type == "vector_generate")
+            .expect("vector job row exists");
+        assert!(job
+            .requests
+            .iter()
+            .all(|request| { request.mlx == Some(false) && request.candle == Some(false) }));
+    }
+
+    #[test]
     fn source_capture_digest_values_are_provenance_not_semantics() {
         let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
         let mut live = checked_in.clone();
@@ -6180,6 +6238,9 @@ mod tests {
         let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
 
         for model in &manifest.models {
+            if model_is_pending_terminal_vector_install(model) {
+                continue;
+            }
             let row = matrix.models.iter().find(|row| row.id == model.id).unwrap();
             let descriptors: Vec<_> = [&mlx, &candle]
                 .into_iter()

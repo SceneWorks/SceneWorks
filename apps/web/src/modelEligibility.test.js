@@ -7,6 +7,7 @@ import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import {
   AUDIO_MODES,
   VIDEO_MODES,
+  VECTOR_MODES,
   angleModelUsable,
   audioModelServesMode,
   audioModelUsable,
@@ -23,12 +24,57 @@ import {
   videoModelServesMode,
   videoModelUsable,
   visionCaptionModelUsable,
+  vectorModelAvailability,
+  vectorModelServesMode,
+  vectorModelUsable,
 } from "./modelEligibility.js";
 import { VISION_CAPTION_MODEL_ID, fallbackModels } from "./constants.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
 
 describe("modelEligibility predicates", () => {
+  it("routes StarVector image_to_svg by backend and offers missing installs", () => {
+    const model = {
+      id: "starvector_1b",
+      type: "vector",
+      capabilities: ["image_to_svg"],
+      vector: { providers: {
+        mlx: { id: "mlx-starvector-1b", available: true },
+        candle: { id: "candle-starvector-1b", available: true },
+      } },
+      installState: "installed",
+      cacheState: "complete",
+    };
+    expect(VECTOR_MODES).toEqual(["image_to_svg", "text_to_svg"]);
+    expect(vectorModelServesMode(model, "image_to_svg", { platform: "macos" })).toBe(true);
+    expect(vectorModelServesMode(model, "text_to_svg", { platform: "macos" })).toBe(false);
+    expect(vectorModelAvailability(model, "image_to_svg", { platform: "macos" })).toMatchObject({
+      available: true,
+      backend: "mlx",
+      providerId: "mlx-starvector-1b",
+    });
+    const missing = { ...model, installState: "missing", cacheState: "missing", downloadable: true };
+    expect(vectorModelAvailability(missing, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      reason: "model_missing",
+      backend: "candle",
+    });
+    expect(downloadOffersFor([missing], vectorModelUsable, { platform: "win32" })).toEqual([missing]);
+    const unavailable = {
+      ...model,
+      vector: { providers: { ...model.vector.providers, candle: {
+        id: "candle-starvector-1b",
+        available: false,
+        reason: "pending_terminal_inference_pin",
+      } } },
+    };
+    expect(vectorModelAvailability(unavailable, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      reason: "pending_terminal_inference_pin",
+      backend: "candle",
+    });
+  });
+
   it("imageModelUsable matches image models serving a mode, rejects other types", () => {
     expect(imageModelUsable({ type: "image", capabilities: ["text_to_image"] }, caps)).toBe(true);
     expect(imageModelUsable({ type: "image", capabilities: ["edit_image"] }, caps)).toBe(true);
