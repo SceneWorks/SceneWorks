@@ -270,6 +270,12 @@ fn mlx_gpu_advertises_generation_capabilities_only() {
         .any(|capability| capability.as_str() == "video_generate"));
     assert!(capabilities
         .iter()
+        .any(|capability| capability.as_str() == "vector_image_to_svg"));
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "vector_text_to_svg"));
+    assert!(capabilities
+        .iter()
         .any(|capability| capability.as_str() == "training_caption"));
     // Real, model-backed person detect/track are ported to the MLX worker (sc-3709): the
     // worker advertises the non-preview capabilities so the API routes real jobs here.
@@ -331,6 +337,7 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         WorkerCapability::CatalogAnalysis,
         // carve-outs
         WorkerCapability::ImageEdit,
+        WorkerCapability::VectorImageToSvg,
         WorkerCapability::ImageDetail,
         WorkerCapability::ImageVqa,
         WorkerCapability::ImageInterleave,

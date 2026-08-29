@@ -152,6 +152,7 @@ const MODEL_TAB_TYPES = [
   ["image", "Image Models"],
   ["video", "Video Models"],
   ["audio", "Audio Models"],
+  ["vector", "Vector Models"],
   ["utility", "Utility Models"],
 ];
 

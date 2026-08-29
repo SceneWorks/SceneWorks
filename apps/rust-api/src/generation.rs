@@ -390,6 +390,106 @@ fn validate_vector_model_manifest(
     Ok(())
 }
 
+fn validate_vector_model_availability(
+    model_id: &str,
+    backend: &str,
+    model: &Value,
+) -> Result<(), ApiError> {
+    let provider = model
+        .pointer(&format!("/vector/providers/{backend}"))
+        .and_then(Value::as_object);
+    if provider
+        .and_then(|value| value.get("available"))
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        let reason = provider
+            .and_then(|value| value.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider_not_linked");
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            format!("Model {model_id} is unavailable on the {backend} vector backend"),
+            "vector_backend_unavailable",
+            json!({ "reason": reason, "modelId": model_id, "backend": backend }),
+        ));
+    }
+    let install_state = model
+        .get("installState")
+        .and_then(Value::as_str)
+        .unwrap_or("missing");
+    let cache_state = model
+        .get("cacheState")
+        .and_then(Value::as_str)
+        .unwrap_or("missing");
+    if install_state != "installed" || cache_state != "complete" {
+        let reason = if cache_state == "incomplete" {
+            "model_incomplete"
+        } else {
+            "model_missing"
+        };
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            format!(
+                "Model {model_id} is not completely installed; download or repair it in Model Manager before submitting"
+            ),
+            "vector_model_unavailable",
+            json!({
+                "reason": reason,
+                "modelId": model_id,
+                "installState": install_state,
+                "cacheState": cache_state,
+                "downloadable": model.get("downloadable").and_then(Value::as_bool).unwrap_or(false),
+                "repairAvailable": model.get("repairAvailable").and_then(Value::as_bool).unwrap_or(false),
+                "missingRequiredFiles": model.get("missingRequiredFiles").cloned().unwrap_or_else(|| json!([])),
+            }),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_vector_provider_request(
+    payload: &VectorRequest,
+    model: &Value,
+) -> Result<(), ApiError> {
+    let vector = model.get("vector").and_then(Value::as_object);
+    if payload.mode == VectorMode::ImageToSvg
+        && !payload.prompt.trim().is_empty()
+        && vector
+            .and_then(|value| value.get("acceptsTextGuidance"))
+            .and_then(Value::as_bool)
+            == Some(false)
+    {
+        return Err(ApiError::bad_request(format!(
+            "Model {} does not accept text guidance for image_to_svg",
+            payload.model
+        )));
+    }
+    for (field, requested) in [
+        (
+            "maxNewTokens",
+            u64::from(payload.detail_budget.max_new_tokens),
+        ),
+        (
+            "maxSvgBytes",
+            u64::from(payload.detail_budget.max_svg_bytes),
+        ),
+        ("maxWallTimeMs", payload.detail_budget.max_wall_time_ms),
+    ] {
+        if let Some(limit) = vector
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_u64)
+        {
+            if requested > limit {
+                return Err(ApiError::bad_request(format!(
+                    "detailBudget.{field} exceeds the selected provider limit of {limit}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn validate_vector_source_asset(
     state: AppState,
     project_id: String,
@@ -434,8 +534,18 @@ pub(crate) async fn create_vector_job(
         validate_vector_source_asset(state.clone(), payload.project_id.clone(), source_asset_id)
             .await?;
     }
-    let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
+    let model_manifest_entry = crate::models::model_catalog(&state)
+        .await?
+        .into_iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(payload.model.as_str()))
+        .unwrap_or_else(|| json!({}));
     validate_vector_model_manifest(&payload.model, payload.mode, &model_manifest_entry)?;
+    validate_vector_provider_request(&payload, &model_manifest_entry)?;
+    validate_vector_model_availability(
+        &payload.model,
+        enqueue_backend(&state),
+        &model_manifest_entry,
+    )?;
     let requested_gpu = payload.requested_gpu.clone();
     let project_id = payload.project_id.clone();
     let project_name = payload.project_name.clone();

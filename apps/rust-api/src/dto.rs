@@ -844,7 +844,8 @@ pub(crate) struct VectorDetailBudget {
 impl Default for VectorDetailBudget {
     fn default() -> Self {
         Self {
-            max_new_tokens: 4_096,
+            // Common limit of both registered StarVector-1B providers (MLX: 4000, Candle: 4096).
+            max_new_tokens: 4_000,
             max_svg_bytes: 256 * 1_024,
             max_wall_time_ms: 120_000,
         }

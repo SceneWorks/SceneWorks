@@ -1311,6 +1311,28 @@
       ]
     },
     {
+      "id": "starvector-1b",
+      "models": [
+        "starvector_1b"
+      ],
+      "name": "StarVector-1B image-to-SVG model",
+      "publisher": "StarVector authors",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Image-to-SVG vectorization from the immutable 380ab95d25a8e9ab1dc825debe238b4953ae13b9 snapshot. SceneWorks downloads only the declared model, tokenizer, configuration, processor metadata, and model-card files; it excludes and never executes the repository's remote Python modules. The model card declares Apache-2.0 and the repository ships no separate NOTICE file at this revision.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "z-image-apache"
+        }
+      ]
+    },
+    {
       "id": "insightface",
       "models": [
         "instantid_face_stack"

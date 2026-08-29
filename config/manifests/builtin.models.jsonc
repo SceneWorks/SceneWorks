@@ -25254,6 +25254,69 @@
       }
     },
     {
+      "id": "starvector_1b",
+      "name": "StarVector-1B",
+      "family": "starvector",
+      "type": "vector",
+      "adapter": "starvector",
+      "recommended": true,
+      "autoDownload": false,
+      "capabilities": ["image_to_svg"],
+      "vector": {
+        "acceptsTextGuidance": false,
+        "maxNewTokens": 4000,
+        "maxSvgBytes": 262144,
+        "maxWallTimeMs": 120000,
+        "providers": {
+          "mlx": { "id": "mlx-starvector-1b", "available": true },
+          "candle": { "id": "candle-starvector-1b", "available": true }
+        }
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "starvector/starvector-1b-im2svg",
+          "revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+          // Exact native runtime closure at the pinned revision. Remote Python modules and
+          // .gitattributes are deliberately excluded: SceneWorks executes only the Rust providers.
+          "files": [
+            "README.md",
+            "added_tokens.json",
+            "config.json",
+            "merges.txt",
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+            "model.safetensors.index.json",
+            "preprocessor_config.json",
+            "processor_config.json",
+            "special_tokens_map.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.json"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 5147481592,
+          "footprint": { "diskSizeBytes": 5147481592 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/starvector/starvector-1b-im2svg"
+      },
+      "licenseUrl": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+      "ui": {
+        "label": "StarVector-1B",
+        "description": "Native image-to-SVG vectorization from the exact StarVector-1B snapshot. The MLX and Candle providers load local files only; Model Manager must complete the install before submission.",
+        "recommendedFor": ["image_to_svg"],
+        "promptGuide": {
+          "title": "StarVector-1B Vectorization Guide",
+          "path": "/prompt-guides/starvector-1b.md",
+          "sources": [
+            { "label": "StarVector-1B image-to-SVG model card", "url": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9" }
+          ]
+        }
+      }
+    },
+    {
       // LAION CLAP (HTSAT-unfused) — semantic audio↔text embedder. Inference sc-12851: a candle
       // AudioEmbedder (candle-audio-clap) that loads config.json + tokenizer.json + pytorch_model.bin
       // from a passed-in snapshot DIR (LoadSpec::weights → WeightsSource::Dir) — NEVER self-resolved.

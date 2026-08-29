@@ -165,6 +165,9 @@ pub(crate) fn with_candle_capabilities(
             // candle-eligible edit models (`image_job_is_candle_eligible`); unsupported edit models
             // are refused and remain queued.
             extend_capabilities_unique(&mut gpu.capabilities, [WorkerCapability::ImageEdit]);
+            // StarVector-1B is registered in runtime-cuda's text catalog and serves only the
+            // image-conditioned SVG extension. Text-to-SVG remains unadvertised and unclaimable.
+            extend_capabilities_unique(&mut gpu.capabilities, [WorkerCapability::VectorImageToSvg]);
             // SenseNova-U1 VQA + Document-Studio interleave (sc-5501) run off the `Generator`
             // registry via the concrete candle `T2iModel::{vqa, interleave_gen}` (their text /
             // text+image output the neutral contract can't express), so they are NOT in
@@ -1034,6 +1037,9 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // API only routes MLX-eligible edit models here (`image_job_is_mlx_eligible`);
         // unsupported edit models are refused and remain queued.
         WorkerCapability::ImageEdit,
+        // StarVector-1B is an explicit runtime-macos text provider with a typed SVG extension.
+        // Its 1B checkpoint is image-conditioned only, so never claim vector_text_to_svg.
+        WorkerCapability::VectorImageToSvg,
         // Tile-ControlNet detail refine (epic 3041, sc-3060) — the SDXL-family
         // `image_detail` job runs in-process on the engine here too.
         WorkerCapability::ImageDetail,
