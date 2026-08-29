@@ -20,6 +20,9 @@ node scripts/kv-baseline-harness.mjs compare dense.json compressed.json comparis
 ```
 
 `record` requires the local-only `provenance.modelFilePath` input and verifies
+either that exact file or every resolved file in a sharded snapshot directory;
+directory identity is the sorted path/byte-count/content-hash aggregate used by
+the inference producer. It then verifies
 its byte count and SHA-256 before removing the path from the portable receipt.
 Both `record` and `compare` atomically generate the JSON artifact, a Markdown
 human receipt with the same basename, and exact-byte SHA-256 sidecars. The

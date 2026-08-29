@@ -696,19 +696,67 @@ async function sha256File(file) {
   return hash.digest("hex");
 }
 
+export async function inventoryModelArtifact(artifactPath) {
+  let metadata;
+  try {
+    metadata = await stat(artifactPath);
+  } catch (error) {
+    fail(`model artifact is unavailable: ${error.message}`);
+  }
+  if (metadata.isFile()) {
+    if (metadata.size <= 0) fail("model artifact must be non-empty");
+    return { bytes: metadata.size, sha256: await sha256File(artifactPath), files: 1 };
+  }
+  if (!metadata.isDirectory()) fail("model artifact must be a file or snapshot directory");
+
+  const root = path.resolve(artifactPath);
+  const files = [];
+  async function visit(directory) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      const resolved = await stat(absolute);
+      if (resolved.isDirectory()) {
+        if (entry.isSymbolicLink()) fail(`model snapshot contains a directory symlink: ${absolute}`);
+        await visit(absolute);
+        continue;
+      }
+      if (!resolved.isFile() || resolved.size <= 0) {
+        fail(`model snapshot contains an empty or unsupported entry: ${absolute}`);
+      }
+      files.push({
+        path: path.relative(root, absolute).split(path.sep).join("/"),
+        bytes: resolved.size,
+        sha256: await sha256File(absolute),
+      });
+    }
+  }
+  await visit(root);
+  if (files.length === 0) fail("model snapshot is empty");
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  const bytes = files.reduce((total, file) => total + file.bytes, 0);
+  if (!Number.isSafeInteger(bytes)) fail("model snapshot byte count exceeds safe integer range");
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(file.path);
+    hash.update("\0");
+    hash.update(String(file.bytes));
+    hash.update("\0");
+    hash.update(file.sha256);
+    hash.update("\n");
+  }
+  return { bytes, sha256: hash.digest("hex"), files: files.length };
+}
+
 export async function buildVerifiedReceipt(input) {
   object(input?.provenance, "provenance");
   const modelFilePath = text(input.provenance.modelFilePath, "provenance.modelFilePath");
-  let metadata;
-  try {
-    metadata = await stat(modelFilePath);
-  } catch (error) {
-    fail(`model file is unavailable: ${error.message}`);
+  const inventory = await inventoryModelArtifact(modelFilePath);
+  if (input.provenance.modelFileBytes !== inventory.bytes) fail("model artifact byte count mismatch");
+  if (inventory.sha256 !== input.provenance.modelFileSha256) {
+    fail("model artifact SHA-256 mismatch");
   }
-  if (!metadata.isFile() || metadata.size <= 0) fail("model artifact must be a non-empty file");
-  if (input.provenance.modelFileBytes !== metadata.size) fail("model file byte count mismatch");
-  const actualHash = await sha256File(modelFilePath);
-  if (actualHash !== input.provenance.modelFileSha256) fail("model file SHA-256 mismatch");
   const verifiedInput = structuredClone(input);
   delete verifiedInput.provenance.modelFilePath;
   object(verifiedInput.quality?.fixtureEvidence, "quality.fixtureEvidence");
