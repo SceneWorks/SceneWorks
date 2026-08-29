@@ -1554,6 +1554,35 @@ export function selectPlanProviders(config, { model, providerName, fixture } = {
 }
 
 const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+const LTX25_CAPTURE_CASE_COUNT = 84;
+
+let canonicalLtx25LogicalCaseIds;
+
+function expectedLtx25LogicalCaseIds() {
+  if (!canonicalLtx25LogicalCaseIds) {
+    const plan = JSON.parse(readFileSync(path.join(ROOT, "config/memory-calibration-plan.json"), "utf8"));
+    canonicalLtx25LogicalCaseIds = expandPlan({
+      ...plan,
+      providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+    }).filter((planned) => planned.backend === "mlx")
+      .map((planned) => planned.logicalCaseId)
+      .sort();
+    if (canonicalLtx25LogicalCaseIds.length !== LTX25_CAPTURE_CASE_COUNT) {
+      fail(`canonical LTX-2.5 plan must contain exactly ${LTX25_CAPTURE_CASE_COUNT} MLX cases`);
+    }
+  }
+  return canonicalLtx25LogicalCaseIds;
+}
+
+function validateCanonicalLtx25Selection(plannedCases) {
+  const actual = plannedCases.map((planned) => planned.logicalCaseId).sort();
+  const expected = expectedLtx25LogicalCaseIds();
+  if (new Set(actual).size !== LTX25_CAPTURE_CASE_COUNT || !equal(actual, expected)) {
+    fail(
+      `--model ltx_2_5 must select the exact canonical ${LTX25_CAPTURE_CASE_COUNT}-case MLX campaign`,
+    );
+  }
+}
 
 function ltx25ArtifactKey(planned) {
   const variant = planned?.target?.transformerVariant;
@@ -1577,12 +1606,18 @@ async function requireLtx25File(file, label) {
   return metadata;
 }
 
-async function hashLtx25File(file, label) {
+async function hashLtx25File(file, label, trustedRoot) {
   const metadata = await requireLtx25File(file, label);
+  const physical = await realpath(file);
+  const boundary = await realpath(trustedRoot);
+  const relation = path.relative(boundary, physical);
+  if (!relation || relation.startsWith("..") || path.isAbsolute(relation)) {
+    fail(`${label} escaped the repository cache boundary at ${file}`);
+  }
   const hash = createHash("sha256");
   let bytes = 0;
   try {
-    for await (const chunk of createReadStream(file)) {
+    for await (const chunk of createReadStream(physical)) {
       bytes += chunk.length;
       hash.update(chunk);
     }
@@ -1646,7 +1681,7 @@ export async function prepareLtx25CaptureArtifacts(
   if (canonicalEnhancer !== enhancer) fail(`LTX-2.5 enhancer root must be canonical: ${enhancer}`);
   let enhancerInventory;
   try {
-    enhancerInventory = await inventoryFor(enhancer);
+    enhancerInventory = await inventoryFor(enhancer, { trustedRoot: repositoryDirectory });
   } catch (error) {
     fail(`hash LTX-2.5 enhancer artifact inventory: ${error.message}`);
   }
@@ -1666,6 +1701,7 @@ export async function prepareLtx25CaptureArtifacts(
     ? await hashLtx25File(
         path.join(resolved, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
         "LTX-2.5 dev refinement adapter",
+        repositoryDirectory,
       )
     : null;
 
@@ -1693,7 +1729,7 @@ export async function prepareLtx25CaptureArtifacts(
     }
     let inventory;
     try {
-      inventory = await inventoryFor(root);
+      inventory = await inventoryFor(root, { trustedRoot: repositoryDirectory });
     } catch (error) {
       fail(`hash LTX-2.5 ${key} artifact inventory: ${error.message}`);
     }
@@ -1711,6 +1747,34 @@ export async function prepareLtx25CaptureArtifacts(
     devAdapter,
     artifacts,
   };
+}
+
+async function assertLtx25ArtifactsStable(sealed, plannedCases, inventoryFor = hashArtifactInventory) {
+  const observed = await prepareLtx25CaptureArtifacts(
+    sealed.snapshotRoot,
+    plannedCases,
+    inventoryFor,
+  );
+  for (const field of ["snapshotRoot", "repository", "revision", "enhancer"]) {
+    if (!equal(observed[field], sealed[field])) {
+      fail(`LTX-2.5 ${field} changed after campaign preparation`);
+    }
+  }
+  if (sealed.devAdapter) {
+    const observedDevAdapter = observed.devAdapter ?? await hashLtx25File(
+      sealed.devAdapter.path,
+      "LTX-2.5 dev refinement adapter",
+      path.dirname(path.dirname(sealed.snapshotRoot)),
+    );
+    if (!equal(observedDevAdapter, sealed.devAdapter)) {
+      fail("LTX-2.5 devAdapter changed after campaign preparation");
+    }
+  }
+  for (const key of new Set(plannedCases.map(ltx25ArtifactKey))) {
+    if (!equal(observed.artifacts.get(key), sealed.artifacts.get(key))) {
+      fail(`LTX-2.5 ${key} artifact inventory changed during provider execution`);
+    }
+  }
 }
 
 export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = process.env) {
@@ -1778,6 +1842,63 @@ function ltx25ExpectedSourceInputs(prepared, planned) {
     });
   }
   return inputs;
+}
+
+export function validateLtx25ResumeIdentity(
+  existing,
+  plannedCases,
+  prepared,
+  currentRepositories = null,
+  currentHardware = null,
+) {
+  const selectedIds = new Set(plannedCases.map((planned) => planned.logicalCaseId));
+  const sessions = new Map((existing.sourceSessions ?? []).map((session) => [session.id, session]));
+  const resumed = new Map();
+  let campaignHardware = null;
+  for (const record of existing.records ?? []) {
+    const logicalIds = new Set([record.logicalCaseId, ...completedLogicalIds(record)]);
+    for (const logicalId of logicalIds) {
+      if (!selectedIds.has(logicalId)) continue;
+      if (resumed.has(logicalId)) {
+        fail(`${logicalId}: resume contains multiple LTX-2.5 campaign identities`);
+      }
+      resumed.set(logicalId, record);
+      if (currentRepositories
+          && !equal(repositoriesIdentity(record.repositories), repositoriesIdentity(currentRepositories))) {
+        fail(`${logicalId}: LTX-2.5 resume row was captured from a different repository identity`);
+      }
+      if (currentHardware && !equal(record.hardware, currentHardware)) {
+        fail(`${logicalId}: LTX-2.5 resume row was captured on different hardware`);
+      }
+      if (campaignHardware && !equal(record.hardware, campaignHardware)) {
+        fail(`${logicalId}: LTX-2.5 resume mixes hardware identities`);
+      }
+      campaignHardware = record.hardware;
+    }
+  }
+  for (const planned of plannedCases) {
+    const record = resumed.get(planned.logicalCaseId);
+    if (!record) continue;
+    const sourceSessionIds = record.derivation?.loadability?.sourceSessionIds;
+    if (!Array.isArray(sourceSessionIds) || sourceSessionIds.length !== 1) {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row requires one exact source session`);
+    }
+    const session = sessions.get(sourceSessionIds[0]);
+    if (session?.kind !== "physical_mlx") {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row requires physical MLX provenance`);
+    }
+    const expectedInputs = ltx25ExpectedSourceInputs(prepared, planned);
+    if (!equal(session.inputs, expectedInputs)) {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume row has stale artifact identity`);
+    }
+    const base = expectedInputs[0];
+    if (record.artifact?.repository !== base.repository
+        || record.artifact?.resolvedRevision !== base.resolvedRevision
+        || record.artifact?.variant !== base.variant
+        || record.artifact?.inventorySha256 !== base.sha256) {
+      fail(`${planned.logicalCaseId}: completed LTX-2.5 resume artifact disagrees with current campaign`);
+    }
+  }
 }
 
 export async function assessProviderReuse({ config, providerCommand, backend, fixture }) {
@@ -1959,11 +2080,15 @@ export async function runProviderPlan({
   });
   const allExpanded = applyExecutionPolicy(expandPlan(selectedConfig));
   const expanded = applyExecutionPolicy(expandPlan(selectedConfig, existing.records));
-  const allSelectedCases = backend
-    ? allExpanded.filter((planned) => planned.backend === backend)
+  if (model === "ltx_2_5" && backend && backend !== "mlx") {
+    fail("--model ltx_2_5 is the exact canonical MLX campaign and cannot select another backend");
+  }
+  const selectedBackend = backend ?? (model === "ltx_2_5" ? "mlx" : undefined);
+  const allSelectedCases = selectedBackend
+    ? allExpanded.filter((planned) => planned.backend === selectedBackend)
     : allExpanded;
   if (allSelectedCases.length === 0) {
-    fail(`provider run selected no ${backend ?? "remaining"} cases${
+    fail(`provider run selected no ${selectedBackend ?? "remaining"} cases${
       model ? ` for model ${JSON.stringify(model)}` : ""
     }`);
   }
@@ -1971,32 +2096,55 @@ export async function runProviderPlan({
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
-  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
-  const exactLtx25Selection = backend === "mlx" && model === "ltx_2_5" &&
-    allSelectedCases.every((planned) =>
-      planned.backend === "mlx" &&
-      planned.target.modelId === "ltx_2_5" &&
-      planned.target.provider === "ltx_2_5");
+  const selectedCases = selectedBackend
+    ? expanded.filter((planned) => planned.backend === selectedBackend)
+    : expanded;
+  const exactLtx25Selection = model === "ltx_2_5";
+  if (exactLtx25Selection) validateCanonicalLtx25Selection(allSelectedCases);
   if (ltx25SnapshotRoot && !exactLtx25Selection) {
-    fail("--ltx25-snapshot-root requires --backend mlx --model ltx_2_5");
+    fail("--ltx25-snapshot-root requires --model ltx_2_5");
   }
   if (exactLtx25Selection && !ltx25SnapshotRoot) {
-    fail("--backend mlx --model ltx_2_5 requires --ltx25-snapshot-root for per-case artifact binding");
+    fail("--model ltx_2_5 requires --ltx25-snapshot-root for per-case artifact binding");
   }
-  // Validate the selector against the complete plan above, then let a fully completed resume be a
-  // deterministic no-op. The untouched merge base is already schema-valid and identity-sorted, and
-  // there is no reason to probe hardware or start a provider when it contains every selected case.
-  if (selectedCases.length === 0) return existing;
   const ltx25Artifacts = exactLtx25Selection
-    ? await prepareLtx25CaptureArtifacts(ltx25SnapshotRoot, selectedCases)
+    ? await prepareLtx25CaptureArtifacts(ltx25SnapshotRoot, allSelectedCases)
     : null;
-  const probe = JSON.parse(await executeProvider(
-    providerCommand[0],
-    providerCommand.slice(1),
-    canonicalJson({ action: "probe", repositories }),
-    ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts) } : undefined,
-  ));
+  if (ltx25Artifacts) {
+    validateLtx25ResumeIdentity(
+      existing,
+      allSelectedCases,
+      ltx25Artifacts,
+      repositories,
+    );
+  }
+  // Artifact identity and every completed row are validated above before a fully completed resume
+  // may become a deterministic no-op. Hardware is intentionally not reprobed when no work remains.
+  if (selectedCases.length === 0) return existing;
+  let probeOutput;
+  try {
+    probeOutput = await executeProvider(
+      providerCommand[0],
+      providerCommand.slice(1),
+      canonicalJson({ action: "probe", repositories }),
+      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts) } : undefined,
+    );
+  } finally {
+    if (ltx25Artifacts) {
+      await assertLtx25ArtifactsStable(ltx25Artifacts, allSelectedCases);
+    }
+  }
+  const probe = JSON.parse(probeOutput);
   await assertRepositoriesStable();
+  if (ltx25Artifacts) {
+    validateLtx25ResumeIdentity(
+      existing,
+      allSelectedCases,
+      ltx25Artifacts,
+      repositories,
+      probe.hardware,
+    );
+  }
   // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
   // plan cases or promote matrix cells. Resume has a narrower operational concern. A prior receipt
   // proves that its exact logical case was already attempted only when the harness, both repository
@@ -2071,7 +2219,6 @@ export async function runProviderPlan({
       fail(`${first.modelLoadGroup}: a rung batch may contain only one pending case per rung`);
     }
     const action = invocation.length > 1 ? "run_batch" : "run";
-    onProviderInvocation?.({ action, cases: invocation });
     const providerRequest = canonicalJson({
       action,
       ...(action === "run" ? { planned: first } : { planned: invocation }),
@@ -2084,13 +2231,20 @@ export async function runProviderPlan({
       if (invocation.some((planned) => ltx25ArtifactKey(planned) !== artifactKey)) {
         fail(`LTX-2.5 provider invocation crosses nested artifact roots at ${artifactKey}`);
       }
+      await assertLtx25ArtifactsStable(ltx25Artifacts, invocation);
     }
-    const providerOutput = await executeProvider(
-      providerCommand[0],
-      providerCommand.slice(1),
-      providerRequest,
-      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts, first) } : undefined,
-    );
+    onProviderInvocation?.({ action, cases: invocation });
+    let providerOutput;
+    try {
+      providerOutput = await executeProvider(
+        providerCommand[0],
+        providerCommand.slice(1),
+        providerRequest,
+        ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts, first) } : undefined,
+      );
+    } finally {
+      if (ltx25Artifacts) await assertLtx25ArtifactsStable(ltx25Artifacts, invocation);
+    }
     await assertRepositoriesStable();
     const response = JSON.parse(providerOutput);
     const fragments = action === "run_batch" ? response.fragments : [response];

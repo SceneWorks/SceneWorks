@@ -13,7 +13,6 @@ use mlx_gen::{AdapterKind, AdapterSpec};
 const LABEL: &str = "MLX LTX-2.5";
 const EXECUTION_PATH: &str = "the MLX LTX-2.5 full-A/V text-to-video path";
 const FINGERPRINT: &str = "sc-18797-ltx-2-5-mlx-ladder-v1";
-const PUBLIC_REVISION: &str = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
 const SEED: u64 = 18755;
 const BASE_FRAMES: u32 = 145;
 const BASE_FPS: u32 = 24;
@@ -357,16 +356,6 @@ fn validate_nested_root(
     Ok(())
 }
 
-fn validate_public_revision(repository: &str, revision: &str) -> Result<(), String> {
-    protocol::validate_artifact_identity(repository, revision, protocol::LTX25_REPOSITORY)?;
-    if revision != PUBLIC_REVISION {
-        return Err(format!(
-            "{LABEL} requires public artifact revision {PUBLIC_REVISION}, got {revision}"
-        ));
-    }
-    Ok(())
-}
-
 fn configured_spec(
     root: PathBuf,
     snapshot_root: &Path,
@@ -409,7 +398,7 @@ fn load_artifact(
     let revision = protocol::required_env("SCENEWORKS_LTX25_REVISION")?;
     // Refuse stale or merely SHA-shaped artifact revisions before canonicalization, provider
     // construction, and especially before any Metal materialization.
-    validate_public_revision(&repository, &revision)?;
+    protocol::validate_ltx25_artifact_identity(&repository, &revision)?;
     let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
         "SCENEWORKS_LTX25_ROOT",
     )?))
@@ -1599,7 +1588,7 @@ mod tests {
 
     #[test]
     fn path_shape_binds_snapshot_variant_and_tier_without_weights() {
-        let revision = PUBLIC_REVISION;
+        let revision = protocol::LTX_2_5_REVISION;
         let root = PathBuf::from(format!(
             "/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/{revision}/distilled/q4"
         ));
@@ -1626,13 +1615,17 @@ mod tests {
 
     #[test]
     fn artifact_revision_is_the_exact_public_upload_not_merely_sha_shaped() {
-        validate_public_revision(protocol::LTX25_REPOSITORY, PUBLIC_REVISION).unwrap();
-        let error = validate_public_revision(
+        protocol::validate_ltx25_artifact_identity(
+            protocol::LTX25_REPOSITORY,
+            protocol::LTX_2_5_REVISION,
+        )
+        .unwrap();
+        let error = protocol::validate_ltx25_artifact_identity(
             protocol::LTX25_REPOSITORY,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .unwrap_err();
-        assert!(error.contains(PUBLIC_REVISION), "{error}");
+        assert!(error.contains(protocol::LTX_2_5_REVISION), "{error}");
     }
 
     #[test]
@@ -1797,7 +1790,7 @@ mod tests {
         let root = snapshot_root.join("dev/q4");
         let artifact = Artifact {
             repository: protocol::LTX25_REPOSITORY.to_owned(),
-            revision: PUBLIC_REVISION.to_owned(),
+            revision: protocol::LTX_2_5_REVISION.to_owned(),
             root: root.clone(),
             snapshot_root: snapshot_root.clone(),
             spec: configured_spec(root, &snapshot_root, target, &selection),

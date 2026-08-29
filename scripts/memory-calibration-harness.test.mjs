@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -15,7 +15,8 @@ import {
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
   ltx25ProviderEnvironment, parsePhysicalMlxAvContent, physicalMlxSessionId,
   prepareLtx25CaptureArtifacts, runProviderPlan, validateBundle, validateRecord, selectPlanProviders,
-  validatePhysicalMlxAvContentsAgainstRecord, validateSourceSessionFiles,
+  validateLtx25ResumeIdentity, validatePhysicalMlxAvContentsAgainstRecord,
+  validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import {
   calibrationBinding,
@@ -59,7 +60,12 @@ async function cleanFixtureRepo() {
   return root;
 }
 
-async function ltx25FixtureSnapshot({ omitRoot } = {}) {
+async function ltx25FixtureSnapshot({
+  omitRoot,
+  symlinkedEnhancer = false,
+  escapedEnhancer = false,
+  symlinkedDevAdapter = false,
+} = {}) {
   const cache = await mkdtemp(path.join(tmpdir(), "memory-ltx25-cache-"));
   const snapshot = path.join(
     cache,
@@ -68,12 +74,36 @@ async function ltx25FixtureSnapshot({ omitRoot } = {}) {
     LTX25_CAPTURE_REVISION,
   );
   await mkdir(path.join(snapshot, "enhancer"), { recursive: true });
-  await writeFile(path.join(snapshot, "enhancer", "model.safetensors"), "enhancer");
+  const enhancerFile = path.join(snapshot, "enhancer", "model.safetensors");
+  if (symlinkedEnhancer || escapedEnhancer) {
+    const target = escapedEnhancer
+      ? path.join(cache, "escaped-enhancer.safetensors")
+      : path.join(cache, "models--SceneWorks--ltx-2.5-mlx", "blobs", "enhancer-blob");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "enhancer");
+    await symlink(path.relative(path.dirname(enhancerFile), target), enhancerFile);
+  } else {
+    await writeFile(enhancerFile, "enhancer");
+  }
   await mkdir(path.join(snapshot, "distilled_lora"), { recursive: true });
-  await writeFile(
-    path.join(snapshot, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
-    "adapter",
+  const adapterFile = path.join(
+    snapshot,
+    "distilled_lora",
+    "ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
   );
+  if (symlinkedDevAdapter) {
+    const adapterBlob = path.join(
+      cache,
+      "models--SceneWorks--ltx-2.5-mlx",
+      "blobs",
+      "adapter-blob",
+    );
+    await mkdir(path.dirname(adapterBlob), { recursive: true });
+    await writeFile(adapterBlob, "adapter");
+    await symlink(path.relative(path.dirname(adapterFile), adapterBlob), adapterFile);
+  } else {
+    await writeFile(adapterFile, "adapter");
+  }
   for (const variant of ["distilled", "dev"]) {
     for (const tier of ["q4", "q8", "bf16"]) {
       if (`${variant}/${tier}` === omitRoot) continue;
@@ -3183,25 +3213,36 @@ test("the LTX-2.5 snapshot driver binds all six nested roots to exact per-root i
     prepareLtx25CaptureArtifacts(missingLayout, selected),
     /nested artifact root dev\/q8 is missing/,
   );
+  const normalHfSymlinks = await ltx25FixtureSnapshot({
+    symlinkedEnhancer: true,
+    symlinkedDevAdapter: true,
+  });
+  assert.match(
+    (await prepareLtx25CaptureArtifacts(normalHfSymlinks, selected)).enhancer.sha256,
+    /^[0-9a-f]{64}$/,
+  );
+  const escapedHfSymlink = await ltx25FixtureSnapshot({ escapedEnhancer: true });
+  await assert.rejects(
+    prepareLtx25CaptureArtifacts(escapedHfSymlink, selected),
+    /escaped its trusted root/,
+  );
 });
 
 test("the LTX-2.5 model driver injects the selected root only after the hardware probe", async () => {
   const plan = JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
   );
-  const provider = selectPlanProviders(plan, { model: "ltx_2_5" })
-    .find((candidate) => candidate.backend === "mlx");
   const snapshot = await ltx25FixtureSnapshot();
   const cleanRepo = await cleanFixtureRepo();
   let capturedEnvironment;
+  let capturedPlanned;
   await assert.rejects(
     runProviderPlan({
       closureDigestFor: stubClosureDigest,
-      config: { providers: [provider] },
+      config: plan,
       providerCommand: ["fixture-ltx25-provider"],
       sceneWorksRepo: cleanRepo,
       inferenceRepo: cleanRepo,
-      backend: "mlx",
       model: "ltx_2_5",
       ltx25SnapshotRoot: snapshot,
       executeProvider: async (_command, _args, input, options) => {
@@ -3226,25 +3267,282 @@ test("the LTX-2.5 model driver injects the selected root only after the hardware
             },
           });
         }
+        capturedPlanned = request.planned;
         capturedEnvironment = options.env;
         throw new Error("stop after LTX-2.5 invocation environment capture");
       },
     }),
     /stop after LTX-2\.5 invocation environment capture/,
   );
-  const key = `${provider.target.transformerVariant}/${provider.target.tier}`;
+  const key = `${capturedPlanned.target.transformerVariant}/${capturedPlanned.target.tier}`;
   assert.equal(capturedEnvironment.SCENEWORKS_LTX25_ROOT, path.join(snapshot, ...key.split("/")));
   assert.ok(Number(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_BYTES) > 0);
   assert.match(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
   assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_BYTES) > 0);
   assert.match(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
-  if (provider.target.transformerVariant === "dev") {
+  if (capturedPlanned.target.transformerVariant === "dev") {
     assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES) > 0);
     assert.match(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, /^[0-9a-f]{64}$/);
   } else {
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
     assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
   }
+});
+
+test("every LTX-2.5 provider invocation rehashes the nested and shared artifacts", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const cleanRepo = await cleanFixtureRepo();
+  for (const [mutation, expected] of [
+    ["base", /artifact inventory changed during provider execution/],
+    ["enhancer", /enhancer changed after campaign preparation/],
+    ["devAdapter", /devAdapter changed after campaign preparation/],
+  ]) {
+    const snapshot = await ltx25FixtureSnapshot();
+    await assert.rejects(
+      runProviderPlan({
+        closureDigestFor: stubClosureDigest,
+        config: plan,
+        providerCommand: ["fixture-ltx25-provider"],
+        sceneWorksRepo: cleanRepo,
+        inferenceRepo: cleanRepo,
+        model: "ltx_2_5",
+        ltx25SnapshotRoot: snapshot,
+        executeProvider: async (_command, _args, input, options) => {
+          const request = JSON.parse(input);
+          if (request.action === "probe") {
+            return JSON.stringify({
+              hardware: {
+                probe: "fixture MLX probe",
+                memoryBytes: 137438953472,
+                model: "Mac17,6",
+                chip: "Apple M5 Max",
+                osVersion: "26.5.2",
+                metalDevice: "Apple M5 Max",
+                mlxMemoryLimitBytes: 130567005798,
+                wiredLimitBytes: 87044670532,
+              },
+            });
+          }
+          const file = mutation === "base"
+            ? path.join(options.env.SCENEWORKS_LTX25_ROOT, "transformer.safetensors")
+            : mutation === "enhancer"
+              ? path.join(snapshot, "enhancer", "model.safetensors")
+              : path.join(
+                  snapshot,
+                  "distilled_lora",
+                  "ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+                );
+          await writeFile(file, `${mutation}-mutated`);
+          throw new Error("provider failed after mutating an input");
+        },
+      }),
+      expected,
+    );
+  }
+});
+
+test("LTX-2.5 resume rows bind the current per-case and shared campaign identity", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  const planned = selected.find((candidate) => candidate.target.transformerVariant === "dev");
+  const prepared = await prepareLtx25CaptureArtifacts(await ltx25FixtureSnapshot(), selected);
+  const key = `${planned.target.transformerVariant}/${planned.target.tier}`;
+  const artifact = prepared.artifacts.get(key);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }, {
+    role: "adapter",
+    path: prepared.devAdapter.path,
+    bytes: prepared.devAdapter.bytes,
+    sha256: prepared.devAdapter.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "dev_refinement_lora",
+  }];
+  const record = runtimeComplete();
+  Object.assign(record, {
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: planned.loadShape,
+    artifact: {
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: planned.target.tier,
+      inventorySha256: artifact.sha256,
+    },
+    target: planned.target,
+    fixture: planned.fixture,
+    strategy: planned.strategy,
+    calibrationFingerprint: planned.calibrationFingerprint,
+    sweep: {
+      axes: [],
+      cases: [{ parameters: planned.strategy.parameters, result: "passed" }],
+      rangeVerified: true,
+    },
+    derivation: { loadability: { kind: "direct", sourceSessionIds: ["ims-current"] } },
+  });
+  assert.equal(logicalCaseId(record), planned.logicalCaseId);
+  const existing = {
+    sourceSessions: [{ id: "ims-current", kind: "physical_mlx", inputs }],
+    records: [record],
+  };
+  validateLtx25ResumeIdentity(
+    existing,
+    selected,
+    prepared,
+    record.repositories,
+    record.hardware,
+  );
+
+  for (const role of ["base", "enhancer", "adapter"]) {
+    const staleInput = structuredClone(existing);
+    staleInput.sourceSessions[0].inputs.find((input) => input.role === role).sha256 = "0".repeat(64);
+    assert.throws(
+      () => validateLtx25ResumeIdentity(staleInput, selected, prepared),
+      /stale artifact identity/,
+    );
+  }
+  const staleRecord = structuredClone(existing);
+  staleRecord.records[0].artifact.resolvedRevision = "0".repeat(40);
+  assert.throws(
+    () => validateLtx25ResumeIdentity(staleRecord, selected, prepared),
+    /resume artifact disagrees with current campaign/,
+  );
+  const duplicate = structuredClone(existing);
+  duplicate.records.push(structuredClone(duplicate.records[0]));
+  assert.throws(
+    () => validateLtx25ResumeIdentity(duplicate, selected, prepared),
+    /multiple LTX-2\.5 campaign identities/,
+  );
+  const foreignRepositories = structuredClone(record.repositories);
+  foreignRepositories.inference.revision = "f".repeat(40);
+  assert.throws(
+    () => validateLtx25ResumeIdentity(
+      existing,
+      selected,
+      prepared,
+      foreignRepositories,
+      record.hardware,
+    ),
+    /different repository identity/,
+  );
+  const foreignHardware = structuredClone(record.hardware);
+  foreignHardware.chip = "Apple M6 Max";
+  assert.throws(
+    () => validateLtx25ResumeIdentity(
+      existing,
+      selected,
+      prepared,
+      record.repositories,
+      foreignHardware,
+    ),
+    /captured on different hardware/,
+  );
+});
+
+test("a fully completed LTX-2.5 resume cannot no-op before provenance validation", async () => {
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const selected = expandPlan({
+    ...plan,
+    providers: selectPlanProviders(plan, { model: "ltx_2_5" }),
+  }).filter((planned) => planned.backend === "mlx");
+  const snapshot = await ltx25FixtureSnapshot();
+  const prepared = await prepareLtx25CaptureArtifacts(snapshot, selected);
+  const cleanRepo = await cleanFixtureRepo();
+  const revision = (await execFileAsync("git", ["-C", cleanRepo, "rev-parse", "HEAD"])).stdout.trim();
+  const matrixSourceRevision = JSON.parse(
+    await readFile(path.join(cleanRepo, "docs/generated/memory-matrix.json")),
+  ).generatedFrom.sceneWorksRevision;
+  const repositories = {
+    sceneWorks: { revision, dirty: false, matrixSourceRevision },
+    inference: { revision, dirty: false, closureDigest: "a".repeat(64) },
+  };
+  const hardware = {
+    probe: "fixture MLX probe",
+    memoryBytes: 137438953472,
+    model: "Mac17,6",
+    chip: "Apple M5 Max",
+    osVersion: "26.5.2",
+    metalDevice: "Apple M5 Max",
+    mlxMemoryLimitBytes: 130567005798,
+    wiredLimitBytes: 87044670532,
+  };
+  const records = selected.map((planned) => {
+    const key = `${planned.target.transformerVariant}/${planned.target.tier}`;
+    const artifact = prepared.artifacts.get(key);
+    const record = runtimeComplete();
+    Object.assign(record, {
+      evidenceScope: planned.evidenceScope,
+      backend: planned.backend,
+      loadShape: planned.loadShape,
+      repositories,
+      hardware,
+      artifact: {
+        repository: prepared.repository,
+        resolvedRevision: prepared.revision,
+        variant: planned.target.tier,
+        inventorySha256: artifact.sha256,
+      },
+      target: planned.target,
+      fixture: planned.fixture,
+      strategy: planned.strategy,
+      sweep: {
+        axes: [],
+        cases: [{ parameters: planned.strategy.parameters, result: "passed" }],
+        rangeVerified: true,
+      },
+      calibrationFingerprint: planned.calibrationFingerprint,
+    });
+    record.logicalCaseId = logicalCaseId(record);
+    record.id = recordId(record);
+    assert.equal(record.logicalCaseId, planned.logicalCaseId);
+    return record;
+  });
+  const resume = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: [],
+    records,
+  };
+  validateBundle(resume);
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config: plan,
+      providerCommand: ["must-not-run"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      model: "ltx_2_5",
+      ltx25SnapshotRoot: snapshot,
+      resume,
+      executeProvider: async () => assert.fail("completed resume must not probe or execute"),
+    }),
+    /completed LTX-2\.5 resume row requires one exact source session/,
+  );
 });
 
 test("--model rejects unknown values and incompatible backend selections", async () => {
@@ -3280,7 +3578,7 @@ test("--model rejects unknown values and incompatible backend selections", async
       backend: "candle",
       model: "ltx_2_5",
     }),
-    /provider run selected no candle cases for model "ltx_2_5"/,
+    /exact canonical MLX campaign and cannot select another backend/,
   );
   await assert.rejects(
     runProviderPlan({
@@ -3290,6 +3588,21 @@ test("--model rejects unknown values and incompatible backend selections", async
       sceneWorksRepo: cleanRepo,
       inferenceRepo: cleanRepo,
       backend: "mlx",
+      model: "ltx_2_5",
+      executeProvider: async () => assert.fail("missing snapshot root must fail before provider probe"),
+    }),
+    /must select the exact canonical 84-case MLX campaign/,
+  );
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config: plan,
+      providerCommand: ["must-not-run"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
       model: "ltx_2_5",
       executeProvider: async () => assert.fail("missing snapshot root must fail before provider probe"),
     }),
