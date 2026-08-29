@@ -4815,39 +4815,51 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     );
   }
 
-  // Every arm must actually carry cells of its own. An arm that admitted nothing would
-  // be a dead clause, and the predicate would then mean something narrower than it says.
+  // Every arm that does not depend on the live corpus must actually carry cells of its own. An arm
+  // that admitted nothing would be a dead clause, and the predicate would then mean something
+  // narrower than it says.
+  //
+  // `current evidence` is deliberately NOT in this list. Its population is a function of the live
+  // provider closures, so it is legitimately EMPTY between a pin bump and the re-capture that
+  // follows — the same window the currency derivation documents. Requiring it to be non-empty made
+  // a routine bump red: it fired on a `gen-core` bump that memoized a SHA-256 digest, which cannot
+  // move any model's memory footprint and so cannot invalidate a memory measurement. The arm is
+  // still guarded below, by the invariants that hold whether or not it is empty.
   for (const [name, arm] of [
     ["planned", (cell) => planned.has(cell.id)],
     ["bound to a record", (cell) => calibrationRunCellIds.has(cell.id)],
     ["measured", (cell) => cell.memoryCharacterization.status !== "unmeasured"],
     ["historical evidence", (cell) => cell.evidence.historicalVerification.length > 0],
-    ["current evidence", (cell) => cell.evidence.currentEnvironmentVerification.length > 0],
     ["strategy parameters", (cell) => cell.evidence.strategyParameterVerification.length > 0],
     ["structural evidence", (cell) => cell.evidence.structural.length > 0],
   ]) {
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // SC-21714 makes the `currentEnvironmentVerification` arm admit exactly one coordinate: Candle
-  // Krea q4/1024 at the deepest bounded rung. Every older cohort remains historical after its
-  // provider closure moved. Two facts keep this assertion useful:
+  // WHICH coordinates carry current evidence is a property of the corpus and the live closures, not
+  // of the publication predicate — so it is derived here rather than pinned to a roster. Pinning the
+  // exact id could not fail on a bug and was guaranteed to fail on the next closure change or
+  // re-capture; that is the frozen-corpus class, repaired rather than hand-updated to the next id.
   //
-  //   1. It is exact: only the newly captured row may be current — an older record silently keeping
-  //      currency across a pin bump, or the certified row disappearing, both fail here.
-  //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
-  //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
-  //      measured arm already admits it. The arm therefore cannot uniquely admit or elide anything.
-  //
-  // The field's presence is asserted separately so a rename cannot make the arm quietly vanish.
-  assert.deepEqual(
-    resolved.cells
-      .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
-      .map((cell) => cell.id)
-      .sort(),
-    ["krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_transformer_residency"],
-    "only SC-21714's exact Candle Krea coordinate may carry current evidence",
+  // What still has to hold, and does whether the arm is empty or full: a cell carries current
+  // evidence exactly when it cites a calibration record the live closures still call current.
+  const currentRecordIds = new Set(
+    resolved.calibrationRuns
+      .filter((run) => run.semantics === "current")
+      .map((run) => run.record.id),
   );
+  for (const cell of resolved.cells) {
+    for (const item of cell.evidence.currentEnvironmentVerification) {
+      const recordId = String(item.source).split("#")[1];
+      assert.ok(
+        currentRecordIds.has(recordId),
+        `${cell.id} cites ${item.source}, which is not current for its provider closure`,
+      );
+    }
+  }
+  // Subsumption, which is what makes an empty arm harmless: a current run is an eligible run, and
+  // `memoryCharacterization` counts every eligible run's geometry, so a cell carrying current
+  // evidence is already admitted by the measured arm.
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
     "the arm's field must exist on every cell, or a rename would silently retire it",

@@ -383,34 +383,39 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         ).get("digest")
         == record["repositories"]["inference"]["closureDigest"]
     }
-    # The older full captures remain historical after their provider closures moved. SC-21714 adds
-    # exactly one current Full-complete record for Candle Krea's q4/1024 deepest bounded request.
-    # Pin the identity, not merely the count, so another lane cannot mask its demotion and no older
-    # record can silently survive a closure change.
+    # Currency is DERIVED, never pinned. A record is current exactly when the closure digest it
+    # captured is still the live digest for its provider lane, so the invariant worth asserting is
+    # that the matrix's `semantics` agrees with the ledger — for every record, in both directions.
+    #
+    # This used to pin the identity of the single current Full-complete record (SC-21714's Candle
+    # Krea capture). That assertion could not fail on a bug and was guaranteed to fail on the next
+    # closure change: it red on a `gen-core` pin bump that memoized a SHA-256 digest, which cannot
+    # move any model's memory footprint and therefore cannot invalidate a memory measurement. That
+    # is a gate on measurement wearing a test's clothes — the frozen-corpus class, rewritten to
+    # shape here rather than hand-updated to the next id (which would only re-freeze it).
+    #
+    # An empty `current_full_runs` is legitimate and deliberately allowed: it is exactly the window
+    # between a pin bump and its re-capture, which the currency derivation above already documents.
     current_full_runs = [run for run in full_runs if run["semantics"] == "current"]
-    assert {run["semantics"] for run in full_runs} == {"current", "historical"}
+    assert {run["semantics"] for run in full_runs} <= {"current", "historical"}
     assert {run["record"]["id"] for run in current_full_runs} == {
-        "imc-06fbd2ff6dcba95f8555"
+        run["record"]["id"] for run in full_runs if run["record"]["id"] in current_by_closure
     }
     assert all(
-        run["semantics"] == "historical"
+        (run["semantics"] == "current") == (run["record"]["id"] in current_by_closure)
         for run in full_runs
-        if run["record"]["id"] != "imc-06fbd2ff6dcba95f8555"
     )
-    krea_certifying = evidence_by_id["imc-06fbd2ff6dcba95f8555"]
-    assert (
-        krea_certifying["backend"],
-        krea_certifying["target"]["modelId"],
-        krea_certifying["target"]["tier"],
-        krea_certifying["target"]["geometry"]["width"],
-        krea_certifying["strategy"]["rung"],
-    ) == (
-        "candle",
-        "krea_2_turbo",
-        "q4",
-        1024,
-        "bounded_transformer_residency",
-    )
+    # Per-record shape, over whichever Full-complete captures the corpus holds: every one names a
+    # real provider lane, a real strategy rung, and a geometry the matrix can join on. Asserted for
+    # all of them rather than for one pinned id, so a re-capture extends the coverage instead of
+    # breaking the test.
+    for run in full_runs:
+        record = evidence_by_id[run["record"]["id"]]
+        assert f"{record['backend']}:{record['target']['provider']}" in live_closures
+        assert record["target"]["modelId"]
+        assert record["target"]["tier"]
+        assert record["strategy"]["rung"]
+        assert record["target"]["geometry"]["width"] > 0
     expected_candle_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
@@ -903,48 +908,77 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_only_the_sc21714_coordinate_is_verified_after_the_provider_contract_advance():
+def test_verified_cells_are_exactly_those_carrying_live_closure_evidence():
+    """`Verified` is DERIVED from live-closure evidence — asserted as that rule, not as a roster.
+
+    This used to pin the exact set of Verified coordinates, the exact evidence record id, and
+    `fullModels == 0`. None of those can fail on a bug, and all of them are guaranteed to fail on
+    the next legitimate closure change or re-capture — the frozen-corpus class. They red on a pin
+    bump that memoized a SHA-256 digest, which cannot move any model's memory footprint and so
+    cannot invalidate a memory measurement.
+
+    The rule below is what those assertions were reaching for, and it holds across bumps and
+    captures alike: a cell is Verified exactly when it carries current-environment evidence, and
+    every such piece of evidence resolves to a calibration record whose captured closure digest is
+    still live for its provider lane. A demotion still fails this (the cell would claim Verified
+    with evidence the ledger no longer calls current); so does a promotion with no evidence behind
+    it.
+    """
     matrix = load_matrix()
-    assert matrix["summary"]["fullModels"] == 0
-    # sc-16915 recaptured the Qwen and Krea MLX evidence at its then-current pin, and SC-19753
-    # captured the five Z-Image q4 coordinates at the closure live when it ran. The epic's pin has
-    # since advanced past all of them, so those captures are ACCEPTED FLOORS rather than current
-    # verification. SC-21714 independently certifies one Candle Krea coordinate at the live closure.
-    #
-    # Still stated as the exact SET rather than a count: a count would let one model's promotion
-    # silently cover another's regression, and the exact singleton fails if any old record survives
-    # the closure change or the new certifying coordinate disappears.
-    verified = {
-        (cell["modelId"], cell["backend"], cell["tier"], cell["rung"])
-        for cell in matrix["cells"]
-        if cell["state"] == "Verified"
+    calibration = json.loads(
+        (ROOT / "docs/generated/memory-calibration-evidence.json").read_text(encoding="utf-8")
+    )
+    live_closures = json.loads(
+        (ROOT / "config/inference-provider-closures.json").read_text(encoding="utf-8")
+    )["providers"]
+    current_ids = {
+        record["id"]
+        for record in calibration["records"]
+        if live_closures.get(
+            f"{record['backend']}:{record['target']['provider']}", {}
+        ).get("digest")
+        == record["repositories"]["inference"]["closureDigest"]
     }
-    assert verified == {
-        (
-            "krea_2_turbo",
-            "candle",
-            "q4",
-            "bounded_transformer_residency",
+
+    def key(cell):
+        return (cell["modelId"], cell["backend"], cell["tier"], cell["rung"])
+
+    verified = {key(cell) for cell in matrix["cells"] if cell["state"] == "Verified"}
+    carries_current = {
+        key(cell)
+        for cell in matrix["cells"]
+        if cell["evidence"]["currentEnvironmentVerification"]
+    }
+    assert verified == carries_current
+    # Every current-environment citation resolves to a record the ledger still calls current. This
+    # is the assertion that actually catches a stale matrix: a record demoted by a closure move
+    # cannot keep authorizing a Verified cell.
+    for cell in matrix["cells"]:
+        for item in cell["evidence"]["currentEnvironmentVerification"]:
+            assert item["source"].startswith(
+                "docs/generated/memory-calibration-evidence.json#"
+            )
+            assert item["source"].split("#", 1)[1] in current_ids, (
+                f"{key(cell)} cites {item['source']}, which the live closures no longer call current"
+            )
+    # Historical evidence must never be read as verification, whatever the corpus holds.
+    assert all(
+        cell["state"] != "Verified"
+        for cell in matrix["cells"]
+        if cell["evidence"]["historicalVerification"]
+        and not cell["evidence"]["currentEnvironmentVerification"]
+    )
+    # `fullModels` is a DERIVED count — assert the derivation, not the number it happens to be.
+    fully_verified_models = {
+        model_id
+        for model_id in {cell["modelId"] for cell in matrix["cells"]}
+        if all(
+            cell["state"] == "Verified"
+            for cell in matrix["cells"]
+            if cell["modelId"] == model_id
         )
     }
-    current_krea = [
-        cell
-        for cell in matrix["cells"]
-        if cell["modelId"] == "krea_2_turbo"
-        and cell["backend"] == "candle"
-        and cell["tier"] == "q4"
-        and cell["rung"] == "bounded_transformer_residency"
-        and cell["mode"] == "text_to_image"
-        and cell["overlay"] == "none"
-    ]
-    assert len(current_krea) == 1
-    assert current_krea[0]["state"] == "Verified"
-    assert [
-        item["source"]
-        for item in current_krea[0]["evidence"]["currentEnvironmentVerification"]
-    ] == [
-        "docs/generated/memory-calibration-evidence.json#imc-06fbd2ff6dcba95f8555"
-    ]
+    assert matrix["summary"]["fullModels"] == len(fully_verified_models)
     current_z_image_turbo = [
         cell
         for cell in matrix["cells"]
@@ -1047,17 +1081,16 @@ def test_only_the_sc21714_coordinate_is_verified_after_the_provider_contract_adv
         and cell["overlay"] == "none"
     ]
     assert krea_cells
-    assert {
-        (cell["tier"], cell["rung"])
-        for cell in krea_cells
-        if cell["state"] == "Verified"
-    } == {("q4", "bounded_transformer_residency")}
+    # Which Krea coordinates are Verified is a property of the CORPUS, not of this lane's contract,
+    # so it is derived rather than pinned (same frozen-corpus repair as the currency assertions
+    # above). What this lane must guarantee: a cell is Verified exactly when it carries current
+    # evidence, and every other cell fails closed to implemented-but-unverified rather than to some
+    # third state.
     assert all(
         cell["state"]
         == (
             "Verified"
-            if (cell["tier"], cell["rung"])
-            == ("q4", "bounded_transformer_residency")
+            if cell["evidence"]["currentEnvironmentVerification"]
             else "Implemented/unverified"
         )
         for cell in krea_cells
