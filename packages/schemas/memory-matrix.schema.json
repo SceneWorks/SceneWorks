@@ -486,6 +486,39 @@
           "type": ["integer", "null"]
         }
       }
+    },
+    "pipelineCharacterization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transformerVariant", "decoder", "memoryCharacterization"],
+      "properties": {
+        "transformerVariant": { "enum": ["distilled", "dev"] },
+        "decoder": { "enum": ["conv", "diffvae"] },
+        "memoryCharacterization": {
+          "type": "object",
+          "required": ["status", "measuredGeometries", "coveredPixelBound"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "enum": ["unmeasured", "point", "fitted"] },
+            "measuredGeometries": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*x[1-9][0-9]*(xf[1-9][0-9]*)?$"
+              }
+            },
+            "coveredPixelBound": {
+              "type": ["integer", "null"],
+              "exclusiveMinimum": 0
+            },
+            "coveredFrameBound": {
+              "type": ["integer", "null"],
+              "exclusiveMinimum": 0
+            }
+          }
+        }
+      }
     }
   },
   "required": [
@@ -1385,39 +1418,6 @@
             "binding": {
               "type": "string",
               "minLength": 1
-            }
-          }
-        }
-      }
-    },
-    "pipelineCharacterization": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["transformerVariant", "decoder", "memoryCharacterization"],
-      "properties": {
-        "transformerVariant": { "enum": ["distilled", "dev"] },
-        "decoder": { "enum": ["conv", "diffvae"] },
-        "memoryCharacterization": {
-          "type": "object",
-          "required": ["status", "measuredGeometries", "coveredPixelBound"],
-          "additionalProperties": false,
-          "properties": {
-            "status": { "enum": ["unmeasured", "point", "fitted"] },
-            "measuredGeometries": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]*x[1-9][0-9]*(xf[1-9][0-9]*)?$"
-              }
-            },
-            "coveredPixelBound": {
-              "type": ["integer", "null"],
-              "exclusiveMinimum": 0
-            },
-            "coveredFrameBound": {
-              "type": ["integer", "null"],
-              "exclusiveMinimum": 0
             }
           }
         }

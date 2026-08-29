@@ -43,6 +43,12 @@ def matrix_validator():
     return jsonschema.Draft202012Validator(schema, registry=registry)
 
 
+def test_pipeline_characterization_schema_is_defined_at_its_ref_target():
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    assert "pipelineCharacterization" in schema["$defs"]
+    assert "pipelineCharacterization" not in schema["properties"]
+
+
 def test_generated_memory_matrix_is_current_and_schema_valid():
     subprocess.run(
         ["node", "scripts/generate-memory-matrix.mjs", "--check"],
