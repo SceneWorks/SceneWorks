@@ -24,8 +24,8 @@
  * `memory-calibration-harness.mjs#evidenceSemantics` and `generate-memory-matrix.mjs#closureIsCurrent`
  * key it. A record or manifest calibration binding is stale when the closure digest it was captured
  * under differs from the live digest for its own lane. The live table is loaded through
- * `validatedInferenceClosures`, the SAME gate the matrix generator uses, so the report cannot report
- * currency against a closure table that is not keyed to the live Cargo pin.
+ * `validatedInferenceClosures`, the SAME predicate the matrix generator uses, so the report and the
+ * matrix cannot disagree about which lanes are current.
  *
  * TWO POPULATIONS, KEPT SEPARATE
  *
@@ -720,9 +720,11 @@ export async function loadSources(root = ROOT) {
     );
   const closures = JSON.parse(closuresBody);
   return {
-    // The SAME gate the matrix generator applies: a closure table not keyed to the live pin is a
-    // hard error, here as there, so the report can never grade currency against a stale table.
-    liveDigests: validatedInferenceClosures(closuresBody, inferencePinFromCargo(cargoBody)),
+    // The SAME predicate the matrix generator applies, so the report and the matrix cannot disagree
+    // about which lanes are current. It no longer requires the table to be keyed to the live pin:
+    // `inferenceRevision` is the revision the digests were derived at, and demanding it equal the
+    // Cargo pin made every pin bump a forced re-derivation, which demoted every lane at once.
+    liveDigests: validatedInferenceClosures(closuresBody),
     declarations: closures.providers,
     records: JSON.parse(evidenceBody).records,
     manifest: JSON.parse(stripJsoncComments(manifestBody)),

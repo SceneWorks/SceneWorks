@@ -1630,18 +1630,29 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
 /// source of truth for a base model's pinned `coRequisite` downloads (the app seeds its live catalog
 /// from these bytes). The training plan carries the base model id, not its manifest entry, so the trainer
 /// resolves components off this. `None` when the id is not a builtin model.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// Compiled on every build (not just the macOS/candle trainer lanes): the pre-loader model-source
+/// guard resolves a plan-backed imported checkpoint's resident base model off this too
+/// (sc-22329), and the guard runs everywhere.
+///
+/// The parse is memoized because that guard call is on the PER-JOB path — including for imported
+/// jobs whose row is discarded moments later for missing receipts — where it would otherwise
+/// comment-strip and parse the whole embedded catalog every time. The bytes are a compile-time
+/// constant, so one parse can serve the process.
 pub(crate) fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
-    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, contents)| *contents)?;
-    let manifest: serde_json::Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).ok()?;
-    manifest
+    static MODELS: std::sync::OnceLock<Option<serde_json::Value>> = std::sync::OnceLock::new();
+    MODELS
+        .get_or_init(|| {
+            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .map(|(_, contents)| *contents)?;
+            serde_json::from_str::<serde_json::Value>(
+                &sceneworks_core::jsonc::strip_jsonc_comments(raw),
+            )
+            .ok()
+        })
+        .as_ref()?
         .get("models")?
         .as_array()?
         .iter()
