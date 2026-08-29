@@ -1348,6 +1348,33 @@ test("the LTX-2.5 MLX terminal plan is the exact 60-case base plus 24-case max e
       assert.equal(row.rung, "bounded_attention");
       assert.ok(!row.engagedRungs.includes("bounded_transformer_residency"));
     }
+    const expectedComposition = {
+      "distilled/conv": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+      ],
+      "distilled/diffvae": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency",
+      ],
+      "dev/conv": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+      ],
+      "dev/diffvae": ["resident", "staged_residency", "bounded_attention"],
+    }[`${row.target.transformerVariant}/${row.target.decoder}`];
+    assert.deepEqual(
+      row.engagedRungs,
+      expectedComposition,
+      `${row.target.transformerVariant}/${row.target.decoder} must preserve the provider's exact layered composition`,
+    );
   }
 
   for (const field of ["transformerVariant", "decoder"]) {
