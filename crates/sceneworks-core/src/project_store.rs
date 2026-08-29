@@ -854,6 +854,19 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
+        // SVG is active document syntax, not a generic upload format. Vector assets may enter
+        // only through the worker-owned `vector_generate` sanitizer/rasterizer boundary, which
+        // writes a canonical SVG plus a bounded PNG preview together (sc-22251).
+        if content_type.eq_ignore_ascii_case("image/svg+xml")
+            || Path::new(&upload.filename)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "SVG uploads are not supported; use Vector Studio".to_owned(),
+            ));
+        }
         if !content_type.starts_with("image/") {
             return Err(ProjectStoreError::BadRequest(
                 "Only image dataset uploads are supported".to_owned(),
@@ -1920,6 +1933,19 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
+        // SVG is active document syntax, not a generic upload format. Vector assets may enter
+        // only through the worker-owned `vector_generate` sanitizer/rasterizer boundary, which
+        // writes a canonical SVG plus a bounded PNG preview together (sc-22251).
+        if content_type.eq_ignore_ascii_case("image/svg+xml")
+            || Path::new(&upload.filename)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "SVG uploads are not supported; use Vector Studio".to_owned(),
+            ));
+        }
         if !content_type.starts_with("image/")
             && !content_type.starts_with("video/")
             && !content_type.starts_with("audio/")
@@ -4879,6 +4905,16 @@ fn build_generated_asset_sidecar(
             object.insert("extra".to_owned(), extra.clone());
         }
     }
+    // SVG is never a browser-previewable media type. The worker supplies a separately stored,
+    // bounded PNG fact after sanitizing/rasterizing the SVG; keep it on the vector sidecar rather
+    // than asking clients to infer a sibling filename or to fetch the active source document.
+    if media_type == "vector" {
+        if let Some(preview) = fact.get("preview") {
+            if let Some(object) = asset.as_object_mut() {
+                object.insert("preview".to_owned(), preview.clone());
+            }
+        }
+    }
     asset
 }
 
@@ -6846,6 +6882,39 @@ mod tests {
             json!(false)
         );
         assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
+    }
+
+    #[test]
+    fn build_generated_vector_sidecar_keeps_svg_source_and_png_preview_distinct() {
+        let fact = json!({
+            "assetId": "asset_vector",
+            "type": "vector",
+            "mediaPath": "assets/images/genset_v/asset_vector/vector.svg",
+            "mimeType": "image/svg+xml",
+            "width": 12,
+            "height": 8,
+            "createdAt": "2026-08-29T00:00:00Z",
+            "mode": "image_to_svg",
+            "model": "fixture_svg",
+            "adapter": "fixture_svg",
+            "prompt": "",
+            "negativePrompt": "",
+            "count": 1,
+            "normalizedWidth": 12,
+            "normalizedHeight": 8,
+            "preview": {
+                "path": "assets/images/genset_v/asset_vector/preview.png",
+                "mimeType": "image/png",
+                "width": 12,
+                "height": 8,
+            },
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_v", &fact);
+        assert_eq!(asset["type"], "vector");
+        assert_eq!(asset["file"]["path"], fact["mediaPath"]);
+        assert_eq!(asset["file"]["mimeType"], "image/svg+xml");
+        assert_eq!(asset["preview"]["mimeType"], "image/png");
+        assert_ne!(asset["file"]["path"], asset["preview"]["path"]);
     }
 
     /// sc-4408: a scored generation's `rawAdapterSettings.faceLikeness` block (attached worker-side by
@@ -11652,6 +11721,46 @@ mod tests {
         assert!(is_safe_upload_extension("mp4"));
         assert!(!is_safe_upload_extension("svg"));
         assert!(!is_safe_upload_extension("html"));
+    }
+
+    #[test]
+    fn import_asset_refuses_svg_even_when_the_client_claims_png() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("No raw SVG").expect("project creates");
+        let source = temp_dir.path().join("untrusted.svg");
+        std::fs::write(
+            &source,
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
+        )
+        .expect("fixture writes");
+
+        let error = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "untrusted.svg".to_owned(),
+                    // The filename check must still win when the client lies about the MIME type.
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect_err("generic SVG import is forbidden");
+        assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+        assert!(store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list")
+            .is_empty());
+        assert!(
+            !Path::new(&project.path)
+                .join("assets/uploads")
+                .read_dir()
+                .expect("upload dir")
+                .any(|entry| entry.is_ok()),
+            "rejected SVG leaves neither asset nor sidecar"
+        );
     }
 
     /// sc-8872 (F-070): end-to-end — a `video/mp4` upload named `evil.html` is stored with a `.mp4`

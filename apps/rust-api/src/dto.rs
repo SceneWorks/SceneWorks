@@ -793,6 +793,18 @@ pub(crate) struct ImageJobRequest {
     pub(crate) advanced: JsonObject,
 }
 
+/// The deliberately narrow, fixture-only image-to-SVG intake used by the Vector Studio walking
+/// skeleton. Production raster/provider routing is a later story; keeping this input typed and
+/// separate prevents an arbitrary SVG from entering the generic raw-job route.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImageToSvgJobRequest {
+    pub(crate) project_id: String,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    pub(crate) fixture_svg: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VqaJobRequest {
