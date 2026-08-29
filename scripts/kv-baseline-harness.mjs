@@ -49,6 +49,11 @@ const LIFECYCLE = [
   "postRunRelease",
 ];
 const CONTEXT_BANDS = ["short", "medium", "memory-material", "fit-boundary"];
+export const MEMORY_MATERIAL_MIN_DENSE_SHARE_BPS = 1_000;
+export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
+const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
+const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
+const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
 const TIMING_FIELDS = [
   "loadMs",
   "prefillMs",
@@ -395,6 +400,22 @@ function validateFixtureEvidence(evidence) {
   }
 }
 
+function contextBandTarget(contextWindowTokens, contextBand) {
+  positiveInteger(contextWindowTokens, "geometry.contextWindowTokens");
+  if (contextWindowTokens < 1_024) fail("context window is below the frozen minimum");
+  const medium = Math.min(1_024, Math.max(128, Math.floor(contextWindowTokens / 16)));
+  const memoryMaterial = Math.floor(contextWindowTokens / 4);
+  const fitBoundary = Math.max(
+    contextWindowTokens - 512,
+    Math.ceil(contextWindowTokens * FIT_BOUNDARY_MIN_CONTEXT_BPS / 10_000),
+  );
+  const targets = { short: 32, medium, "memory-material": memoryMaterial, "fit-boundary": fitBoundary };
+  if (!(32 < medium && medium < memoryMaterial && memoryMaterial < fitBoundary)) {
+    fail("context window cannot represent four distinct frozen bands");
+  }
+  return targets[contextBand];
+}
+
 function receiptCore(receipt) {
   return Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receiptSha256"));
 }
@@ -429,29 +450,38 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   exactKeys(
     receipt.provenance,
     [
-      "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision", "mlxRevision", "dependencyLockSha256",
+      "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision", "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256",
       "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
+      "referenceModelId", "referenceModelSha256", "referenceModelBytes",
       "thermalState", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
     ],
     "provenance",
   );
   gitRevision(receipt.provenance.sceneWorksRevision, "provenance.sceneWorksRevision");
   gitRevision(receipt.provenance.inferenceRevision, "provenance.inferenceRevision");
-  if (receipt.provenance.sceneWorksRepository !== "git@github.com:SceneWorks/SceneWorks.git"
-    || receipt.provenance.inferenceRepository !== "git@github.com:SceneWorks/inference.git") {
+  if (receipt.provenance.sceneWorksRepository !== SCENEWORKS_REPOSITORY
+    || receipt.provenance.inferenceRepository !== INFERENCE_REPOSITORY) {
     fail("provenance repository identity is not the paired SceneWorks repositories");
   }
   for (const field of [
-    "mlxRevision", "os", "xcode", "hardware", "modelId", "powerMode", "thermalState",
+    "mlxVersion", "mlxSource", "mlxRevision", "os", "xcode", "hardware", "modelId",
+    "referenceModelId", "powerMode", "thermalState",
     "commandTemplate", "command",
   ]) {
     text(receipt.provenance[field], `provenance.${field}`);
   }
   digest(receipt.provenance.dependencyLockSha256, "provenance.dependencyLockSha256");
+  gitRevision(receipt.provenance.mlxRevision, "provenance.mlxRevision");
+  if (receipt.provenance.mlxSource
+    !== `git+${PMETAL_MLX_REPOSITORY}?rev=${receipt.provenance.mlxRevision}#${receipt.provenance.mlxRevision}`) {
+    fail("MLX dependency source does not bind its exact Git revision");
+  }
   digest(receipt.provenance.modelFileSha256, "provenance.modelFileSha256");
+  digest(receipt.provenance.referenceModelSha256, "provenance.referenceModelSha256");
   digest(receipt.provenance.campaignSessionId, "provenance.campaignSessionId");
   digest(receipt.provenance.coordinateOperationSha256, "provenance.coordinateOperationSha256");
   positiveInteger(receipt.provenance.modelFileBytes, "provenance.modelFileBytes");
+  positiveInteger(receipt.provenance.referenceModelBytes, "provenance.referenceModelBytes");
   positiveInteger(receipt.provenance.campaignCacheStateVersion, "provenance.campaignCacheStateVersion");
   if (receipt.provenance.thermalState !== "nominal") {
     fail("thermal state is not nominal");
@@ -477,11 +507,13 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
 
   exactKeys(
     receipt.geometry,
-    ["batch", "queryHeads", "kvHeads", "headDimension", "queryLength", "kvLength", "layers", "elementBytes", "capacity", "contextTargetTokens", "contextPayloadTokens"],
+    ["batch", "queryHeads", "kvHeads", "headDimension", "queryLength", "kvLength", "layers", "elementBytes", "capacity", "contextWindowTokens", "contextTargetTokens", "contextPayloadTokens"],
     "geometry",
   );
   for (const field of Object.keys(receipt.geometry)) positiveInteger(receipt.geometry[field], `geometry.${field}`);
-  if (receipt.geometry.contextPayloadTokens > receipt.geometry.contextTargetTokens
+  if (receipt.geometry.contextTargetTokens
+      !== contextBandTarget(receipt.geometry.contextWindowTokens, receipt.matrix.contextBand)
+    || receipt.geometry.contextPayloadTokens > receipt.geometry.contextTargetTokens
     || receipt.geometry.contextPayloadTokens < Math.floor(receipt.geometry.contextTargetTokens / 2)) {
     fail("context payload token count is outside its producer-measured band");
   }
@@ -533,7 +565,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (!Array.isArray(receipt.memory.allocationEvents) || receipt.memory.allocationEvents.length === 0) {
     fail("memory allocation events are required");
   }
-  if (detectFullCacheTemporary(
+  if (receipt.mode === "compressed" && detectFullCacheTemporary(
     receipt.memory.allocationEvents,
     receipt.memory.denseTheoreticalKvBytes,
   ).detected) fail("full-cache temporary detected");
@@ -573,6 +605,17 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     || receipt.memory.reconciliation.expectedDenseKvBytes !== expectedDenseKvBytes
     || receipt.memory.reconciliation.observedPersistentKvBytes !== receipt.memory.persistentKvBytes) {
     fail("dense KV byte attribution does not reconcile with geometry");
+  }
+  if (receipt.matrix.contextBand === "memory-material"
+    && expectedDenseKvBytes * 10_000
+      < prefillPeak.physFootprintBytes * MEMORY_MATERIAL_MIN_DENSE_SHARE_BPS) {
+    fail("memory-material dense KV is below the frozen process-footprint share");
+  }
+  if (receipt.matrix.contextBand === "fit-boundary"
+    && (receipt.geometry.capacity > receipt.geometry.contextWindowTokens
+      || receipt.geometry.capacity * 10_000
+        < receipt.geometry.contextWindowTokens * FIT_BOUNDARY_MIN_CONTEXT_BPS)) {
+    fail("fit-boundary cache occupancy is below the frozen admission ratio");
   }
   if (receipt.mode === "dense"
     && Math.abs(receipt.memory.persistentKvBytes - expectedDenseKvBytes)
@@ -839,13 +882,16 @@ export async function buildVerifiedReceipt(input) {
 }
 
 export function validateFixtureArtifact(artifact, fixture, sourceRow) {
-  exactKeys(artifact, ["fixture", "independentReference", "evidence", "metrics"], `fixture artifact ${fixture}`);
+  const keys = ["fixture", "independentReference", "evidence", "metrics"];
+  if (Object.hasOwn(artifact, "binding")) keys.push("binding");
+  exactKeys(artifact, keys, `fixture artifact ${fixture}`);
   if (artifact.fixture !== fixture) fail(`fixture artifact name mismatch for ${fixture}`);
   if (artifact.independentReference !== sourceRow.independentReference) {
     fail(`fixture artifact reference mismatch for ${fixture}`);
   }
   object(artifact.evidence, `fixture artifact ${fixture}.evidence`);
   object(artifact.metrics, `fixture artifact ${fixture}.metrics`);
+  if (Object.hasOwn(artifact, "binding")) object(artifact.binding, `fixture artifact ${fixture}.binding`);
   for (const field of ["parityMaxError", "perplexityDelta", "greedyTokenAgreement", "structuredToolAgreement", "needleRetrieval", "multiTurnPromptCache"]) {
     if (typeof artifact.metrics[field] !== "number" || !Number.isFinite(artifact.metrics[field])) {
       fail(`fixture artifact ${fixture}.metrics.${field} must be finite`);
@@ -969,6 +1015,7 @@ async function readSealedText(file) {
 /** Publish JSON, human receipt, and both sidecars as one directory rename. */
 export async function writeReceiptSet(directory, receipt) {
   validateReceipt(receipt);
+  if (!receipt[FIXTURE_SOURCES]) fail("published receipt requires exact fixture source bytes");
   const parent = path.dirname(directory);
   const base = path.basename(directory);
   const staging = path.join(parent, `.${base}.staging-${process.pid}-${randomUUID()}`);
@@ -983,18 +1030,21 @@ export async function writeReceiptSet(directory, receipt) {
       writeFile(path.join(staging, "receipt.json.sha256"), `${sha256(json)}  receipt.json\n`, { flag: "wx" }),
       writeFile(path.join(staging, "receipt.md.sha256"), `${sha256(markdown)}  receipt.md\n`, { flag: "wx" }),
     ]);
-    if (receipt[FIXTURE_SOURCES]) {
-      await mkdir(path.join(staging, "fixtures"), { recursive: false });
-      for (const fixture of FIXTURES) {
-        const source = receipt[FIXTURE_SOURCES][fixture];
-        const bytes = await readFile(source);
-        const name = `${fixture}.json`;
-        if (sha256(bytes) !== receipt.quality.fixtureEvidence[fixture].artifactSha256) {
-          fail(`fixture ${fixture} changed before publication`);
-        }
-        await writeFile(path.join(staging, "fixtures", name), bytes, { flag: "wx" });
-        await writeFile(path.join(staging, "fixtures", `${name}.sha256`), `${sha256(bytes)}  ${name}\n`, { flag: "wx" });
+    await mkdir(path.join(staging, "fixtures"), { recursive: false });
+    for (const fixture of FIXTURES) {
+      const source = receipt[FIXTURE_SOURCES][fixture];
+      const bytes = await readFile(source);
+      const name = `${fixture}.json`;
+      const artifactName = `fixtures/${name}`;
+      if (sha256(bytes) !== receipt.quality.fixtureEvidence[fixture].artifactSha256) {
+        fail(`fixture ${fixture} changed before publication`);
       }
+      const sidecar = `${sha256(bytes)}  ${artifactName}\n`;
+      if (sha256(sidecar) !== receipt.quality.fixtureEvidence[fixture].artifactSidecarSha256) {
+        fail(`fixture ${fixture} sidecar changed before publication`);
+      }
+      await writeFile(path.join(staging, "fixtures", name), bytes, { flag: "wx" });
+      await writeFile(path.join(staging, "fixtures", `${name}.sha256`), sidecar, { flag: "wx" });
     }
     await rename(staging, directory);
   } catch (error) {
@@ -1008,18 +1058,23 @@ export async function readReceiptSet(directory) {
   const markdown = await readSealedText(path.join(directory, "receipt.md"));
   assertMarkdownBound(markdown, receipt);
   const fixtureDirectory = path.join(directory, "fixtures");
-  try {
-    for (const fixture of FIXTURES) {
-      const file = path.join(fixtureDirectory, `${fixture}.json`);
-      const bytes = await readFile(file);
-      const declared = receipt.quality.fixtureEvidence[fixture].artifactSha256;
-      if (sha256(bytes) !== declared
-        || parseSidecar(await readFile(`${file}.sha256`, "utf8"), `${fixture}.json`) !== declared) {
-        fail(`published fixture ${fixture} is not bound to the receipt`);
-      }
+  for (const fixture of FIXTURES) {
+    const file = path.join(fixtureDirectory, `${fixture}.json`);
+    const bytes = await readFile(file);
+    const sidecar = await readFile(`${file}.sha256`, "utf8");
+    const row = receipt.quality.fixtureEvidence[fixture];
+    if (sha256(bytes) !== row.artifactSha256
+      || parseSidecar(sidecar, row.artifactName) !== row.artifactSha256
+      || sha256(sidecar) !== row.artifactSidecarSha256) {
+      fail(`published fixture ${fixture} is not bound to the receipt`);
     }
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+    let artifact;
+    try {
+      artifact = JSON.parse(bytes.toString("utf8"));
+    } catch (error) {
+      fail(`published fixture ${fixture} is not valid JSON: ${error.message}`);
+    }
+    validateFixtureArtifact(artifact, fixture, row);
   }
   return receipt;
 }
@@ -1035,9 +1090,10 @@ export function compareReceipts(dense, compressed) {
     fail("comparison requires dense then compressed receipts");
   }
   for (const field of [
-    "sceneWorksRevision", "inferenceRevision", "mlxRevision", "dependencyLockSha256",
+    "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision",
+    "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256",
     "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
-    "thermalState", "commandTemplate",
+    "referenceModelId", "referenceModelSha256", "referenceModelBytes", "thermalState", "commandTemplate",
   ]) {
     if (dense.provenance[field] !== compressed.provenance[field]) {
       fail(`comparison identity differs at provenance.${field}`);
@@ -1084,6 +1140,7 @@ export function validateCampaign(receipts) {
   if (!Array.isArray(receipts) || receipts.length === 0) fail("campaign has no sealed receipts");
   const coordinates = new Set();
   const familyModels = new Map();
+  let campaignIdentity;
   for (const receipt of receipts) {
     validateReceipt(receipt);
     if (receipt.mode !== "dense") fail("dense baseline campaign contains a non-dense receipt");
@@ -1093,7 +1150,29 @@ export function validateCampaign(receipts) {
     ].join("/");
     if (coordinates.has(coordinate)) fail(`duplicate campaign coordinate ${coordinate}`);
     coordinates.add(coordinate);
-    const identity = `${receipt.provenance.modelId}/${receipt.provenance.modelFileSha256}`;
+    const globalIdentity = canonicalJson(Object.fromEntries([
+      "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision",
+      "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256", "os", "xcode",
+      "hardware", "powerMode", "thermalState", "commandTemplate",
+    ].map((field) => [field, receipt.provenance[field]])));
+    if (campaignIdentity && campaignIdentity !== globalIdentity) {
+      fail("campaign source, dependency, toolchain, hardware, or power identity drift");
+    }
+    campaignIdentity ??= globalIdentity;
+    const identity = canonicalJson({
+      modelId: receipt.provenance.modelId,
+      modelFileSha256: receipt.provenance.modelFileSha256,
+      modelFileBytes: receipt.provenance.modelFileBytes,
+      referenceModelId: receipt.provenance.referenceModelId,
+      referenceModelSha256: receipt.provenance.referenceModelSha256,
+      referenceModelBytes: receipt.provenance.referenceModelBytes,
+      queryHeads: receipt.geometry.queryHeads,
+      kvHeads: receipt.geometry.kvHeads,
+      headDimension: receipt.geometry.headDimension,
+      layers: receipt.geometry.layers,
+      elementBytes: receipt.geometry.elementBytes,
+      contextWindowTokens: receipt.geometry.contextWindowTokens,
+    });
     const prior = familyModels.get(receipt.matrix.family);
     if (prior && prior !== identity) fail(`model identity drift within ${receipt.matrix.family}`);
     familyModels.set(receipt.matrix.family, identity);
