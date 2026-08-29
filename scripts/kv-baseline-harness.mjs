@@ -71,6 +71,7 @@ const FIXTURES = [
   "long-context-needle",
   "multi-turn-prompt-cache",
 ];
+const FIXTURE_SOURCES = Symbol("fixtureSources");
 
 function fail(message) {
   throw new Error(`KV baseline receipt: ${message}`);
@@ -306,7 +307,7 @@ export function detectFullCacheTemporary(events, denseBytes) {
   const transientCacheBytesByPhase = new Map();
   events.forEach((event, index) => {
     validateAllocationEvent(event, index);
-    const relevantRole = event.role === "cache" || event.role === "attention-workspace";
+    const relevantRole = event.role === "cache" || event.role === "attention-workspace" || event.role === "output";
     const explicit = event.kind === "dense_cache_temporary"
       || event.kind === "full_cache_materialization";
     if (event.lifetime === "transient" && explicit) {
@@ -428,7 +429,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   exactKeys(
     receipt.provenance,
     [
-      "sceneWorksRevision", "inferenceRevision", "mlxRevision", "dependencyLockSha256",
+      "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision", "mlxRevision", "dependencyLockSha256",
       "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
       "thermalState", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
     ],
@@ -436,6 +437,10 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   );
   gitRevision(receipt.provenance.sceneWorksRevision, "provenance.sceneWorksRevision");
   gitRevision(receipt.provenance.inferenceRevision, "provenance.inferenceRevision");
+  if (receipt.provenance.sceneWorksRepository !== "git@github.com:SceneWorks/SceneWorks.git"
+    || receipt.provenance.inferenceRepository !== "git@github.com:SceneWorks/inference.git") {
+    fail("provenance repository identity is not the paired SceneWorks repositories");
+  }
   for (const field of [
     "mlxRevision", "os", "xcode", "hardware", "modelId", "powerMode", "thermalState",
     "commandTemplate", "command",
@@ -472,10 +477,14 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
 
   exactKeys(
     receipt.geometry,
-    ["batch", "queryHeads", "kvHeads", "headDimension", "queryLength", "kvLength", "layers", "elementBytes", "capacity"],
+    ["batch", "queryHeads", "kvHeads", "headDimension", "queryLength", "kvLength", "layers", "elementBytes", "capacity", "contextTargetTokens", "contextPayloadTokens"],
     "geometry",
   );
   for (const field of Object.keys(receipt.geometry)) positiveInteger(receipt.geometry[field], `geometry.${field}`);
+  if (receipt.geometry.contextPayloadTokens > receipt.geometry.contextTargetTokens
+    || receipt.geometry.contextPayloadTokens < Math.floor(receipt.geometry.contextTargetTokens / 2)) {
+    fail("context payload token count is outside its producer-measured band");
+  }
   if (receipt.geometry.queryHeads % receipt.geometry.kvHeads !== 0) {
     fail("geometry queryHeads must be divisible by kvHeads");
   }
@@ -821,7 +830,12 @@ export async function buildVerifiedReceipt(input) {
       independentReference: sourceRow.independentReference,
     };
   }
-  return buildReceipt(verifiedInput);
+  const receipt = buildReceipt(verifiedInput);
+  Object.defineProperty(receipt, FIXTURE_SOURCES, {
+    value: Object.fromEntries(FIXTURES.map((fixture) => [fixture, input.quality.fixtureEvidence[fixture].artifactPath])),
+    enumerable: false,
+  });
+  return receipt;
 }
 
 export function validateFixtureArtifact(artifact, fixture, sourceRow) {
@@ -969,6 +983,19 @@ export async function writeReceiptSet(directory, receipt) {
       writeFile(path.join(staging, "receipt.json.sha256"), `${sha256(json)}  receipt.json\n`, { flag: "wx" }),
       writeFile(path.join(staging, "receipt.md.sha256"), `${sha256(markdown)}  receipt.md\n`, { flag: "wx" }),
     ]);
+    if (receipt[FIXTURE_SOURCES]) {
+      await mkdir(path.join(staging, "fixtures"), { recursive: false });
+      for (const fixture of FIXTURES) {
+        const source = receipt[FIXTURE_SOURCES][fixture];
+        const bytes = await readFile(source);
+        const name = `${fixture}.json`;
+        if (sha256(bytes) !== receipt.quality.fixtureEvidence[fixture].artifactSha256) {
+          fail(`fixture ${fixture} changed before publication`);
+        }
+        await writeFile(path.join(staging, "fixtures", name), bytes, { flag: "wx" });
+        await writeFile(path.join(staging, "fixtures", `${name}.sha256`), `${sha256(bytes)}  ${name}\n`, { flag: "wx" });
+      }
+    }
     await rename(staging, directory);
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
@@ -980,6 +1007,20 @@ export async function readReceiptSet(directory) {
   const receipt = await readSealedJson(path.join(directory, "receipt.json"));
   const markdown = await readSealedText(path.join(directory, "receipt.md"));
   assertMarkdownBound(markdown, receipt);
+  const fixtureDirectory = path.join(directory, "fixtures");
+  try {
+    for (const fixture of FIXTURES) {
+      const file = path.join(fixtureDirectory, `${fixture}.json`);
+      const bytes = await readFile(file);
+      const declared = receipt.quality.fixtureEvidence[fixture].artifactSha256;
+      if (sha256(bytes) !== declared
+        || parseSidecar(await readFile(`${file}.sha256`, "utf8"), `${fixture}.json`) !== declared) {
+        fail(`published fixture ${fixture} is not bound to the receipt`);
+      }
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   return receipt;
 }
 
@@ -1071,6 +1112,16 @@ export function validateCampaign(receipts) {
     }
   }
   if (missing.length) fail(`campaign incomplete; missing ${missing.length} coordinates`);
+  for (const family of ["llama", "qwen"]) {
+    const bands = new Map(receipts
+      .filter((receipt) => receipt.matrix.family === family)
+      .map((receipt) => [receipt.matrix.contextBand, receipt.geometry.contextPayloadTokens]));
+    if (bands.size !== CONTEXT_BANDS.length
+      || CONTEXT_BANDS.some((band, index) => index > 0
+        && bands.get(band) <= bands.get(CONTEXT_BANDS[index - 1]))) {
+      fail(`context-band tokenizer measurements are not strictly increasing for ${family}`);
+    }
+  }
   return {
     schemaVersion: SCHEMA_VERSION,
     complete: true,
