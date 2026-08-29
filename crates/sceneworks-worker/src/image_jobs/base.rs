@@ -4434,17 +4434,62 @@ enum DowntierPick {
 /// never include q4, so it rejects rather than silently rendering q4 (acceptance #5). An explicit user
 /// pick never reaches here (the caller skips the downtier for it, honoring the pick — acceptance #7).
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+// Scoring a candle tier is a manifest arithmetic lookup, so that lane keeps the eager form and its
+// straight-line read. On macOS the only callers left are the ordering tests — the MLX gate scores
+// lazily now, because there scoring a tier hashes an encoder.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn choose_downtier(default_tier: &str, candidates: &[(&'static str, TierFit)]) -> DowntierPick {
+    let tiers: Vec<&'static str> = candidates.iter().map(|(tier, _)| *tier).collect();
+    let mut fits = candidates.iter().map(|(_, fit)| *fit);
+    match choose_downtier_lazy::<_, std::convert::Infallible>(default_tier, &tiers, |_| {
+        Ok(fits.next())
+    }) {
+        Ok(pick) => pick,
+        Err(never) => match never {},
+    }
+}
+
+/// [`choose_downtier`] with the fit scored ON DEMAND, stopping at the first tier that fits.
+///
+/// Same ordering rule, same result — this is the single implementation and the eager form above
+/// delegates to it, so the two cannot drift. What changes is how many tiers get SCORED.
+///
+/// That matters because on the MLX lane scoring a tier is not cheap. `mlx_tier_fit` reaches
+/// `ProviderRegistry::footprint`, which resolves the encoder through `EncoderContract::source_for_load`
+/// and seals it with `ArtifactSeal::read_unchanged` — a full SHA-256 of that tier's text encoder. A
+/// stack sample of a krea_2_turbo job caught 62% of a 30-second window inside that subtree, 96% of it
+/// in the SHA-256 compressor itself and only 3% in `read`: it is CPU, not I/O.
+///
+/// The caller then collected EVERY candidate before choosing, so a machine with room to spare paid for
+/// bf16, q8 and q4 in turn — three encoders hashed to answer a question the first one had already
+/// settled. Measured on one job: 15s + 10s + 6s, against a budget with 61 GB unused.
+///
+/// `Ok(None)` from `fit` SKIPS a tier rather than scoring it, preserving the caller's pre-existing
+/// filter for a candidate whose directory does not resolve: such a tier was absent from the eager
+/// slice entirely, so it must not become the named rejection either.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn choose_downtier_lazy<F, E>(
+    default_tier: &str,
+    tiers: &[&'static str],
+    mut fit: F,
+) -> Result<DowntierPick, E>
+where
+    F: FnMut(&'static str) -> Result<Option<TierFit>, E>,
+{
     let mut smallest_reject: Option<(&'static str, f64, f64)> = None;
-    for &(tier, fit) in candidates {
+    for &tier in tiers {
+        let Some(fit) = fit(tier)? else {
+            continue;
+        };
         match fit {
-            // DESCENDING fidelity ⇒ the first that fits is the highest-fidelity fitting tier.
+            // DESCENDING fidelity ⇒ the first that fits is the highest-fidelity fitting tier, and
+            // nothing below it can win — so nothing below it is scored.
             TierFit::Fits => {
-                return if tier == default_tier {
+                return Ok(if tier == default_tier {
                     DowntierPick::Keep
                 } else {
                     DowntierPick::Downtier(tier)
-                };
+                });
             }
             TierFit::TooBig {
                 needed_gb,
@@ -4455,14 +4500,14 @@ fn choose_downtier(default_tier: &str, candidates: &[(&'static str, TierFit)]) -
     // Nothing fit — reject, naming the LAST (smallest / least-demanding) tier we tried. `None` only when
     // the candidate list was empty (no installed tier in range — defensive; the default itself is always
     // installed & in range), in which case Keep lets the plain gate handle it.
-    match smallest_reject {
+    Ok(match smallest_reject {
         Some((tier, needed_gb, available_gb)) => DowntierPick::Reject {
             tier,
             needed_gb,
             available_gb,
         },
         None => DowntierPick::Keep,
-    }
+    })
 }
 
 /// The installed tiers in `[floor, default]` for `request`'s model, in DESCENDING fidelity, ready for
@@ -8431,19 +8476,19 @@ async fn generate_stream(
     if !explicit_pick {
         if let Some(default_tier) = tier_key_from_resolved_dir(&weights_dir) {
             let floor = min_quality_floor(request);
-            let candidates: Vec<(&'static str, TierFit)> =
-                downtier_candidate_tiers(request, settings, default_tier, floor)
-                    .into_iter()
-                    .filter_map(|cand| {
-                        resolve_tier_dir(request, settings, cand).map(|dir| (cand, dir))
-                    })
-                    .map(|(cand, dir)| {
-                        let probe =
-                            tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
-                        Ok((cand, mlx_tier_fit(engine_id, &probe)))
-                    })
-                    .collect::<WorkerResult<Vec<_>>>()?;
-            match choose_downtier(default_tier, &candidates) {
+            let tiers = downtier_candidate_tiers(request, settings, default_tier, floor);
+            // Scored lazily (see `choose_downtier_lazy`): each `mlx_tier_fit` seals that tier's text
+            // encoder with a full SHA-256, so collecting the whole ladder up front charged every job
+            // for tiers the default tier had already ruled out. The candidates are in descending
+            // fidelity, so the ordinary "it fits" outcome now scores exactly one.
+            let pick = choose_downtier_lazy(default_tier, &tiers, |cand| -> WorkerResult<_> {
+                let Some(dir) = resolve_tier_dir(request, settings, cand) else {
+                    return Ok(None);
+                };
+                let probe = tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
+                Ok(Some(mlx_tier_fit(engine_id, &probe)))
+            })?;
+            match pick {
                 DowntierPick::Keep => {}
                 DowntierPick::Downtier(chosen) => {
                     if let Some(dir) = resolve_tier_dir(request, settings, chosen) {
@@ -15997,6 +16042,83 @@ mod capability_downtier_tests {
         // Q8 default fits → Keep, even though a smaller q4 is also installed and would fit.
         let candidates = [("q8", TierFit::Fits), ("q4", TierFit::Fits)];
         assert_eq!(choose_downtier("q8", &candidates), DowntierPick::Keep);
+    }
+
+    /// The ladder scores a tier only until one fits (sc-10733 cost, not semantics).
+    ///
+    /// On the MLX lane `mlx_tier_fit` reaches `ProviderRegistry::footprint`, which seals that tier's
+    /// text encoder with a full SHA-256. The gate used to collect the WHOLE candidate list before
+    /// choosing, so a machine with room to spare hashed bf16, q8 and q4 in turn to answer a question
+    /// the first one had already settled — 15s + 10s + 6s on one measured krea_2_turbo job, against
+    /// a budget with 61 GB unused.
+    ///
+    /// Stated as a call count, like `the_load_boundary_hashes_the_closure_exactly_once`: on the pure
+    /// chooser a duration would measure nothing, and the count is the actual claim.
+    #[test]
+    fn the_ladder_scores_no_tier_below_the_first_that_fits() {
+        use std::cell::RefCell;
+        let tiers = ["bf16", "q8", "q4"];
+        let scored = RefCell::new(Vec::new());
+        let score = |fits: fn(&str) -> TierFit| {
+            scored.borrow_mut().clear();
+            super::choose_downtier_lazy::<_, std::convert::Infallible>("bf16", &tiers, |tier| {
+                scored.borrow_mut().push(tier);
+                Ok(Some(fits(tier)))
+            })
+            .unwrap()
+        };
+
+        // The ordinary outcome: the default fits, so nothing below it is even looked at.
+        assert_eq!(score(|_| TierFit::Fits), DowntierPick::Keep);
+        assert_eq!(*scored.borrow(), vec!["bf16"]);
+
+        // A genuine downtier stops at the tier it lands on, not at the end of the ladder.
+        assert_eq!(
+            score(|tier| if tier == "bf16" {
+                too_big(72.0, 40.0)
+            } else {
+                TierFit::Fits
+            }),
+            DowntierPick::Downtier("q8")
+        );
+        assert_eq!(*scored.borrow(), vec!["bf16", "q8"]);
+
+        // Only a rejection walks the whole ladder — and it must, to name the smallest tier tried.
+        assert_eq!(
+            score(|_| too_big(72.0, 8.0)),
+            DowntierPick::Reject {
+                tier: "q4",
+                needed_gb: 72.0,
+                available_gb: 8.0,
+            }
+        );
+        assert_eq!(*scored.borrow(), vec!["bf16", "q8", "q4"]);
+    }
+
+    /// A candidate whose directory does not resolve is SKIPPED, exactly as the eager form's
+    /// `filter_map` dropped it before scoring — it must not become the named rejection.
+    #[test]
+    fn an_unresolvable_tier_is_skipped_rather_than_scored_as_too_big() {
+        let tiers = ["bf16", "q8", "q4"];
+        let pick = super::choose_downtier_lazy::<_, std::convert::Infallible>(
+            "bf16",
+            &tiers,
+            |tier| match tier {
+                "bf16" => Ok(Some(too_big(72.0, 40.0))),
+                // Not installed: no directory, so nothing to score.
+                "q8" => Ok(None),
+                _ => Ok(Some(too_big(20.0, 8.0))),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pick,
+            DowntierPick::Reject {
+                tier: "q4",
+                needed_gb: 20.0,
+                available_gb: 8.0,
+            }
+        );
     }
 
     #[test]

@@ -127,6 +127,59 @@ impl ArtifactFile {
     }
 }
 
+/// One closure file's on-disk stat identity: what it is called inside the bundle, how large it is,
+/// and when it was last written.
+///
+/// The triple deliberately mirrors `imports::ModelFileIdentity`, the same shape the imported-model
+/// attribution marker has used to decide whether a cached SHA-256 still describes a file. Size
+/// catches a truncation that preserved the timestamp; mtime catches a rewrite that preserved the
+/// length. Together they are what an ordinary write to a file cannot avoid changing.
+///
+/// This is drift detection, not an authenticity proof: anything that can rewrite a bundle file and
+/// restore its mtime can also rewrite the journal that records this observation. The threat it is
+/// built for is the real one — a bundle that changed underneath the cache — and for that it is
+/// exact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClosureFileStat {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub modified_nanos: String,
+}
+
+impl ClosureFileStat {
+    fn observe(relative_path: String, path: &Path) -> Result<Self, ArtifactContractError> {
+        let metadata = std::fs::metadata(path).map_err(|error| {
+            ArtifactContractError(format!(
+                "artifact closure file {} is unavailable: {error}",
+                path.display()
+            ))
+        })?;
+        let modified_nanos = metadata
+            .modified()
+            .map_err(|error| {
+                ArtifactContractError(format!(
+                    "artifact closure file {} has no modification time: {error}",
+                    path.display()
+                ))
+            })?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                ArtifactContractError(format!(
+                    "artifact closure file {} is modified before the epoch: {error}",
+                    path.display()
+                ))
+            })?
+            .as_nanos()
+            .to_string();
+        Ok(Self {
+            relative_path,
+            size_bytes: metadata.len(),
+            modified_nanos,
+        })
+    }
+}
+
 /// One concrete member of the immutable bundle closure. Optional components appear here only
 /// after selection; later materialization never has to infer them from a manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +301,39 @@ impl ResolvedBundleClosure {
             }
         }
         Ok(())
+    }
+
+    /// The closure's on-disk stat identity under `root`: one entry per file, keyed by the same
+    /// bundle-relative path [`Self::validate_at_root`] resolves, carrying size and mtime.
+    ///
+    /// This is the cheap observation a content-hash receipt is judged against — see
+    /// `resolved_cache::ClosureContentReceipt`. It walks and confines paths through exactly the
+    /// same `rebase_under` composition as the validating pass, so the two cannot disagree about
+    /// WHICH files make up the closure; it simply stats each one instead of reading it.
+    ///
+    /// Sorted by relative path so two observations of the same closure compare equal regardless of
+    /// member ordering.
+    pub fn stat_identity_at_root(
+        &self,
+        root: &Path,
+    ) -> Result<Vec<ClosureFileStat>, ArtifactContractError> {
+        self.validate_canonical()?;
+        let root = canonical_or_absolute(root)?;
+        let mut stats = Vec::new();
+        for member in &self.members {
+            member.validate()?;
+            let member_root = rebase_under(&root, &member.destination)?;
+            for file in &member.files {
+                let path = rebase_under(&member_root, &file.relative_path)?;
+                let relative_path = portable_relative_path(
+                    &member.destination.join(&file.relative_path),
+                    "artifact output file",
+                )?;
+                stats.push(ClosureFileStat::observe(relative_path, &path)?);
+            }
+        }
+        stats.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Ok(stats)
     }
 
     /// Resolve every member from its exact repository, immutable revision and source subpath.
