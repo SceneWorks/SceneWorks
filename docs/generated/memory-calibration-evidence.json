@@ -1159,6 +1159,326 @@
     },
     {
       "artifact": {
+        "repository": "SceneWorks/krea-2-turbo-mlx",
+        "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "capturedAt": "2026-08-28T21:59:42Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:krea-turbo-certifying",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preLoadDeviceUsed",
+            "unit": "bytes",
+            "value": 1045430272
+          },
+          {
+            "name": "loadDevicePeakDelta",
+            "unit": "bytes",
+            "value": 512753664
+          },
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3828350976
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3998220288
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3832545280
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 3998220288
+          },
+          {
+            "name": "allocatorCounterAliasesDeviceDelta",
+            "unit": "boolean",
+            "value": 1
+          },
+          {
+            "name": "wiredCounterAliasesDiscreteDeviceDelta",
+            "unit": "boolean",
+            "value": 1
+          },
+          {
+            "name": "cudaCachingAllocatorPresent",
+            "unit": "boolean",
+            "value": 0
+          },
+          {
+            "name": "phaseCancelInjections",
+            "unit": "count",
+            "value": 3
+          },
+          {
+            "name": "phaseErrorInjections",
+            "unit": "count",
+            "value": 3
+          },
+          {
+            "name": "postFaultWarmFollowUps",
+            "unit": "count",
+            "value": 6
+          },
+          {
+            "name": "maximumPostFaultDeviceGrowth",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "postFaultDeviceGrowthTolerance",
+            "unit": "bytes",
+            "value": 67108864
+          },
+          {
+            "name": "abaResidentRepeatMaximumErrorPer255",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "abaResidentRepeatMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "abaBoundedMaximumErrorPer255",
+            "unit": "count",
+            "value": 5
+          },
+          {
+            "name": "abaBoundedMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 66
+          },
+          {
+            "name": "maximumRecoveryMaximumErrorPer255",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "maximumRecoveryMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 194
+          },
+          {
+            "name": "negativeMutationMeanErrorMicroUnits",
+            "unit": "count",
+            "value": 265028
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "krea-q4-1024-seed42",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-06fbd2ff6dcba95f8555",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-4a68fe7972c6b7064fb1",
+      "negativeMutation": {
+        "maximumError": 0.7607843137254902,
+        "meanError": 0.26502825919988654,
+        "measured": true,
+        "parameters": {
+          "attentionChunkSize": 134217728,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512,
+          "transformerWindowSize": 1
+        },
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 3828350976,
+          "allocatorBytes": 3828350976,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 3832545280,
+          "allocatorBytes": 3832545280,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 3998220288,
+          "allocatorBytes": 3998220288,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 3998220288,
+          "allocatorBytes": 3998220288,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 3828350976,
+        "decode": 3832545280,
+        "denoise": 3998220288,
+        "overall": 3998220288
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps and tier; production bounded-transformer tuple versus resident A-B-A control",
+        "identicalInputs": true,
+        "maximumError": 0.0196078431372549,
+        "maximumErrorThreshold": 1,
+        "meanError": 0.00006592195797586676,
+        "meanErrorThreshold": 0.01681,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "5b0457b11456bb26e95bab62c0be3750c0891b7c3a9a5ab99de44051b7a0aa5d",
+          "dirty": false,
+          "revision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:e4df49683ea84d0f86e111457b8eb2b5f05675f01a5c9a5cba91d55e6b83e99b",
+          "revision": "ebc2a29789ac78ff4bdc263fec65db012a0b3f4f"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 3998220288,
+          "name": "exact_fit",
+          "predictedBytes": 3998220288,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "conditioning, denoise, and decode cancellation returned typed cancellation; retained memory stayed within 64 MiB and every warm recovery passed the approved parity envelope",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries; retained memory stayed within 64 MiB and every warm recovery passed the approved parity envelope",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "attentionChunkSize": 134217728,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512,
+          "transformerWindowSize": 1
+        },
+        "rung": "bounded_transformer_residency"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              128
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              134217728
+            ]
+          },
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 134217728,
+              "decodeOverlap": 128,
+              "decodeTileEdge": 512,
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "krea_2_turbo",
+        "overlay": "none",
+        "provider": "krea_2_turbo",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
         "inventorySha256": "a8b9a41f2d11e6626a4f127b4e7fb1eb1a825be4af072199b60c0cfb9b09b0ab",
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",

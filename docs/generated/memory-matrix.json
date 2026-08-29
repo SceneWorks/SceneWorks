@@ -1,12 +1,12 @@
 {
   "schemaVersion": 9,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:894e18f6a7257a79d2fb21b3b3d409b2f14cb462bb86ade7961925e5098dcfea",
+    "sceneWorksRevision": "source-tree:3228577ffb62b5e182e8e661d6a4f58c0fdae974a39240f37d78026b59539d85",
     "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "77b72a3efc5ecc0cb59288f54e496c72ff261243280ce76a46a6b0eacec88fc9"
+        "sha256": "663ed5c5af310b9f5bd3b474d560ac65331218d9781d4bfb2f507687d40c6512"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -78,7 +78,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "4c8ba7debac6085012c6d707343bc991c38c34850717440dd4e9bf18a353f136"
+        "sha256": "68e34a98c9b1d5eb0bff7b75b7d3f336ee92923deefe223750690a0f77a2d07b"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
@@ -190,14 +190,14 @@
     "videoMlxStagedStaticCoverageDenominator": 10,
     "unroutedEntries": [],
     "fullModels": 0,
-    "calibrationRuns": 108,
+    "calibrationRuns": 109,
     "calibrationRunsByStatus": {
-      "complete": 85,
+      "complete": 86,
       "runtimeComplete": 23,
       "gated": 0,
       "negativeComplete": 0
     },
-    "currentCalibrationRuns": 0,
+    "currentCalibrationRuns": 1,
     "memoryContractReconciliation": {
       "providers": 102,
       "bespokeWaivers": 1,
@@ -10288,9 +10288,10 @@
       "elided": 9,
       "implemented": 3,
       "states": {
-        "Implemented/unverified": 3,
+        "Implemented/unverified": 2,
         "Missing": 9,
-        "Structurally N/A": 6
+        "Structurally N/A": 6,
+        "Verified": 1
       },
       "implementedBy": {
         "tier": {
@@ -21122,7 +21123,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "state": "Implemented/unverified",
+      "state": "Verified",
       "memoryCharacterization": {
         "status": "fitted",
         "measuredGeometries": [
@@ -21200,7 +21201,32 @@
             }
           }
         ],
-        "currentEnvironmentVerification": [],
+        "currentEnvironmentVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-06fbd2ff6dcba95f8555",
+            "hardware": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+            "tier": "q4",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-28T21:59:42Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "observedPeakGb": 3.7236328125,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.0196078431372549,
+              "fixture": "krea-q4-1024-seed42"
+            }
+          }
+        ],
         "strategyParameterVerification": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
@@ -53060,6 +53086,58 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-04b9d90be4e8b1e6d62b"
+      }
+    },
+    {
+      "cellId": "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:bounded_transformer_residency",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "current",
+      "record": {
+        "id": "imc-06fbd2ff6dcba95f8555",
+        "status": "complete",
+        "backend": "candle",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "krea_2_turbo",
+          "overlay": "none",
+          "provider": "krea_2_turbo",
+          "tier": "q4"
+        },
+        "strategy": {
+          "rung": "bounded_transformer_residency",
+          "engagedRungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+        "capturedAt": "2026-08-28T21:59:42Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "5b0457b11456bb26e95bab62c0be3750c0891b7c3a9a5ab99de44051b7a0aa5d",
+            "dirty": false,
+            "revision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:e4df49683ea84d0f86e111457b8eb2b5f05675f01a5c9a5cba91d55e6b83e99b",
+            "revision": "ebc2a29789ac78ff4bdc263fec65db012a0b3f4f"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-06fbd2ff6dcba95f8555"
       }
     },
     {

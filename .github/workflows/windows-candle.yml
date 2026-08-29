@@ -158,7 +158,7 @@ on:
   workflow_dispatch:
     inputs:
       run_five_rung_reference:
-        description: "Capture the SC-16402 Krea fresh-process five-rung reference"
+        description: "Capture the Krea five-rung diagnostic and q4/1024 certifying exact request"
         required: false
         type: boolean
         default: false
@@ -821,7 +821,7 @@ jobs:
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           path: .calibration/inference
           persist-credentials: false
-      - name: Build and run the authoritative Candle five-rung reference
+      - name: Build and run the Candle Krea diagnostic and certifying captures
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         shell: cmd
         env:
@@ -829,6 +829,9 @@ jobs:
           # renamed alongside the dispatch inputs; see the workflow_dispatch header.
           SCENEWORKS_KREA_REPOSITORY: ${{ inputs.provision_repository }}
           SCENEWORKS_KREA_REVISION: ${{ inputs.provision_revision }}
+          # SC-21714 certifies on the second physical Blackwell card. Candle still sees logical
+          # cuda:0, while the adapter's nvidia-smi probe records physical device 1.
+          CUDA_VISIBLE_DEVICES: "1"
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -836,19 +839,22 @@ jobs:
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --fresh-per-case --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-fresh.json"
           node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --batch-rungs --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-reused.json"
+          node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture krea-q4-1024-seed42 --fresh-per-case --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-21714-candle-certifying.json"
           node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16059-candle-fresh.json"
           node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-16059-candle-reused.json"
+          node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-21714-candle-certifying.json"
           node scripts\memory-calibration-harness.mjs compare-reuse --fresh "%RUNNER_TEMP%\sc-16059-candle-fresh.json" --reused "%RUNNER_TEMP%\sc-16059-candle-reused.json" --output "%RUNNER_TEMP%\sc-16059-candle-reuse-comparison.json"
           node -e "const a=require(process.argv[1]); console.log(JSON.stringify(a,null,2)); if(!['amortizable','unable_to_amortize'].includes(a.verdict)) throw new Error('unexpected Candle reuse verdict: '+a.verdict)" "%RUNNER_TEMP%\sc-16059-candle-reuse-comparison.json"
-      - name: Upload raw schema-checked Candle five-rung reference
+      - name: Upload raw schema-checked Candle Krea evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sc-16059-candle-reuse-${{ github.run_id }}
+          name: sc-21714-krea-certifying-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/sc-16059-candle-fresh.json
             ${{ runner.temp }}/sc-16059-candle-reused.json
             ${{ runner.temp }}/sc-16059-candle-reuse-comparison.json
+            ${{ runner.temp }}/sc-21714-candle-certifying.json
           if-no-files-found: error
       - name: Clippy (candle worker)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}

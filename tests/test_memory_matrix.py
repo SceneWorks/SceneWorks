@@ -383,17 +383,34 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         ).get("digest")
         == record["repositories"]["inference"]["closureDigest"]
     }
-    # sc-16915 measured seventeen Full-complete runs at the then-live closure; SC-18237 and SC-18353
-    # later added fifteen Qwen records, and SC-19753 five Z-Image records, each at the closure live
-    # when it ran. The epic's pin advance moved past all of them, so every Full-complete run is now
-    # historical — an accepted floor, not a re-capture work order.
-    #
-    # Still pinned as an exact set AND an exact count, the same way it was when runs were current: a
-    # bare `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
-    # family's promotion mask another's demotion. Holding the current count at exactly 0 is what
-    # makes a record silently surviving the closure change fail here.
-    assert {run["semantics"] for run in full_runs} == {"historical"}
-    assert sum(1 for run in full_runs if run["semantics"] == "current") == 0
+    # The older full captures remain historical after their provider closures moved. SC-21714 adds
+    # exactly one current Full-complete record for Candle Krea's q4/1024 deepest bounded request.
+    # Pin the identity, not merely the count, so another lane cannot mask its demotion and no older
+    # record can silently survive a closure change.
+    current_full_runs = [run for run in full_runs if run["semantics"] == "current"]
+    assert {run["semantics"] for run in full_runs} == {"current", "historical"}
+    assert {run["record"]["id"] for run in current_full_runs} == {
+        "imc-06fbd2ff6dcba95f8555"
+    }
+    assert all(
+        run["semantics"] == "historical"
+        for run in full_runs
+        if run["record"]["id"] != "imc-06fbd2ff6dcba95f8555"
+    )
+    krea_certifying = evidence_by_id["imc-06fbd2ff6dcba95f8555"]
+    assert (
+        krea_certifying["backend"],
+        krea_certifying["target"]["modelId"],
+        krea_certifying["target"]["tier"],
+        krea_certifying["target"]["geometry"]["width"],
+        krea_certifying["strategy"]["rung"],
+    ) == (
+        "candle",
+        "krea_2_turbo",
+        "q4",
+        1024,
+        "bounded_transformer_residency",
+    )
     expected_candle_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
@@ -604,11 +621,18 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # at every re-capture, so the set is held to its SHAPE instead of an id list: every member is
     # a current bounded-decode sweep row whose first case sits OFF the production point, and no
     # two members re-measure the same coordinate — a duplicated or mislabeled ingest still fails.
-    # The set is a subset of the CURRENT corpus, so in the window between a pin bump and its
-    # re-capture (where the sc-17137 main sync leaves things) it is legitimately empty alongside
-    # `current_by_closure`; whenever anything is current again, the decode sweep must be part of it.
-    if current_by_closure:
+    # The set is a subset of the current Qwen corpus. SC-21714 makes Candle Krea current without
+    # creating Qwen characterization edges, so only a current Qwen cohort requires this sweep.
+    current_qwen_ids = {
+        record["id"]
+        for record in calibration["records"]
+        if record["id"] in current_by_closure
+        and record["backend"] == "mlx"
+        and record["target"]["provider"] == "qwen_image"
+    }
+    if current_qwen_ids:
         assert unbound_decode_edges
+    assert unbound_decode_edges <= current_qwen_ids
     unbound_coordinates = [
         (
             record["backend"],
@@ -879,25 +903,48 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_historical_records_remain_unverified_after_the_provider_contract_advance():
+def test_only_the_sc21714_coordinate_is_verified_after_the_provider_contract_advance():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     # sc-16915 recaptured the Qwen and Krea MLX evidence at its then-current pin, and SC-19753
     # captured the five Z-Image q4 coordinates at the closure live when it ran. The epic's pin has
-    # since advanced past all of them, so every shipped capture is now an ACCEPTED FLOOR rather than
-    # current verification — a pin bump staling calibration records is the fail-closed design
-    # working, not a re-capture work order.
+    # since advanced past all of them, so those captures are ACCEPTED FLOORS rather than current
+    # verification. SC-21714 independently certifies one Candle Krea coordinate at the live closure.
     #
     # Still stated as the exact SET rather than a count: a count would let one model's promotion
-    # silently cover another's regression, and an exact empty set still fails the moment any record
-    # survives the closure change as current.
+    # silently cover another's regression, and the exact singleton fails if any old record survives
+    # the closure change or the new certifying coordinate disappears.
     verified = {
         (cell["modelId"], cell["backend"], cell["tier"], cell["rung"])
         for cell in matrix["cells"]
         if cell["state"] == "Verified"
     }
-    # No family may remain Verified merely because it was current at an older pin.
-    assert verified == set()
+    assert verified == {
+        (
+            "krea_2_turbo",
+            "candle",
+            "q4",
+            "bounded_transformer_residency",
+        )
+    }
+    current_krea = [
+        cell
+        for cell in matrix["cells"]
+        if cell["modelId"] == "krea_2_turbo"
+        and cell["backend"] == "candle"
+        and cell["tier"] == "q4"
+        and cell["rung"] == "bounded_transformer_residency"
+        and cell["mode"] == "text_to_image"
+        and cell["overlay"] == "none"
+    ]
+    assert len(current_krea) == 1
+    assert current_krea[0]["state"] == "Verified"
+    assert [
+        item["source"]
+        for item in current_krea[0]["evidence"]["currentEnvironmentVerification"]
+    ] == [
+        "docs/generated/memory-calibration-evidence.json#imc-06fbd2ff6dcba95f8555"
+    ]
     current_z_image_turbo = [
         cell
         for cell in matrix["cells"]
@@ -1000,7 +1047,21 @@ def test_historical_records_remain_unverified_after_the_provider_contract_advanc
         and cell["overlay"] == "none"
     ]
     assert krea_cells
-    assert all(cell["state"] == "Implemented/unverified" for cell in krea_cells)
+    assert {
+        (cell["tier"], cell["rung"])
+        for cell in krea_cells
+        if cell["state"] == "Verified"
+    } == {("q4", "bounded_transformer_residency")}
+    assert all(
+        cell["state"]
+        == (
+            "Verified"
+            if (cell["tier"], cell["rung"])
+            == ("q4", "bounded_transformer_residency")
+            else "Implemented/unverified"
+        )
+        for cell in krea_cells
+    )
     for cell in krea_cells:
         parameters = cell["strategyParameters"]
         assert {

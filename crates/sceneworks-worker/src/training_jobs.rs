@@ -4788,9 +4788,9 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
-            model_options: Default::default(),
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -4901,9 +4901,9 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
-            model_options: Default::default(),
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5017,9 +5017,9 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
-            model_options: Default::default(),
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5171,9 +5171,9 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
-            model_options: Default::default(),
             resume: false,
             control_type: None,
+            model_options: Default::default(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
