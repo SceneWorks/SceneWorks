@@ -1416,8 +1416,9 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
         count: 1,
         seed: Some(target.seed),
         steps: Some(target.transformer_variant.steps()),
-        guidance: (target.transformer_variant == protocol::Ltx25TransformerVariant::Dev)
-            .then_some(3.0),
+        // The dev provider owns its fixed multimodal guider parameters; neither packed variant
+        // advertises the generic request-level guidance axis.
+        guidance: None,
         frames: Some(target.frames),
         fps: Some(target.fps),
         // The production default A/V T2V path leaves this unset. `Some("no_audio")` is the only

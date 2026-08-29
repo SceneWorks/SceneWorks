@@ -627,12 +627,10 @@ export function VideoStudio() {
   // inertness is TRANSIENT (turn Lightning off and the control works again). A missing axis is
   // permanent for the model, so a forever-dead input is just clutter — Audio Studio hides these two
   // for the same reason (`showGuidance` / `showNegative`).
-  // LTX-2.5's distilled path is CFG-free; only the dev transformer consumes these two fields.
-  // Other catalog entries retain the manifest-driven absent-means-true contract above.
-  const supportsGuidance =
-    model === ltx25VideoModelId
-      ? ltx25Dev
-      : selectedModel?.video?.supportsGuidance !== false;
+  // LTX-2.5 keeps guidance provider-owned on both packed variants. Only negative conditioning is
+  // variant-specific: the distilled default has no negative branch, while dev consumes one through
+  // its fixed native multimodal guider. Other catalog entries retain absent-means-true above.
+  const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
   const supportsNegativePrompt =
     model === ltx25VideoModelId
       ? ltx25Dev

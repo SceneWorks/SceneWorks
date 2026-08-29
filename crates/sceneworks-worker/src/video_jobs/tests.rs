@@ -11174,6 +11174,13 @@ fn ltx25_generation_controls_reach_typed_provider_options_and_explicit_duration_
         "advanced": { "temporalUpsampleRounds": 1 }
     }));
     assert!(ltx25_generation_options(&wrong_model).is_err());
+
+    let dead_guidance = request(json!({
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "advanced": { "transformerVariant": "dev", "guidanceScale": 4.2 }
+    }));
+    assert!(ltx25_generation_options(&dead_guidance).is_err());
 }
 
 #[cfg(target_os = "macos")]

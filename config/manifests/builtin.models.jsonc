@@ -19440,6 +19440,11 @@
       "type": "video",
       "adapter": "ltx_video",
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+      // Neither packed transformer exposes generic request-level guidance: distilled guidance is
+      // baked in, while dev uses the fixed multimodal guider parameters from its checkpoint row.
+      // The default distilled variant also has no negative branch. Video Studio reopens only the
+      // negative prompt when the user explicitly selects dev; guidance stays provider-owned.
+      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
       // One rehost, two transformer identities. Every selected quant tier downloads both nested
       // variants and the worker selects exactly one root. Sizes are measured from the finalized
       // public bundle and every runtime resolver binds the immutable verified revision below.

@@ -23,7 +23,6 @@ const TRANSFORMER_WINDOW_SIZE: u32 = 1;
 const DECODE_TILE_EDGE: u32 = 192;
 const DECODE_OVERLAP: u32 = 64;
 const DEV_STEPS: u32 = 30;
-const DEV_GUIDANCE: f32 = 3.0;
 const DEV_ADAPTER: &str = "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors";
 const AV_MAGIC: &[u8] = b"SCENEWORKS_AV1\0";
 // PCM is already normalized floating-point data, so the established LTX full-pipeline absolute
@@ -645,7 +644,10 @@ fn generation_request(target: Target) -> GenerationRequest {
         count: 1,
         seed: Some(SEED),
         steps: dev.then_some(DEV_STEPS),
-        guidance: dev.then_some(DEV_GUIDANCE),
+        // Both packed variants reject generic request guidance. The dev checkpoint executes its
+        // fixed video/audio CFG, STG, rescale, and modality scales inside the native four-branch
+        // sampler; `GenerationRequest::guidance` is not that typed checkpoint contract.
+        guidance: None,
         frames: Some(target.geometry.frames),
         fps: Some(target.geometry.fps),
         ..Default::default()
@@ -1521,7 +1523,7 @@ mod tests {
     fn requests_thread_variant_schedule_geometry_and_full_av_defaults() {
         for (variant, steps, guidance) in [
             (TransformerVariant::Distilled, None, None),
-            (TransformerVariant::Dev, Some(DEV_STEPS), Some(DEV_GUIDANCE)),
+            (TransformerVariant::Dev, Some(DEV_STEPS), None),
         ] {
             let target = Target {
                 variant,

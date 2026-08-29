@@ -117,6 +117,14 @@ pub(super) fn ltx25_generation_options(
         });
     }
 
+    if request.advanced.contains_key("guidanceScale") {
+        return Err(WorkerError::InvalidPayload(
+            "LTX-2.5 does not accept advanced.guidanceScale; distilled guidance is baked in and \
+             the dev checkpoint uses its fixed native video/audio guider parameters"
+                .to_owned(),
+        ));
+    }
+
     let decoder = sceneworks_core::video_request::requested_ltx25_vae_decoder(&request.advanced)
         .map_err(WorkerError::InvalidPayload)?;
     let temporal_upsample_rounds =
@@ -1910,11 +1918,11 @@ pub(super) async fn generate_ltx(
         auto_duration: ltx25_options.auto_duration,
         temporal_upsample_rounds: ltx25_options.temporal_upsample_rounds,
         use_diffusion_decoder: ltx25_options.use_diffusion_decoder,
-        // The dev checkpoint's SC-18759 schedule is a fixed 30-transition
-        // contract. A forged advanced request must not turn it into the
-        // distilled eight-step schedule.
+        // The dev checkpoint's SC-18759 schedule is a fixed 30-transition contract. Its video and
+        // audio CFG/STG/rescale/modality scales are likewise checkpoint-native, not the generic
+        // request guidance axis; `ltx25_generation_options` rejects a forged override above.
         steps: ltx25_dev.then_some(30),
-        guidance: ltx25_dev.then(|| advanced::f32(&request.advanced, "guidanceScale", 3.0)),
+        guidance: None,
         seed: resolve_video_seed(request) as u64,
         control_scale: None,
         video_mode,

@@ -1407,7 +1407,9 @@ pub(super) async fn generate_candle_video_using(
             // The raw dev transformer is defined by the 30-step SC-18759
             // schedule, not by a caller-provided generic LTX step count.
             Some(30),
-            Some(advanced_opt_f32(request, "guidanceScale").unwrap_or(3.0)),
+            // Video/audio guidance is fixed inside the native four-branch dev sampler. The loaded
+            // provider deliberately rejects the unrelated generic request-level guidance axis.
+            None,
             non_empty_negative_prompt(request),
         )
     } else if is_ltx {

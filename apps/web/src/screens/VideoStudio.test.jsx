@@ -2302,6 +2302,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     id: "ltx_2_5",
     name: "LTX-2.5",
     adapter: "ltx_video",
+    video: { supportsGuidance: false, supportsNegativePrompt: false },
     defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
     limits: { steps: [8, 30] },
     hasVariantMatrix: true,
@@ -2445,12 +2446,11 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     const steps = labeledInput("Steps");
     expect(steps.disabled).toBe(true);
     expect(steps.placeholder).toBe("30 (fixed schedule)");
-    expect(labeledInput("Guidance")).toBeTruthy();
+    expect(labeledInput("Guidance")).toBeFalsy();
     expect(labeledInput("Video CFG")).toBeFalsy();
     expect(labeledInput("Video STG")).toBeFalsy();
     expect(labeledInput("Video rescale")).toBeFalsy();
 
-    await act(async () => setInput(labeledInput("Guidance"), "4.2"));
     const negative = [...container.querySelectorAll("label")]
       .find((label) => label.textContent.trim().startsWith("Negative prompt"))
       ?.querySelector("textarea");
@@ -2469,9 +2469,10 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     expect(payload).toMatchObject({
       model: "ltx_2_5",
       negativePrompt: "washed out",
-      advanced: { transformerVariant: "dev", guidanceScale: 4.2 },
+      advanced: { transformerVariant: "dev" },
     });
     expect(payload.advanced.steps).toBeUndefined();
+    expect(payload.advanced.guidanceScale).toBeUndefined();
   });
 
   it("keeps distilled LTX-2.5 sealed while exposing only its stock prompt enhancer", async () => {
@@ -3427,12 +3428,12 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     // Both MiniMax-H3 partitions joined in sc-17158: the sc-17242 spike enumerated the reference
     // pipeline's complete 19-parameter input surface and neither `guidance_scale` nor
     // `negative_prompt` is on it, so the axes genuinely do not exist. The non-declaring count is
-    // deliberately asserted separately. LTX-2.5 is the additional non-declaring entry: its dev
-    // variant exposes both axes and its distilled default retains the LTX controls.
+    // deliberately asserted separately. LTX-2.5 declares both absent for its default distilled
+    // surface; Video Studio reopens only negative conditioning when dev is explicitly selected.
     const videoEntries = models.filter((entry) => entry.type === "video");
     const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
-    expect(declaring).toEqual(["krea_realtime_14b", "minimax_h3", "minimax_h3_ref", "svd"]);
-    expect(videoEntries.length - declaring.length).toBe(9);
+    expect(declaring).toEqual(["krea_realtime_14b", "ltx_2_5", "minimax_h3", "minimax_h3_ref", "svd"]);
+    expect(videoEntries.length - declaring.length).toBe(8);
 
     const context = baseContext({ videoModels: [SVD] });
     await render(context);

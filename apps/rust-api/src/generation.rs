@@ -770,6 +770,13 @@ fn normalize_ltx25_generation_controls(
         return Ok(false);
     }
 
+    if advanced.contains_key("guidanceScale") {
+        return Err(ApiError::bad_request(
+            "LTX-2.5 does not accept advanced.guidanceScale; distilled guidance is baked in and \
+             the dev checkpoint uses its fixed native video/audio guider parameters",
+        ));
+    }
+
     requested_ltx25_vae_decoder(&advanced).map_err(ApiError::bad_request)?;
     requested_temporal_upsample_rounds(&advanced).map_err(ApiError::bad_request)?;
 
@@ -901,6 +908,13 @@ mod ltx25_generation_control_tests {
             "advanced": { "temporalUpsampleRounds": 3 }
         }));
         assert!(normalize_ltx25_generation_controls("ltx_2_5", &mut bad_rounds, &entry()).is_err());
+
+        let mut dead_guidance = payload(json!({
+            "advanced": { "transformerVariant": "dev", "guidanceScale": 4.2 }
+        }));
+        assert!(
+            normalize_ltx25_generation_controls("ltx_2_5", &mut dead_guidance, &entry()).is_err()
+        );
     }
 }
 
