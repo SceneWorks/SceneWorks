@@ -58,3 +58,12 @@ peak without replacement transient; runtime-only opportunity ≥5% generation ti
 
 Real-weight generation receipts remain blocked until the appropriate FLUX.2 Klein and Wan assets are
 available on an uncontended runner. No measurement is fabricated by this source-only lane.
+
+### Wan producer API blocker
+
+Loaded Wan identity is owned by private `WanGenerator` fields (`root`, `descriptor`, and
+`dit_source`) at `candle-gen-wan/src/lib.rs:853-880`; exact configuration is held by private
+`Pipeline::{te_cfg,dit_cfg,vae_cfg,variant,root}` at `candle-gen-wan/src/wan14b.rs:146-163`.
+The current public observer accepts only a sink path and receives no generator, pipeline,
+request, or tensor metadata. A truthful producer therefore requires a campaign context threaded
+through this private API; caller-authored JSON/config is not evidence and remains rejected.
