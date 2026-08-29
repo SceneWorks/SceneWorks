@@ -26211,7 +26211,7 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
 ))]
 #[test]
 fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
-    use crate::external_library_runtime::PLAN_BACKED_RESIDENT_BASE_MODELS;
+    use crate::external_library_runtime::{ResidentBaseShape, PLAN_BACKED_RESIDENT_BASE_MODELS};
     use std::collections::BTreeSet;
 
     let plan_families: BTreeSet<&str> = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
@@ -26234,9 +26234,12 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
          load their base from the source library while the resolved cache holds it"
     );
 
-    // Every row must name a real builtin catalog entry that carries a primary download for the
-    // row's tier — the closure the guard builds for it would otherwise be empty on every host
-    // and the row would be dead.
+    // Every row must name a real builtin catalog entry whose closure survives on EVERY platform
+    // this app ships, and whose surviving rows are the shape the row declares. Judged through
+    // `selected_model_artifact_closure` — the same selection the guard runs — rather than by
+    // scanning the raw downloads: a row whose tier download is platform-restricted would pass a
+    // raw scan while yielding an EMPTY closure on the excluded hosts, leaving the row dead
+    // exactly where it matters.
     for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
         let entry = crate::training_jobs::builtin_model_manifest_entry(row.base_model_id)
             .unwrap_or_else(|| {
@@ -26245,18 +26248,45 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
                     row.family, row.base_model_id
                 )
             });
-        assert!(
-            entry["downloads"].as_array().into_iter().flatten().any(|download| {
-                download.get("variant").and_then(serde_json::Value::as_str) == Some(row.tier)
-                    && !sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download(
+        for platform in ["macos", "windows", "linux"] {
+            let closure =
+                sceneworks_core::model_artifacts::artifact_selection::selected_model_artifact_closure(
+                    &entry,
+                    platform,
+                    Some(row.tier),
+                );
+            let downloads: Vec<&serde_json::Value> = closure["downloads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .collect();
+            let matches_shape = |download: &&serde_json::Value| {
+                let co_requisite =
+                    sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download(
                         download,
-                    )
-            }),
-            "builtin entry {:?} declares no primary {:?}-tier download for family {:?}",
-            row.base_model_id,
-            row.tier,
-            row.family
-        );
+                    );
+                match row.shape {
+                    // The route opens the base's own tier: its PRIMARY row must survive.
+                    ResidentBaseShape::FullTier => !co_requisite,
+                    // The route opens only declared components: a co-requisite row at this tier
+                    // must survive, and it is the only thing the guard's closure will name.
+                    ResidentBaseShape::ComponentsOnly => {
+                        co_requisite
+                            && download.get("required").and_then(serde_json::Value::as_str)
+                                != Some("soft")
+                    }
+                }
+            };
+            assert!(
+                downloads.iter().any(matches_shape),
+                "builtin entry {:?} yields no {:?} download at tier {:?} on {platform} — the \
+                 resident-base row for family {:?} would be dead there",
+                row.base_model_id,
+                row.shape,
+                row.tier,
+                row.family
+            );
+        }
     }
 
     // Identity pins against the family resolvers' own constants: the guard's synthetic closure
@@ -26289,4 +26319,43 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
         .expect("mage-flow row");
     assert_eq!(mage.base_model_id, MAGE_FINETUNED_BASE_MODEL);
     assert_eq!(mage.tier, MAGE_FINETUNED_COMPONENT_TIER);
+
+    // And the SHAPE is not free-form: it says which of the base entry's repositories the family's
+    // route opens, which is exactly what the family's presence in one plan table or the other
+    // already declares. A `base-snapshot` family resolves a whole tier DIRECTORY
+    // (`resolve_krea_imported_base_tier` → `WeightsSource::Dir`); a component-resolver family
+    // resolves named components out of a co-requisite repo and never opens the base's own primary
+    // (`resolve_mage_finetuned_components` → `resolve_co_requisites_for_tier`). Getting this
+    // backwards is silent: pass 3 is all-or-nothing across a model's pairs, so an over-wide
+    // closure stops the components being served instead of erroring.
+    for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
+        let in_base_tiers = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
+            .iter()
+            .any(|(family, _)| *family == row.family);
+        let in_component_resolvers = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
+            .iter()
+            .any(|(family, _)| *family == row.family);
+        let expected = if in_base_tiers {
+            ResidentBaseShape::FullTier
+        } else {
+            assert!(
+                in_component_resolvers,
+                "family {:?} is in neither plan table, which the set equality above should have \
+                 caught",
+                row.family
+            );
+            ResidentBaseShape::ComponentsOnly
+        };
+        assert_eq!(
+            row.shape,
+            expected,
+            "family {:?} is registered in {}, so its resident base is {expected:?}",
+            row.family,
+            if in_base_tiers {
+                "CHECKPOINT_PLAN_RESIDENT_BASE_TIERS"
+            } else {
+                "CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS"
+            }
+        );
+    }
 }
