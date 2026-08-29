@@ -43,6 +43,17 @@ pub const RESOLVED_CACHE_MAX_BYTES_ENV: &str = "SCENEWORKS_RESOLVED_CACHE_MAX_BY
 pub const RESOLVED_CACHE_INACTIVITY_SECONDS_ENV: &str =
     "SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS";
 pub const RESOLVED_CACHE_STORE_VERSION: u32 = 1;
+/// How long a recorded content verdict ([`ClosureContentReceipt`]) may stand before the load
+/// boundary re-reads the bundle regardless of its stat identity. 24 hours.
+///
+/// The bound exists for the failure the stat identity cannot see: bytes that change with no
+/// filesystem write behind them. A working session re-uses one verdict throughout and never pays
+/// the hash twice; a bundle left in the cache is re-proved daily, so decay surfaces as a refusal
+/// and a fall back to the source tier instead of being served indefinitely.
+///
+/// Cheap enough to be worth it now that the hash runs on the hardware SHA-2 backend: the largest
+/// bundle here is 33 GB, which is ~11s once a day rather than ~61s per job.
+pub const CONTENT_RECEIPT_MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
 /// The journal version a DERIVED entry is written at (sc-20635).
 ///
 /// `production` and `derivedFrom` widen the metadata document, and `ResolvedCacheMetadata` is
@@ -406,6 +417,20 @@ pub struct ResolvedCacheMetadata {
 /// safe in every direction a sidecar can fail: unreadable, unparseable, forward-versioned, or
 /// belonging to another entry all mean "no verdict", which is precisely the pre-receipt behaviour of
 /// re-reading the bytes.
+///
+/// ## Why the verdict expires
+///
+/// Stat identity detects a WRITE. It cannot detect bytes that changed without one — bit rot, a
+/// failing cable or enclosure, a drive rewriting a sector under it. Before receipts, every job
+/// re-read the bundle, so that class was caught on the next generation by accident rather than by
+/// design. A verdict with no expiry would replace "caught on the next job" with "never caught
+/// again", because the sidecar outlives restarts and nothing else on the load path reads the bytes.
+///
+/// That is not a hypothetical here: the cache exists to front a model library that can live on
+/// external USB media, which is exactly where silent decay is the plausible failure and a mtime-
+/// restoring writer is not. So a verdict is redeemable only for [`CONTENT_RECEIPT_MAX_AGE_SECONDS`]
+/// — long enough that a working session never re-hashes, short enough that a rotting bundle is
+/// re-proved and refused rather than served forever.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClosureContentReceipt {
@@ -2795,6 +2820,19 @@ fn validate_metadata_shape_with(
 /// Every caller holds the entry's metadata lock, which is what makes the read-decide-write below a
 /// single transition rather than three racing ones. Entries that predate receipts simply have none:
 /// their first acquisition after upgrade hashes once, as today, and stamps.
+/// Whether a recorded verdict has stood longer than [`CONTENT_RECEIPT_MAX_AGE_SECONDS`].
+///
+/// Fails CLOSED in both odd directions. A receipt stamped in the future — a clock that moved
+/// backwards, or a bundle copied in from another machine — has no meaningful age, so it expires
+/// rather than being honoured indefinitely; the cost is one re-hash.
+fn receipt_expired(receipt: &ClosureContentReceipt) -> Result<bool, ResolvedCacheError> {
+    let now = now_seconds()?;
+    let Some(age) = now.checked_sub(receipt.verified_at) else {
+        return Ok(true);
+    };
+    Ok(age >= CONTENT_RECEIPT_MAX_AGE_SECONDS)
+}
+
 fn validate_complete_metadata(
     store: &ResolvedCacheStore,
     metadata: &ResolvedCacheMetadata,
@@ -2811,7 +2849,7 @@ fn validate_complete_metadata(
         .ok();
     let recorded = store.read_content_receipt(&digest, &metadata.cache_key);
     if let (Some(recorded), Some(before)) = (&recorded, &before) {
-        if &recorded.files == before {
+        if &recorded.files == before && !receipt_expired(recorded)? {
             return validate_complete_metadata_inner(
                 store,
                 metadata,
@@ -2863,7 +2901,8 @@ fn validate_complete_metadata(
 /// cache at startup, the same whole-cache cost sc-19712 F-3 removed from job submission; byte
 /// accounting needs sizes, and every caller that ACTS on a summary re-proves it under fresh
 /// locks). An invalid managed entry degrades to `Corrupt` in either mode so it cannot hide valid
-/// entries or stop their recovery/retention; load acquisition still re-hashes every file.
+/// entries or stop their recovery/retention; load acquisition re-hashes whenever the recorded
+/// verdict does not still describe the bundle (see [`validate_complete_metadata`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryListing {
     Runtime,
@@ -2881,8 +2920,12 @@ impl EntryListing {
 /// How thoroughly a complete entry's own bundle bytes are re-verified.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContentVerification {
-    /// Re-reads and re-hashes every bundle file. Required before handing an artifact to a runtime
-    /// load, and the cost is proportional to the bundle size.
+    /// Re-reads and re-hashes every bundle file. The cost is proportional to the bundle size.
+    ///
+    /// The load boundary selects this mode whenever it cannot redeem a recorded verdict — see
+    /// [`validate_complete_metadata`] and [`ClosureContentReceipt`] — which is the case on a first
+    /// acquisition, after any change to the closure's stat identity, and once a standing verdict
+    /// passes [`CONTENT_RECEIPT_MAX_AGE_SECONDS`]. It is no longer entered on *every* acquisition.
     RehashEveryFile,
     /// Validates identity, shape, confinement, file presence and sizes, but does not re-hash file
     /// contents. Used by every path that is *reading* rather than loading: journal slot selection,
@@ -2892,11 +2935,18 @@ enum ContentVerification {
     /// model loads.
     ///
     /// This mode is safe on a read path only because it is never the last word: the load boundary
-    /// ([`ResolvedCacheStore::acquire_complete`]) re-verifies at [`Self::RehashEveryFile`] under
-    /// the entry's locks before any bytes reach a runtime, and every boundary that stamps
-    /// `Complete` content (`record_complete`, `publish_staged`, `recover`'s receipt resurrection)
-    /// proves the bytes itself immediately before writing. Do not weaken the load boundary — it
-    /// is what this mode leans on.
+    /// ([`ResolvedCacheStore::acquire_complete`]) is the one place that proves content, and every
+    /// boundary that stamps `Complete` content (`record_complete`, `publish_staged`, `recover`'s
+    /// receipt resurrection) proves the bytes itself immediately before writing. Do not weaken the
+    /// load boundary — it is what this mode leans on.
+    ///
+    /// What the load boundary now guarantees, precisely, because it is no longer "re-hash every
+    /// time": every acquisition runs THIS mode's checks, and it re-reads the bytes unless a
+    /// recorded verdict covers them — same closure, same per-file size and mtime, taken less than
+    /// [`CONTENT_RECEIPT_MAX_AGE_SECONDS`] ago. So an alteration that moves any of that is still
+    /// refused on the next load, and one that moves none of it is still caught, but within the
+    /// max-age rather than on the very next job. Widening that window, or dropping the age bound,
+    /// is what "weakening the load boundary" would now mean.
     PathsAndSizesOnly,
 }
 

@@ -405,6 +405,91 @@ fn a_recorded_verdict_is_reused_while_the_closure_is_untouched_and_dropped_when_
     );
 }
 
+/// A standing verdict expires, so decay with no filesystem write behind it cannot hide forever.
+///
+/// Stat identity detects a WRITE. Bit rot, a failing enclosure, a drive rewriting a sector — none
+/// of those move size or mtime, so the receipt would keep matching and the bytes would never be
+/// read again. Before receipts every job re-read the bundle, which caught that class by accident;
+/// the max-age is what keeps catching it on purpose. This matters because the cache fronts a model
+/// library that can live on external USB media, where silent decay is the plausible failure and a
+/// timestamp-restoring writer is not.
+///
+/// The receipt is aged by rewriting `verifiedAt` rather than by waiting, so this asserts the
+/// contract rather than sleeping through it.
+#[test]
+fn a_standing_verdict_expires_and_sends_the_closure_back_through_the_full_read() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    let published = match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("fixture bundle was not published: {other:?}"),
+    };
+    let hashed_files = published
+        .artifact
+        .closure
+        .members
+        .iter()
+        .flat_map(|member| member.files.iter())
+        .filter(|file| file.sha256.is_some())
+        .count() as u64;
+
+    let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
+    drop(
+        store
+            .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+            .unwrap()
+            .expect("the fixture entry must be acquirable"),
+    );
+
+    // Backdate the standing verdict past the bound. Nothing about the bundle changes, so only the
+    // age can send this back through the read.
+    let sidecar = store
+        .entry_path(&candidate.cache_key)
+        .unwrap()
+        .join("content.verification.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    let verified_at = receipt["verifiedAt"].as_u64().expect("a recorded verdict");
+    receipt["verifiedAt"] =
+        serde_json::json!(verified_at.saturating_sub(CONTENT_RECEIPT_MAX_AGE_SECONDS + 1));
+    std::fs::write(&sidecar, serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let (lease, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(
+        lease.unwrap().is_some(),
+        "an expired verdict re-proves the bundle; it does not refuse an intact one"
+    );
+    assert_eq!(
+        hashes, hashed_files,
+        "a verdict older than the max age must not be redeemed — the bytes are read again"
+    );
+
+    // And the re-proof stands on its own: the refreshed verdict is redeemable immediately.
+    let (lease, after_refresh) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    assert!(lease.unwrap().is_some());
+    assert_eq!(
+        after_refresh, 0,
+        "re-proving must stamp a fresh verdict, not leave the entry hashing on every acquisition"
+    );
+}
+
 /// The recorded verdict must stay OUT of the metadata journal, so a downgrade still reads the store.
 ///
 /// `ResolvedCacheMetadata` is `deny_unknown_fields` and the journal keeps two slots. A receipt field

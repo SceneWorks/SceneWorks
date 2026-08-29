@@ -1627,6 +1627,14 @@ pub(crate) async fn run_image_generate_job(
     // a no-op on the job row (the heartbeat's job update is scoped to the owning worker), but it
     // would still write `busy` + this job id back onto the WORKER row — racing the loop's own Idle
     // heartbeat and briefly advertising a worker that is free as occupied.
+    //
+    // NARROWS that race rather than closing it: `Drop` aborts the pump task, which cannot recall a
+    // POST already on the wire. One in-flight request can still land after the terminal write. The
+    // loop's next Idle heartbeat (one progress interval, ≤15s) corrects the worker row, and the job
+    // row was never at risk, so the residue is a worker that reads busy for at most that interval.
+    // Closing it outright would need the pump to await its in-flight request, which would put a
+    // network round-trip in front of every job's terminal post to fix a self-correcting cosmetic
+    // window.
     drop(preload_heartbeat);
 
     update_job(
