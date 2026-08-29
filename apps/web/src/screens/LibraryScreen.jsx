@@ -191,6 +191,7 @@ export function LibraryScreen() {
           <select aria-label="Asset type" onChange={(event) => setTypeFilter(event.target.value)} value={typeFilter}>
             <option value="all">All media</option>
             <option value="image">Images</option>
+            <option value="vector">Vectors</option>
             <option value="video">Videos</option>
             <option value="audio">Audio</option>
             <option value="upload">Uploads</option>
