@@ -13,7 +13,13 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "available": { "type": "boolean" },
-        "reason": { "enum": ["provider_not_linked", "unsupported_platform"] }
+        "reason": {
+          "enum": [
+            "provider_not_linked",
+            "unsupported_platform",
+            "pending_terminal_inference_pin"
+          ]
+        }
       }
     },
     "staticMemoryStrategyCapability": {

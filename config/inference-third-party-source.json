@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 857f2454 advances the feature train through the native StarVector-1B MLX and Candle provider merges, together with the preceding MiniMax-H3 integration. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes at this pin. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
-  "inferenceRevision": "857f24549adc824ad2fa3774dafc89d2110be410",
-  "auditDigest": "d202b61cff91cfda9885cfd0abf4e56934d3df065ab2afd09242e4dfe37852c0",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 3775a5f8 advances inference main with the substantive LTX 2.5 integration and Krea mixed-dtype conditioning repair. The exact scanner records 667 provenance candidates and 97 production-Rust crate prefixes at this pin. Current report-only licensing findings must be read from the checker output; this summary does not freeze their counts.",
+  "inferenceRevision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
+  "auditDigest": "080d0b71eab7914d4e7ecfe7d6a963ea9a5ccb5e7c123eb1a7c0c653f10c4bf9",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "857f24549adc824ad2fa3774dafc89d2110be410",
+    "revision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 667,
-    "populationSha256": "f7c730b767a9eb8097223e99871d9e7a339c3a3001c5d77a9e79a1b091737d05"
+    "populationSha256": "05b46405b3eac269166e9e814e377b8cdb210deb00f12f57933e75bae598dbcb"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "857f24549adc824ad2fa3774dafc89d2110be410",
+    "revision": "3775a5f80a07a38071c7859f6ac565bcab5d1c7b",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 97,
     "cratePopulationSha256": "993023a1f5832a7402f3c6aaf5989122b8d12436d69b5fd840be84ba90b329f2"

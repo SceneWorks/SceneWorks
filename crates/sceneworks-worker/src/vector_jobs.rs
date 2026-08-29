@@ -7,11 +7,7 @@
 //! network/resource loader), and published as an SVG+PNG directory rename.
 
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
-use std::time::Duration;
 
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
@@ -88,7 +84,6 @@ pub(crate) struct VectorProviderRequest {
     pub(crate) mode: VectorMode,
     pub(crate) model: String,
     pub(crate) source_path: Option<PathBuf>,
-    pub(crate) model_path: PathBuf,
     pub(crate) prompt: String,
     pub(crate) sampling: VectorSampling,
     pub(crate) detail_budget: VectorDetailBudget,
@@ -100,6 +95,9 @@ pub(crate) struct VectorProviderRequest {
 pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
     fn provider_id(&self) -> &str;
     fn supports_mode(&self, mode: VectorMode) -> bool;
+    fn unavailable_reason(&self) -> Option<&str> {
+        None
+    }
     fn generate_svg(
         &self,
         request: &VectorProviderRequest,
@@ -108,9 +106,9 @@ pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
     ) -> WorkerResult<()>;
 }
 
-struct NativeStarVectorProvider;
+struct PendingTerminalPinVectorProvider;
 
-impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
+impl MultimodalVectorProviderAdapter for PendingTerminalPinVectorProvider {
     fn provider_id(&self) -> &str {
         "starvector"
     }
@@ -119,152 +117,29 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
         mode == VectorMode::ImageToSvg
     }
 
+    fn unavailable_reason(&self) -> Option<&str> {
+        Some("pending_terminal_inference_pin")
+    }
+
     fn generate_svg(
         &self,
-        request: &VectorProviderRequest,
-        cancel: &gen_core::CancelFlag,
-        on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
+        _request: &VectorProviderRequest,
+        _cancel: &gen_core::CancelFlag,
+        _on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
     ) -> WorkerResult<()> {
-        generate_starvector_svg(request, cancel, on_source)
+        Err(WorkerError::InvalidPayload(
+            "vector_backend_unavailable: pending_terminal_inference_pin".to_owned(),
+        ))
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn generate_starvector_svg(
-    request: &VectorProviderRequest,
-    cancel: &gen_core::CancelFlag,
-    on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
-) -> WorkerResult<()> {
-    use gen_core::core_llm::{
-        Content, ImageRef, LoadSpec, Message, Role, Sampling, StarVectorFinishReason,
-        StarVectorProvider, StarVectorRequest, StarVectorStreamEvent, TextLlmRequest,
-    };
-
-    let source_path = request.source_path.as_deref().ok_or_else(|| {
-        WorkerError::InvalidPayload("StarVector image_to_svg source is missing".to_owned())
-    })?;
-    let decoded = image::ImageReader::open(source_path)
-        .map_err(|error| WorkerError::InvalidPayload(format!("open vector source image: {error}")))?
-        .with_guessed_format()
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("detect vector source image: {error}"))
-        })?
-        .decode()
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!("decode vector source image: {error}"))
-        })?
-        .to_rgb8();
-    let image =
-        ImageRef::new(decoded.width(), decoded.height(), decoded.into_raw()).map_err(|error| {
-            WorkerError::InvalidPayload(format!("build StarVector image request: {error}"))
-        })?;
-    let core_cancel = gen_core::core_llm::CancelFlag::new();
-    let text_request = TextLlmRequest {
-        messages: vec![Message {
-            role: Role::User,
-            content: vec![Content::Image(image)],
-            thinking: None,
-            tool_calls: Vec::new(),
-        }],
-        sampling: Sampling {
-            temperature: request.sampling.temperature,
-            top_p: request.sampling.top_p,
-            top_k: request.sampling.top_k as usize,
-            repetition_penalty: request.sampling.repetition_penalty,
-            repetition_context: request.sampling.repetition_context as usize,
-        },
-        max_new_tokens: request.detail_budget.max_new_tokens,
-        seed: request.sampling.seed,
-        cancel: core_cancel.clone(),
-        ..Default::default()
-    };
-    let svg_request = StarVectorRequest::new(
-        text_request,
-        request.detail_budget.max_svg_bytes as usize,
-        Duration::from_millis(request.detail_budget.max_wall_time_ms),
-    );
-    let spec = LoadSpec::dense(request.model_path.to_string_lossy());
-
-    #[cfg(target_os = "macos")]
-    let provider = runtime_macos::llm::StarVector1bProvider::load(&spec)
-        .map_err(|error| classify_starvector_error("load MLX StarVector-1B", error))?;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let provider = runtime_cuda::llm::starvector::CandleStarVectorProvider::load(&spec)
-        .map_err(|error| classify_starvector_error("load Candle StarVector-1B", error))?;
-
-    let monitor_done = Arc::new(AtomicBool::new(false));
-    let monitor_done_thread = monitor_done.clone();
-    let outer_cancel = cancel.clone();
-    let monitored_cancel = core_cancel.clone();
-    let monitor = std::thread::spawn(move || {
-        while !monitor_done_thread.load(Ordering::Acquire) {
-            if outer_cancel.is_cancelled() {
-                monitored_cancel.cancel();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    });
-    let mut callback_error = None;
-    let callback_cancel = core_cancel.clone();
-    let generated = provider.generate_svg(&svg_request, &mut |event| {
-        if callback_error.is_none() {
-            if let StarVectorStreamEvent::Source { text, index } = event {
-                callback_error = on_source(&text, index).err();
-                if callback_error.is_some() {
-                    callback_cancel.cancel();
-                }
-            }
-        }
-    });
-    monitor_done.store(true, Ordering::Release);
-    let _ = monitor.join();
-    let output = generated.map_err(|error| match error {
-        gen_core::core_llm::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
-        other => classify_starvector_error("generate StarVector SVG", other),
-    })?;
-    if let Some(error) = callback_error {
-        return Err(error);
+fn ensure_provider_available(provider: &dyn MultimodalVectorProviderAdapter) -> WorkerResult<()> {
+    if let Some(reason) = provider.unavailable_reason() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "vector_backend_unavailable: {reason}"
+        )));
     }
-    match output.finish_reason {
-        StarVectorFinishReason::CompleteRoot | StarVectorFinishReason::Eos => Ok(()),
-        StarVectorFinishReason::Cancelled => Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned())),
-        reason => Err(WorkerError::InvalidPayload(format!(
-            "StarVector stopped before a complete SVG root: {reason:?}"
-        ))),
-    }
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn classify_starvector_error(context: &str, error: gen_core::core_llm::Error) -> WorkerError {
-    match error {
-        gen_core::core_llm::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
-        gen_core::core_llm::Error::Unsupported(detail)
-        | gen_core::core_llm::Error::InvalidRequest(detail) => {
-            WorkerError::InvalidPayload(format!("{context}: {detail}"))
-        }
-        other => WorkerError::Engine(format!("{context}: {other}")),
-    }
-}
-
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
-fn generate_starvector_svg(
-    _request: &VectorProviderRequest,
-    _cancel: &gen_core::CancelFlag,
-    _on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
-) -> WorkerResult<()> {
-    Err(WorkerError::InvalidPayload(
-        "vector_backend_unavailable: this worker build links no StarVector provider".to_owned(),
-    ))
+    Ok(())
 }
 
 fn manifest_declares_mode(payload: &VectorJobPayload) -> bool {
@@ -365,7 +240,13 @@ pub(crate) async fn run_vector_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    run_vector_job_with_provider(api, settings, job, Arc::new(NativeStarVectorProvider)).await
+    run_vector_job_with_provider(
+        api,
+        settings,
+        job,
+        Arc::new(PendingTerminalPinVectorProvider),
+    )
+    .await
 }
 
 pub(crate) async fn run_vector_job_with_provider(
@@ -392,6 +273,10 @@ pub(crate) async fn run_vector_job_with_provider(
             provider.provider_id()
         )));
     }
+    // Keep this before project lookup, heartbeat, or any status transition: the catalog may be
+    // installable before the feature train permanently pins the matching native providers, but a
+    // queued/stale job must never make an unavailable backend look claimed.
+    ensure_provider_available(provider.as_ref())?;
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.get_project(&payload.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -411,21 +296,6 @@ pub(crate) async fn run_vector_job_with_provider(
             ))
         }
     };
-    let model_path = payload
-        .model_manifest_entry
-        .get("installedPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "vector_model_unavailable: the selected model is not completely installed; use Model Manager"
-                    .to_owned(),
-            )
-        })?;
-
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
         api,
@@ -461,7 +331,6 @@ pub(crate) async fn run_vector_job_with_provider(
         mode: payload.mode,
         model: payload.model.clone(),
         source_path,
-        model_path,
         prompt: payload.prompt.clone(),
         sampling: payload.sampling.clone(),
         detail_budget: payload.detail_budget.clone(),
@@ -941,12 +810,23 @@ mod tests {
     }
 
     #[test]
+    fn production_provider_fails_closed_until_the_terminal_inference_pin() {
+        let provider = PendingTerminalPinVectorProvider;
+        assert!(provider.supports_mode(VectorMode::ImageToSvg));
+        let error = ensure_provider_available(&provider).expect_err("provider remains unavailable");
+        assert!(matches!(
+            error,
+            WorkerError::InvalidPayload(detail)
+                if detail == "vector_backend_unavailable: pending_terminal_inference_pin"
+        ));
+    }
+
+    #[test]
     fn cancellation_during_streamed_svg_never_reaches_publication() {
         let request = VectorProviderRequest {
             mode: VectorMode::TextToSvg,
             model: "starvector_test".to_owned(),
             source_path: None,
-            model_path: PathBuf::from("unused-by-injected-test-provider"),
             prompt: "a compact mark".to_owned(),
             sampling: VectorSampling {
                 temperature: 0.2,

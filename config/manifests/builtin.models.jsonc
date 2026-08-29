@@ -25268,8 +25268,8 @@
         "maxSvgBytes": 262144,
         "maxWallTimeMs": 120000,
         "providers": {
-          "mlx": { "id": "mlx-starvector-1b", "available": true },
-          "candle": { "id": "candle-starvector-1b", "available": true }
+          "mlx": { "id": "mlx-starvector-1b", "available": false, "reason": "pending_terminal_inference_pin" },
+          "candle": { "id": "candle-starvector-1b", "available": false, "reason": "pending_terminal_inference_pin" }
         }
       },
       "downloads": [
@@ -25305,7 +25305,7 @@
       "licenseUrl": "https://huggingface.co/starvector/starvector-1b-im2svg/tree/380ab95d25a8e9ab1dc825debe238b4953ae13b9",
       "ui": {
         "label": "StarVector-1B",
-        "description": "Native image-to-SVG vectorization from the exact StarVector-1B snapshot. The MLX and Candle providers load local files only; Model Manager must complete the install before submission.",
+        "description": "Image-to-SVG vectorization from the exact StarVector-1B snapshot. Model Manager can install the immutable files now; native MLX and Candle dispatch remains unavailable until the terminal feature-train inference pin.",
         "recommendedFor": ["image_to_svg"],
         "promptGuide": {
           "title": "StarVector-1B Vectorization Guide",

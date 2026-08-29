@@ -297,7 +297,7 @@ fn write_vector_test_manifest_with_provider_state(
         if provider_available {
             json!({ "id": id, "available": true })
         } else {
-            json!({ "id": id, "available": false, "reason": "unsupported_platform" })
+            json!({ "id": id, "available": false, "reason": "pending_terminal_inference_pin" })
         }
     };
     std::fs::write(
@@ -377,7 +377,7 @@ async fn vector_route_reports_typed_unavailable_backend_before_enqueue() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "vector_backend_unavailable");
-    assert_eq!(body["context"]["reason"], "unsupported_platform");
+    assert_eq!(body["context"]["reason"], "pending_terminal_inference_pin");
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert!(jobs.as_array().expect("jobs").is_empty());
 }
@@ -400,8 +400,13 @@ fn builtin_starvector_manifest_is_the_exact_native_image_to_svg_closure() {
         model["vector"]["providers"]["candle"]["id"],
         "candle-starvector-1b"
     );
-    assert_eq!(model["vector"]["providers"]["mlx"]["available"], true);
-    assert_eq!(model["vector"]["providers"]["candle"]["available"], true);
+    for backend in ["mlx", "candle"] {
+        assert_eq!(model["vector"]["providers"][backend]["available"], false);
+        assert_eq!(
+            model["vector"]["providers"][backend]["reason"],
+            "pending_terminal_inference_pin"
+        );
+    }
     let download = &model["downloads"][0];
     assert_eq!(download["repo"], "starvector/starvector-1b-im2svg");
     assert_eq!(

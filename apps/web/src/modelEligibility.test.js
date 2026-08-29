@@ -65,12 +65,12 @@ describe("modelEligibility predicates", () => {
       vector: { providers: { ...model.vector.providers, candle: {
         id: "candle-starvector-1b",
         available: false,
-        reason: "unsupported_platform",
+        reason: "pending_terminal_inference_pin",
       } } },
     };
     expect(vectorModelAvailability(unavailable, "image_to_svg", { platform: "win32" })).toMatchObject({
       available: false,
-      reason: "unsupported_platform",
+      reason: "pending_terminal_inference_pin",
       backend: "candle",
     });
   });
