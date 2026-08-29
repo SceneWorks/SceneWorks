@@ -2046,9 +2046,9 @@ async fn run_utility_job(
             JobType::ImageEdit => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image edit failed.", error)),
-            JobType::VectorGenerate => run_image_to_svg_job(api, settings, &job)
+            JobType::VectorGenerate => run_vector_job(api, settings, &job)
                 .await
-                .map_err(|error| ("Image vectorization failed.", error)),
+                .map_err(|error| ("Vector generation failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
             // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
             // never advertised, so this arm is unreachable there and the job remains queued.

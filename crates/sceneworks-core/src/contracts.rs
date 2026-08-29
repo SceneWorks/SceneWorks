@@ -214,9 +214,8 @@ string_enum! {
         ImageEdit => "image_edit",
         ImageVqa => "image_vqa",
         ImageInterleave => "image_interleave",
-        // CPU-only vector generation walking skeleton (epic 19699, sc-22251).
-        // The worker sanitizes and canonicalizes the supplied SVG before it ever reaches the
-        // project tree, then publishes the SVG and its native PNG preview as one pair.
+        // Vector Studio generation. Request mode is carried in the typed payload and routed to a
+        // mode-specific worker capability before claim.
         VectorGenerate => "vector_generate",
         VideoGenerate => "video_generate",
         VideoExtend => "video_extend",
@@ -405,6 +404,10 @@ string_enum! {
         ImageEdit => "image_edit",
         ImageVqa => "image_vqa",
         ImageInterleave => "image_interleave",
+        // Native StarVector providers advertise modes independently. A worker that implements only
+        // raster vectorization must never claim a text_to_svg job (or vice versa).
+        VectorImageToSvg => "vector_image_to_svg",
+        VectorTextToSvg => "vector_text_to_svg",
         VideoGenerate => "video_generate",
         VideoExtend => "video_extend",
         VideoBridge => "video_bridge",

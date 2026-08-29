@@ -4879,6 +4879,7 @@ fn build_generated_asset_sidecar(
         "video" => build_video_sidecar_parts(job_id, fact),
         "audio" => build_audio_sidecar_parts(job_id, fact),
         "document" => build_document_sidecar_parts(job_id, fact),
+        "vector" => build_vector_sidecar_parts(job_id, fact),
         _ => build_image_sidecar_parts(job_id, fact),
     };
     let mut asset = json!({
@@ -4962,6 +4963,43 @@ fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
     let lineage = json!({
         "parents": parents,
         "sourceAssetId": get("sourceAssetId"),
+        "sourceTimestamp": Value::Null,
+        "jobId": job_id,
+    });
+    (file, recipe, lineage)
+}
+
+/// Vector Studio replay is intentionally explicit rather than inheriting the image recipe's
+/// width/height/LoRA shape. These are the complete generation inputs and the two versioned
+/// post-processing boundaries required to reproduce or explain a stored SVG.
+fn build_vector_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let source_asset_id = get("sourceAssetId");
+    let parents = source_asset_id
+        .as_str()
+        .map(|source| vec![Value::String(source.to_owned())])
+        .unwrap_or_default();
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": get("width"),
+        "height": get("height"),
+        "duration": Value::Null,
+        "fps": Value::Null,
+    });
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": get("prompt"),
+        "sampling": get("sampling"),
+        "detailBudget": get("detailBudget"),
+        "sanitizerVersion": get("sanitizerVersion"),
+        "rendererVersion": get("rendererVersion"),
+    });
+    let lineage = json!({
+        "parents": parents,
+        "sourceAssetId": source_asset_id,
         "sourceTimestamp": Value::Null,
         "jobId": job_id,
     });
@@ -6895,10 +6933,25 @@ mod tests {
             "height": 8,
             "createdAt": "2026-08-29T00:00:00Z",
             "mode": "image_to_svg",
-            "model": "fixture_svg",
-            "adapter": "fixture_svg",
-            "prompt": "",
-            "negativePrompt": "",
+            "model": "starvector_1b",
+            "adapter": "starvector",
+            "prompt": "preserve the bold silhouette",
+            "sourceAssetId": "asset_source",
+            "sampling": {
+                "temperature": 0.2,
+                "topP": 0.9,
+                "topK": 0,
+                "repetitionPenalty": 1.0,
+                "repetitionContext": 0,
+                "seed": 17,
+            },
+            "detailBudget": {
+                "maxNewTokens": 4096,
+                "maxSvgBytes": 262144,
+                "maxWallTimeMs": 120000,
+            },
+            "sanitizerVersion": "sceneworks-inert-svg-v1",
+            "rendererVersion": "resvg-0.45",
             "count": 1,
             "normalizedWidth": 12,
             "normalizedHeight": 8,
@@ -6915,6 +6968,22 @@ mod tests {
         assert_eq!(asset["file"]["mimeType"], "image/svg+xml");
         assert_eq!(asset["preview"]["mimeType"], "image/png");
         assert_ne!(asset["file"]["path"], asset["preview"]["path"]);
+        assert_eq!(asset["recipe"]["mode"], "image_to_svg");
+        assert_eq!(asset["recipe"]["model"], "starvector_1b");
+        assert_eq!(asset["recipe"]["sampling"]["seed"], 17);
+        assert_eq!(asset["recipe"]["detailBudget"]["maxNewTokens"], 4096);
+        assert_eq!(
+            asset["recipe"]["sanitizerVersion"],
+            "sceneworks-inert-svg-v1"
+        );
+        assert_eq!(asset["recipe"]["rendererVersion"], "resvg-0.45");
+        assert_eq!(asset["lineage"]["sourceAssetId"], "asset_source");
+        assert_eq!(asset["lineage"]["parents"], json!(["asset_source"]));
+
+        let encoded = serde_json::to_vec(&asset).expect("vector sidecar serializes");
+        let replayed: Value = serde_json::from_slice(&encoded).expect("vector sidecar parses");
+        assert_eq!(replayed["recipe"], asset["recipe"]);
+        assert_eq!(replayed["lineage"], asset["lineage"]);
     }
 
     /// sc-4408: a scored generation's `rawAdapterSettings.faceLikeness` block (attached worker-side by

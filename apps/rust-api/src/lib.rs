@@ -152,9 +152,8 @@ use training::{
 };
 mod generation;
 use generation::{
-    create_audio_job, create_image_job, create_image_to_svg_job, create_interleave_job,
-    create_video_job, create_vqa_job, parse_recipe_preset_resolution, typed_generation_route,
-    JobCatalogSnapshot,
+    create_audio_job, create_image_job, create_interleave_job, create_vector_job, create_video_job,
+    create_vqa_job, parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
 use generation::{validate_interleave_job, validate_vqa_job};
@@ -185,14 +184,14 @@ use dto::{
     DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
     DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery,
     FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
-    ImageJobRequest, ImageToSvgJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery,
-    LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest,
-    ModelDownloadRequest, ModelImportRequest, ModelImportSourceV1, OwnershipModeV1,
-    PersonDetectionJobRequest, PersonTrackCorrectionsRequest, PersonTrackJobRequest,
-    ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest, QualityAckBody, ReadinessQuery,
-    RecipePresetsQuery, SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
-    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
-    VideoJobRequest, VqaJobRequest,
+    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
+    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
+    ModelImportRequest, ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest,
+    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
+    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
+    SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
+    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VectorMode,
+    VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
@@ -1707,10 +1706,7 @@ fn create_app_with_state_mode(
             post(save_person_track_corrections),
         )
         .route("/api/v1/image/jobs", post(create_image_job))
-        .route(
-            "/api/v1/image/vectorize/jobs",
-            post(create_image_to_svg_job),
-        )
+        .route("/api/v1/image/vectorize/jobs", post(create_vector_job))
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))

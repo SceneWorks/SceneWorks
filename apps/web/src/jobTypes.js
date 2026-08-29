@@ -10,6 +10,7 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "image_edit",
   "image_vqa",
   "image_interleave",
+  "vector_generate",
   "image_upscale",
   "image_detail",
   "image_segment",
@@ -30,7 +31,6 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
 
 // Utility job types that run on any worker (no GPU required).
 export const NON_GPU_JOB_TYPES = new Set([
-  "vector_generate",
   "dataset_parquet_import",
   "model_download",
   "model_import",
