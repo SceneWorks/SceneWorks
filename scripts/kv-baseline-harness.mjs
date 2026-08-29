@@ -402,7 +402,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [
       "schemaVersion", "harnessVersion", "runId", "capturedAt", "mode", "status",
       "contractHash", "receiptSha256", "provenance", "matrix", "geometry", "memory",
-      "timings", "quality", "lifecycle", "cancellation",
+      "timings", "quality", "lifecycle", "cancellation", "warmup",
     ],
     "receipt",
   );
@@ -425,7 +425,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [
       "sceneWorksRevision", "inferenceRevision", "mlxRevision", "dependencyLockSha256",
       "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
-      "thermalState", "commandTemplate", "command",
+      "thermalState", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion",
     ],
     "provenance",
   );
@@ -439,7 +439,9 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   }
   digest(receipt.provenance.dependencyLockSha256, "provenance.dependencyLockSha256");
   digest(receipt.provenance.modelFileSha256, "provenance.modelFileSha256");
+  digest(receipt.provenance.campaignSessionId, "provenance.campaignSessionId");
   positiveInteger(receipt.provenance.modelFileBytes, "provenance.modelFileBytes");
+  positiveInteger(receipt.provenance.campaignCacheStateVersion, "provenance.campaignCacheStateVersion");
   if (receipt.provenance.thermalState !== "nominal") {
     fail("thermal state is not nominal");
   }
@@ -670,6 +672,24 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   }
   exactKeys(receipt.cancellation, ["cleanupVerified"], "cancellation");
   if (receipt.cancellation.cleanupVerified !== true) fail("cancellation cleanup is not verified");
+  exactKeys(
+    receipt.warmup,
+    ["required", "completed", "workerPid", "suiteSha256", "sessionId", "cacheStateVersion"],
+    "warmup",
+  );
+  positiveInteger(receipt.warmup.workerPid, "warmup.workerPid");
+  nonnegativeInteger(receipt.warmup.cacheStateVersion, "warmup.cacheStateVersion");
+  const warmRequired = receipt.matrix.processTemperature === "warm";
+  if (receipt.warmup.required !== warmRequired
+    || (warmRequired && (!receipt.warmup.completed
+      || !/^[0-9a-f]{64}$/.test(receipt.warmup.suiteSha256)
+      || receipt.warmup.sessionId !== receipt.provenance.campaignSessionId
+      || receipt.warmup.cacheStateVersion === 0
+      || receipt.warmup.cacheStateVersion > receipt.provenance.campaignCacheStateVersion))
+    || (!warmRequired && (receipt.warmup.completed || receipt.warmup.suiteSha256 !== ""
+      || receipt.warmup.sessionId !== "" || receipt.warmup.cacheStateVersion !== 0))) {
+    fail("warmup session/cache-state evidence is inconsistent with the coordinate");
+  }
   return receipt;
 }
 
