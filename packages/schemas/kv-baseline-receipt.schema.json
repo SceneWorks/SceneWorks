@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/kv-baseline-receipt.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schemaVersion", "harnessVersion", "runId", "capturedAt", "mode", "status", "provenance", "geometry", "memory", "timings", "quality", "lifecycle", "fullCacheTemporary", "cancellation"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "harnessVersion": { "const": "sc-20671-kv-baseline-v1" },
+    "mode": { "enum": ["dense", "compressed"] },
+    "status": { "const": "complete" },
+    "provenance": { "type": "object", "required": ["sceneWorksRevision", "inferenceRevision", "mlxRevision", "os", "xcode", "hardware", "modelId", "modelFileSha256", "powerMode", "thermalState", "command"] },
+    "fullCacheTemporary": { "type": "object", "required": ["detected"], "properties": { "detected": { "const": false } } },
+    "cancellation": { "type": "object", "required": ["cleanupVerified"], "properties": { "cleanupVerified": { "const": true } } }
+  }
+}
