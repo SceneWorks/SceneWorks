@@ -19,10 +19,12 @@ pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
 pub const LTX_REPOSITORY: &str = "SceneWorks/ltx-2.3-mlx";
-/// The single public LTX-2.5 MLX rehost. Capture roots are nested one level deeper than the 2.3
-/// artifact (`<snapshot>/<transformerVariant>/<tier>`); the adapter validates both axes before it
-/// opens the registered provider.
+/// The single public LTX-2.5 rehost used by both native capture adapters. Roots are nested one
+/// level deeper than the 2.3 artifact (`<snapshot>/<transformerVariant>/<tier>`); each adapter
+/// validates both axes before opening its registered provider.
 pub const LTX25_REPOSITORY: &str = "SceneWorks/ltx-2.5-mlx";
+/// Compatibility spelling used by the Candle arm; keep both adapters bound to one literal.
+pub const LTX_2_5_REPOSITORY: &str = LTX25_REPOSITORY;
 /// The `mlx:minimax_h3` TIERED artifact (sc-18663). Unlike every repository above it, this rehost
 /// is **not sufficient on its own**: `mlx_gen_minimax_h3::model::load` probes `vae/`, `audio_vae/`,
 /// `tokenizer/` and `FL2VA/audio_vae/` under the spec's own weights root, and this rehost publishes
@@ -41,6 +43,187 @@ pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// never backfills the field from the plan (sc-16482) — a receipt may only testify to its own run.
 pub const LOAD_SHAPE_EAGER: &str = "eager_materialization";
 pub const LOAD_SHAPE_DEFERRED: &str = "deferred_materialization";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Ltx25TransformerVariant {
+    Distilled,
+    Dev,
+}
+
+impl Ltx25TransformerVariant {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Distilled => "distilled",
+            Self::Dev => "dev",
+        }
+    }
+
+    pub const fn steps(self) -> u32 {
+        match self {
+            Self::Distilled => 8,
+            Self::Dev => 30,
+        }
+    }
+
+    pub const fn requires_official_refinement_lora(self) -> bool {
+        matches!(self, Self::Dev)
+    }
+
+    pub fn validate_load_shape(self, load_shape: &str) -> Result<(), String> {
+        match (self, load_shape) {
+            (Self::Dev, LOAD_SHAPE_EAGER)
+            | (Self::Distilled, LOAD_SHAPE_EAGER | LOAD_SHAPE_DEFERRED) => Ok(()),
+            (Self::Dev, LOAD_SHAPE_DEFERRED) => Err(
+                "LTX-2.5 dev capture requires eager_materialization because the official stage-two refinement LoRA makes transformer streaming ineligible"
+                    .to_owned(),
+            ),
+            (_, other) => Err(format!("unsupported LTX-2.5 Candle loadShape {other:?}")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Ltx25Decoder {
+    Conv,
+    DiffVae,
+}
+
+impl Ltx25Decoder {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conv => "conv",
+            Self::DiffVae => "diffvae",
+        }
+    }
+}
+
+/// Exact plan axes consumed by the real LTX-2.5 Candle capture arm. Keeping this parser in the
+/// weight-free library makes the fail-closed request contract testable on a CPU-only host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ltx25CandleTarget {
+    pub tier: String,
+    pub transformer_variant: Ltx25TransformerVariant,
+    pub decoder: Ltx25Decoder,
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
+    pub fps: u32,
+    pub seed: u64,
+}
+
+pub fn ltx25_candle_target(request: &Value) -> Result<Ltx25CandleTarget, String> {
+    let planned = planned(request)?;
+    let target = planned
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let string = |field: &str| {
+        target
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("planned.target.{field} must be a string"))
+    };
+    if string("provider")? != "ltx_2_5_distilled" {
+        return Err("LTX-2.5 Candle capture requires provider \"ltx_2_5_distilled\"".to_owned());
+    }
+    if string("modelId")? != "ltx_2_5" {
+        return Err("LTX-2.5 Candle capture requires modelId \"ltx_2_5\"".to_owned());
+    }
+    if string("mode")? != "text_to_video" {
+        return Err("LTX-2.5 Candle capture requires mode \"text_to_video\"".to_owned());
+    }
+    if string("overlay")? != "none" {
+        return Err(
+            "LTX-2.5 Candle base campaign requires target.overlay \"none\"; the official dev refinement is part of the base recipe"
+                .to_owned(),
+        );
+    }
+    let tier = match string("tier")? {
+        tier @ ("bf16" | "q4" | "q8") => tier.to_owned(),
+        tier => return Err(format!("unsupported LTX-2.5 Candle numeric tier {tier:?}")),
+    };
+    let transformer_variant = match string("transformerVariant")? {
+        "distilled" => Ltx25TransformerVariant::Distilled,
+        "dev" => Ltx25TransformerVariant::Dev,
+        variant => {
+            return Err(format!(
+                "unsupported LTX-2.5 transformerVariant {variant:?}"
+            ))
+        }
+    };
+    let decoder = match string("decoder")? {
+        "conv" => Ltx25Decoder::Conv,
+        "diffvae" => Ltx25Decoder::DiffVae,
+        decoder => return Err(format!("unsupported LTX-2.5 decoder {decoder:?}")),
+    };
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |field: &str| {
+        geometry
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{field} must fit u32"))
+    };
+    let width = axis("width")?;
+    let height = axis("height")?;
+    let frames = axis("frames")?;
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "LTX-2.5 Candle capture requires geometry.batch == 1, got {batch}"
+        ));
+    }
+    if width < 64 || height < 64 || width > 1280 || height > 1280 {
+        return Err(format!(
+            "LTX-2.5 Candle capture requires width/height in 64..=1280, got {width}x{height}"
+        ));
+    }
+    if width % 64 != 0 || height % 64 != 0 {
+        return Err(format!(
+            "LTX-2.5 Candle capture requires width/height divisible by 64, got {width}x{height}"
+        ));
+    }
+    if frames == 0 || frames % 8 != 1 {
+        return Err(format!(
+            "LTX-2.5 Candle capture requires geometry.frames == 1 + 8k, got {frames}"
+        ));
+    }
+    let fixture = planned
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("ltx-2-5-candle-{tier}-{width}x{height}-f{frames}-fps");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse LTX-2.5 fixture fps {fps:?}: {error}"))?;
+    if ![24, 25, 30].contains(&fps) {
+        return Err(format!(
+            "planned.fixture fps {fps} is outside the LTX-2.5 manifest values [24, 25, 30]"
+        ));
+    }
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse LTX-2.5 fixture seed {seed:?}: {error}"))?;
+    Ok(Ltx25CandleTarget {
+        tier,
+        transformer_variant,
+        decoder,
+        width,
+        height,
+        frames,
+        fps,
+        seed,
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferencePhase {
@@ -461,6 +644,39 @@ pub fn validate_huggingface_revision_root(
     )
 }
 
+/// Validate a canonical Hugging Face root with more than one repository-relative selector, such as
+/// LTX-2.5's `<transformer-variant>/<numeric-tier>` layout.
+pub fn validate_huggingface_snapshot_subpath(
+    canonical_root: &Path,
+    repository: &str,
+    revision: &str,
+    subpath: &[&str],
+    expected_repository: &str,
+) -> Result<(), String> {
+    validate_artifact_identity(repository, revision, expected_repository)?;
+    if subpath.is_empty()
+        || subpath.iter().any(|component| {
+            component.is_empty() || component.contains('/') || component.contains('\\')
+        })
+    {
+        return Err("artifact snapshot subpath must contain plain non-empty components".to_owned());
+    }
+    let repository_component = format!("models--{}", expected_repository.replace('/', "--"));
+    let mut expected = vec![repository_component.as_str(), "snapshots", revision];
+    expected.extend(subpath.iter().copied());
+    let components = canonical_root
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if !components.ends_with(&expected) {
+        return Err(format!(
+            "artifact root must end with /{repository_component}/snapshots/{revision}/{}",
+            subpath.join("/")
+        ));
+    }
+    Ok(())
+}
+
 fn validate_snapshot_suffix(
     canonical_root: &Path,
     repository: &str,
@@ -597,6 +813,143 @@ pub fn fail(message: impl AsRef<str>) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ltx25_request() -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": "ltx_2_5_distilled",
+                    "modelId": "ltx_2_5",
+                    "tier": "q4",
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "transformerVariant": "distilled",
+                    "decoder": "conv",
+                    "geometry": { "width": 768, "height": 512, "batch": 1, "frames": 145 }
+                },
+                "fixture": "ltx-2-5-candle-q4-768x512-f145-fps24-seed18755"
+            }
+        })
+    }
+
+    #[test]
+    fn ltx25_candle_target_binds_every_planned_axis() {
+        let target = ltx25_candle_target(&ltx25_request()).unwrap();
+        assert_eq!(target.tier, "q4");
+        assert_eq!(
+            target.transformer_variant,
+            Ltx25TransformerVariant::Distilled
+        );
+        assert_eq!(target.decoder, Ltx25Decoder::Conv);
+        assert_eq!(
+            (target.width, target.height, target.frames),
+            (768, 512, 145)
+        );
+        assert_eq!((target.fps, target.seed), (24, 18_755));
+
+        let mut dev = ltx25_request();
+        dev["planned"]["target"]["tier"] = json!("q8");
+        dev["planned"]["target"]["transformerVariant"] = json!("dev");
+        dev["planned"]["target"]["decoder"] = json!("diffvae");
+        dev["planned"]["target"]["geometry"] =
+            json!({ "width": 512, "height": 512, "batch": 1, "frames": 17 });
+        dev["planned"]["fixture"] = json!("ltx-2-5-candle-q8-512x512-f17-fps25-seed18777");
+        let target = ltx25_candle_target(&dev).unwrap();
+        assert_eq!(
+            target.tier, "q8",
+            "q8 must remain distinct and reach provider admission"
+        );
+        assert_eq!(target.transformer_variant, Ltx25TransformerVariant::Dev);
+        assert_eq!(target.decoder, Ltx25Decoder::DiffVae);
+        assert_eq!((target.width, target.height, target.frames), (512, 512, 17));
+    }
+
+    #[test]
+    fn ltx25_dev_recipe_requires_the_official_lora_and_eager_load_shape() {
+        assert!(!Ltx25TransformerVariant::Distilled.requires_official_refinement_lora());
+        assert!(Ltx25TransformerVariant::Dev.requires_official_refinement_lora());
+        assert!(Ltx25TransformerVariant::Distilled
+            .validate_load_shape(LOAD_SHAPE_DEFERRED)
+            .is_ok());
+        assert!(Ltx25TransformerVariant::Dev
+            .validate_load_shape(LOAD_SHAPE_EAGER)
+            .is_ok());
+        let error = Ltx25TransformerVariant::Dev
+            .validate_load_shape(LOAD_SHAPE_DEFERRED)
+            .unwrap_err();
+        assert!(error.contains("official stage-two refinement LoRA"));
+        assert!(error.contains("eager_materialization"));
+    }
+
+    #[test]
+    fn ltx25_candle_target_fails_closed_on_identity_and_geometry_drift() {
+        for (pointer, replacement, expected) in [
+            ("/planned/target/provider", json!("ltx_2_5"), "provider"),
+            (
+                "/planned/target/modelId",
+                json!("ltx_2_5_distilled"),
+                "modelId",
+            ),
+            ("/planned/target/mode", json!("image_to_video"), "mode"),
+            ("/planned/target/overlay", json!("lora"), "overlay"),
+            (
+                "/planned/target/transformerVariant",
+                json!("turbo"),
+                "transformerVariant",
+            ),
+            ("/planned/target/decoder", json!("auto"), "decoder"),
+            ("/planned/target/geometry/batch", json!(2), "batch"),
+            (
+                "/planned/target/geometry/width",
+                json!(770),
+                "divisible by 64",
+            ),
+            ("/planned/target/geometry/frames", json!(144), "1 + 8k"),
+        ] {
+            let mut request = ltx25_request();
+            *request.pointer_mut(pointer).unwrap() = replacement;
+            let error = ltx25_candle_target(&request).unwrap_err();
+            assert!(error.contains(expected), "{pointer}: {error}");
+        }
+        let mut mismatched_fixture = ltx25_request();
+        mismatched_fixture["planned"]["target"]["tier"] = json!("bf16");
+        assert!(ltx25_candle_target(&mismatched_fixture)
+            .unwrap_err()
+            .contains("must start with"));
+    }
+
+    #[test]
+    fn ltx25_nested_snapshot_root_binds_variant_and_tier() {
+        let revision = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
+        let root = Path::new("/cache/models--SceneWorks--ltx-2.5-mlx/snapshots")
+            .join(revision)
+            .join("dev")
+            .join("q8");
+        validate_huggingface_snapshot_subpath(
+            &root,
+            LTX_2_5_REPOSITORY,
+            revision,
+            &["dev", "q8"],
+            LTX_2_5_REPOSITORY,
+        )
+        .unwrap();
+        assert!(validate_huggingface_snapshot_subpath(
+            &root,
+            LTX_2_5_REPOSITORY,
+            revision,
+            &["distilled", "q8"],
+            LTX_2_5_REPOSITORY,
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_subpath(
+            &root,
+            LTX_2_5_REPOSITORY,
+            revision,
+            &["dev/q8"],
+            LTX_2_5_REPOSITORY,
+        )
+        .is_err());
+    }
 
     #[test]
     fn unix_epoch_formats_as_rfc3339() {
