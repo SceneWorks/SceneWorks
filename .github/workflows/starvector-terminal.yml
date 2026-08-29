@@ -1,0 +1,25 @@
+name: StarVector terminal campaign
+on:
+  workflow_dispatch:
+    inputs:
+      permanent_pin:
+        description: Exact permanent-pin authority
+        required: true
+        type: string
+jobs:
+  mlx-1b:
+    if: ${{ github.event.inputs.permanent_pin != '' }}
+    runs-on: [self-hosted, macos, real-weights]
+    steps: [{uses: actions/checkout@v4}, {run: node scripts/starvector-terminal-campaign.mjs release/starvector-terminal-campaign-v1.json}]
+  mlx-8b:
+    needs: mlx-1b
+    runs-on: [self-hosted, macos, real-weights]
+    steps: [{uses: actions/checkout@v4}, {run: echo 'controller supplies pre-provisioned exact snapshot only'}]
+  cuda-1b:
+    needs: mlx-8b
+    runs-on: [self-hosted, windows, cuda, real-weights]
+    steps: [{uses: actions/checkout@v4}, {shell: bash, run: echo 'controller supplies pre-provisioned exact snapshot only'}]
+  cuda-8b:
+    needs: cuda-1b
+    runs-on: [self-hosted, windows, cuda, real-weights]
+    steps: [{uses: actions/checkout@v4}, {shell: bash, run: echo 'controller uploads receipt/artifacts even on failure'}]
