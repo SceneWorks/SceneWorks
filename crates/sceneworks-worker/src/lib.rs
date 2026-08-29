@@ -235,6 +235,8 @@ use media_jobs::*;
 mod image_decode;
 mod image_jobs;
 use image_jobs::*;
+mod vector_jobs;
+use vector_jobs::*;
 // Ideogram 4 mandatory JSON-caption conditioning + placeholder detect-and-recover (epic 4725,
 // sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
 // on the Linux parity lane. sc-6610: its functions are called only from the macOS MLX generate path
@@ -2044,6 +2046,9 @@ async fn run_utility_job(
             JobType::ImageEdit => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image edit failed.", error)),
+            JobType::VectorGenerate => run_image_to_svg_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Image vectorization failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
             // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
             // never advertised, so this arm is unreachable there and the job remains queued.

@@ -271,6 +271,36 @@ pub(crate) async fn create_image_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// Create the CPU-only fixture vectorization job. The worker owns SVG parsing, sanitization,
+/// canonicalization, preview rasterization, and publication; this route only validates the typed
+/// envelope and prevents accidental use of the raw generic queue API.
+pub(crate) async fn create_image_to_svg_job(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<ImageToSvgJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    if payload.project_id.trim().is_empty() {
+        return Err(ApiError::bad_request("projectId is required"));
+    }
+    if payload.fixture_svg.trim().is_empty() {
+        return Err(ApiError::bad_request("fixtureSvg is required"));
+    }
+    let mut job_payload = to_json_object(&payload)?;
+    // The job type describes the CPU vector capability; the operation is an explicit payload
+    // mode so later StarVector/provider work can extend `vector_generate` without inventing a
+    // second job class.
+    job_payload.insert("mode".to_owned(), Value::String("image_to_svg".to_owned()));
+    let job = create_generation_job(
+        state,
+        JobType::VectorGenerate,
+        Some(payload.project_id),
+        payload.project_name,
+        job_payload,
+        "cpu".to_owned(),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
 /// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
 /// source shape and operation select one provider registration; family identity alone never admits
 /// a request. Builtins retain their id-keyed routing and are out of this family gate.
@@ -1197,6 +1227,7 @@ pub(crate) fn contract_number(value: f32) -> Value {
 pub(crate) fn typed_generation_route(job_type: &JobType) -> Option<&'static str> {
     match job_type {
         JobType::ImageGenerate | JobType::ImageEdit => Some("/api/v1/image/jobs"),
+        JobType::VectorGenerate => Some("/api/v1/image/vectorize/jobs"),
         JobType::VideoGenerate
         | JobType::VideoExtend
         | JobType::VideoBridge

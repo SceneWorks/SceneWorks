@@ -81,6 +81,70 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
 }
 
 #[tokio::test]
+async fn vector_source_is_attachment_only_while_its_preview_is_inline_png() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector files" }),
+    )
+    .await;
+    let project_id = created["id"].as_str().expect("project id");
+    let root = std::path::PathBuf::from(created["path"].as_str().expect("project path"))
+        .join("assets/images/vector");
+    std::fs::create_dir_all(&root).expect("vector parent creates");
+    std::fs::write(
+        root.join("vector.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\"/></svg>",
+    )
+    .expect("svg fixture writes");
+    std::fs::write(root.join("preview.png"), PNG_32X32).expect("preview fixture writes");
+
+    let (status, headers, _) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/files/assets/images/vector/vector.svg"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/svg+xml");
+    assert_eq!(headers["content-disposition"], "attachment");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+
+    let (status, error) = request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{project_id}/files/assets/images/vector/vector.svg?thumbnail=320"
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "SVG thumbnails are not supported; use the vector PNG preview"
+    );
+
+    let (status, headers, bytes) = request_raw(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/files/assets/images/vector/preview.png"),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/png");
+    assert!(headers.get("content-disposition").is_none());
+    assert_eq!(bytes, PNG_32X32);
+}
+
+#[tokio::test]
 async fn project_file_route_backfills_and_reuses_bounded_thumbnails() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);

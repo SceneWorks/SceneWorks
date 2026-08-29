@@ -251,6 +251,9 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
         ("video_extend", "/api/v1/video/jobs"),
         ("video_bridge", "/api/v1/video/jobs"),
         ("person_replace", "/api/v1/video/jobs"),
+        // Vector Studio is a typed `vector_generate` capability. `image_to_svg` is a payload
+        // mode owned by its dedicated fixture route, never a generic job type.
+        ("vector_generate", "/api/v1/image/vectorize/jobs"),
         // Audio Studio (sc-13404): the audio route injects the model's manifest entry too, so an
         // `audio_generate` job enqueued raw through the generic route must be rejected the same way.
         ("audio_generate", "/api/v1/audio/jobs"),
@@ -278,6 +281,33 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
             "{job_type}: error must name {typed_route}, got {body}"
         );
     }
+}
+
+#[tokio::test]
+async fn fixture_vector_route_uses_vector_generate_with_image_to_svg_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": "project-1",
+            "projectName": "Fixture",
+            "fixtureSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["type"], "vector_generate");
+    assert_eq!(created["requestedGpu"], "cpu");
+    assert_eq!(created["payload"]["mode"], "image_to_svg");
+    assert_eq!(
+        created["payload"]["fixtureSvg"],
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>"
+    );
 }
 
 /// The other half of the guard: the job types the generic route legitimately serves keep
