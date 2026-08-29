@@ -669,6 +669,12 @@ pub(crate) async fn run_video_generate_job(
     )
     .await?;
 
+    // The video twin of the image dispatch seam's region heartbeat: same pre-load admission pass,
+    // same 90 s stale-worker sweep, and larger weights than any image route, so the same window is
+    // wider here. Only `wan.rs` carries a consumer interval arm today; every other video route
+    // depends on this guard for its load window. Dropped before the terminal post below.
+    let preload_heartbeat = crate::progress::HeartbeatPump::start(api, settings, &job.id);
+
     // sc-3033 ships the procedural stub only; the real MLX video models (Wan sc-3034,
     // LTX+audio sc-3035) decode `GenerationOutput::Video` into a `DecodedVideo` here.
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
@@ -1201,6 +1207,8 @@ pub(crate) async fn run_video_generate_job(
 
     let fact = video_asset_fact(&plan, seed, adapter, raw_settings, replacement_status, clip);
     let result = streaming_result(&plan, &fact, adapter);
+    // Before the terminal post, so a late tick cannot re-advertise a finished worker as busy.
+    drop(preload_heartbeat);
     update_job(
         api,
         &job.id,

@@ -51,6 +51,25 @@ remove_dir_all = "=0.8.4"
 # cache uses volume + file index to distinguish atomic replacement.
 winapi-util = "0.1"
 
+[target.'cfg(all(target_arch = "aarch64", target_vendor = "apple"))'.dependencies]
+# ARMv8 SHA-2 instructions for the resolved-cache closure verify (sc-21534's load boundary).
+# Without `asm`, sha2 0.10's aarch64 backend is not compiled in at all and every hash runs the
+# portable software compressor. Measured on one 6.0 GB Krea shard on an Apple Silicon host:
+# 0.54 GB/s soft vs 2.97 GB/s with `asm` — same digest, 5.2x. On a 33 GB bundle that is the
+# difference between a ~60 s verify and a ~11 s one.
+#
+# Target-gated, and deliberately narrow. The feature pulls in `sha2-asm`, whose build script
+# hands GNU-syntax `.S` files to `cc` with `-c`; under MSVC that is `cl.exe`, which assembles
+# neither, so enabling this workspace-wide would break the Windows candle lane at link time
+# rather than in review. `aarch64-apple` is exactly where the hot path runs (the MLX worker's
+# resolved cache) and exactly where the in-crate intrinsics backend is selected.
+#
+# Cargo unifies features across the graph per target, so this single declaration is what every
+# member that hashes (worker, desktop, api, memory-adapter) compiles against on this target —
+# the same union hazard `image` is hoisted to `[workspace.dependencies]` for. It cannot be
+# hoisted the same way because `[workspace.dependencies]` entries carry no target cfg.
+sha2 = { version = "0.10", features = ["asm"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 # Descriptor-relative filesystem operations keep resolved-cache staging publication and cleanup
