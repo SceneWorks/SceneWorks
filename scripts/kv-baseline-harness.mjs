@@ -778,9 +778,50 @@ export async function buildVerifiedReceipt(input) {
     if (await sha256File(artifactPath) !== sourceRow.artifactSha256) {
       fail(`quality fixture ${fixture} artifact SHA-256 mismatch`);
     }
+    let artifact;
+    try {
+      artifact = JSON.parse(await readFile(artifactPath, "utf8"));
+    } catch (error) {
+      fail(`quality fixture ${fixture} artifact is not valid JSON: ${error.message}`);
+    }
+    validateFixtureArtifact(artifact, fixture, sourceRow);
     delete verifiedInput.quality.fixtureEvidence[fixture].artifactPath;
   }
   return buildReceipt(verifiedInput);
+}
+
+export function validateFixtureArtifact(artifact, fixture, sourceRow) {
+  exactKeys(artifact, ["fixture", "independentReference", "evidence", "metrics"], `fixture artifact ${fixture}`);
+  if (artifact.fixture !== fixture) fail(`fixture artifact name mismatch for ${fixture}`);
+  if (artifact.independentReference !== sourceRow.independentReference) {
+    fail(`fixture artifact reference mismatch for ${fixture}`);
+  }
+  object(artifact.evidence, `fixture artifact ${fixture}.evidence`);
+  object(artifact.metrics, `fixture artifact ${fixture}.metrics`);
+  for (const field of ["parityMaxError", "perplexityDelta", "greedyTokenAgreement", "structuredToolAgreement", "needleRetrieval", "multiTurnPromptCache"]) {
+    if (typeof artifact.metrics[field] !== "number" || !Number.isFinite(artifact.metrics[field])) {
+      fail(`fixture artifact ${fixture}.metrics.${field} must be finite`);
+    }
+  }
+  const requiredEvidence = {
+    "kernel-fp32-reference": ["candidatePerplexity", "referencePerplexity", "parityErrors", "greedyMatches", "greedyTotal"],
+    "structured-tool-call": ["matches", "total"],
+    "long-context-needle": ["matches", "total"],
+    "multi-turn-prompt-cache": ["matches", "total"],
+  }[fixture];
+  exactKeys(artifact.evidence, requiredEvidence, `fixture artifact ${fixture}.evidence`);
+  if (fixture === "kernel-fp32-reference") {
+    for (const field of ["candidatePerplexity", "referencePerplexity", "greedyMatches", "greedyTotal"]) {
+      if (typeof artifact.evidence[field] !== "number" || !Number.isFinite(artifact.evidence[field])) fail(`fixture artifact ${fixture}.${field} must be finite`);
+    }
+    if (!Array.isArray(artifact.evidence.parityErrors) || artifact.evidence.parityErrors.length === 0
+      || artifact.evidence.parityErrors.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
+      fail(`fixture artifact ${fixture}.parityErrors must contain finite values`);
+    }
+  } else {
+    for (const field of ["matches", "total"]) positiveInteger(artifact.evidence[field], `fixture artifact ${fixture}.${field}`);
+    if (artifact.evidence.matches > artifact.evidence.total) fail(`fixture artifact ${fixture} matches exceed total`);
+  }
 }
 
 async function removeIfPresent(file) {
