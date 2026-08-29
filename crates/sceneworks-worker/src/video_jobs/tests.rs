@@ -11439,6 +11439,53 @@ fn resolve_ltx_model_dir_reaches_bf16_in_a_sibling_revision() {
     assert_eq!(default.expect("default resolves"), old.join("q4"));
 }
 
+/// LTX-2.5 is a sealed public bundle. A mutable main ref or a larger sibling snapshot must never
+/// replace the exact revision named by the builtin manifest.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_ltx25_model_dir_uses_the_immutable_bundle_revision() {
+    fn write_complete_ltx25_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in LTX25_TIER_REQUIRED_FILES {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    let hub = tempfile::tempdir().expect("LTX-2.5 hub");
+    let repo_cache = hub.path().join(format!(
+        "models--{}",
+        sceneworks_core::hf_home::safe_repo_dir_name(LTX25_BUNDLE_REPO).expect("LTX-2.5 repo slug")
+    ));
+    let pinned = repo_cache.join("snapshots").join(LTX25_BUNDLE_REVISION);
+    write_complete_ltx25_dir(&pinned.join("distilled/q4"));
+
+    let mutable_revision = "ffffffffffffffffffffffffffffffffffffffff";
+    let mutable = repo_cache.join("snapshots").join(mutable_revision);
+    write_complete_ltx25_dir(&mutable.join("distilled/q4"));
+    write_complete_ltx25_dir(&mutable.join("dev/q4"));
+    std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
+    std::fs::write(repo_cache.join("refs/main"), mutable_revision).unwrap();
+
+    let data = tempfile::tempdir().expect("LTX-2.5 data");
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let request = request(json!({
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "prompt": "immutable revision"
+    }));
+    let resolved =
+        ltx_with_hermetic_cache(hub.path(), || resolve_ltx_model_dir(&settings, &request));
+
+    assert_eq!(
+        resolved.expect("pinned LTX-2.5 tier resolves"),
+        pinned.join("distilled/q4"),
+        "runtime selection must ignore refs/main and larger cached siblings"
+    );
+}
+
 /// A complete tier in any revision is already provisioned. Presence checks must not contact the Hub
 /// for it, while a tier missing from every revision must still attempt the fetch.
 #[cfg(target_os = "macos")]
@@ -12120,6 +12167,16 @@ fn video_load_spec_threads_text_encoder_dir() {
         matches!(spec.components.get("enhancer"), Some(WeightsSource::Dir(path)) if path == &PathBuf::from("/models/ltx-2.5-mlx/enhancer")),
         "the stock enhancer must resolve from the snapshot root, not the selected tier"
     );
+    assert_eq!(
+        spec.offload_policy,
+        OffloadPolicy::Sequential,
+        "LTX-2.5 must stage its major components sequentially"
+    );
+    assert_eq!(
+        spec.load_shape,
+        gen_core::LoadShape::DeferredMaterialization,
+        "an adapter-free LTX-2.5 load must make bounded transformer residency reachable"
+    );
     let candle_ltx25 = VideoGenInput {
         engine_id: "ltx_2_5_distilled",
         model_dir: PathBuf::from("/models/ltx-2.5-mlx/dev/q4"),
@@ -12128,6 +12185,23 @@ fn video_load_spec_threads_text_encoder_dir() {
     assert!(
         video_load_spec(&candle_ltx25).components.is_empty(),
         "the Candle provider must not receive the MLX-only enhancer component"
+    );
+    let adapted_ltx25 = VideoGenInput {
+        engine_id: "ltx_2_5_distilled",
+        model_dir: PathBuf::from("/models/ltx-2.5-mlx/distilled/q4"),
+        adapters: vec![AdapterSpec::new(
+            PathBuf::from("/models/ltx-2.5-mlx/distilled_lora/refinement.safetensors"),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )],
+        ..VideoGenInput::default()
+    };
+    let spec = video_load_spec(&adapted_ltx25);
+    assert_eq!(spec.offload_policy, OffloadPolicy::Sequential);
+    assert_eq!(
+        spec.load_shape,
+        gen_core::LoadShape::EagerMaterialization,
+        "adapter-bearing LTX-2.5 loads must not claim bounded transformer residency"
     );
 
     let diffvae = VideoGenInput {
@@ -14807,7 +14881,11 @@ mod candle_video_label_tests {
             }
         }
 
-        for (bits, tier) in [(4, "q4"), (8, "q8"), (0, "bf16"), (-1, "bf16")] {
+        for (bits, tier, expected_quant) in [
+            (4, "q4", Some(Quant::Q4)),
+            (0, "bf16", None),
+            (-1, "bf16", None),
+        ] {
             for variant in ["distilled", "dev"] {
                 let request = request(json!({
                     "projectId": "p",
@@ -14821,19 +14899,39 @@ mod candle_video_label_tests {
                     candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &request)
                         .expect("exact LTX-2.5 variant/tier");
                 assert_eq!(resolved, root.path().join(variant).join(tier));
-                assert!(
-                    quant.is_none(),
-                    "the selected tier is already packed or dense"
+                assert_eq!(
+                    quant, expected_quant,
+                    "the selected split tier's physical numeric identity must reach LoadSpec"
+                );
+                let spec = video_load_spec(&VideoGenInput {
+                    engine_id: "ltx_2_5_distilled",
+                    model_dir: resolved,
+                    quant,
+                    ..VideoGenInput::default()
+                });
+                assert_eq!(
+                    spec.quantize, expected_quant,
+                    "the Candle provider rejects a LoadSpec whose selector disagrees with the physical tier"
                 );
             }
         }
 
         let default = request(json!({ "projectId": "p", "model": "ltx_2_5" }));
         assert_eq!(
-            candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &default,)
-                .map(|(dir, _)| dir),
-            Some(root.path().join("distilled/q4")),
+            candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &default,),
+            Some((root.path().join("distilled/q4"), Some(Quant::Q4))),
             "omitted selectors retain the distilled q4 default"
+        );
+
+        let q8 = request(json!({
+            "projectId": "p",
+            "model": "ltx_2_5",
+            "advanced": { "mlxQuantize": 8 }
+        }));
+        assert_eq!(
+            candle_ltx_tier_subdir(root.path(), "ltx_2_5_distilled", "ltx_2_5", &q8),
+            None,
+            "the MLX-affine q8 tier is not a measured Candle execution contract"
         );
 
         std::fs::remove_file(root.path().join("dev/bf16/text_encoder.safetensors"))

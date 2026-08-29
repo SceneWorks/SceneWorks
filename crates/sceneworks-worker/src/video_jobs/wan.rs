@@ -1525,6 +1525,17 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     .into_iter()
     .flatten()
     .collect::<BTreeMap<_, _>>();
+    // LTX-2.5's split checkpoints can stage the Gemma encoder and DiT sequentially on every load.
+    // Adapter-free loads also satisfy the providers' exact rung-4 prerequisite: their 48-block
+    // transformer source can be reopened under the shared deferred-materialization contract.
+    // Dev always carries its required refinement adapter, and user adapter loads do too; keeping
+    // those eager prevents a block rebuild from silently dropping forward-time residuals.
+    if matches!(input.engine_id, "ltx_2_5" | "ltx_2_5_distilled") {
+        spec.offload_policy = OffloadPolicy::Sequential;
+        if spec.adapters.is_empty() {
+            spec = spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+        }
+    }
     spec
 }
 

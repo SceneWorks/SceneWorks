@@ -153,6 +153,10 @@ const candleTierModelIds = new Set([
 // this execution allowlist literal and local so an unrelated future catalog tier cannot become
 // runnable merely by appearing in the manifest. MLX continues to use the complete installed tier set.
 const SCAIL2_CANDLE_PRODUCT_TIERS = Object.freeze(["q4", "q8", "bf16"]);
+// LTX-2.5 q8 is the published MLX-affine tier. The Candle provider's Q8 selector names a distinct
+// INT8-ConvRot contract whose measurement receipt is still unaccepted, so only q4 and dense bf16
+// may be offered for Candle execution.
+const LTX25_CANDLE_PRODUCT_TIERS = Object.freeze(["q4", "bf16"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
@@ -160,10 +164,16 @@ const TIER_SCREEN = "video";
 const MAX_SCAIL2_REFERENCE_CHARACTERS = 6;
 
 function videoExecutionTierModel(model, backend) {
-  if (backend !== "candle" || model?.id !== SCAIL2_MODEL_ID) {
+  const acceptedTiers =
+    model?.id === SCAIL2_MODEL_ID
+      ? SCAIL2_CANDLE_PRODUCT_TIERS
+      : model?.id === ltx25VideoModelId
+        ? LTX25_CANDLE_PRODUCT_TIERS
+        : null;
+  if (backend !== "candle" || acceptedTiers === null) {
     return model;
   }
-  const accepted = (tier) => SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier);
+  const accepted = (tier) => acceptedTiers.includes(tier);
   return {
     ...model,
     variants: Array.isArray(model.variants)

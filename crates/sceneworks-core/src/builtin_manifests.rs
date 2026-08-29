@@ -496,9 +496,9 @@ mod tests {
             .find(|model| model["id"].as_str() == Some("ltx_2_5"))
             .expect("ltx_2_5 is present");
         let expected = [
-            ("q4", 82_001_022_554_u64),
-            ("q8", 83_672_119_594_u64),
-            ("bf16", 145_561_735_442_u64),
+            ("q4", 82_001_054_462_u64),
+            ("q8", 83_672_150_720_u64),
+            ("bf16", 145_561_765_732_u64),
         ];
 
         let downloads = model["downloads"]
@@ -527,9 +527,14 @@ mod tests {
                     .map(String::as_str)
                     .collect::<Vec<_>>()
             );
+            let expected_platforms = if tier == "q8" {
+                serde_json::json!(["macos"])
+            } else {
+                serde_json::json!(["macos", "windows", "linux"])
+            };
             assert_eq!(
                 row["platforms"].as_array().expect("tier has platforms"),
-                &["macos", "windows", "linux"]
+                expected_platforms.as_array().expect("expected platforms")
             );
             assert_eq!(row["estimatedSizeBytes"].as_u64(), Some(measured_bytes));
             assert_eq!(
@@ -541,7 +546,7 @@ mod tests {
         }
 
         let expected_co_requisites = [
-            (vec!["enhancer/*"], 23_951_746_871_u64),
+            (vec!["enhancer/*"], 23_951_748_129_u64),
             (
                 vec!["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"],
                 8_899_889_568_u64,
@@ -561,11 +566,16 @@ mod tests {
                         .is_some_and(|files| files == &expected_files)
                 })
                 .unwrap_or_else(|| panic!("ltx_2_5 has co-requisite {expected_files:?}"));
+            let expected_platforms = if expected_files == ["enhancer/*"] {
+                serde_json::json!(["macos"])
+            } else {
+                serde_json::json!(["macos", "windows", "linux"])
+            };
             assert_eq!(
                 row["platforms"]
                     .as_array()
                     .expect("co-requisite has platforms"),
-                &["macos", "windows", "linux"]
+                expected_platforms.as_array().expect("expected platforms")
             );
             assert_eq!(row["estimatedSizeBytes"].as_u64(), Some(measured_bytes));
         }

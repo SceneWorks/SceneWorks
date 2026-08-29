@@ -226,6 +226,14 @@ pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const LTX25_BUNDLE_REPO: &str = "SceneWorks/ltx-2.5-mlx";
+/// Immutable revision of the finalized public LTX-2.5 bundle. The installer, MLX resolver and
+/// Candle resolver all bind this same snapshot so a mutable `refs/main` or a larger cached sibling
+/// can never replace the published artifact at runtime.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const LTX25_BUNDLE_REVISION: &str = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
 /// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
 /// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
@@ -425,13 +433,18 @@ pub(super) fn resolve_ltx_model_dir(
         let tier = ltx_bundle_tier_order(request)
             .first()
             .expect("LTX tier order is non-empty");
-        let root =
-            huggingface_snapshot_dir(&settings.data_dir, LTX25_BUNDLE_REPO).ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "LTX-2.5 bundle not found; install {LTX25_BUNDLE_REPO} with {} / {tier} first",
-                    variant.component_dir()
-                ))
-            })?;
+        let root = crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            LTX25_BUNDLE_REPO,
+            LTX25_BUNDLE_REVISION,
+        )
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LTX-2.5 bundle revision {LTX25_BUNDLE_REVISION} not found; install \
+                     {LTX25_BUNDLE_REPO} with {} / {tier} first",
+                variant.component_dir(),
+            ))
+        })?;
         let dir = root.join(variant.component_dir()).join(tier);
         return ltx25_dir_is_complete(&dir).then_some(dir).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(

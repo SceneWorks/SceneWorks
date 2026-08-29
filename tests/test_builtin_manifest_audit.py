@@ -204,28 +204,30 @@ def test_ltx25_builtin_manifest_uses_published_tier_sizes_and_geometry():
         if not row.get("coRequisite")
     }
     expected_bytes = {
-        "q4": 82_001_022_554,
-        "q8": 83_672_119_594,
-        "bf16": 145_561_735_442,
+        "q4": 82_001_054_462,
+        "q8": 83_672_150_720,
+        "bf16": 145_561_765_732,
     }
 
     assert set(tiers) == set(expected_bytes)
     for tier, measured_bytes in expected_bytes.items():
         row = tiers[tier]
         assert row["files"] == [f"distilled/{tier}/*", f"dev/{tier}/*"]
-        assert row["platforms"] == ["macos", "windows", "linux"]
+        expected_platforms = ["macos"] if tier == "q8" else ["macos", "windows", "linux"]
+        assert row["platforms"] == expected_platforms
         assert row["estimatedSizeBytes"] == measured_bytes
         assert row["footprint"]["diskSizeBytes"] == measured_bytes
         assert row["footprint"]["residentMemoryBytes"] is None
         assert row["footprint"]["peakMemoryBytes"] is None
 
     expected_co_requisites = {
-        ("enhancer/*",): 23_951_746_871,
+        ("enhancer/*",): 23_951_748_129,
         ("distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",): 8_899_889_568,
     }
     assert len(co_requisites) == len(expected_co_requisites)
     for row in co_requisites:
-        assert row["platforms"] == ["macos", "windows", "linux"]
+        expected_platforms = ["macos"] if row["files"] == ["enhancer/*"] else ["macos", "windows", "linux"]
+        assert row["platforms"] == expected_platforms
         assert row["estimatedSizeBytes"] == expected_co_requisites[tuple(row["files"])]
 
     assert model["defaults"]["steps"] == 8

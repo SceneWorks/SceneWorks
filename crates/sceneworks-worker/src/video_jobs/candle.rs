@@ -5,8 +5,8 @@ use super::{
     ltx::{
         ltx25_dir_is_complete, ltx25_generation_options, ltx25_transformer_variant,
         resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
-        resolve_video_clip_conditioning, LTX25_BUNDLE_REPO, LTX_BUNDLE_PRE_BF16_REVISION,
-        LTX_BUNDLE_REPO, LTX_BUNDLE_REVISION,
+        resolve_video_clip_conditioning, LTX25_BUNDLE_REPO, LTX25_BUNDLE_REVISION,
+        LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO, LTX_BUNDLE_REVISION,
     },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
@@ -351,11 +351,12 @@ fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> 
     roots.into_iter().flatten().find_map(resolve)
 }
 
-/// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
-/// the returned load quant is deliberately `None`: `LoadSpec::quantize` means on-the-fly
-/// quantization to the Candle LTX provider and must never be set for these tiers. Base LTX supports
-/// only the published q4/q8 Candle tiers; an explicit bf16 or other value returns `None` so callers
-/// fail closed rather than silently loading q4. Eros has no Candle route after SC-18902 acceptance.
+/// Resolve the exact packed LTX tier selected by the request. LTX-2.5's provider binds
+/// `LoadSpec::quantize` to the physical split-bundle tier and rejects a mismatch, so q4 carries its
+/// exact numeric identity while dense bf16 carries `None`. Its published q8 bytes are MLX-affine;
+/// Candle's `Quant::Q8` names the separately measured INT8-ConvRot contract, so q8 fails closed
+/// until SC-18777 accepts a CUDA mode. LTX-2.3 keeps its legacy `None` marker. Eros has no Candle
+/// route after SC-18902 acceptance.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_ltx_tier_subdir(
     root: &Path,
@@ -375,13 +376,15 @@ pub(super) fn candle_ltx_tier_subdir(
         // this resolver runs.  The nested component directory is the selection
         // boundary; never fall through to a sibling variant.
         let variant = ltx25_transformer_variant(request).ok()?;
-        let tier = match tier {
-            CandleLtxTier::Q4 => "q4",
-            CandleLtxTier::Q8 => "q8",
-            CandleLtxTier::Bf16 => "bf16",
+        let (tier, quant) = match tier {
+            CandleLtxTier::Q4 => ("q4", Some(Quant::Q4)),
+            // `Quant::Q8` names the separately measured INT8-ConvRot contract in the provider;
+            // the local MLX-affine q8 tier remains macOS-only until SC-18777 accepts a CUDA mode.
+            CandleLtxTier::Q8 => return None,
+            CandleLtxTier::Bf16 => ("bf16", None),
         };
         let dir = root.join(variant.component_dir()).join(tier);
-        return candle_ltx25_tier_complete(&dir).then_some((dir, None));
+        return candle_ltx25_tier_complete(&dir).then_some((dir, quant));
     }
     // Keep the Candle resolver aligned with the immutable bundle compatibility policy: an existing
     // q4 install may still live at the proven parent while an on-demand q8 fetch lands at the
@@ -1187,6 +1190,18 @@ pub(super) async fn generate_candle_video_using(
         // Resolve-or-error; never a stub (the candle generic arm has no stub fallback once
         // `candle_video_engine_id` resolves the id).
         resolve_mochi_model_dir(settings, request)?
+    } else if engine_id == "ltx_2_5_distilled" {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            LTX25_BUNDLE_REPO,
+            LTX25_BUNDLE_REVISION,
+        )
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "candle video weights snapshot not found for {LTX25_BUNDLE_REPO} at immutable \
+                 revision {LTX25_BUNDLE_REVISION}"
+            ))
+        })?
     } else {
         candle_video_snapshot_dir(settings, &repo)?
     };
@@ -1217,7 +1232,7 @@ pub(super) async fn generate_candle_video_using(
     if is_ltx && ltx_tier.is_none() {
         return Err(WorkerError::InvalidPayload(format!(
             "{} requires a complete Candle LTX packed tier matching advanced.mlxQuantize \
-             (LTX-2.3: q4/q8; LTX-2.5: q4/q8/bf16) from an approved immutable bundle revision; \
+             (LTX-2.3: q4/q8; LTX-2.5: q4/bf16 until SC-18777 accepts another CUDA tier) from an approved immutable bundle revision; \
              repair this model in Model Manager",
             request.model
         )));
