@@ -484,23 +484,26 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # Only the current rows carry admission; the historical rows must not.
     assert all(run["binding"]["eligible"] for run in mlx_flux2_by_semantics["current"])
     # Two retained cohorts, and only these two: SC-18218's originals at 10831e4ca and sc-19721's
-    # re-captures at the epic's 75d66db5 pin (kept by the sc-17137 main sync; the sc-20523 pin
-    # moved the closure past both, so both read historical until the bump-time re-capture).
-    expected_mlx_flux2_cohorts = {
-        "10831e4ca5b8bf780319a8ee7f21427175075448": (
-            "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247"
-        ),
-        "75d66db50543ac288deb278853d0f0b432f92c5c": (
-            "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6"
-        ),
+    # re-captures at the epic's 75d66db5 pin (kept by the sc-17137 main sync).
+    #
+    # The COHORT is the claim — which revisions the retained captures were taken at, and that a
+    # revision maps to exactly one digest. The digests themselves are DERIVED (a function of the
+    # revision and the `CLOSURE_DIGEST_VERSION` in force), so they are read back from the bundle
+    # rather than restated as hex literals. Two literals used to sit here and they could not fail on
+    # this claim — only on a legitimate re-derivation, which is what they did on the v4 narrowing.
+    expected_mlx_flux2_revisions = {
+        "10831e4ca5b8bf780319a8ee7f21427175075448",
+        "75d66db50543ac288deb278853d0f0b432f92c5c",
     }
+    digest_by_revision: dict[str, str] = {}
     for run in mlx_flux2_runtime:
         record = evidence_by_id[run["record"]["id"]]
         revision = record["repositories"]["inference"]["revision"]
-        assert revision in expected_mlx_flux2_cohorts
-        assert record["repositories"]["inference"]["closureDigest"] == (
-            expected_mlx_flux2_cohorts[revision]
-        )
+        digest = record["repositories"]["inference"]["closureDigest"]
+        assert revision in expected_mlx_flux2_revisions
+        # One revision, one digest: a cohort that disagreed with itself would mean two records claim
+        # the same inference source and measured different code.
+        assert digest_by_revision.setdefault(revision, digest) == digest
         if run["semantics"] == "historical":
             assert record["repositories"]["inference"]["closureDigest"] != live_closures[
                 "mlx:flux2_dev"
@@ -541,6 +544,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
             "not_run"
         }
         assert scenarios["overlay"]["result"] == "not_applicable"
+    # "Two retained cohorts, and ONLY these two" — the completeness half of the claim above. The
+    # membership check inside the loop rejects a THIRD cohort appearing; this rejects one silently
+    # going missing, which a partial re-ingest looks like.
+    assert set(digest_by_revision) == expected_mlx_flux2_revisions
 
     flux2_runtime = candle_flux2_runtime + mlx_flux2_runtime
 

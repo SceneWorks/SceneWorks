@@ -4634,6 +4634,37 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.deepEqual(movedIds, [KREA_CONTROL_CELL]);
 });
 
+test("a pin bump alone builds the matrix and demotes nothing", async () => {
+  // THE REGRESSION THIS FILE MOST NEEDS. `validatedInferenceClosures` used to throw when the closure
+  // table's `inferenceRevision` was not the live Cargo pin, so moving the pin did not merely demote —
+  // it made the generator, and every test in this file, fail outright. And because the only way to
+  // clear it was to re-derive the table, and re-deriving rotated every digest at once, the throw was
+  // the forcing function that turned "the pin moved" into "re-measure everything".
+  //
+  // The table's revision is the revision its digests were derived at. Moving the pin without
+  // re-deriving must therefore build, and produce a byte-identical matrix: no digest moved, so no
+  // record's currency moved either.
+  const cargo = await readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8");
+  const bumped = cargo.replace(
+    /(github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*")[0-9a-f]{40}(")/g,
+    `$1${"a".repeat(40)}$2`,
+  );
+  assert.notEqual(bumped, cargo, "the pin rewrite must actually change the manifest");
+
+  const shipped = await buildMatrix({ publish: false });
+  const afterBump = await buildMatrix({ publish: false, sourceOverrides: { cargo: bumped } });
+  assert.deepEqual(
+    afterBump.cells.map((cell) => [cell.id, cell.state]),
+    shipped.cells.map((cell) => [cell.id, cell.state]),
+    "a pin bump on its own must not move a single cell's state",
+  );
+  assert.equal(
+    afterBump.summary.currentCalibrationRuns,
+    shipped.summary.currentCalibrationRuns,
+    "a pin bump on its own must not demote a single calibration run",
+  );
+});
+
 test("Verified never implies geometry coverage — one point certifies one point (sc-16060)", async () => {
   // The story's central case: a record whose geometry is INSIDE the envelope but far from what the
   // cell will be asked to render. Under the old single-field model this cell read as certified
