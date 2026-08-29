@@ -16,6 +16,17 @@ The paired inference reducer is `scripts/sc20686_cache_attribution.py`. It accep
 rows only, rejects inferred rows and self-attention, applies the tracker-recorded thresholds, and
 produces separate family decisions. No real-weight claim or Go/No-go is emitted without rows.
 
+## Campaign producer boundary
+
+The paired campaign producer is `inference/scripts/sc20686_campaign_adapter.py`. It is inert unless
+called with `--campaign`; normal generation has no observer or receipt overhead. At the mapped
+FLUX.2 Klein/Wan entrypoint, the producer receives the product-owned observer event stream and
+exact geometry/configuration, hashes the complete snapshot inventory, requires creation/reuse/
+invalidation/release and allocator/process phase samples, then atomically writes one canonical raw
+row plus its SHA-256 sidecar. It invokes the reducer with `--sidecar`, which verifies both hashes
+before any family decision. `--fake` uses the same path for weightless tests; it is not real-weight
+evidence. Missing events, geometry, identity, or explicit campaign mode fail closed.
+
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
 
