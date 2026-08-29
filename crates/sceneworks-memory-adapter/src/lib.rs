@@ -19,6 +19,10 @@ pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
 pub const LTX_REPOSITORY: &str = "SceneWorks/ltx-2.3-mlx";
+/// The single public LTX-2.5 MLX rehost. Capture roots are nested one level deeper than the 2.3
+/// artifact (`<snapshot>/<transformerVariant>/<tier>`); the adapter validates both axes before it
+/// opens the registered provider.
+pub const LTX25_REPOSITORY: &str = "SceneWorks/ltx-2.5-mlx";
 /// The `mlx:minimax_h3` TIERED artifact (sc-18663). Unlike every repository above it, this rehost
 /// is **not sufficient on its own**: `mlx_gen_minimax_h3::model::load` probes `vae/`, `audio_vae/`,
 /// `tokenizer/` and `FL2VA/audio_vae/` under the spec's own weights root, and this rehost publishes

@@ -29,6 +29,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[path = "mlx_ltx25.rs"]
+mod mlx_ltx25;
+
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
@@ -1068,6 +1071,7 @@ mod tests {
             "flux2_dev",
             // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
             "ltx_2_3",
+            "ltx_2_5",
             // sc-18663: and the second video arm.
             "minimax_h3",
         ] {
@@ -1086,6 +1090,7 @@ mod tests {
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
         assert_eq!(LTX_PROVIDER, "ltx_2_3");
+        assert_eq!(mlx_ltx25::PROVIDER, "ltx_2_5");
         assert_eq!(MINIMAX_PROVIDER, "minimax_h3");
     }
 
@@ -10246,6 +10251,9 @@ fn run(request: &Value) -> Result<Value, String> {
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
+        // SC-18783: LTX-2.5 is a separate provider contract. Its variant and decoder axes are
+        // validated inside the arm rather than being folded into the legacy 2.3 route.
+        mlx_ltx25::PROVIDER => mlx_ltx25::run(request),
         // sc-18663: the second video arm, and the first joint audio+video one. Same rule as LTX —
         // it accepts a multi-frame geometry only by validating against MiniMax-H3's own lattice,
         // stride and canvas budget, read off the pinned engine crate.
