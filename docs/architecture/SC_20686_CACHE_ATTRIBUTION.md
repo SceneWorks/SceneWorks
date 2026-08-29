@@ -42,6 +42,17 @@ existing `ContiguousKvCache` hook in `text_encoder.rs` is caption-upsample self-
 not valid evidence for this story. The reference opportunity is blocked until a product-owned
 persistent cross-attention K/V boundary exists.
 
+### Wan variant closure
+
+The registered Wan generator surface is asserted in
+`crates/media/candle-gen/candle-gen-wan/src/lib.rs:1488-1492`: TI2V-5B, T2V-14B, I2V-14B,
+`wan_vace`, and VACE-Fun 14B. The shared cross-K/V ownership is
+`transformer.rs:389-439` for block projection/read and `transformer.rs:621-653` for the
+multi-block prepared cache; the denoise lifecycle is `wan14b.rs:533-581`. The checked-in
+coverage manifest lists all five IDs (plus the historical adapter alias) and requires exact
+geometry axes before reduction. No terminal family decision is valid until each listed variant
+has a real full-generation row for its representative geometry coordinates.
+
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
 
