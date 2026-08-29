@@ -207,14 +207,12 @@ test("an exact phase tie keeps the tier phase-flip question open", () => {
 test("video curve generation leaves the image calibration corpus byte-identical", () => {
   const imageCorpus = path.join(ROOT, "docs/generated/memory-calibration-evidence.json");
   const before = createHash("sha256").update(readFileSync(imageCorpus)).digest("hex");
-  // Renewed for SC-21714: the corpus gained the complete Candle Krea q4/1024 certifying record.
-  // The claim this test owns — video curve generation never mutates the image corpus — is the
-  // before/after equality below; this pin only names the reviewed snapshot.
-  assert.equal(
-    before,
-    "a96ad01ea477d56e24891cf41b6398918bc465f67d6120df22ab7ddf4826211a",
-    "the explicit pre-video image evidence outcome remains the reviewed corpus",
-  );
+  // The claim this test owns is the before/after equality below: the video-only producer must never
+  // mutate the image corpus. A hash literal naming "the reviewed snapshot" used to sit here, and it
+  // could not fail on that claim — only on someone legitimately touching the corpus, which it did on
+  // every re-capture and again on the v4 closure-digest restamp. That is the frozen-corpus class:
+  // a gate on the data wearing a test's clothes. The shape is what matters, so assert the shape.
+  assert.match(before, /^[0-9a-f]{64}$/);
   const output = mkdtempSync(path.join(tmpdir(), "sceneworks-video-curves-"));
   try {
     const run = spawnSync(

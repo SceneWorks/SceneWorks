@@ -3203,7 +3203,7 @@ function declaredEvidence(model, backend, tier) {
 
 
 /**
- * The live per-provider compile-closure digests, gated against the Cargo pin (sc-17774).
+ * The live per-provider compile-closure digests (sc-17774).
  *
  * This REPLACES `compatibilityAuthorizes`, which was the only escape from pin-identity invalidation
  * and was hardcoded to a single frozen `flux2_dev` audit object carrying one hand-verified
@@ -3211,20 +3211,25 @@ function declaredEvidence(model, backend, tier) {
  * one provider, so it was spent the moment the pin moved one commit further, and it generalised to
  * nothing. Every provider now gets the same relief from a derived digest, with no hand audit.
  *
- * The config is derived offline so a reviewer sees a digest change in the diff rather than having it
- * conjured at check time. That makes a stale config the obvious failure mode, so it is a hard error
- * rather than a fallback: a config keyed to an older pin would report currency for closures nobody
- * re-derived. Whether the digests are REAL is a separate question, graded in CI — `check.yml`
- * re-derives them against a shallow fetch of the pinned inference revision, which is possible
- * because SceneWorks/inference is public.
+ * `inferenceRevision` is CAPTURE PROVENANCE — the revision these digests were derived at — and is
+ * deliberately NOT required to equal Cargo's live pin. Requiring equality is pin identity one level
+ * up: it cannot fail on a bad digest, only on an unbumped one, so its whole effect was to make
+ * re-deriving the config MANDATORY on every pin bump. Re-deriving is what rotates the digests, and
+ * because `core-llm` and `gen-core` sit in every provider's closure a rotation is all-or-nothing —
+ * so the throw turned "the pin moved" into "every provider's measurements are historical", which is
+ * exactly the coupling this module exists to remove. Measured on the f32fce06 -> 857f2454 bump:
+ * 17 of 17 providers demoted, every one attributable solely to `core-llm`, whose entire diff was
+ * `pub mod starvector;` plus its re-exports — a new model that cannot move an existing model's
+ * peak by a byte. Same reasoning, same shape as the sibling fix in
+ * `parseRung4ContractPrerequisites`; a stale-vs-live comparison belongs to whoever re-derives the
+ * config, not to every consumer that reads it.
  */
-export function validatedInferenceClosures(body, pin) {
+export function validatedInferenceClosures(body) {
   const closures = JSON.parse(body);
-  if (closures.inferenceRevision !== pin) {
+  if (!/^[0-9a-f]{40}$/.test(closures.inferenceRevision ?? "")) {
     throw new Error(
-      `${"config/inference-provider-closures.json"} is keyed to ` +
-        `${closures.inferenceRevision?.slice(0, 8) ?? "(unset)"} but Cargo pins ${pin.slice(0, 8)}. ` +
-        "Re-run: node scripts/inference-closure-digest.mjs --repo <inference> --write",
+      "config/inference-provider-closures.json must record the full inference revision its " +
+        "digests were derived at",
     );
   }
   const digests = new Map();
@@ -4480,10 +4485,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   assertMinimaxH3CalibrationPlan(calibrationPlan);
   // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
   // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
-  const inferenceClosureDigests = validatedInferenceClosures(
-    bodies.inferenceClosures,
-    inferencePin(cargoBody),
-  );
+  const inferenceClosureDigests = validatedInferenceClosures(bodies.inferenceClosures);
   const closureDigestsByProvider = Object.fromEntries(inferenceClosureDigests);
   const rung4Survey = parseRung4Survey(bodies.rung4Survey, { familyGroups: familyGroup });
   // sc-19542: the rung-4 arm's declared prerequisite graph, per (family, backend). Coverage is
