@@ -7,12 +7,14 @@
 //! contract, and the shared request scope; there is no synthetic peak or alternate render path.
 
 use super::*;
+use mlx_gen::gen_core::AudioTrack;
 use mlx_gen::{AdapterKind, AdapterSpec};
 
 pub(super) const PROVIDER: &str = "ltx_2_5";
 const LABEL: &str = "MLX LTX-2.5";
 const EXECUTION_PATH: &str = "the MLX LTX-2.5 full-A/V text-to-video path";
 const FINGERPRINT: &str = "sc-18797-ltx-2-5-mlx-ladder-v1";
+const PUBLIC_REVISION: &str = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
 const SEED: u64 = 18755;
 const BASE_FRAMES: u32 = 145;
 const BASE_FPS: u32 = 24;
@@ -25,6 +27,13 @@ const DECODE_OVERLAP: u32 = 64;
 const DEV_STEPS: u32 = 30;
 const DEV_GUIDANCE: f32 = 3.0;
 const DEV_ADAPTER: &str = "distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors";
+const AV_MAGIC: &[u8] = b"SCENEWORKS_AV1\0";
+// PCM is already normalized floating-point data, so the established LTX full-pipeline absolute
+// envelope applies without the video path's `/255` conversion. The mandatory 0.25-amplitude
+// same-shape mutation is more than twenty times this maximum bound.
+const AUDIO_MAX_THRESHOLD: f64 = LTX_MAX_THRESHOLD;
+const AUDIO_MEAN_THRESHOLD: f64 = LTX_MEAN_THRESHOLD;
+const AUDIO_RMS_THRESHOLD: f64 = LTX_RMS_THRESHOLD;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransformerVariant {
@@ -101,7 +110,16 @@ struct Target {
 struct Artifact {
     repository: String,
     revision: String,
+    root: PathBuf,
     spec: LoadSpec,
+}
+
+struct SourceCapturePlan {
+    output_dir: PathBuf,
+    source_prefix: String,
+    logical_case_id: String,
+    inventory_bytes: u64,
+    inventory_sha256: String,
 }
 
 fn target_string<'a>(
@@ -332,6 +350,16 @@ fn validate_nested_root(
     Ok(())
 }
 
+fn validate_public_revision(repository: &str, revision: &str) -> Result<(), String> {
+    protocol::validate_artifact_identity(repository, revision, protocol::LTX25_REPOSITORY)?;
+    if revision != PUBLIC_REVISION {
+        return Err(format!(
+            "{LABEL} requires public artifact revision {PUBLIC_REVISION}, got {revision}"
+        ));
+    }
+    Ok(())
+}
+
 fn configured_spec(
     root: PathBuf,
     snapshot_root: &Path,
@@ -372,7 +400,9 @@ fn load_artifact(
     protocol::validate_plain_overlay_target(request, EXECUTION_PATH)?;
     let repository = protocol::required_env("SCENEWORKS_LTX25_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_LTX25_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::LTX25_REPOSITORY)?;
+    // Refuse stale or merely SHA-shaped artifact revisions before canonicalization, provider
+    // construction, and especially before any Metal materialization.
+    validate_public_revision(&repository, &revision)?;
     let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
         "SCENEWORKS_LTX25_ROOT",
     )?))
@@ -420,6 +450,7 @@ fn load_artifact(
     Ok(Artifact {
         repository,
         revision,
+        root,
         spec,
     })
 }
@@ -437,6 +468,88 @@ fn runtime_overlay(spec: &LoadSpec, decoder: Decoder) -> Result<Option<String>, 
         axes.push("decoder:diffusion_vae".to_owned());
     }
     Ok((!axes.is_empty()).then(|| axes.join("+")))
+}
+
+fn lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_logical_case_id(value: &str) -> bool {
+    value.strip_prefix("implan-").is_some_and(|suffix| {
+        suffix.len() == 20
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// Resolve every raw-receipt prerequisite before constructing the provider. A missing raw-log
+/// directory or inventory attestation must fail before an expensive Metal load, not after a clip
+/// has already been rendered and become impossible to ingest.
+fn prepare_source_capture(request: &Value) -> Result<SourceCapturePlan, String> {
+    let capture_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_MEMORY_CAPTURE_DIR",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_MEMORY_CAPTURE_DIR: {error}"))?;
+    let source_prefix = protocol::required_env("SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX")?;
+    let parts = source_prefix.split('/').collect::<Vec<_>>();
+    if parts.len() < 3
+        || parts[..2] != ["docs", "calibration"]
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || *part == "." || *part == ".." || part.contains('\\'))
+    {
+        return Err(
+            "SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX must be a normalized path below docs/calibration"
+                .to_owned(),
+        );
+    }
+    let output_dir = parts
+        .iter()
+        .fold(capture_root.clone(), |directory, part| directory.join(part));
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|error| format!("create LTX-2.5 physical capture directory: {error}"))?;
+    let output_dir = std::fs::canonicalize(output_dir)
+        .map_err(|error| format!("canonicalize LTX-2.5 physical capture directory: {error}"))?;
+    if !output_dir.starts_with(&capture_root) {
+        return Err(
+            "SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX escaped SCENEWORKS_MEMORY_CAPTURE_DIR".to_owned(),
+        );
+    }
+    let logical_case_id = protocol::planned(request)?
+        .get("logicalCaseId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.logicalCaseId must be a string".to_owned())?
+        .to_owned();
+    if !valid_logical_case_id(&logical_case_id) {
+        return Err(
+            "planned.logicalCaseId must be implan- plus 20 lowercase hex characters".to_owned(),
+        );
+    }
+    let inventory_bytes = integer(
+        &protocol::required_env("SCENEWORKS_MEMORY_MODEL_BYTES")?,
+        "SCENEWORKS_MEMORY_MODEL_BYTES",
+    )?;
+    if inventory_bytes == 0 {
+        return Err("SCENEWORKS_MEMORY_MODEL_BYTES must be greater than zero".to_owned());
+    }
+    let inventory_sha256 = protocol::required_env("SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256")?;
+    if !lowercase_sha256(&inventory_sha256) {
+        return Err(
+            "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 must be 64 lowercase hex characters"
+                .to_owned(),
+        );
+    }
+    Ok(SourceCapturePlan {
+        output_dir,
+        source_prefix,
+        logical_case_id,
+        inventory_bytes,
+        inventory_sha256,
+    })
 }
 
 fn context(
@@ -501,8 +614,25 @@ fn generation_request(target: Target) -> GenerationRequest {
 struct RenderedClip {
     frames: Vec<Image>,
     fps: u32,
-    audio: Option<DiagnosticAudioIdentity>,
+    audio: AudioTrack,
     phases: Option<[PhaseMemory; 3]>,
+}
+
+fn full_av_video(output: GenerationOutput) -> Result<(Vec<Image>, u32, AudioTrack), String> {
+    match output {
+        GenerationOutput::Video {
+            frames,
+            fps,
+            audio: Some(audio),
+        } => Ok((frames, fps, audio)),
+        GenerationOutput::Video { audio: None, .. } => {
+            Err(format!("{LABEL} full-A/V render returned no audio track"))
+        }
+        GenerationOutput::Images(_) => Err(format!("{LABEL} returned images, not a video clip")),
+        GenerationOutput::Audio(_) => Err(format!(
+            "{LABEL} returned a standalone audio track, not a video clip"
+        )),
+    }
 }
 
 fn render(
@@ -546,7 +676,7 @@ fn render(
         },
     )?;
     let phases = measure.then(|| [conditioning.get(), denoise.get(), PhaseMemory::capture()]);
-    let (frames, fps, audio) = diagnostic_video_frames(output, LABEL)?;
+    let (frames, fps, audio) = full_av_video(output)?;
     if frames.len() != target.geometry.frames as usize || fps != target.geometry.fps {
         return Err(format!(
             "{LABEL} returned {} frames at {fps} fps; expected {} at {} fps",
@@ -555,23 +685,41 @@ fn render(
             target.geometry.fps,
         ));
     }
+    let expected_frame_bytes = usize::try_from(target.geometry.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(target.geometry.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| format!("{LABEL} frame byte count overflow"))?;
     if frames.iter().any(|frame| {
         frame.width != target.geometry.width
             || frame.height != target.geometry.height
-            || frame.pixels.is_empty()
+            || frame.pixels.len() != expected_frame_bytes
     }) {
         return Err(format!(
-            "{LABEL} returned an empty or wrong-sized video frame"
+            "{LABEL} returned an empty, truncated, or wrong-sized RGB video frame"
         ));
     }
     let first = &frames[0];
     if first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
         return Err(format!("{LABEL} returned a degenerate first video frame"));
     }
-    if !matches!(audio, Some(identity) if identity.samples > 0 && identity.sample_rate > 0 && identity.channels > 0)
+    if audio.samples.is_empty()
+        || audio.sample_rate == 0
+        || audio.channels == 0
+        || audio.samples.len() % usize::from(audio.channels) != 0
+        || audio.samples.iter().any(|sample| !sample.is_finite())
     {
         return Err(format!(
-            "{LABEL} full-A/V render returned no usable audio track"
+            "{LABEL} full-A/V render returned malformed interleaved PCM"
+        ));
+    }
+    if !audio.stems.is_empty() {
+        return Err(format!(
+            "{LABEL} unexpectedly returned source-separated stems outside the canonical capture format"
         ));
     }
     Ok(RenderedClip {
@@ -584,6 +732,235 @@ fn render(
 
 fn quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
+}
+
+fn audio_max_mean_rms_abs(
+    left: &AudioTrack,
+    right: &AudioTrack,
+) -> Result<(f64, f64, f64), String> {
+    if left.sample_rate != right.sample_rate
+        || left.channels != right.channels
+        || left.samples.len() != right.samples.len()
+        || left.samples.is_empty()
+    {
+        return Err(format!(
+            "audio shape mismatch: {} samples at {} Hz/{} channels versus {} at {} Hz/{} channels",
+            left.samples.len(),
+            left.sample_rate,
+            left.channels,
+            right.samples.len(),
+            right.sample_rate,
+            right.channels,
+        ));
+    }
+    let mut maximum = 0.0_f64;
+    let mut sum = 0.0_f64;
+    let mut sum_squares = 0.0_f64;
+    for (&left, &right) in left.samples.iter().zip(&right.samples) {
+        if !left.is_finite() || !right.is_finite() {
+            return Err("audio comparison received non-finite PCM".to_owned());
+        }
+        let difference = (f64::from(left) - f64::from(right)).abs();
+        maximum = maximum.max(difference);
+        sum += difference;
+        sum_squares += difference * difference;
+    }
+    let count = left.samples.len() as f64;
+    Ok((maximum, sum / count, (sum_squares / count).sqrt()))
+}
+
+fn audio_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= AUDIO_MAX_THRESHOLD && mean <= AUDIO_MEAN_THRESHOLD && rms <= AUDIO_RMS_THRESHOLD
+}
+
+fn mutate_audio_pcm(audio: &AudioTrack) -> AudioTrack {
+    let mut mutated = audio.clone();
+    for sample in &mut mutated.samples {
+        *sample = if *sample >= 0.0 {
+            *sample - 0.25
+        } else {
+            *sample + 0.25
+        };
+    }
+    mutated
+}
+
+fn pcm_sha256(audio: &AudioTrack) -> String {
+    let mut hasher = Sha256::new();
+    for samples in audio.samples.chunks(16_384) {
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_bits().to_le_bytes());
+        }
+        hasher.update(&bytes);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn emit_canonical_av(
+    clip: &RenderedClip,
+    mut emit: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<u64, String> {
+    let first = clip
+        .frames
+        .first()
+        .ok_or_else(|| "canonical A/V receipt requires at least one frame".to_owned())?;
+    let frame_count = u32::try_from(clip.frames.len())
+        .map_err(|_| "canonical A/V frame count must fit u32".to_owned())?;
+    let sample_count = u64::try_from(clip.audio.samples.len())
+        .map_err(|_| "canonical A/V sample count must fit u64".to_owned())?;
+    let mut total = 0_u64;
+    let mut write = |bytes: &[u8]| {
+        total = total
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| "canonical A/V receipt byte count overflow".to_owned())?;
+        emit(bytes)
+    };
+    write(AV_MAGIC)?;
+    for value in [
+        first.width,
+        first.height,
+        frame_count,
+        clip.fps,
+        clip.audio.sample_rate,
+    ] {
+        write(&value.to_le_bytes())?;
+    }
+    write(&clip.audio.channels.to_le_bytes())?;
+    write(&sample_count.to_le_bytes())?;
+    for frame in &clip.frames {
+        write(&frame.width.to_le_bytes())?;
+        write(&frame.height.to_le_bytes())?;
+        let pixel_count = u64::try_from(frame.pixels.len())
+            .map_err(|_| "canonical A/V frame byte count must fit u64".to_owned())?;
+        write(&pixel_count.to_le_bytes())?;
+        write(&frame.pixels)?;
+    }
+    for samples in clip.audio.samples.chunks(16_384) {
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_bits().to_le_bytes());
+        }
+        write(&bytes)?;
+    }
+    Ok(total)
+}
+
+fn canonical_av_identity(clip: &RenderedClip) -> Result<(String, u64), String> {
+    let mut hasher = Sha256::new();
+    let bytes = emit_canonical_av(clip, |chunk| {
+        hasher.update(chunk);
+        Ok(())
+    })?;
+    Ok((format!("{:x}", hasher.finalize()), bytes))
+}
+
+fn file_identity(path: &Path) -> Result<(String, u64), String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("open immutable A/V receipt {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read immutable A/V receipt {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| "immutable A/V receipt byte count overflow".to_owned())?;
+        hasher.update(&buffer[..read]);
+    }
+    Ok((format!("{:x}", hasher.finalize()), total))
+}
+
+fn persist_canonical_av(
+    plan: &SourceCapturePlan,
+    role: &str,
+    clip: &RenderedClip,
+) -> Result<Value, String> {
+    if !matches!(role, "selected_av" | "reference_av") {
+        return Err(format!("unsupported canonical A/V receipt role {role:?}"));
+    }
+    let (content_sha256, bytes) = canonical_av_identity(clip)?;
+    let first = &clip.frames[0];
+    let file_name = format!(
+        "{}-{role}-{}x{}-f{}-{content_sha256}.avbin",
+        plan.logical_case_id,
+        first.width,
+        first.height,
+        clip.frames.len(),
+    );
+    let local_path = plan.output_dir.join(&file_name);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&local_path)
+    {
+        Ok(mut file) => {
+            let written = emit_canonical_av(clip, |chunk| {
+                file.write_all(chunk)
+                    .map_err(|error| format!("write physical MLX {role} output: {error}"))
+            })?;
+            if written != bytes {
+                return Err(format!(
+                    "physical MLX {role} output wrote {written} bytes after hashing {bytes}"
+                ));
+            }
+            file.sync_all()
+                .map_err(|error| format!("sync physical MLX {role} output: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let (existing_sha256, existing_bytes) = file_identity(&local_path)?;
+            if existing_sha256 != content_sha256 || existing_bytes != bytes {
+                return Err(format!(
+                    "content-addressed physical MLX {role} output already exists with different bytes"
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(format!(
+                "create immutable physical MLX {role} output: {error}"
+            ));
+        }
+    }
+    Ok(json!({
+        "role": role,
+        "path": format!("{}/{file_name}", plan.source_prefix),
+        "localPath": local_path,
+        "sha256": content_sha256,
+        "bytes": bytes,
+    }))
+}
+
+fn source_capture(
+    plan: &SourceCapturePlan,
+    artifact: &Artifact,
+    tier: &str,
+    selected: &RenderedClip,
+    reference: &RenderedClip,
+) -> Result<Value, String> {
+    Ok(json!({
+        "kind": "physical_mlx",
+        "inputs": [{
+            "role": "base",
+            "path": artifact.root,
+            "bytes": plan.inventory_bytes,
+            "sha256": plan.inventory_sha256,
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": tier,
+        }],
+        "outputs": [
+            persist_canonical_av(plan, "selected_av", selected)?,
+            persist_canonical_av(plan, "reference_av", reference)?,
+        ],
+        "claims": [
+            "memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"
+        ],
+    }))
 }
 
 /// One physical full-pipeline tuple per plan row. Component names remain in the exact case but do
@@ -609,6 +986,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     validate_selection_shape(&selection, target)?;
     let artifact = load_artifact(request, target, tier, &selection)?;
     let overlay = runtime_overlay(&artifact.spec, target.decoder)?;
+    let capture_plan = prepare_source_capture(request)?;
     let registry = mlx_gen_ltx::provider_registry()
         .map_err(|error| format!("build LTX-2.5 registry: {error}"))?;
     let contract = registry
@@ -724,13 +1102,8 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         return Err("LTX-2.5 admission accepted stale calibration evidence".to_owned());
     }
 
-    let RenderedClip {
-        frames: selected,
-        fps: selected_fps,
-        audio: selected_audio,
-        phases,
-    } = render(generator.as_ref(), target, &probe_context, true)?;
-    let [conditioning, denoise, decode] = phases.expect("measured render returns phases");
+    let selected = render(generator.as_ref(), target, &probe_context, true)?;
+    let [conditioning, denoise, decode] = selected.phases.expect("measured render returns phases");
     if [conditioning.active, denoise.active, decode.active].contains(&0) {
         return Err("an LTX-2.5 full-pipeline phase reported a zero active peak".to_owned());
     }
@@ -763,27 +1136,49 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 
     let mut warm_context = probe_context.clone();
     warm_context.cache_state = MemoryCacheState::Warm;
-    let RenderedClip {
-        frames: repeat,
-        fps: repeat_fps,
-        audio: repeat_audio,
-        ..
-    } = render(generator.as_ref(), target, &warm_context, false)?;
-    if selected_fps != repeat_fps || selected_audio != repeat_audio {
+    let repeat = render(generator.as_ref(), target, &warm_context, false)?;
+    if selected.fps != repeat.fps {
         return Err("LTX-2.5 identical-input repeat changed A/V identity".to_owned());
     }
-    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&selected, &repeat)?;
+    let (maximum_error, mean_error, rms_error) =
+        video_max_mean_rms_abs(&selected.frames, &repeat.frames)?;
     if !quality_passes(maximum_error, mean_error, rms_error) {
         return Err(format!(
             "LTX-2.5 warm repeat exceeded determinism envelope: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
         ));
     }
-    let mutated = qwen_negative_mutation(&selected[0]);
+    let (audio_maximum_error, audio_mean_error, audio_rms_error) =
+        audio_max_mean_rms_abs(&selected.audio, &repeat.audio)?;
+    if !audio_quality_passes(audio_maximum_error, audio_mean_error, audio_rms_error) {
+        return Err(format!(
+            "LTX-2.5 warm repeat exceeded PCM determinism envelope: max={audio_maximum_error:.6}, mean={audio_mean_error:.6}, rms={audio_rms_error:.6}"
+        ));
+    }
+    let selected_pcm_sha256 = pcm_sha256(&selected.audio);
+    let reference_pcm_sha256 = pcm_sha256(&repeat.audio);
+    let mutated = qwen_negative_mutation(&selected.frames[0]);
     let (mutated_maximum, mutated_mean, mutated_rms) =
-        image_max_mean_rms_abs(&mutated, &repeat[0])?;
+        image_max_mean_rms_abs(&mutated, &repeat.frames[0])?;
     if quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
         return Err("LTX-2.5 output mutation did not breach determinism envelope".to_owned());
     }
+    let mutated_audio = mutate_audio_pcm(&selected.audio);
+    let (mutated_audio_maximum, mutated_audio_mean, mutated_audio_rms) =
+        audio_max_mean_rms_abs(&mutated_audio, &repeat.audio)?;
+    if audio_quality_passes(mutated_audio_maximum, mutated_audio_mean, mutated_audio_rms) {
+        return Err(
+            "LTX-2.5 same-shape PCM mutation did not breach determinism envelope".to_owned(),
+        );
+    }
+    if mutated_audio.sample_rate != selected.audio.sample_rate
+        || mutated_audio.channels != selected.audio.channels
+        || mutated_audio.samples.len() != selected.audio.samples.len()
+    {
+        return Err("LTX-2.5 PCM mutation changed the audio shape".to_owned());
+    }
+    let sample_count = u64::try_from(selected.audio.samples.len())
+        .map_err(|_| "LTX-2.5 PCM sample count must fit u64".to_owned())?;
+    let source_capture = source_capture(&capture_plan, &artifact, tier, &selected, &repeat)?;
 
     let lifecycle_reason = concat!(
         "SC-18783 executes the measured full-pipeline render plus one identical-input warm parity ",
@@ -818,7 +1213,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "overall": overall.json(),
         },
         "quality": {
-            "contract": "identical public artifact revision, transformer variant, decoder, prompt, seed, geometry, cadence, tier, required adapter recipe, and loaded provider; measured render versus warm full-pipeline repeat",
+            "contract": "identical public artifact revision, transformer variant, decoder, prompt, seed, geometry, cadence, tier, required adapter recipe, and loaded provider; every video pixel and interleaved PCM sample in the measured render versus warm full-pipeline repeat",
             "identicalInputs": true,
             "result": "passed",
             "maximumError": maximum_error,
@@ -827,6 +1222,20 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "maximumErrorThreshold": LTX_MAX_THRESHOLD,
             "meanErrorThreshold": LTX_MEAN_THRESHOLD,
             "rootMeanSquareErrorThreshold": LTX_RMS_THRESHOLD,
+            "audio": {
+                "result": "passed",
+                "sampleRateHz": selected.audio.sample_rate,
+                "channels": selected.audio.channels,
+                "sampleCount": sample_count,
+                "selectedPcmSha256": selected_pcm_sha256,
+                "referencePcmSha256": reference_pcm_sha256,
+                "maximumAbsoluteError": audio_maximum_error,
+                "meanAbsoluteError": audio_mean_error,
+                "rootMeanSquareError": audio_rms_error,
+                "maximumAbsoluteErrorThreshold": AUDIO_MAX_THRESHOLD,
+                "meanAbsoluteErrorThreshold": AUDIO_MEAN_THRESHOLD,
+                "rootMeanSquareErrorThreshold": AUDIO_RMS_THRESHOLD,
+            },
         },
         "negativeMutation": null,
         "loadability": {
@@ -850,8 +1259,12 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
+                ("audioMutationMaximumAbsoluteErrorMicrounits", "count", (mutated_audio_maximum * 1_000_000.0).round() as u64),
+                ("audioMutationMeanAbsoluteErrorMicrounits", "count", (mutated_audio_mean * 1_000_000.0).round() as u64),
+                ("audioMutationRootMeanSquareErrorMicrounits", "count", (mutated_audio_rms * 1_000_000.0).round() as u64),
             ],
         ),
+        "sourceCapture": source_capture,
         "capturedAt": protocol::captured_at(),
     });
     // This path validates `target.overlay == none` before loading. Do not call the shared plain
@@ -872,6 +1285,31 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_clip(samples: Vec<f32>) -> RenderedClip {
+        RenderedClip {
+            frames: vec![
+                Image {
+                    width: 2,
+                    height: 1,
+                    pixels: vec![1, 2, 3, 4, 5, 6],
+                },
+                Image {
+                    width: 2,
+                    height: 1,
+                    pixels: vec![7, 8, 9, 10, 11, 12],
+                },
+            ],
+            fps: 24,
+            audio: AudioTrack {
+                samples,
+                sample_rate: 48_000,
+                channels: 2,
+                stems: Vec::new(),
+            },
+            phases: None,
+        }
+    }
 
     fn request(
         tier: &str,
@@ -1075,7 +1513,7 @@ mod tests {
 
     #[test]
     fn path_shape_binds_snapshot_variant_and_tier_without_weights() {
-        let revision = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
+        let revision = PUBLIC_REVISION;
         let root = PathBuf::from(format!(
             "/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/{revision}/distilled/q4"
         ));
@@ -1098,6 +1536,111 @@ mod tests {
             "q4",
         )
         .is_err());
+    }
+
+    #[test]
+    fn artifact_revision_is_the_exact_public_upload_not_merely_sha_shaped() {
+        validate_public_revision(protocol::LTX25_REPOSITORY, PUBLIC_REVISION).unwrap();
+        let error = validate_public_revision(
+            protocol::LTX25_REPOSITORY,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap_err();
+        assert!(error.contains(PUBLIC_REVISION), "{error}");
+    }
+
+    #[test]
+    fn pcm_parity_hashes_every_sample_and_same_shape_corruption_fails() {
+        let selected = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
+        let reference = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
+        let (maximum, mean, rms) =
+            audio_max_mean_rms_abs(&selected.audio, &reference.audio).unwrap();
+        assert!(audio_quality_passes(maximum, mean, rms));
+        assert_eq!(pcm_sha256(&selected.audio), pcm_sha256(&reference.audio));
+
+        let mutated = mutate_audio_pcm(&selected.audio);
+        assert_eq!(mutated.sample_rate, selected.audio.sample_rate);
+        assert_eq!(mutated.channels, selected.audio.channels);
+        assert_eq!(mutated.samples.len(), selected.audio.samples.len());
+        let (maximum, mean, rms) = audio_max_mean_rms_abs(&mutated, &reference.audio).unwrap();
+        assert!(!audio_quality_passes(maximum, mean, rms));
+        assert_ne!(pcm_sha256(&mutated), pcm_sha256(&reference.audio));
+    }
+
+    #[test]
+    fn canonical_av_receipt_binds_all_frames_metadata_and_pcm() {
+        let clip = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
+        let mut bytes = Vec::new();
+        let emitted = emit_canonical_av(&clip, |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(emitted, bytes.len() as u64);
+        assert_eq!(&bytes[..AV_MAGIC.len()], AV_MAGIC);
+        assert_eq!(emitted, 105);
+        let (digest, counted) = canonical_av_identity(&clip).unwrap();
+        assert_eq!(counted, emitted);
+        assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)));
+
+        let mut pcm_mutation = tiny_clip(vec![0.0, 0.25, -0.5, 0.5]);
+        assert_ne!(
+            canonical_av_identity(&clip).unwrap().0,
+            canonical_av_identity(&pcm_mutation).unwrap().0
+        );
+        pcm_mutation.audio.samples[3] = 0.75;
+        pcm_mutation.frames[1].pixels[5] ^= 1;
+        assert_ne!(
+            canonical_av_identity(&clip).unwrap().0,
+            canonical_av_identity(&pcm_mutation).unwrap().0
+        );
+    }
+
+    #[test]
+    fn canonical_av_receipts_are_content_addressed_and_immutable() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let output_dir = std::env::temp_dir().join(format!(
+            "sceneworks-ltx25-av-receipt-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let plan = SourceCapturePlan {
+            output_dir: output_dir.clone(),
+            source_prefix: "docs/calibration/sc-18783".to_owned(),
+            logical_case_id: "implan-0123456789abcdefabcd".to_owned(),
+            inventory_bytes: 1,
+            inventory_sha256: "a".repeat(64),
+        };
+        let clip = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
+        let receipt = persist_canonical_av(&plan, "selected_av", &clip).unwrap();
+        assert_eq!(receipt["role"], "selected_av");
+        assert!(receipt["path"].as_str().unwrap().ends_with(".avbin"));
+        let local_path = PathBuf::from(receipt["localPath"].as_str().unwrap());
+        let (digest, bytes) = file_identity(&local_path).unwrap();
+        assert_eq!(receipt["sha256"], digest);
+        assert_eq!(receipt["bytes"], bytes);
+        assert_eq!(
+            persist_canonical_av(&plan, "selected_av", &clip).unwrap(),
+            receipt
+        );
+
+        std::fs::write(&local_path, b"tampered").unwrap();
+        let error = persist_canonical_av(&plan, "selected_av", &clip).unwrap_err();
+        assert!(error.contains("different bytes"), "{error}");
+        std::fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[test]
+    fn capture_receipt_tokens_are_fail_closed() {
+        assert!(valid_logical_case_id("implan-0123456789abcdefabcd"));
+        assert!(!valid_logical_case_id("implan-0123456789ABCDEFabcd"));
+        assert!(!valid_logical_case_id("fixture-0123456789abcdefabcd"));
+        assert!(lowercase_sha256(&"a".repeat(64)));
+        assert!(!lowercase_sha256(&"A".repeat(64)));
+        assert!(!lowercase_sha256(&"a".repeat(63)));
     }
 
     #[test]
