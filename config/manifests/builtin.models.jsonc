@@ -19447,7 +19447,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "coRequisite": true,
           "files": ["enhancer/*"],
           "platforms": ["macos"],
@@ -19456,7 +19456,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "coRequisite": true,
           "files": ["distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors"],
           "platforms": ["macos", "windows", "linux"],
@@ -19465,7 +19465,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "q4",
           "default": true,
           "files": ["distilled/q4/*", "dev/q4/*"],
@@ -19477,7 +19477,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "q8",
           "files": ["distilled/q8/*", "dev/q8/*"],
           "platforms": ["macos"],
@@ -19487,7 +19487,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "bf16",
           "files": ["distilled/bf16/*", "dev/bf16/*"],
           "platforms": ["macos", "windows", "linux"],

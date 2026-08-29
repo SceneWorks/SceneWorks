@@ -3206,7 +3206,9 @@ test("the LTX-2.5 snapshot driver binds all six nested roots to exact per-root i
   await mkdir(wrongRevision, { recursive: true });
   await assert.rejects(
     prepareLtx25CaptureArtifacts(wrongRevision, selected),
-    /must be models--SceneWorks--ltx-2\.5-mlx\/snapshots\/791ef617/,
+    new RegExp(
+      `must be models--SceneWorks--ltx-2\\.5-mlx/snapshots/${LTX25_CAPTURE_REVISION}`,
+    ),
   );
   const missingLayout = await ltx25FixtureSnapshot({ omitRoot: "dev/q8" });
   await assert.rejects(

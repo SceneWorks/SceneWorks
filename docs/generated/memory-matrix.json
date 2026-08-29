@@ -1,12 +1,12 @@
 {
   "schemaVersion": 10,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:491a894942560f5811fc7cf8cac28f1c1baef62ef021d88752ed6b322d3601b4",
+    "sceneWorksRevision": "source-tree:784751767cbf08c31620b1550387f0572bfc4ba69f4e78b2becf40418f3ae493",
     "inferenceRevision": "346dd4a82f11c3e85f144bb0d5a8a0aa756ae497",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "3043a333b66f8418ecc4f5a2ad14cbc90c6a29ccb5b88fc8af469a41e9f072ae"
+        "sha256": "75e4155c0d7e4a59631b94870257fbf1486a63bbc048f678ed7713ed53ced349"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -14,7 +14,7 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "2224aa496179cfb258919ac08ee7a72a148c4a0f13b7516a25c5b3203f3969a7"
+        "sha256": "4146501fed94c6de5f8729da062e13b92ad83be711ae5a38cdeef4a2a90ad3f7"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -34,7 +34,7 @@
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
-        "sha256": "3ab35dcb34f77bc2acf814b6ba4a6684791701ad0698e4bc9e6edcb71d4c51d7"
+        "sha256": "af79cfa13c15b191ce2d1b33cbbfa2bf3b0dc189fdfb21007e4c17b0af674ccb"
       },
       "videoRouteSvd": {
         "path": "crates/sceneworks-worker/src/video_jobs/svd.rs",
@@ -16537,12 +16537,12 @@
       "loadability": [
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "q4"
         },
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": null
         }
       ]
@@ -16561,12 +16561,12 @@
       "loadability": [
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "bf16"
         },
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": null
         }
       ]
@@ -16585,12 +16585,12 @@
       "loadability": [
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "q4"
         },
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": null
         }
       ]
@@ -16609,12 +16609,12 @@
       "loadability": [
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": "q8"
         },
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
-          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "revision": "081658ce6886cacba20817ce0359bbefef706ff2",
           "variant": null
         }
       ]

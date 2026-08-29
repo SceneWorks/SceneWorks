@@ -26,7 +26,7 @@ pub const LTX25_REPOSITORY: &str = "SceneWorks/ltx-2.5-mlx";
 /// Compatibility spelling used by the Candle arm; keep both adapters bound to one literal.
 pub const LTX_2_5_REPOSITORY: &str = LTX25_REPOSITORY;
 /// Exact public revision sealed into every LTX-2.5 capture receipt.
-pub const LTX_2_5_REVISION: &str = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
+pub const LTX_2_5_REVISION: &str = "081658ce6886cacba20817ce0359bbefef706ff2";
 /// The `mlx:minimax_h3` TIERED artifact (sc-18663). Unlike every repository above it, this rehost
 /// is **not sufficient on its own**: `mlx_gen_minimax_h3::model::load` probes `vae/`, `audio_vae/`,
 /// `tokenizer/` and `FL2VA/audio_vae/` under the spec's own weights root, and this rehost publishes

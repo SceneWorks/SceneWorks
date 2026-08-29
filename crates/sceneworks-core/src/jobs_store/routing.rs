@@ -439,24 +439,49 @@ mod tests {
     }
 
     #[test]
-    fn ltx_2_5_candle_admission_preserves_all_published_tiers_and_user_loras() {
-        for tier in [json!(4), json!("8"), json!(0), json!(-1)] {
-            let mut payload = catalog::video_mode_probe_payload("ltx_2_5", "text_to_video");
-            payload.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
-            payload.insert("loras".to_owned(), json!([{ "id": "style" }]));
-            assert!(
-                candle::video_request_candle_eligible("ltx_2_5", &payload),
-                "LTX-2.5 must admit its published tier {tier} with a user LoRA"
-            );
+    fn ltx_2_5_candle_admission_rejects_unpromoted_q8_across_base_and_advanced_modes() {
+        let modes = [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+        ];
+        for mode in modes {
+            for tier in [json!(4), json!("4"), json!(0), json!("0"), json!(-1)] {
+                let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
+                job.payload
+                    .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+                job.payload
+                    .entry("loras".to_owned())
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({ "id": "style" }));
+                assert!(
+                    candle::video_job_is_candle_eligible(&job),
+                    "LTX-2.5 must preserve q4/bf16 tier {tier} with a user LoRA in {mode}"
+                );
+            }
+
+            for tier in [json!(8), json!("8")] {
+                let mut job = canonical_video_route_probe("ltx_2_5", mode).unwrap();
+                job.payload
+                    .insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+                assert!(
+                    !candle::video_job_is_candle_eligible(&job),
+                    "LTX-2.5 q8 must remain unrouted until inference promotes terminal evidence: {mode} {tier}"
+                );
+            }
         }
 
-        for tier in [json!(0), json!(-1), json!(3), json!(16), json!("bf16")] {
+        for tier in [json!(3), json!(16), json!("bf16")] {
             let mut ltx25 = catalog::video_mode_probe_payload("ltx_2_5", "text_to_video");
             ltx25.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
-            assert_eq!(
-                candle::video_request_candle_eligible("ltx_2_5", &ltx25),
-                tier.as_i64().is_some_and(|bits| bits <= 0),
-                "LTX-2.5 must fail closed outside q4/q8/bf16: {tier}"
+            assert!(
+                !candle::video_request_candle_eligible("ltx_2_5", &ltx25),
+                "LTX-2.5 must fail closed outside q4/bf16: {tier}"
             );
 
             let mut ltx23 = catalog::video_mode_probe_payload("ltx_2_3", "text_to_video");
@@ -464,6 +489,15 @@ mod tests {
             assert!(
                 !candle::video_request_candle_eligible("ltx_2_3", &ltx23),
                 "LTX-2.3 must not inherit LTX-2.5's bf16 tier: {tier}"
+            );
+        }
+
+        for tier in [json!(4), json!(8), json!("8")] {
+            let mut ltx23 = catalog::video_mode_probe_payload("ltx_2_3", "text_to_video");
+            ltx23.insert("advanced".to_owned(), json!({ "mlxQuantize": tier }));
+            assert!(
+                candle::video_request_candle_eligible("ltx_2_3", &ltx23),
+                "LTX-2.3 packed tier behavior must remain unchanged: {tier}"
             );
         }
     }

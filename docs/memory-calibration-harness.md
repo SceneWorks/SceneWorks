@@ -201,7 +201,7 @@ The model-wide LTX-2.5 capture replaces the example's `--fixture` with both of t
 
 ```text
   --model ltx_2_5 \
-  --ltx25-snapshot-root /absolute/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/791ef61731ad067bd13ebff8cc0f07532476d9ef \
+  --ltx25-snapshot-root /absolute/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2 \
 ```
 
 One provider process probes one backend-specific hardware shape, so `--backend mlx|candle` is

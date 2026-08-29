@@ -37,7 +37,7 @@ export const LTX25_DECODERS = ["conv", "diffvae"];
 // must reject a merely SHA-shaped snapshot before it hashes hundreds of GiB or starts Metal work.
 // The focused selector test binds these literals back to config/download-pattern-evidence.json.
 export const LTX25_CAPTURE_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
-export const LTX25_CAPTURE_REVISION = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
+export const LTX25_CAPTURE_REVISION = "081658ce6886cacba20817ce0359bbefef706ff2";
 export const RUNG_REUSE_TOLERANCE = Object.freeze({
   absoluteBytes: 256 * 1024 * 1024,
   relative: 0.05,

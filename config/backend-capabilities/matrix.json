@@ -5,7 +5,7 @@
     "modelCount": 95,
     "importedFamilyCount": 3,
     "cellCount": 943,
-    "mlxOnlyCellCount": 44,
+    "mlxOnlyCellCount": 45,
     "candleOnlyCellCount": 47,
     "exceptionCount": 10
   },
@@ -22,7 +22,7 @@
     "descriptorMlxRuntime": "dc70bce7222298c489bc6b61a024bbb6606d8eaf95d891b178e52be828042dc4",
     "descriptorPreviewFacts": "5c923b58907e633d22e2c8a6446479d2ec56abab10d738244b2f244bf197a05d",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "92a1fa1f22b0e18a28a6284f614ec6b3bb7935aafd83f738918603bf0dde0c3e",
+    "manifest": "1fb9882cf0c8bb0cc9ae7b5c85a36d9814f733e77b33e3dc8cdabb0058019e70",
     "modelImportDefaults": "7b93079be78b6228a066b0a368b24c71c8abffe748742882c053be033e3d7cba",
     "routerCandle": "e6273f677afdf999c383a16f686e98a3d1032a426c05efa697486fd1cc46d544",
     "routerCatalog": "0100ef471747520d90f9b23f8aeb0ba961412f3455a8424cc80759be4d017ce7",
@@ -41,7 +41,7 @@
     "webSimpleJobs": "bba715b793b6fbe6a644d4db31172e3a8a3fc9c8d93fede22767a2989b09dd27",
     "webSimpleVideo": "6404756ee8ed4d3d9139969f977933e72c82e11b02297d664eb97703acab6885",
     "webUpscaleEngines": "31f3e26fbd009954126a324ea37dc9e2e1a9fa89955620c50794fb2df1ec40d4",
-    "webVideoStudio": "f04ecd5809e7f90f281f98bae7b8541618db2d7c1e4ce69b4c2a17c2dc5fa4bf",
+    "webVideoStudio": "5c94106264834dd9a687cd90770ed0514c26c38f1a96138a2bd10e6297bb0e0a",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "aeb30734a088abddc46610baa3c5bf9c78830ac4f6291e7a8b0616147a715926",
@@ -58,16 +58,16 @@
     "workerTrainingDispatch": "371c8f993aaeb929cf09c42d28c120cb88d8f25eab7016e2fa0658d3745b4824",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
-    "workerVideoCandle": "b6b8da0ade66e1b8f92054a75b92d9ff35ce0716a2666cc246f4ae26c8a093cc",
+    "workerVideoCandle": "4142c5429f8bf602485f6fb0f946a2cf7184d5c82d3c40a9116160cad4ed1c14",
     "workerVideoDispatch": "b035b1d43b47cbc64190a956bd2ef13db16e8cdac7918ccd6b77ba9072e0445b",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "8263ca8b835dcd5d00386190d9d027dc56e68c9d15ebc303cd2343311787aa2e",
+    "workerVideoLtx": "f068dfa17bd7975117853e33a6ac6158d6e545cafb1ef4236444786980da4b5f",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "b1c0f7d3e934afd7d9f612a497db768283c5b2a1a1bdd964a5db6213c98b9682",
     "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "466e9a6a9fc26d3ee3bb185685278c1ac8b38b4325fd6e430c1447a397f52462",
-    "workerVideoWan": "76c09fa05236b5733375c37362942d83ff74454f5772e59fc5cf27c496e732d1"
+    "workerVideoWan": "92d45f09eec151466de568b5d36a2f3c0875e316102622649e532f3d7700491f"
   },
   "models": [
     {
@@ -3105,7 +3105,12 @@
         {
           "capability": "q8",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
         }
       ],
       "guidanceMethod": [],

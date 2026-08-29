@@ -691,7 +691,7 @@ Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
   executions; the complete resume bundle remains the lossless, deterministically ordered ingest base,
   and a fully completed selection returns it without probing hardware or invoking the provider.
 - `--backend mlx --model ltx_2_5` additionally requires
-  `--ltx25-snapshot-root /abs/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/791ef61731ad067bd13ebff8cc0f07532476d9ef`.
+  `--ltx25-snapshot-root /abs/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2`.
   The harness validates that exact public repository/revision and the selected nested layout, hashes
   each required `<transformerVariant>/<tier>` root once, hashes the shared enhancer root once, hashes
   the dev refinement adapter file once when required, and sets their byte counts and digests on every

@@ -233,7 +233,7 @@ pub(super) const LTX25_BUNDLE_REPO: &str = "SceneWorks/ltx-2.5-mlx";
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) const LTX25_BUNDLE_REVISION: &str = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
+pub(super) const LTX25_BUNDLE_REVISION: &str = "081658ce6886cacba20817ce0359bbefef706ff2";
 /// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
 /// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
