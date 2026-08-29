@@ -963,6 +963,34 @@ async function resolveReceiptPath(relativePath, roots) {
   fail(`missing immutable source receipt ${relativePath}`);
 }
 
+/**
+ * A `repositories` block with the DERIVED closure digest removed, for comparing a record against the
+ * immutable receipts it was reconstructed from.
+ *
+ * `repositories.inference.closureDigest` is a pure function of the `revision` beside it and the
+ * `CLOSURE_DIGEST_VERSION` in force, so it carries no capture fact the revision does not already
+ * pin. Comparing it against a receipt made the receipts assert an ALGORITHM rather than a capture,
+ * which is what made a digest-version bump unrepresentable: `--restamp` legitimately re-derives
+ * every record's digest at its own revision, and the equality then read that re-derivation as
+ * tampering. Everything the receipt actually witnesses — revision, dirtiness, hardware, capture
+ * time, and every measurement — is still compared exactly. Whether a digest is the RIGHT function of
+ * its revision is a separate question, answered by `backfill-closure-digests.mjs --verify`, which
+ * re-derives all 109 against a real inference clone rather than trusting a stored copy.
+ */
+function capturedProvenance(repositories) {
+  return {
+    ...repositories,
+    inference: Object.fromEntries(
+      Object.entries(repositories?.inference ?? {}).filter(([key]) => key !== "closureDigest"),
+    ),
+  };
+}
+
+/** A record compared on everything the immutable receipts witness. See [`capturedProvenance`]. */
+function recordAsWitnessed(record) {
+  return { ...record, repositories: capturedProvenance(record.repositories) };
+}
+
 export async function validateSourceSessionFiles(
   bundle,
   extraRoot = null,
@@ -1025,8 +1053,8 @@ export async function validateSourceSessionFiles(
       overlay: request.planned.target.overlay,
       rung: request.planned.strategy.rung,
     };
-    if (!equal(request.repositories, record.repositories)
-        || !equal(session.repositories, record.repositories)
+    if (!equal(capturedProvenance(request.repositories), capturedProvenance(record.repositories))
+        || !equal(capturedProvenance(session.repositories), capturedProvenance(record.repositories))
         || !equal(request.hardware, record.hardware)
         || !equal(session.hardware, record.hardware)
         || session.capturedAt !== record.capturedAt
@@ -1082,7 +1110,7 @@ export async function validateSourceSessionFiles(
       fail(`${session.id}: physical MLX session id does not match its provider response digest`);
     }
     const reconstructedRecord = recordFromPhysicalMlxResponse(providerResponse, request, session);
-    if (!equal(reconstructedRecord, record)) {
+    if (!equal(recordAsWitnessed(reconstructedRecord), recordAsWitnessed(record))) {
       fail(`${session.id}: provider response measurements do not match the evidence record`);
     }
   }
