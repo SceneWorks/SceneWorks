@@ -340,6 +340,16 @@ function maxRoleBytesByPhase(events, role, lifetime) {
   return Math.max(0, ...totals.values());
 }
 
+function maxClassifiedTransientBytesByPhase(events) {
+  const totals = new Map();
+  for (const event of events) {
+    if (event.lifetime !== "transient"
+      || !["cache", "attention-workspace", "output"].includes(event.role)) continue;
+    totals.set(event.phase, (totals.get(event.phase) ?? 0) + event.bytes);
+  }
+  return Math.max(0, ...totals.values());
+}
+
 function validatePhaseSample(sample, index, expectedPid) {
   const name = `memory.phaseSamples[${index}]`;
   exactKeys(
@@ -573,7 +583,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       !== receipt.memory.persistentKvBytes
     || maxRoleBytesByPhase(receipt.memory.allocationEvents, "weights", "persistent")
       !== receipt.memory.modelWeightsBytes
-    || maxRoleBytesByPhase(receipt.memory.allocationEvents, "attention-workspace", "transient")
+    || maxClassifiedTransientBytesByPhase(receipt.memory.allocationEvents)
       !== receipt.memory.transientWorkspaceBytes) {
     fail("typed allocation events do not reconcile with memory attribution totals");
   }
