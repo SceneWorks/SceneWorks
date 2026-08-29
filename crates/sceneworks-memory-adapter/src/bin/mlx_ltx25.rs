@@ -734,6 +734,10 @@ fn quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
 }
 
+fn output_fps_diagnostic(target: Target) -> (&'static str, &'static str, u64) {
+    ("outputFps", "count", u64::from(target.geometry.fps))
+}
+
 fn audio_max_mean_rms_abs(
     left: &AudioTrack,
     right: &AudioTrack,
@@ -1253,7 +1257,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
                 ("predictedOverallCeiling", "bytes", predicted),
                 ("renderedFrames", "count", u64::from(target.geometry.frames)),
-                ("renderedFps", "count", u64::from(target.geometry.fps)),
+                output_fps_diagnostic(target),
                 ("devVariant", "count", u64::from(target.variant == TransformerVariant::Dev)),
                 ("diffusionDecoder", "count", u64::from(target.decoder == Decoder::DiffVae)),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
@@ -1469,6 +1473,10 @@ mod tests {
             assert_eq!(request.seed, Some(SEED));
             assert!(request.video_mode.is_none(), "default full-A/V route");
             assert!(request.conditioning.is_empty(), "reference-free T2V");
+            assert_eq!(
+                output_fps_diagnostic(target),
+                ("outputFps", "count", u64::from(BASE_FPS))
+            );
         }
     }
 
