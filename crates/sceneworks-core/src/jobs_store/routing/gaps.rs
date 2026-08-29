@@ -438,7 +438,8 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // sc-4415: face_likeness_compare runs the same native SCRFD+ArcFace stack to score two existing
         // assets on demand — a native Rust/MLX job, not a native-flow gap. Gated by the worker's
         // capability advertisement, so it queues rather than enforce-fails here.
-        | JobType::FaceLikenessCompare => Ok(()),
+        | JobType::FaceLikenessCompare
+        | JobType::VectorGenerate => Ok(()),
 
         // Forward-compat: an unrecognized job type isn't a known native-flow gap, so don't
         // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
@@ -707,6 +708,7 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // too (audio is candle-native on every platform); it routes by the `audio_generate` capability
         // advertisement rather than enforce-failing here.
         | JobType::AudioGenerate
+        | JobType::VectorGenerate
         | JobType::Unknown(_) => Ok(()),
     }
 }

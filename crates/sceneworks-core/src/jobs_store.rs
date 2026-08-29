@@ -98,6 +98,7 @@ pub const JOB_STATUSES: &[&str] = &[
     "interrupted",
 ];
 pub const NON_GPU_JOB_TYPES: &[&str] = &[
+    "vector_generate",
     "model_download",
     "model_import",
     "model_convert",

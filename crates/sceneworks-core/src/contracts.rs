@@ -214,6 +214,10 @@ string_enum! {
         ImageEdit => "image_edit",
         ImageVqa => "image_vqa",
         ImageInterleave => "image_interleave",
+        // CPU-only vector generation walking skeleton (epic 19699, sc-22251).
+        // The worker sanitizes and canonicalizes the supplied SVG before it ever reaches the
+        // project tree, then publishes the SVG and its native PNG preview as one pair.
+        VectorGenerate => "vector_generate",
         VideoGenerate => "video_generate",
         VideoExtend => "video_extend",
         VideoBridge => "video_bridge",
@@ -527,6 +531,7 @@ string_enum! {
         Upload => "upload",
         Frame => "frame",
         Render => "render",
+        Vector => "vector",
         // An interleaved text-image document (SenseNova-U1). The asset's `file`
         // points to an InterleavedDocument JSON in assets/documents/; the images it
         // references are ordinary `image` assets. See sc-1576.
