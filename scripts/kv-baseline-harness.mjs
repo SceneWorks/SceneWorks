@@ -382,9 +382,14 @@ function validateFixtureEvidence(evidence) {
   exactKeys(evidence, FIXTURES, "quality.fixtureEvidence");
   for (const fixture of FIXTURES) {
     const row = evidence[fixture];
-    exactKeys(row, ["passed", "artifactSha256", "independentReference"], `quality.fixtureEvidence.${fixture}`);
+    exactKeys(row, ["passed", "artifactName", "artifactSha256", "artifactSidecarSha256", "independentReference"], `quality.fixtureEvidence.${fixture}`);
     if (row.passed !== true) fail(`quality fixture ${fixture} did not pass`);
+    if (row.artifactName !== `fixtures/${fixture}.json`) fail(`quality fixture ${fixture} artifact name mismatch`);
     digest(row.artifactSha256, `quality.fixtureEvidence.${fixture}.artifactSha256`);
+    digest(row.artifactSidecarSha256, `quality.fixtureEvidence.${fixture}.artifactSidecarSha256`);
+    if (row.artifactSidecarSha256 !== sha256(`${row.artifactSha256}  ${row.artifactName}\n`)) {
+      fail(`quality fixture ${fixture} artifact sidecar binding mismatch`);
+    }
     text(row.independentReference, `quality.fixtureEvidence.${fixture}.independentReference`);
   }
 }
@@ -796,7 +801,8 @@ export async function buildVerifiedReceipt(input) {
     if (!artifactMetadata.isFile() || artifactMetadata.size <= 0) {
       fail(`quality fixture ${fixture} artifact must be a non-empty file`);
     }
-    if (await sha256File(artifactPath) !== sourceRow.artifactSha256) {
+    const artifactSha256 = await sha256File(artifactPath);
+    if (artifactSha256 !== sourceRow.artifactSha256) {
       fail(`quality fixture ${fixture} artifact SHA-256 mismatch`);
     }
     let artifact;
@@ -806,7 +812,14 @@ export async function buildVerifiedReceipt(input) {
       fail(`quality fixture ${fixture} artifact is not valid JSON: ${error.message}`);
     }
     validateFixtureArtifact(artifact, fixture, sourceRow);
-    delete verifiedInput.quality.fixtureEvidence[fixture].artifactPath;
+    const artifactName = `fixtures/${fixture}.json`;
+    verifiedInput.quality.fixtureEvidence[fixture] = {
+      passed: sourceRow.passed,
+      artifactName,
+      artifactSha256,
+      artifactSidecarSha256: sha256(`${artifactSha256}  ${artifactName}\n`),
+      independentReference: sourceRow.independentReference,
+    };
   }
   return buildReceipt(verifiedInput);
 }
