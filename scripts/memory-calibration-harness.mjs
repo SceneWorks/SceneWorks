@@ -1574,6 +1574,23 @@ async function requireLtx25File(file, label) {
     fail(`${label} is missing at ${file}: ${error.message}`);
   }
   if (!metadata.isFile() || metadata.size < 1) fail(`${label} must be one non-empty file at ${file}`);
+  return metadata;
+}
+
+async function hashLtx25File(file, label) {
+  const metadata = await requireLtx25File(file, label);
+  const hash = createHash("sha256");
+  let bytes = 0;
+  try {
+    for await (const chunk of createReadStream(file)) {
+      bytes += chunk.length;
+      hash.update(chunk);
+    }
+  } catch (error) {
+    fail(`hash ${label} at ${file}: ${error.message}`);
+  }
+  if (bytes !== metadata.size) fail(`${label} changed size while it was being hashed at ${file}`);
+  return { path: file, bytes, sha256: hash.digest("hex") };
 }
 
 export async function prepareLtx25CaptureArtifacts(
@@ -1625,12 +1642,32 @@ export async function prepareLtx25CaptureArtifacts(
     fail(`LTX-2.5 enhancer directory is missing at ${enhancer}: ${error.message}`);
   }
   if (enhancerEntries.length === 0) fail(`LTX-2.5 enhancer directory is empty at ${enhancer}`);
-  if (plannedCases.some((planned) => planned.target.transformerVariant === "dev")) {
-    await requireLtx25File(
-      path.join(resolved, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
-      "LTX-2.5 dev refinement adapter",
-    );
+  const canonicalEnhancer = await realpath(enhancer);
+  if (canonicalEnhancer !== enhancer) fail(`LTX-2.5 enhancer root must be canonical: ${enhancer}`);
+  let enhancerInventory;
+  try {
+    enhancerInventory = await inventoryFor(enhancer);
+  } catch (error) {
+    fail(`hash LTX-2.5 enhancer artifact inventory: ${error.message}`);
   }
+  if (!Number.isSafeInteger(enhancerInventory.bytes) || enhancerInventory.bytes <= 0 ||
+      !/^[0-9a-f]{64}$/.test(enhancerInventory.sha256)) {
+    fail("LTX-2.5 enhancer artifact inventory is malformed");
+  }
+  const enhancerArtifact = {
+    root: enhancer,
+    bytes: enhancerInventory.bytes,
+    sha256: enhancerInventory.sha256,
+  };
+  const needsDevAdapter = plannedCases.some(
+    (planned) => planned.target.transformerVariant === "dev",
+  );
+  const devAdapter = needsDevAdapter
+    ? await hashLtx25File(
+        path.join(resolved, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
+        "LTX-2.5 dev refinement adapter",
+      )
+    : null;
 
   const artifacts = new Map();
   const keys = [...new Set(plannedCases.map(ltx25ArtifactKey))].sort();
@@ -1670,6 +1707,8 @@ export async function prepareLtx25CaptureArtifacts(
     snapshotRoot: resolved,
     repository: LTX25_CAPTURE_REPOSITORY,
     revision: LTX25_CAPTURE_REVISION,
+    enhancer: enhancerArtifact,
+    devAdapter,
     artifacts,
   };
 }
@@ -1680,6 +1719,10 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
     "SCENEWORKS_LTX25_ROOT",
     "SCENEWORKS_MEMORY_MODEL_BYTES",
     "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_ENHANCER_BYTES",
+    "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
+    "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
   ]) delete environment[name];
   environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
   environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
@@ -1690,8 +1733,51 @@ export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = pr
     environment.SCENEWORKS_LTX25_ROOT = artifact.root;
     environment.SCENEWORKS_MEMORY_MODEL_BYTES = String(artifact.bytes);
     environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 = artifact.sha256;
+    environment.SCENEWORKS_LTX25_ENHANCER_BYTES = String(prepared.enhancer.bytes);
+    environment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256 = prepared.enhancer.sha256;
+    if (planned.target.transformerVariant === "dev") {
+      if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES = String(prepared.devAdapter.bytes);
+      environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256 = prepared.devAdapter.sha256;
+    }
   }
   return environment;
+}
+
+function ltx25ExpectedSourceInputs(prepared, planned) {
+  const key = ltx25ArtifactKey(planned);
+  const artifact = prepared.artifacts.get(key);
+  if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+  const inputs = [{
+    role: "base",
+    path: artifact.root,
+    bytes: artifact.bytes,
+    sha256: artifact.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: planned.target.tier,
+  }, {
+    role: "enhancer",
+    path: prepared.enhancer.root,
+    bytes: prepared.enhancer.bytes,
+    sha256: prepared.enhancer.sha256,
+    repository: prepared.repository,
+    resolvedRevision: prepared.revision,
+    variant: "enhancer",
+  }];
+  if (planned.target.transformerVariant === "dev") {
+    if (!prepared.devAdapter) fail("LTX-2.5 prepared snapshot has no dev adapter inventory");
+    inputs.push({
+      role: "adapter",
+      path: prepared.devAdapter.path,
+      bytes: prepared.devAdapter.bytes,
+      sha256: prepared.devAdapter.sha256,
+      repository: prepared.repository,
+      resolvedRevision: prepared.revision,
+      variant: "dev_refinement_lora",
+    });
+  }
+  return inputs;
 }
 
 export async function assessProviderReuse({ config, providerCommand, backend, fixture }) {
@@ -2077,6 +2163,12 @@ export async function runProviderPlan({
         }
         if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
           fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
+        }
+        if (ltx25Artifacts && !equal(
+          sourceCapture.inputs,
+          ltx25ExpectedSourceInputs(ltx25Artifacts, planned),
+        )) {
+          fail(`${planned.logicalCaseId}: LTX-2.5 source inputs do not match the sealed campaign inventories`);
         }
         validateExactOutputReceipts(
           sourceCapture.outputs,

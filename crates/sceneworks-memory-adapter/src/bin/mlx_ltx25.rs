@@ -110,15 +110,23 @@ struct Artifact {
     repository: String,
     revision: String,
     root: PathBuf,
+    snapshot_root: PathBuf,
     spec: LoadSpec,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactInventory {
+    bytes: u64,
+    sha256: String,
 }
 
 struct SourceCapturePlan {
     output_dir: PathBuf,
     source_prefix: String,
     logical_case_id: String,
-    inventory_bytes: u64,
-    inventory_sha256: String,
+    model_inventory: ArtifactInventory,
+    enhancer_inventory: ArtifactInventory,
+    dev_adapter_inventory: Option<ArtifactInventory>,
 }
 
 fn target_string<'a>(
@@ -450,6 +458,7 @@ fn load_artifact(
         repository,
         revision,
         root,
+        snapshot_root,
         spec,
     })
 }
@@ -485,10 +494,65 @@ fn valid_logical_case_id(value: &str) -> bool {
     })
 }
 
+fn inventory_from_environment<F>(
+    required_env: &F,
+    bytes_name: &str,
+    sha256_name: &str,
+) -> Result<ArtifactInventory, String>
+where
+    F: Fn(&str) -> Result<String, String>,
+{
+    let bytes = integer(&required_env(bytes_name)?, bytes_name)?;
+    if bytes == 0 {
+        return Err(format!("{bytes_name} must be greater than zero"));
+    }
+    let sha256 = required_env(sha256_name)?;
+    if !lowercase_sha256(&sha256) {
+        return Err(format!("{sha256_name} must be 64 lowercase hex characters"));
+    }
+    Ok(ArtifactInventory { bytes, sha256 })
+}
+
+fn source_inventories_from_environment<F>(
+    target: Target,
+    required_env: &F,
+) -> Result<
+    (
+        ArtifactInventory,
+        ArtifactInventory,
+        Option<ArtifactInventory>,
+    ),
+    String,
+>
+where
+    F: Fn(&str) -> Result<String, String>,
+{
+    let model = inventory_from_environment(
+        required_env,
+        "SCENEWORKS_MEMORY_MODEL_BYTES",
+        "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256",
+    )?;
+    let enhancer = inventory_from_environment(
+        required_env,
+        "SCENEWORKS_LTX25_ENHANCER_BYTES",
+        "SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256",
+    )?;
+    let dev_adapter = (target.variant == TransformerVariant::Dev)
+        .then(|| {
+            inventory_from_environment(
+                required_env,
+                "SCENEWORKS_LTX25_DEV_ADAPTER_BYTES",
+                "SCENEWORKS_LTX25_DEV_ADAPTER_SHA256",
+            )
+        })
+        .transpose()?;
+    Ok((model, enhancer, dev_adapter))
+}
+
 /// Resolve every raw-receipt prerequisite before constructing the provider. A missing raw-log
 /// directory or inventory attestation must fail before an expensive Metal load, not after a clip
 /// has already been rendered and become impossible to ingest.
-fn prepare_source_capture(request: &Value) -> Result<SourceCapturePlan, String> {
+fn prepare_source_capture(request: &Value, target: Target) -> Result<SourceCapturePlan, String> {
     let capture_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
         "SCENEWORKS_MEMORY_CAPTURE_DIR",
     )?))
@@ -528,26 +592,15 @@ fn prepare_source_capture(request: &Value) -> Result<SourceCapturePlan, String> 
             "planned.logicalCaseId must be implan- plus 20 lowercase hex characters".to_owned(),
         );
     }
-    let inventory_bytes = integer(
-        &protocol::required_env("SCENEWORKS_MEMORY_MODEL_BYTES")?,
-        "SCENEWORKS_MEMORY_MODEL_BYTES",
-    )?;
-    if inventory_bytes == 0 {
-        return Err("SCENEWORKS_MEMORY_MODEL_BYTES must be greater than zero".to_owned());
-    }
-    let inventory_sha256 = protocol::required_env("SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256")?;
-    if !lowercase_sha256(&inventory_sha256) {
-        return Err(
-            "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 must be 64 lowercase hex characters"
-                .to_owned(),
-        );
-    }
+    let (model_inventory, enhancer_inventory, dev_adapter_inventory) =
+        source_inventories_from_environment(target, &protocol::required_env)?;
     Ok(SourceCapturePlan {
         output_dir,
         source_prefix,
         logical_case_id,
-        inventory_bytes,
-        inventory_sha256,
+        model_inventory,
+        enhancer_inventory,
+        dev_adapter_inventory,
     })
 }
 
@@ -945,17 +998,40 @@ fn source_capture(
     selected: &RenderedClip,
     reference: &RenderedClip,
 ) -> Result<Value, String> {
-    Ok(json!({
-        "kind": "physical_mlx",
-        "inputs": [{
+    let mut inputs = vec![
+        json!({
             "role": "base",
             "path": artifact.root,
-            "bytes": plan.inventory_bytes,
-            "sha256": plan.inventory_sha256,
+            "bytes": plan.model_inventory.bytes,
+            "sha256": plan.model_inventory.sha256,
             "repository": artifact.repository,
             "resolvedRevision": artifact.revision,
             "variant": tier,
-        }],
+        }),
+        json!({
+            "role": "enhancer",
+            "path": artifact.snapshot_root.join("enhancer"),
+            "bytes": plan.enhancer_inventory.bytes,
+            "sha256": plan.enhancer_inventory.sha256,
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": "enhancer",
+        }),
+    ];
+    if let Some(inventory) = &plan.dev_adapter_inventory {
+        inputs.push(json!({
+            "role": "adapter",
+            "path": artifact.snapshot_root.join(DEV_ADAPTER),
+            "bytes": inventory.bytes,
+            "sha256": inventory.sha256,
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": "dev_refinement_lora",
+        }));
+    }
+    Ok(json!({
+        "kind": "physical_mlx",
+        "inputs": inputs,
         "outputs": [
             persist_canonical_av(plan, "selected_av", selected)?,
             persist_canonical_av(plan, "reference_av", reference)?,
@@ -987,9 +1063,9 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let tier = planned_qwen_tier(request)?;
     let selection = planned_selection(request)?;
     validate_selection_shape(&selection, target)?;
+    let capture_plan = prepare_source_capture(request, target)?;
     let artifact = load_artifact(request, target, tier, &selection)?;
     let overlay = runtime_overlay(&artifact.spec, target.decoder)?;
-    let capture_plan = prepare_source_capture(request)?;
     let registry = mlx_gen_ltx::provider_registry()
         .map_err(|error| format!("build LTX-2.5 registry: {error}"))?;
     let contract = registry
@@ -1621,8 +1697,15 @@ mod tests {
             output_dir: output_dir.clone(),
             source_prefix: "docs/calibration/sc-18783".to_owned(),
             logical_case_id: "implan-0123456789abcdefabcd".to_owned(),
-            inventory_bytes: 1,
-            inventory_sha256: "a".repeat(64),
+            model_inventory: ArtifactInventory {
+                bytes: 1,
+                sha256: "a".repeat(64),
+            },
+            enhancer_inventory: ArtifactInventory {
+                bytes: 2,
+                sha256: "b".repeat(64),
+            },
+            dev_adapter_inventory: None,
         };
         let clip = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
         let receipt = persist_canonical_av(&plan, "selected_av", &clip).unwrap();
@@ -1640,6 +1723,133 @@ mod tests {
         std::fs::write(&local_path, b"tampered").unwrap();
         let error = persist_canonical_av(&plan, "selected_av", &clip).unwrap_err();
         assert!(error.contains("different bytes"), "{error}");
+        std::fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[test]
+    fn source_capture_requires_variant_exact_shared_inventory_environment() {
+        let distilled =
+            validate_target(&request("q4", "distilled", "conv", 768, 512, BASE_FRAMES)).unwrap();
+        let dev = validate_target(&request("q4", "dev", "conv", 768, 512, BASE_FRAMES)).unwrap();
+        let mut values = std::collections::HashMap::from([
+            ("SCENEWORKS_MEMORY_MODEL_BYTES", "1".to_owned()),
+            ("SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256", "a".repeat(64)),
+        ]);
+        let required = |name: &str| {
+            values
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("missing required environment variable {name}"))
+        };
+        let error = source_inventories_from_environment(distilled, &required).unwrap_err();
+        assert!(error.contains("SCENEWORKS_LTX25_ENHANCER_BYTES"), "{error}");
+
+        values.insert("SCENEWORKS_LTX25_ENHANCER_BYTES", "2".to_owned());
+        values.insert("SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256", "b".repeat(64));
+        let required = |name: &str| {
+            values
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("missing required environment variable {name}"))
+        };
+        let (_, _, distilled_adapter) =
+            source_inventories_from_environment(distilled, &required).unwrap();
+        assert!(distilled_adapter.is_none());
+        let error = source_inventories_from_environment(dev, &required).unwrap_err();
+        assert!(
+            error.contains("SCENEWORKS_LTX25_DEV_ADAPTER_BYTES"),
+            "{error}"
+        );
+
+        values.insert("SCENEWORKS_LTX25_DEV_ADAPTER_BYTES", "3".to_owned());
+        values.insert("SCENEWORKS_LTX25_DEV_ADAPTER_SHA256", "c".repeat(64));
+        let required = |name: &str| {
+            values
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("missing required environment variable {name}"))
+        };
+        let (_, _, dev_adapter) = source_inventories_from_environment(dev, &required).unwrap();
+        assert_eq!(
+            dev_adapter,
+            Some(ArtifactInventory {
+                bytes: 3,
+                sha256: "c".repeat(64),
+            })
+        );
+    }
+
+    #[test]
+    fn source_capture_seals_enhancer_and_variant_exact_adapter_inputs() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let output_dir = std::env::temp_dir().join(format!(
+            "sceneworks-ltx25-shared-receipt-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let snapshot_root = output_dir.join("snapshot");
+        let target = validate_target(&request("q4", "dev", "conv", 768, 512, BASE_FRAMES)).unwrap();
+        let selection =
+            planned_selection(&request("q4", "dev", "conv", 768, 512, BASE_FRAMES)).unwrap();
+        let root = snapshot_root.join("dev/q4");
+        let artifact = Artifact {
+            repository: protocol::LTX25_REPOSITORY.to_owned(),
+            revision: PUBLIC_REVISION.to_owned(),
+            root: root.clone(),
+            snapshot_root: snapshot_root.clone(),
+            spec: configured_spec(root, &snapshot_root, target, &selection),
+        };
+        let mut plan = SourceCapturePlan {
+            output_dir: output_dir.clone(),
+            source_prefix: "docs/calibration/sc-18783".to_owned(),
+            logical_case_id: "implan-0123456789abcdefabcd".to_owned(),
+            model_inventory: ArtifactInventory {
+                bytes: 1,
+                sha256: "a".repeat(64),
+            },
+            enhancer_inventory: ArtifactInventory {
+                bytes: 2,
+                sha256: "b".repeat(64),
+            },
+            dev_adapter_inventory: Some(ArtifactInventory {
+                bytes: 3,
+                sha256: "c".repeat(64),
+            }),
+        };
+        let clip = tiny_clip(vec![0.0, 0.25, -0.5, 0.75]);
+        let receipt = source_capture(&plan, &artifact, "q4", &clip, &clip).unwrap();
+        let inputs = receipt["inputs"].as_array().unwrap();
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|input| input["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["base", "enhancer", "adapter"]
+        );
+        assert_eq!(
+            inputs[1]["path"].as_str(),
+            snapshot_root.join("enhancer").to_str()
+        );
+        assert_eq!(inputs[1]["sha256"], "b".repeat(64));
+        assert_eq!(
+            inputs[2]["path"].as_str(),
+            snapshot_root.join(DEV_ADAPTER).to_str()
+        );
+        assert_eq!(inputs[2]["sha256"], "c".repeat(64));
+        plan.dev_adapter_inventory = None;
+        let distilled_receipt = source_capture(&plan, &artifact, "q4", &clip, &clip).unwrap();
+        assert_eq!(
+            distilled_receipt["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|input| input["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["base", "enhancer"]
+        );
         std::fs::remove_dir_all(output_dir).unwrap();
     }
 

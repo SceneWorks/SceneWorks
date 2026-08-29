@@ -265,7 +265,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["role", "path", "bytes", "sha256", "repository", "resolvedRevision", "variant"],
       "properties": {
-        "role": { "enum": ["base", "control", "adapter"] },
+        "role": { "enum": ["base", "control", "adapter", "enhancer"] },
         "path": { "type": "string", "minLength": 1 },
         "bytes": { "type": "integer", "minimum": 1 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

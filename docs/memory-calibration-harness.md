@@ -216,9 +216,12 @@ existing deterministic merge semantics; a resume that already completes every se
 that merge base without probing hardware or invoking the provider. For the LTX-2.5 model selector,
 `--ltx25-snapshot-root` is mandatory and valid only with `--backend mlx --model ltx_2_5`. The harness
 requires the canonical public repository/revision suffix, checks the shared enhancer and dev adapter,
-checks every selected `<transformerVariant>/<tier>` layout, and hashes each selected nested root once.
-It then replaces any inherited root/inventory variables per provider invocation while preserving the
-capture-directory and raw-provenance environment. `--provider <plan-provider-name>` optionally selects one named
+checks every selected `<transformerVariant>/<tier>` layout, hashes each selected nested root once,
+hashes the enhancer root once, and hashes the dev adapter file once when dev rows remain. It then
+replaces inherited tier and shared-component inventory variables per provider invocation while
+preserving the capture-directory and raw-provenance environment. The MLX adapter requires those
+inventories before constructing the provider and records the enhancer on every source session plus
+the refinement adapter on dev sessions. `--provider <plan-provider-name>` optionally selects one named
 provider block; use it to run the current Krea v1 production point separately from non-promotable v2 candidates.
 `--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
 way to execute a multi-rung reference ladder as one reproducible capture.

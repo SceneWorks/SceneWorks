@@ -3097,6 +3097,15 @@ test("the LTX-2.5 snapshot driver binds all six nested roots to exact per-root i
   const prepared = await prepareLtx25CaptureArtifacts(snapshot, selected);
   assert.equal(prepared.repository, LTX25_CAPTURE_REPOSITORY);
   assert.equal(prepared.revision, LTX25_CAPTURE_REVISION);
+  assert.equal(prepared.enhancer.root, path.join(snapshot, "enhancer"));
+  assert.ok(prepared.enhancer.bytes > 0);
+  assert.match(prepared.enhancer.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    prepared.devAdapter.path,
+    path.join(snapshot, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
+  );
+  assert.ok(prepared.devAdapter.bytes > 0);
+  assert.match(prepared.devAdapter.sha256, /^[0-9a-f]{64}$/);
   assert.deepEqual(
     [...prepared.artifacts.keys()],
     ["dev/bf16", "dev/q4", "dev/q8", "distilled/bf16", "distilled/q4", "distilled/q8"],
@@ -3116,12 +3125,52 @@ test("the LTX-2.5 snapshot driver binds all six nested roots to exact per-root i
     assert.equal(environment.SCENEWORKS_LTX25_ROOT, artifact.root);
     assert.equal(environment.SCENEWORKS_MEMORY_MODEL_BYTES, String(artifact.bytes));
     assert.equal(environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, artifact.sha256);
+    assert.equal(
+      environment.SCENEWORKS_LTX25_ENHANCER_BYTES,
+      String(prepared.enhancer.bytes),
+    );
+    assert.equal(
+      environment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256,
+      prepared.enhancer.sha256,
+    );
+    if (planned.target.transformerVariant === "dev") {
+      assert.equal(
+        environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES,
+        String(prepared.devAdapter.bytes),
+      );
+      assert.equal(
+        environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256,
+        prepared.devAdapter.sha256,
+      );
+    } else {
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+      assert.equal(environment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+    }
     assert.equal(environment.SCENEWORKS_MEMORY_CAPTURE_DIR, "/capture/raw");
     assert.equal(
       environment.SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX,
       "docs/calibration/sc-18783-terminal",
     );
   }
+
+  await writeFile(path.join(snapshot, "enhancer", "model.safetensors"), "enhancer-mutated");
+  await writeFile(prepared.devAdapter.path, "adapter-mutated");
+  const mutated = await prepareLtx25CaptureArtifacts(snapshot, selected);
+  assert.notEqual(
+    mutated.enhancer.sha256,
+    prepared.enhancer.sha256,
+    "mutating shared enhancer bytes must change the sealed receipt identity",
+  );
+  assert.notEqual(
+    mutated.devAdapter.sha256,
+    prepared.devAdapter.sha256,
+    "mutating the dev refinement file must change the sealed receipt identity",
+  );
+  assert.deepEqual(
+    [...mutated.artifacts].map(([key, artifact]) => [key, artifact.sha256]),
+    [...prepared.artifacts].map(([key, artifact]) => [key, artifact.sha256]),
+    "shared-artifact mutation must not be hidden inside a tier-root inventory",
+  );
 
   const wrongRevision = path.join(path.dirname(snapshot), "a".repeat(40));
   await mkdir(wrongRevision, { recursive: true });
@@ -3162,6 +3211,8 @@ test("the LTX-2.5 model driver injects the selected root only after the hardware
           assert.equal(options.env.SCENEWORKS_LTX25_REVISION, LTX25_CAPTURE_REVISION);
           assert.equal(options.env.SCENEWORKS_LTX25_ROOT, undefined);
           assert.equal(options.env.SCENEWORKS_MEMORY_MODEL_BYTES, undefined);
+          assert.equal(options.env.SCENEWORKS_LTX25_ENHANCER_BYTES, undefined);
+          assert.equal(options.env.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
           return JSON.stringify({
             hardware: {
               probe: "fixture MLX probe",
@@ -3185,6 +3236,15 @@ test("the LTX-2.5 model driver injects the selected root only after the hardware
   assert.equal(capturedEnvironment.SCENEWORKS_LTX25_ROOT, path.join(snapshot, ...key.split("/")));
   assert.ok(Number(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_BYTES) > 0);
   assert.match(capturedEnvironment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+  assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_BYTES) > 0);
+  assert.match(capturedEnvironment.SCENEWORKS_LTX25_ENHANCER_INVENTORY_SHA256, /^[0-9a-f]{64}$/);
+  if (provider.target.transformerVariant === "dev") {
+    assert.ok(Number(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES) > 0);
+    assert.match(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, /^[0-9a-f]{64}$/);
+  } else {
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_BYTES, undefined);
+    assert.equal(capturedEnvironment.SCENEWORKS_LTX25_DEV_ADAPTER_SHA256, undefined);
+  }
 });
 
 test("--model rejects unknown values and incompatible backend selections", async () => {

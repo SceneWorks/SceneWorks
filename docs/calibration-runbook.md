@@ -693,8 +693,11 @@ Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
 - `--backend mlx --model ltx_2_5` additionally requires
   `--ltx25-snapshot-root /abs/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/791ef61731ad067bd13ebff8cc0f07532476d9ef`.
   The harness validates that exact public repository/revision and the selected nested layout, hashes
-  each required `<transformerVariant>/<tier>` root once, and sets its root, byte count, and inventory
-  digest independently on every provider invocation. A stale inherited tier root is never reused.
+  each required `<transformerVariant>/<tier>` root once, hashes the shared enhancer root once, hashes
+  the dev refinement adapter file once when required, and sets their byte counts and digests on every
+  applicable provider invocation. The adapter refuses a missing shared inventory before provider
+  construction and records enhancer plus variant-exact adapter source inputs. A stale inherited
+  tier or shared-component identity is never reused.
 - `--provider-command` is a **JSON argv array**, quoted as one shell word.
 - `--fresh-per-case` forces one fresh process per case (the oracle shape both CI lanes use);
   `--batch-rungs` forces one target's rungs into an experimental batch.
