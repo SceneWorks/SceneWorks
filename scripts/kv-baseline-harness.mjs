@@ -5,7 +5,7 @@ import addFormats from "ajv-formats";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1003,6 +1003,54 @@ export function validateCampaign(receipts) {
     coordinates: coordinates.size,
     contractHash: QUALITY_CONTRACT_HASH,
   };
+}
+
+/**
+ * Publish a complete matrix as one directory transaction.  Child receipt sets are read and
+ * verified before copying; the public destination remains absent if a worker crashes, a sidecar
+ * drifts, or any of the required 64 coordinates is missing.  This deliberately supersedes a
+ * loose manifest file, which could otherwise describe a mixed generation of receipt directories.
+ */
+export async function writeCampaignSet(directory, receiptSetDirectories) {
+  if (!Array.isArray(receiptSetDirectories) || receiptSetDirectories.length !== 64) {
+    fail("complete campaign publication requires exactly 64 receipt-set directories");
+  }
+  const receipts = await Promise.all(receiptSetDirectories.map((source) => readReceiptSet(source)));
+  const summary = validateCampaign(receipts);
+  const coordinates = receipts.map((receipt) => [
+    receipt.matrix.family, receipt.matrix.contextBand, receipt.matrix.requestMode,
+    receipt.matrix.prefillMode, receipt.matrix.processTemperature,
+  ].join("-"));
+  if (new Set(coordinates).size !== 64) fail("complete campaign has duplicate coordinate directories");
+  const parent = path.dirname(directory);
+  const base = path.basename(directory);
+  const staging = path.join(parent, `.${base}.campaign-staging-${process.pid}-${randomUUID()}`);
+  try {
+    await mkdir(staging, { recursive: false });
+    for (let index = 0; index < receipts.length; index += 1) {
+      await cp(receiptSetDirectories[index], path.join(staging, coordinates[index]), {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+      });
+    }
+    const manifest = {
+      ...summary,
+      kind: "sc-20671-complete-coordinate-set",
+      coordinateReceipts: receipts.map((receipt, index) => ({
+        coordinate: coordinates[index], receiptSha256: receipt.receiptSha256,
+        workerPid: receipt.memory.phaseSamples[0].pid,
+      })),
+    };
+    await Promise.all([
+      writeFile(path.join(staging, "campaign.json"), `${canonicalJson(manifest)}\n`, { flag: "wx" }),
+      writeFile(path.join(staging, "campaign.json.sha256"), `${sha256(`${canonicalJson(manifest)}\n`)}  campaign.json\n`, { flag: "wx" }),
+    ]);
+    await rename(staging, directory);
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export async function cancellationSafe(work, cleanup, signal) {

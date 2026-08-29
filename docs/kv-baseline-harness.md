@@ -43,3 +43,19 @@ decode-steady/lifetime-peak process-footprint deltas, and throughput ratio.
 receipts for both Llama and Qwen across every declared context/request/prefill
 and cold/warm coordinate. No campaign result is checked in yet: the real
 matrix remains open work in SC-20671, not a terminal-epic-only task.
+
+The inference producer is the standalone `sc20671-kv-baseline` executable. Its
+`parent` mode consumes no caller-supplied coordinate list: it reads the frozen
+2 × 4 × 2 × 2 × 2 matrix, forks a new child for every cold row, and requires an
+in-process warm-up in each warm worker. Workers collect identity, geometry,
+Darwin/MLX phase samples, allocation events, timings, output, prefix reuse, and
+cancellation from the product route; the parent accepts only the child’s sealed
+JSON/Markdown set. It copies all 64 validated child sets to a hidden staging
+directory and atomically renames one aggregate directory containing
+`campaign.json` and its sidecar. A missing worker, non-product field, stale
+sidecar, duplicate coordinate, or reused cold PID leaves no campaign directory.
+
+The producer deliberately fails closed if its numeric quality-reference hooks
+cannot supply all four checked-in quality fixtures. It must never substitute a
+synthetic zero-error or caller-authored quality result merely to publish a
+matrix; a successful real-model campaign remains the final SC-20671 gate.
