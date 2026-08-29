@@ -27,6 +27,11 @@ row plus its SHA-256 sidecar. It invokes the reducer with `--sidecar`, which ver
 before any family decision. `--fake` uses the same path for weightless tests; it is not real-weight
 evidence. Missing events, geometry, identity, or explicit campaign mode fail closed.
 
+The Rust providers expose the same observer seam through `sc20686_observer::install_jsonl`: the
+campaign launcher passes `--sc20686-campaign --sc20686-events -` to the selected provider entrypoint,
+which emits JSONL for generation start/end, cross-KV creation/read, invalidation, and release. The
+default observer remains `None`; changing self-attention is never emitted as a reusable event.
+
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
 
