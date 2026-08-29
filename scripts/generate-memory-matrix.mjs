@@ -1102,6 +1102,43 @@ export function plannedPipelineIdentities(calibrationPlan, coordinate) {
   );
 }
 
+function recordMatchesPipelineIdentity(record, identity) {
+  return record.target.transformerVariant === identity.transformerVariant
+    && record.target.decoder === identity.decoder;
+}
+
+export function recordsCoverEveryPipelineIdentity(records, identities) {
+  return identities.length === 0
+    ? records.length > 0
+    : identities.every((identity) => records.some((record) =>
+      recordMatchesPipelineIdentity(record, identity)));
+}
+
+export function pipelineMemoryCharacterizations(
+  records,
+  identities,
+  { declaresTemporalCurve = false } = {},
+) {
+  return identities.map((identity) => ({
+    ...identity,
+    memoryCharacterization: memoryCharacterization(
+      records
+        .filter((record) => recordMatchesPipelineIdentity(record, identity))
+        .map((record) => measuredGeometryKey(record.target.geometry)),
+      { declaresTemporalCurve },
+    ),
+  }));
+}
+
+function aggregatePipelineCharacterization(characterizations, { declaresTemporalCurve }) {
+  if (characterizations.length === 0) return null;
+  const shared = characterizations
+    .map((entry) => new Set(entry.memoryCharacterization.measuredGeometries))
+    .reduce((intersection, geometries) =>
+      new Set([...intersection].filter((geometry) => geometries.has(geometry))));
+  return memoryCharacterization([...shared], { declaresTemporalCurve });
+}
+
 function expectedEngagedRungs({
   model,
   provider,
@@ -3847,6 +3884,38 @@ function validateMatrix(
       if (!dynamic.some((evidence) => evidence.recordStatus === requiredStatus)) {
         throw new Error(`${cell.id}: ${cell.state} lacks a ${requiredStatus} record`);
       }
+      for (const identity of cell.plannedPipelineIdentities ?? []) {
+        if (!dynamic.some((evidence) =>
+          evidence.recordStatus === requiredStatus
+            && evidence.transformerVariant === identity.transformerVariant
+            && evidence.decoder === identity.decoder)) {
+          throw new Error(`${cell.id}: ${cell.state} lacks exact coverage for ${identity.transformerVariant}/${identity.decoder}`);
+        }
+      }
+    }
+    if (cell.plannedPipelineIdentities) {
+      const planned = cell.plannedPipelineIdentities.map((identity) => JSON.stringify(identity)).sort();
+      const characterized = (cell.pipelineCharacterizations ?? [])
+        .map(({ transformerVariant, decoder }) => JSON.stringify({ transformerVariant, decoder }))
+        .sort();
+      if (JSON.stringify(planned) !== JSON.stringify(characterized)) {
+        throw new Error(`${cell.id}: pipeline characterizations do not exactly cover the planned identities`);
+      }
+      for (const entry of cell.pipelineCharacterizations) {
+        assertCharacterizationIsConsistent({
+          id: `${cell.id}:${entry.transformerVariant}:${entry.decoder}`,
+          state: cell.state,
+          memoryCharacterization: entry.memoryCharacterization,
+        });
+      }
+      const expectedAggregate = aggregatePipelineCharacterization(cell.pipelineCharacterizations, {
+        declaresTemporalCurve: "coveredFrameBound" in cell.memoryCharacterization,
+      });
+      if (JSON.stringify(expectedAggregate) !== JSON.stringify(cell.memoryCharacterization)) {
+        throw new Error(`${cell.id}: aggregate characterization is not the shared per-pipeline geometry surface`);
+      }
+    } else if (cell.pipelineCharacterizations) {
+      throw new Error(`${cell.id}: unplanned pipeline characterizations are not allowed`);
     }
     assertCharacterizationIsConsistent(cell);
   }
@@ -4848,14 +4917,23 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               // that owns SceneWorks drift. The historical/current split is a revision distinction,
               // and staling a measured slope on an unrelated source edit is the failure that comment
               // exists to prevent. Promotion to `Verified` is stricter and does require `current`.
-              const characterization = memoryCharacterization([
-                ...(status.historicalVerification ?? []).map((row) => row.geometry),
-                // sc-18812: the temporal axis is carried into the key, so two records that differ
-                // only in frame count are two measured geometries rather than one. The `xfN`
-                // suffix is emitted ONLY above one frame, which is what keeps every image cell's
-                // published `measuredGeometries` byte-identical to what it was before.
-                ...eligibleRuns.map((record) => measuredGeometryKey(record.target.geometry)),
-              ], { declaresTemporalCurve: status.declaresTemporalCurve === true });
+              const pipelineCharacterizations = pipelineMemoryCharacterizations(
+                eligibleRuns,
+                pipelineIdentities,
+                { declaresTemporalCurve: status.declaresTemporalCurve === true },
+              );
+              const characterization = pipelineIdentities.length > 0
+                ? aggregatePipelineCharacterization(pipelineCharacterizations, {
+                    declaresTemporalCurve: status.declaresTemporalCurve === true,
+                  })
+                : memoryCharacterization([
+                    ...(status.historicalVerification ?? []).map((row) => row.geometry),
+                    // sc-18812: the temporal axis is carried into the key, so two records that differ
+                    // only in frame count are two measured geometries rather than one. The `xfN`
+                    // suffix is emitted ONLY above one frame, which is what keeps every image cell's
+                    // published `measuredGeometries` byte-identical to what it was before.
+                    ...eligibleRuns.map((record) => measuredGeometryKey(record.target.geometry)),
+                  ], { declaresTemporalCurve: status.declaresTemporalCurve === true });
               // SC-16060. The producer the vocabulary never had: `Verified` was a listed state with
               // nothing able to emit it, so the guard in `validateMatrix` was unreachable and a test
               // asserting zero of them was green for the trivial reason. Promotion is from
@@ -4863,11 +4941,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               // `Structurally N/A` has nothing to measure, so neither may be lifted by evidence.
               const state =
                 status.state === "Implemented/unverified" &&
-                  currentFullRuns.length > 0 &&
+                  recordsCoverEveryPipelineIdentity(currentFullRuns, pipelineIdentities) &&
                   (!status.requiresCurrentCalibrationBinding || status.evidenceAdmissionCurrent)
                   ? "Verified"
                   : status.state === "Implemented/unverified" &&
-                      currentRuntimeRuns.length > 0 &&
+                      recordsCoverEveryPipelineIdentity(currentRuntimeRuns, pipelineIdentities) &&
                       (!status.requiresCurrentCalibrationBinding || status.evidenceAdmissionCurrent)
                     ? "Runtime verified"
                   : status.state;
@@ -4887,7 +4965,10 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 strategyParameters: status.parameters,
                 engagedRungs,
                 ...(pipelineIdentities.length > 0
-                  ? { plannedPipelineIdentities: pipelineIdentities }
+                  ? {
+                      plannedPipelineIdentities: pipelineIdentities,
+                      pipelineCharacterizations,
+                    }
                   : {}),
                 state,
                 memoryCharacterization: characterization,
@@ -5154,7 +5235,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     // count, is wrong on both — hence a version, not an additive bump.
     // 9 (SC-18783): LTX-2.5 plan/evidence bindings name transformer and decoder identities.
     // Aggregate cells publish `plannedPipelineIdentities`; exact run summaries carry the same axes.
-    schemaVersion: 9,
+    schemaVersion: 10,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,

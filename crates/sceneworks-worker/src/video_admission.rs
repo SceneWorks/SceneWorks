@@ -33,7 +33,7 @@ use gen_core::{
     Conditioning, MemoryBackend, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryNumericTier,
     MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
 };
-use sceneworks_core::memory_calibration::StrategyRung;
+use sceneworks_core::memory_calibration::{Ltx25Decoder, Ltx25TransformerVariant, StrategyRung};
 use sceneworks_core::video_memory_curves::{
     VideoCurveBackend, VideoCurveDecodePass, VideoCurveGeometry, VideoCurveLoadShape,
     VideoCurveQuery, VideoMemoryCurveBundle,
@@ -866,6 +866,8 @@ pub(crate) struct VideoRequestIdentity<'a> {
     pub(crate) fps: u32,
     pub(crate) lane: VideoLane,
     pub(crate) tier: MemoryNumericTier,
+    pub(crate) transformer_variant: Option<Ltx25TransformerVariant>,
+    pub(crate) decoder: Option<Ltx25Decoder>,
     /// The contract's live calibration ABI. Carried separately from the optional calibration
     /// identity so an ABI mismatch fails the fitted curve even if a malformed/legacy identity was
     /// minted with a misleading fingerprint.
@@ -1180,6 +1182,8 @@ fn fitted_or_floor_phase_peaks<'a>(
             if calibration.abi != selector.identity.calibration_abi {
                 return None;
             }
+            let transformer_variant = selector.identity.transformer_variant?;
+            let decoder = selector.identity.decoder?;
             let curve_overlay = video_curve_overlay(selector.identity.overlay);
             bundle.evaluate(VideoCurveQuery {
                 model_id: selector.identity.model_id,
@@ -1188,6 +1192,8 @@ fn fitted_or_floor_phase_peaks<'a>(
                 provider: &selector.contract.provider_id,
                 backend: curve_backend(selector.identity.lane),
                 tier: crate::mlx_fit_gate::plan_tier_key(selector.identity.tier),
+                transformer_variant,
+                decoder,
                 mode: selector.identity.mode,
                 reference_shape: selector.identity.reference_shape,
                 reference_count: selector.identity.reference_count,
@@ -1576,6 +1582,8 @@ fn admit_video_generation_with_curves_and_profiles(
             fps: request.fps,
             lane: request.lane,
             tier: request.tier,
+            transformer_variant: request.transformer_variant,
+            decoder: request.decoder,
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: request.expected_closure_digest,
         },
@@ -2050,6 +2058,10 @@ fn curve_evidence_covers_request(
     let Some(calibration) = contract.calibration.as_ref() else {
         return false;
     };
+    let (Some(transformer_variant), Some(decoder)) = (request.transformer_variant, request.decoder)
+    else {
+        return false;
+    };
     let geometries = sceneworks_core::video_request::video_admission_geometries(
         request.model_id,
         request.lane,
@@ -2066,6 +2078,8 @@ fn curve_evidence_covers_request(
             && curve.provider == contract.provider_id
             && curve.backend == curve_backend(request.lane)
             && curve.tier == crate::mlx_fit_gate::plan_tier_key(request.tier)
+            && curve.transformer_variant == transformer_variant
+            && curve.decoder == decoder
             && curve.mode == request.mode
             && curve.reference_shape == request.reference_shape
             && curve.reference_count == request.reference_count
@@ -2082,6 +2096,8 @@ fn curve_evidence_covers_request(
                         provider: &contract.provider_id,
                         backend: curve_backend(request.lane),
                         tier: crate::mlx_fit_gate::plan_tier_key(request.tier),
+                        transformer_variant,
+                        decoder,
                         mode: request.mode,
                         reference_shape: request.reference_shape,
                         reference_count: request.reference_count,
@@ -2158,6 +2174,8 @@ pub(crate) struct VideoAdmissionInputs<'a> {
     pub(crate) overlay: Option<&'a str>,
     pub(crate) lane: VideoLane,
     pub(crate) tier: MemoryNumericTier,
+    pub(crate) transformer_variant: Option<Ltx25TransformerVariant>,
+    pub(crate) decoder: Option<Ltx25Decoder>,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) frames: u32,

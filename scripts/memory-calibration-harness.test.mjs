@@ -12,7 +12,8 @@ import {
   HARNESS_VERSION, RUNG_REUSE_TOLERANCE, SCHEMA_VERSION, assessProviderReuse, atomicWrite, canonicalJson,
   projectPhaseMetricsToSchemaV5,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
-  physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
+  parsePhysicalMlxAvContent, physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord,
+  validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import {
   calibrationBinding,
@@ -60,6 +61,48 @@ const phase = (value) => ({
   activeBytes: value,
   allocatorBytes: value + 10,
   reclaimableBytes: 10,
+});
+
+function canonicalAvFixture() {
+  const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
+  const frame = Buffer.from([1, 2, 3, 4, 5, 6]);
+  const pcm = Buffer.alloc(16);
+  [0.25, -0.25, 0.5, -0.5].forEach((value, index) => pcm.writeFloatLE(value, index * 4));
+  const bytes = Buffer.alloc(magic.length + 4 * 5 + 2 + 8 + 4 + 4 + 8 + frame.length + pcm.length);
+  let offset = 0;
+  magic.copy(bytes, offset); offset += magic.length;
+  for (const value of [2, 1, 1, 24, 24000]) {
+    bytes.writeUInt32LE(value, offset); offset += 4;
+  }
+  bytes.writeUInt16LE(2, offset); offset += 2;
+  bytes.writeBigUInt64LE(4n, offset); offset += 8;
+  bytes.writeUInt32LE(2, offset); offset += 4;
+  bytes.writeUInt32LE(1, offset); offset += 4;
+  bytes.writeBigUInt64LE(BigInt(frame.length), offset); offset += 8;
+  frame.copy(bytes, offset); offset += frame.length;
+  pcm.copy(bytes, offset);
+  return { bytes, pcm };
+}
+
+test("canonical A/V parser binds the complete header, frame payload, and PCM bytes", () => {
+  const { bytes, pcm } = canonicalAvFixture();
+  assert.deepEqual(parsePhysicalMlxAvContent(bytes), {
+    width: 2,
+    height: 1,
+    frames: 1,
+    fps: 24,
+    sampleRateHz: 24000,
+    channels: 2,
+    sampleCount: 4,
+    pcmSha256: createHash("sha256").update(pcm).digest("hex"),
+  });
+  const wrongMagic = Buffer.from(bytes);
+  wrongMagic[0] ^= 0xff;
+  assert.throws(() => parsePhysicalMlxAvContent(wrongMagic), /canonical SCENEWORKS_AV1 header/);
+  const wrongFrameLength = Buffer.from(bytes);
+  wrongFrameLength.writeBigUInt64LE(5n, Buffer.from("SCENEWORKS_AV1\0").length + 4 * 5 + 2 + 8 + 8);
+  assert.throws(() => parsePhysicalMlxAvContent(wrongFrameLength), /canonical RGB geometry/);
+  assert.throws(() => parsePhysicalMlxAvContent(bytes.subarray(0, -1)), /PCM payload length/);
 });
 
 function complete(overrides = {}) {
@@ -1072,6 +1115,65 @@ test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes
     );
     assert.throws(() => validateRecord(missing), /must identify|must identify transformerVariant and decoder/);
   }
+
+  const sessionId = `ims-${"7".repeat(20)}`;
+  const direct = { kind: "direct", sourceSessionIds: [sessionId] };
+  const derived = structuredClone(base);
+  derived.derivation = {
+    memory: direct, quality: direct, negativeMutation: direct,
+    lifecycle: direct, loadability: direct, overlay: direct,
+    justification: "exact LTX pipeline capture",
+  };
+  const source = {
+    id: sessionId,
+    kind: "unit_test",
+    command: "exact LTX fixture",
+    sourcePath: "docs/calibration/sc-test/ltx-exact.log",
+    capturedAt: derived.capturedAt,
+    repositories: structuredClone(derived.repositories),
+    hardware: { probe: "fixture", memoryBytes: derived.hardware.memoryBytes },
+    target: {
+      tier: derived.target.tier,
+      mode: derived.target.mode,
+      overlay: derived.target.overlay,
+      transformerVariant: derived.target.transformerVariant,
+      decoder: derived.target.decoder,
+      rung: derived.strategy.rung,
+    },
+    stdoutSha256: "8".repeat(64),
+    inputs: [{
+      role: "base", path: "/fixture/q4", bytes: 1, sha256: "9".repeat(64),
+      repository: derived.artifact.repository,
+      resolvedRevision: derived.artifact.resolvedRevision,
+      variant: derived.target.tier,
+    }],
+    outputs: [{ path: "fixture.json", sha256: "a".repeat(64) }],
+    claims: ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
+    result: "passed",
+  };
+  const derivedBundle = {
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: [source],
+    records: [derived],
+  };
+  validateBundle(derivedBundle);
+  for (const field of ["tier", "mode", "overlay", "rung", "transformerVariant", "decoder"]) {
+    const crossed = structuredClone(derivedBundle);
+    crossed.sourceSessions[0].target[field] = "wrong";
+    if (field === "tier") crossed.sourceSessions[0].inputs[0].variant = "wrong";
+    assert.throws(
+      () => validateBundle(crossed),
+      /wrong LTX|schema validation failed/,
+      `${field} cannot cross LTX derivation identities`,
+    );
+  }
+  const missingSourceTarget = structuredClone(derivedBundle);
+  delete missingSourceTarget.sourceSessions[0].target;
+  assert.throws(
+    () => validateBundle(missingSourceTarget),
+    /schema validation failed|without a target identity/,
+  );
 });
 
 test("the LTX-2.5 MLX terminal plan is the exact 60-case base plus 24-case max envelope", async () => {
@@ -2012,6 +2114,53 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
     output.path = output.path.replace(priorLogicalCaseId, authoritativeRecord.logicalCaseId);
   }
   assert.equal(validateBundle(authoritative), authoritative);
+
+  const av = structuredClone(authoritative);
+  const avRecord = av.records[0];
+  avRecord.quality.audio = {
+    result: "passed",
+    sampleRateHz: 24000,
+    channels: 2,
+    sampleCount: 48000,
+    selectedPcmSha256: "a".repeat(64),
+    referencePcmSha256: "b".repeat(64),
+    maximumAbsoluteError: 0.001,
+    meanAbsoluteError: 0.0001,
+    rootMeanSquareError: 0.0002,
+    maximumAbsoluteErrorThreshold: 0.01,
+    meanAbsoluteErrorThreshold: 0.01,
+    rootMeanSquareErrorThreshold: 0.01,
+  };
+  for (const output of av.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
+    output.role = output.role === "selected_rgb" ? "selected_av" : "reference_av";
+    output.path = `${sourcePathPrefix}/${avRecord.logicalCaseId}-${output.role}-1024x1024-f1-${output.sha256}.avbin`;
+  }
+  assert.equal(validateBundle(av), av, "typed A/V receipts round-trip through schema and JS validation");
+  const ltxAv = structuredClone(av);
+  const ltxAvRecord = ltxAv.records[0];
+  delete ltxAvRecord.sourceProvenance;
+  ltxAvRecord.target.modelId = "ltx_2_5";
+  ltxAvRecord.target.provider = "ltx_2_5";
+  ltxAvRecord.target.transformerVariant = "distilled";
+  ltxAvRecord.target.decoder = "conv";
+  const priorAvLogicalCaseId = ltxAvRecord.logicalCaseId;
+  ltxAvRecord.logicalCaseId = logicalCaseId(ltxAvRecord);
+  ltxAvRecord.id = recordId(ltxAvRecord);
+  ltxAv.sourceSessions[0].target.transformerVariant = "distilled";
+  ltxAv.sourceSessions[0].target.decoder = "conv";
+  for (const output of ltxAv.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
+    output.path = output.path.replace(priorAvLogicalCaseId, ltxAvRecord.logicalCaseId);
+  }
+  assert.equal(validateBundle(ltxAv), ltxAv, "LTX A/V provenance binds the complete typed source target");
+  const crossedAv = structuredClone(av);
+  crossedAv.sourceSessions[0].outputs[2].role = "reference_rgb";
+  assert.throws(() => validateBundle(crossedAv), /schema validation|selected\/reference RGB or A\/V pair/);
+  const badAudioHash = structuredClone(av);
+  badAudioHash.records[0].quality.audio.selectedPcmSha256 = "not-a-digest";
+  assert.throws(() => validateBundle(badAudioHash), /schema validation|lowercase SHA-256/);
+  const failedAudio = structuredClone(av);
+  failedAudio.records[0].quality.audio.maximumAbsoluteError = 0.02;
+  assert.throws(() => validateBundle(failedAudio), /audio quality threshold exceeded/);
 
   const missingDerivation = structuredClone(authoritative);
   delete missingDerivation.records[0].derivation;

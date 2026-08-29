@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 9,
+  "schemaVersion": 10,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7bffbefc205e26b1750edad26efb0e7b7ac9dc35bda59c011eec97b3761ad5e7",
+    "sceneWorksRevision": "source-tree:24400c6d3132179429ba017d87369ab2d0d4207ff24c62ac4f9da7086392988f",
     "inferenceRevision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a",
     "sources": {
       "manifest": {
@@ -30,11 +30,11 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "165ca73a3edc9fca151b4cfbba8867900c27ec5d8a605d3b03f631942f2fb39b"
+        "sha256": "de34cdc620ccbc72c7dad3e0865c8dc45e030411f8f7f5a1f62116485523511e"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
-        "sha256": "2b174c2b363d7022f045b9623194f5909a2743965510944c7d5377a68e2b6a71"
+        "sha256": "89b773e8a57a2d02f6d47a3df80c5e2d22f25066276bea754144f490b78f880a"
       },
       "videoRouteSvd": {
         "path": "crates/sceneworks-worker/src/video_jobs/svd.rs",
@@ -78,7 +78,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "4c8ba7debac6085012c6d707343bc991c38c34850717440dd4e9bf18a353f136"
+        "sha256": "f81101aab4979620f5103c6e74e554619d7eedb79a6b3e597e898b02f9d354a8"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
@@ -23770,6 +23770,17 @@
           "decoder": "conv"
         }
       ],
+      "pipelineCharacterizations": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        }
+      ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
@@ -23854,6 +23865,26 @@
           "decoder": "diffvae"
         }
       ],
+      "pipelineCharacterizations": [
+        {
+          "transformerVariant": "dev",
+          "decoder": "conv",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        },
+        {
+          "transformerVariant": "dev",
+          "decoder": "diffvae",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        }
+      ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
@@ -23930,6 +23961,26 @@
         {
           "transformerVariant": "distilled",
           "decoder": "diffvae"
+        }
+      ],
+      "pipelineCharacterizations": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        },
+        {
+          "transformerVariant": "distilled",
+          "decoder": "diffvae",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
         }
       ],
       "state": "Implemented/unverified",
@@ -24016,6 +24067,26 @@
           "decoder": "diffvae"
         }
       ],
+      "pipelineCharacterizations": [
+        {
+          "transformerVariant": "dev",
+          "decoder": "conv",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        },
+        {
+          "transformerVariant": "dev",
+          "decoder": "diffvae",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        }
+      ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
@@ -24092,6 +24163,26 @@
         {
           "transformerVariant": "distilled",
           "decoder": "diffvae"
+        }
+      ],
+      "pipelineCharacterizations": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        },
+        {
+          "transformerVariant": "distilled",
+          "decoder": "diffvae",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
         }
       ],
       "state": "Implemented/unverified",
@@ -24178,6 +24269,26 @@
           "decoder": "diffvae"
         }
       ],
+      "pipelineCharacterizations": [
+        {
+          "transformerVariant": "dev",
+          "decoder": "conv",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        },
+        {
+          "transformerVariant": "dev",
+          "decoder": "diffvae",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        }
+      ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
@@ -24254,6 +24365,26 @@
         {
           "transformerVariant": "distilled",
           "decoder": "diffvae"
+        }
+      ],
+      "pipelineCharacterizations": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
+        },
+        {
+          "transformerVariant": "distilled",
+          "decoder": "diffvae",
+          "memoryCharacterization": {
+            "status": "unmeasured",
+            "measuredGeometries": [],
+            "coveredPixelBound": null
+          }
         }
       ],
       "state": "Implemented/unverified",

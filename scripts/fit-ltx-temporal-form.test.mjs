@@ -208,13 +208,13 @@ test("video curve generation leaves the image calibration corpus byte-identical"
   const imageCorpus = path.join(ROOT, "docs/generated/memory-calibration-evidence.json");
   const before = createHash("sha256").update(readFileSync(imageCorpus)).digest("hex");
   // Renewed for the sc-17137 main sync merge: the corpus gained the epic's 19 records (the
-  // sc-19721 re-captures), which were themselves projected through the sc-18864 v5 alias rule
+  // sc-19721 re-captures), which were themselves projected through the sc-18864 alias rule
   // (deviceBytes/wiredBytes verbatim copies stripped) on ingest. The claim this test owns —
   // video curve generation never mutates the image corpus — is the before/after equality below;
   // this pin only names the reviewed snapshot.
   assert.equal(
     before,
-    "5b7b48f127aa0339c73876f1babb2117eb5cfa32c2405fce0133c539192c9538",
+    "eb2cd3388a1355f80be4733167a2a9a6a6528bc457e6c99ce96c97fe12843e37",
     "the explicit pre-video image evidence outcome remains the reviewed corpus",
   );
   const output = mkdtempSync(path.join(tmpdir(), "sceneworks-video-curves-"));
@@ -292,7 +292,7 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
   );
   const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
-  assert.equal(bundle.schemaVersion, 4);
+  assert.equal(bundle.schemaVersion, 5);
   // sc-20799: the fps24 group is under-sampled (one distinct geometry), so the fit drops it — but
   // the drop must be DECLARED, not silent. Assert the shape of the declaration, not a record count.
   assert.ok(Array.isArray(bundle.unmodeledRecords));
@@ -341,6 +341,9 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
       candidate.tier === "q8" &&
       candidate.mode === "text_to_video",
   );
+  assert.equal(curve.transformerVariant, "distilled");
+  assert.equal(curve.decoder, "conv");
+  assert.match(curve.id, /:q8:distilled:conv:text_to_video:/);
   assert.ok(
     curve,
     "the promoted bundle must carry the sc-18810 ltx_2_3 / q8 / text_to_video curve",
@@ -439,7 +442,7 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
   );
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(schema.properties.schemaVersion.const, 4);
+  assert.equal(schema.properties.schemaVersion.const, 5);
   assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
   assert.equal(
     schema.properties.sourceFit.pattern,
@@ -462,6 +465,11 @@ test("the persisted video curve has an explicit strict schema contract", () => {
   const staleAbi = structuredClone(bundle);
   staleAbi.curves[0].calibrationAbi += 1;
   assert.match(videoCurveSchemaErrors(schema, staleAbi).join("\n"), /expected constant 3/);
+  for (const field of ["transformerVariant", "decoder"]) {
+    const missing = structuredClone(bundle);
+    delete missing.curves[0][field];
+    assert.match(videoCurveSchemaErrors(schema, missing).join("\n"), new RegExp(field));
+  }
 });
 
 test("the applicability hull is the convex measured area-by-voxel hull, not a loose bounding box", () => {

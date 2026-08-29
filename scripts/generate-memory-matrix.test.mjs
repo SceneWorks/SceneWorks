@@ -26,6 +26,8 @@ import {
   isImplemented,
   isPublishableCell,
   memoryCharacterization,
+  pipelineMemoryCharacterizations,
+  recordsCoverEveryPipelineIdentity,
   parseCandleBespokeStagedLanes,
   renderMarkdown,
   OUT_OF_MATRIX_CELL_STATES,
@@ -479,7 +481,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix({ publish: false });
-  assert.equal(matrix.schemaVersion, 9);
+  assert.equal(matrix.schemaVersion, 10);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -505,7 +507,7 @@ test("catalog-relative inventory guard rejects whole-scope loss without freezing
       cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
       sourceOverrides: {
         calibrationEvidence: JSON.stringify({
-          schemaVersion: 5,
+          schemaVersion: 6,
           harnessVersion: "sceneworks-memory-v5",
           records: [],
         }),
@@ -5739,6 +5741,11 @@ test("LTX-2.5 selects every routed platform and exposes only its declared memory
 
   const plannedPipelines = cells.filter((cell) => cell.plannedPipelineIdentities);
   assert.equal(plannedPipelines.length, 7, "six MLX tier/rung cells plus one Candle cell are planned");
+  assert.ok(plannedPipelines.every((cell) =>
+    cell.pipelineCharacterizations.length === cell.plannedPipelineIdentities.length
+      && cell.pipelineCharacterizations.every(
+        (entry) => entry.memoryCharacterization.status === "unmeasured",
+      )));
   const mlxDev = plannedPipelines.filter(
     (cell) => cell.backend === "mlx" && cell.rung === "bounded_attention",
   );
@@ -5789,6 +5796,42 @@ test("LTX-2.5 selects every routed platform and exposes only its declared memory
   assertUniformState("candle", "bounded_transformer_residency", "none", "Implemented/unverified", ["bf16", "q4"]);
   assertUniformState("candle", "bounded_transformer_residency", "none", "Missing", ["q8"]);
   assertUniformState("candle", "bounded_transformer_residency", "lora", "Missing");
+});
+
+test("pipeline identities cannot verify or fit one another by aggregation", () => {
+  const identities = [
+    { transformerVariant: "distilled", decoder: "conv" },
+    { transformerVariant: "distilled", decoder: "diffvae" },
+  ];
+  const record = (decoder, width, height, frames) => ({
+    target: {
+      transformerVariant: "distilled",
+      decoder,
+      geometry: { width, height, frames, batch: 1 },
+    },
+  });
+  const convOnly = [record("conv", 768, 512, 145)];
+  assert.equal(recordsCoverEveryPipelineIdentity(convOnly, identities), false);
+
+  const mixed = [
+    ...convOnly,
+    record("conv", 1280, 704, 145),
+    record("diffvae", 1920, 1080, 449),
+  ];
+  assert.equal(
+    memoryCharacterization(
+      mixed.map((entry) => measuredGeometryKey(entry.target.geometry)),
+      { declaresTemporalCurve: true },
+    ).status,
+    "fitted",
+    "the old aggregate would combine crossed pipelines into a fitted surface",
+  );
+  assert.deepEqual(
+    pipelineMemoryCharacterizations(mixed, identities, { declaresTemporalCurve: true })
+      .map((entry) => [entry.decoder, entry.memoryCharacterization.status]),
+    [["conv", "point"], ["diffvae", "point"]],
+  );
+  assert.equal(recordsCoverEveryPipelineIdentity(mixed, identities), true);
 });
 
 test("LTX-2.5 evidence binds to its exact pipeline plan rather than the aggregate cell", () => {

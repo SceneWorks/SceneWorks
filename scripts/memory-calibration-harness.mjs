@@ -17,7 +17,7 @@ const CALIBRATION_SCHEMA = JSON.parse(
 export const HARNESS_VERSION = "sceneworks-memory-v5";
 // sc-18864 bumped the RECORD SHAPE (per-phase `deviceBytes`/`wiredBytes` removed) without changing
 // the measuring instrument, so the bundle schema version moves and the harness version does not.
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",
@@ -39,10 +39,24 @@ export const RUNG_REUSE_TOLERANCE = Object.freeze({
 const PHYSICAL_MLX_SESSION_OUTPUT_ROLES = Object.freeze([
   "request", "selected_rgb", "reference_rgb",
 ]);
+const PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES = Object.freeze([
+  "request", "selected_av", "reference_av",
+]);
 const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
   "selected_rgb", "reference_rgb",
 ]);
+const PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES = Object.freeze([
+  "selected_av", "reference_av",
+]);
 const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
+const PHYSICAL_MLX_AV_BASENAME = /^(implan-[0-9a-f]{20})-(selected_av|reference_av)-([1-9][0-9]*)x([1-9][0-9]*)-f([1-9][0-9]*)-([0-9a-f]{64})\.avbin$/;
+
+function physicalMlxExpectedRoles(outputs, includeRequest) {
+  const hasAv = outputs?.some((output) => output?.role === "selected_av" || output?.role === "reference_av");
+  return hasAv
+    ? (includeRequest ? PHYSICAL_MLX_AV_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_AV_PROVIDER_OUTPUT_ROLES)
+    : (includeRequest ? PHYSICAL_MLX_SESSION_OUTPUT_ROLES : PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES);
+}
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -96,6 +110,67 @@ function physicalMlxRgbMetadata(output, label) {
   return { logicalCaseId: match[1], width, height };
 }
 
+function physicalMlxAvMetadata(output, label) {
+  const match = path.posix.basename(output.path).match(PHYSICAL_MLX_AV_BASENAME);
+  if (!match || match[2] !== output.role) {
+    fail(`${label} path must bind its logical case, A/V role, geometry, frames, and content digest`);
+  }
+  if (output.sha256 !== match[6]) {
+    fail(`${label} SHA-256 must match its content-addressed filename`);
+  }
+  return {
+    logicalCaseId: match[1],
+    width: Number(match[3]),
+    height: Number(match[4]),
+    frames: Number(match[5]),
+  };
+}
+
+export function parsePhysicalMlxAvContent(bytes, label = "physical MLX A/V output") {
+  const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
+  if (bytes.length < 45 || !bytes.subarray(0, magic.length).equals(magic)) {
+    fail(`${label} must begin with the canonical SCENEWORKS_AV1 header`);
+  }
+  let offset = magic.length;
+  const width = bytes.readUInt32LE(offset); offset += 4;
+  const height = bytes.readUInt32LE(offset); offset += 4;
+  const frames = bytes.readUInt32LE(offset); offset += 4;
+  const fps = bytes.readUInt32LE(offset); offset += 4;
+  const sampleRateHz = bytes.readUInt32LE(offset); offset += 4;
+  const channels = bytes.readUInt16LE(offset); offset += 2;
+  const sampleCount = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+  if (![width, height, frames, fps, sampleRateHz, channels, sampleCount]
+      .every((value) => Number.isSafeInteger(value) && value > 0)) {
+    fail(`${label} canonical A/V header contains a zero or unsafe dimension`);
+  }
+  for (let frame = 0; frame < frames; frame += 1) {
+    if (offset + 16 > bytes.length) fail(`${label} frame ${frame} header is truncated`);
+    const frameWidth = bytes.readUInt32LE(offset); offset += 4;
+    const frameHeight = bytes.readUInt32LE(offset); offset += 4;
+    const pixelLength = Number(bytes.readBigUInt64LE(offset)); offset += 8;
+    const expected = frameWidth * frameHeight * 3;
+    if (frameWidth !== width || frameHeight !== height || !Number.isSafeInteger(expected)
+        || pixelLength !== expected || offset + pixelLength > bytes.length) {
+      fail(`${label} frame ${frame} does not match the canonical RGB geometry`);
+    }
+    offset += pixelLength;
+  }
+  const pcmBytes = sampleCount * 4;
+  if (!Number.isSafeInteger(pcmBytes) || offset + pcmBytes !== bytes.length) {
+    fail(`${label} PCM payload length does not match sampleCount`);
+  }
+  return {
+    width, height, frames, fps, sampleRateHz, channels, sampleCount,
+    pcmSha256: createHash("sha256").update(bytes.subarray(offset)).digest("hex"),
+  };
+}
+
+function physicalMlxOutputMetadata(output, label) {
+  return output.role === "selected_av" || output.role === "reference_av"
+    ? physicalMlxAvMetadata(output, label)
+    : physicalMlxRgbMetadata(output, label);
+}
+
 function validatePhysicalMlxSessionReceipts(session) {
   const sourceDirectory = path.posix.dirname(session.sourcePath);
   if (session.sourcePath !== `${sourceDirectory}/${session.id}.log`) {
@@ -109,18 +184,77 @@ function validatePhysicalMlxSessionReceipts(session) {
     if (path.posix.dirname(output.path) !== sourceDirectory) {
       fail(`${session.id}: physical MLX RGB receipts must share the source directory`);
     }
-    physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
   }
 }
 
 function validatePhysicalMlxOutputsAgainstRecord(record, session) {
   for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
-    const metadata = physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    const metadata = physicalMlxOutputMetadata(output, `${session.id}.${output.role}`);
     if (metadata.logicalCaseId !== record.logicalCaseId
         || metadata.width !== record.target.geometry.width
-        || metadata.height !== record.target.geometry.height) {
-      fail(`${record.id}: physical MLX RGB receipt does not match the measured logical case geometry`);
+        || metadata.height !== record.target.geometry.height
+        || (metadata.frames !== undefined && metadata.frames !== record.target.geometry.frames)) {
+      fail(`${record.id}: physical MLX output receipt does not match the measured logical case geometry`);
     }
+  }
+  const hasAv = session.outputs.some((output) => output.role === "selected_av");
+  if (hasAv !== (record.quality.audio !== undefined)) {
+    fail(`${record.id}: physical MLX A/V receipts and typed audio quality must be present together`);
+  }
+  if (hasAv) validateAudioQuality(record);
+}
+
+function validateAudioQuality(record) {
+  const audio = record.quality.audio;
+  object(audio, `${record.id}.quality.audio`);
+  if (audio.result !== "passed") fail(`${record.id}: A/V audio quality did not pass`);
+  for (const field of ["sampleRateHz", "channels", "sampleCount"]) {
+    if (!Number.isSafeInteger(audio[field]) || audio[field] <= 0) {
+      fail(`${record.id}.quality.audio.${field} must be a positive safe integer`);
+    }
+  }
+  for (const field of ["selectedPcmSha256", "referencePcmSha256"]) {
+    if (!/^[0-9a-f]{64}$/.test(audio[field])) {
+      fail(`${record.id}.quality.audio.${field} must be a lowercase SHA-256 digest`);
+    }
+  }
+  for (const metric of [
+    "maximumAbsoluteError", "meanAbsoluteError", "rootMeanSquareError",
+    "maximumAbsoluteErrorThreshold", "meanAbsoluteErrorThreshold",
+    "rootMeanSquareErrorThreshold",
+  ]) number(audio[metric], `${record.id}.quality.audio.${metric}`);
+  if (audio.maximumAbsoluteError > audio.maximumAbsoluteErrorThreshold
+      || audio.meanAbsoluteError > audio.meanAbsoluteErrorThreshold
+      || audio.rootMeanSquareError > audio.rootMeanSquareErrorThreshold) {
+    fail(`${record.id}: audio quality threshold exceeded`);
+  }
+}
+
+function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
+  if (avContents.size === 0) return;
+  validateAudioQuality(record);
+  const selected = avContents.get("selected_av");
+  const reference = avContents.get("reference_av");
+  const audio = record.quality.audio;
+  const outputFps = record.diagnostics?.measurements?.find(
+    (measurement) => measurement.name === "outputFps",
+  )?.value;
+  for (const content of [selected, reference]) {
+    if (!content
+        || content.width !== record.target.geometry.width
+        || content.height !== record.target.geometry.height
+        || content.frames !== record.target.geometry.frames
+        || content.fps !== outputFps
+        || content.sampleRateHz !== audio.sampleRateHz
+        || content.channels !== audio.channels
+        || content.sampleCount !== audio.sampleCount) {
+      fail(`${label}: canonical A/V header differs from measured video/audio identity`);
+    }
+  }
+  if (selected.pcmSha256 !== audio.selectedPcmSha256
+      || reference.pcmSha256 !== audio.referencePcmSha256) {
+    fail(`${label}: canonical A/V PCM hashes differ from quality.audio`);
   }
 }
 
@@ -795,7 +929,7 @@ export function validateBundle(bundle) {
     if (session.kind === "physical_mlx") {
       validateExactOutputReceipts(
         session.outputs,
-        PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+        physicalMlxExpectedRoles(session.outputs, true),
         `${session.id}.outputs`,
       );
       validatePhysicalMlxSessionReceipts(session);
@@ -871,10 +1005,22 @@ export function validateBundle(bundle) {
           if (requiresDerivation) {
             validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy);
           }
-          if (record.target.modelId === "ltx_2_5" && session.target
-              && (session.target.transformerVariant !== record.target.transformerVariant
-                || session.target.decoder !== record.target.decoder)) {
-            fail(`${record.id}: ${sessionId} has the wrong LTX-2.5 transformer or decoder identity`);
+          if (record.target.modelId.startsWith("ltx_")) {
+            if (!session.target) {
+              fail(`${record.id}: ${sessionId} is an LTX derivation source without a target identity`);
+            }
+            for (const [sourceField, recordField] of [
+              ["tier", record.target.tier],
+              ["mode", record.target.mode],
+              ["overlay", record.target.overlay],
+              ["rung", record.strategy.rung],
+              ["transformerVariant", record.target.transformerVariant],
+              ["decoder", record.target.decoder],
+            ]) {
+              if (session.target[sourceField] !== recordField) {
+                fail(`${record.id}: ${sessionId} has the wrong LTX ${sourceField} identity`);
+              }
+            }
           }
           if (["memory", "quality", "overlay"].includes(claim)
               && session.target && session.target.tier !== record.target.tier) {
@@ -913,6 +1059,14 @@ export function validateBundle(bundle) {
       if (requiresQwenMlxDerivation) {
         const [sessionId] = derivationSessionIds;
         validatePhysicalMlxOutputsAgainstRecord(record, sessions.get(sessionId));
+      }
+      if (record.target.modelId.startsWith("ltx_")) {
+        for (const sessionId of derivationSessionIds) {
+          const session = sessions.get(sessionId);
+          if (session.kind === "physical_mlx") {
+            validatePhysicalMlxOutputsAgainstRecord(record, session);
+          }
+        }
       }
     }
   }
@@ -1005,6 +1159,7 @@ export async function validateSourceSessionFiles(
     }
     const record = boundRecords[0];
     const requestOutput = session.outputs.find((output) => output.role === "request");
+    const avContents = new Map();
     for (const output of session.outputs) {
       const outputFile = await resolveReceiptPath(output.path, roots);
       const outputBytes = await readFile(outputFile);
@@ -1012,7 +1167,14 @@ export async function validateSourceSessionFiles(
           || outputBytes.length !== output.bytes) {
         fail(`${session.id}: output ${output.path} no longer matches its SHA-256 receipt`);
       }
+      if (output.role === "selected_av" || output.role === "reference_av") {
+        avContents.set(
+          output.role,
+          parsePhysicalMlxAvContent(outputBytes, `${session.id}.${output.role}`),
+        );
+      }
     }
+    validatePhysicalMlxAvContentsAgainstRecord(record, avContents, session.id);
     const requestBytes = await readFile(await resolveReceiptPath(requestOutput.path, roots));
     let request;
     try {
@@ -1068,11 +1230,11 @@ export async function validateSourceSessionFiles(
     }
     validateExactOutputReceipts(
       providerResponse?.sourceCapture?.outputs,
-      PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+      physicalMlxExpectedRoles(providerResponse?.sourceCapture?.outputs, false),
       `${session.id}.providerResponse.sourceCapture.outputs`,
     );
     for (const providerOutput of providerResponse.sourceCapture.outputs) {
-      physicalMlxRgbMetadata(
+      physicalMlxOutputMetadata(
         providerOutput,
         `${session.id}.providerResponse.sourceCapture.outputs[${providerOutput.role}]`,
       );
@@ -1693,7 +1855,7 @@ export async function runProviderPlan({
         }
         validateExactOutputReceipts(
           sourceCapture.outputs,
-          PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+          physicalMlxExpectedRoles(sourceCapture.outputs, false),
           `${planned.logicalCaseId}.sourceCapture.outputs`,
         );
         if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
@@ -1731,18 +1893,20 @@ export async function runProviderPlan({
           sha256: createHash("sha256").update(providerRequest).digest("hex"),
           bytes: Buffer.byteLength(providerRequest),
         }];
+        const avContents = new Map();
         for (const output of sourceCapture.outputs) {
           object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
           text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
           text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
           text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
-          const metadata = physicalMlxRgbMetadata(
+          const metadata = physicalMlxOutputMetadata(
             output,
             `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
           );
           if (metadata.logicalCaseId !== planned.logicalCaseId
               || metadata.width !== planned.target.geometry.width
-              || metadata.height !== planned.target.geometry.height) {
+              || metadata.height !== planned.target.geometry.height
+              || (metadata.frames !== undefined && metadata.frames !== planned.target.geometry.frames)) {
             fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
           }
           const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
@@ -1762,6 +1926,22 @@ export async function runProviderPlan({
           if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
             fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
           }
+          if (output.role === "selected_av" || output.role === "reference_av") {
+            const content = parsePhysicalMlxAvContent(
+              bytes,
+              `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+            );
+            const outputFps = record.diagnostics?.measurements?.find(
+              (measurement) => measurement.name === "outputFps",
+            )?.value;
+            if (content.width !== planned.target.geometry.width
+                || content.height !== planned.target.geometry.height
+                || content.frames !== planned.target.geometry.frames
+                || content.fps !== outputFps) {
+              fail(`${planned.logicalCaseId}: canonical A/V header differs from measured geometry/FPS`);
+            }
+            avContents.set(output.role, content);
+          }
           outputs.push({
             role: output.role,
             path: output.path,
@@ -1769,9 +1949,10 @@ export async function runProviderPlan({
             bytes: output.bytes,
           });
         }
+        validatePhysicalMlxAvContentsAgainstRecord(record, avContents, planned.logicalCaseId);
         validateExactOutputReceipts(
           outputs,
-          PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+          physicalMlxExpectedRoles(outputs, true),
           `${sessionId}.outputs`,
         );
         record.derivation = physicalMlxDerivation(sessionId);

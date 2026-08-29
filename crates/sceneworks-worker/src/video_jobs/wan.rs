@@ -1290,6 +1290,11 @@ pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
     pub(super) model_dir: PathBuf,
     pub(super) quant: Option<Quant>,
+    /// Explicit fitted-memory pipeline axes. `None` is not inferred from execution knobs and
+    /// therefore cannot match an LTX curve.
+    pub(super) memory_transformer_variant:
+        Option<sceneworks_core::memory_calibration::Ltx25TransformerVariant>,
+    pub(super) memory_decoder: Option<sceneworks_core::memory_calibration::Ltx25Decoder>,
     pub(super) adapters: Vec<AdapterSpec>,
     pub(super) conditioning: Vec<Conditioning>,
     pub(super) prompt: String,
@@ -1412,6 +1417,8 @@ impl Default for VideoGenInput {
             engine_id: "",
             model_dir: PathBuf::new(),
             quant: None,
+            memory_transformer_variant: None,
+            memory_decoder: None,
             adapters: Vec::new(),
             conditioning: Vec::new(),
             prompt: String::new(),
@@ -2718,6 +2725,8 @@ pub(super) async fn generate_video_using(
                     overlay: admission_overlay.as_deref(),
                     lane: crate::video_admission::LANE,
                     tier: admission_tier,
+                    transformer_variant: input.memory_transformer_variant,
+                    decoder: input.memory_decoder,
                     width: admission_geometry.0,
                     height: admission_geometry.1,
                     frames: admission_geometry.2,

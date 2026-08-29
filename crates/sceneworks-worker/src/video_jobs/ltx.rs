@@ -1874,14 +1874,31 @@ pub(super) async fn generate_ltx(
     } else {
         resolve_bundled_ltx_gemma_dir(&model_dir)
     };
-    let ltx25_dev = request.model == "ltx_2_5"
-        && ltx25_transformer_variant(request)? == Ltx25TransformerVariant::Dev;
+    let ltx25_variant = (request.model == "ltx_2_5")
+        .then(|| ltx25_transformer_variant(request))
+        .transpose()?;
+    let ltx25_dev = ltx25_variant == Some(Ltx25TransformerVariant::Dev);
+    let memory_transformer_variant = Some(match ltx25_variant {
+        Some(Ltx25TransformerVariant::Dev) => {
+            sceneworks_core::memory_calibration::Ltx25TransformerVariant::Dev
+        }
+        Some(Ltx25TransformerVariant::Distilled) | None => {
+            sceneworks_core::memory_calibration::Ltx25TransformerVariant::Distilled
+        }
+    });
+    let memory_decoder = Some(if ltx25_options.use_diffusion_decoder {
+        sceneworks_core::memory_calibration::Ltx25Decoder::DiffVae
+    } else {
+        sceneworks_core::memory_calibration::Ltx25Decoder::Conv
+    });
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
         model_dir,
         quant: None,
+        memory_transformer_variant,
+        memory_decoder,
         adapters: resolve_ltx_adapters(settings, request)?,
         conditioning,
         prompt: request.prompt.clone(),

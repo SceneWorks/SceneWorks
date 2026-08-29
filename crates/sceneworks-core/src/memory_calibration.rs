@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 /// way to tell a measured field from an aliased one), so it loads as `BundleLoad::Stale`.
 ///
 /// Schema v4 added the required per-record `loadShape` axis; v3 and earlier are likewise stale.
-pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 5;
+pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 6;
 pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// ABI paired by the manifest/query side of the reader.
 ///
@@ -185,14 +185,14 @@ pub struct SourceTarget {
     pub rung: StrategyRung,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ltx25TransformerVariant {
     Distilled,
     Dev,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ltx25Decoder {
     Conv,
@@ -215,6 +215,8 @@ pub enum SourceOutputRole {
     Request,
     SelectedRgb,
     ReferenceRgb,
+    SelectedAv,
+    ReferenceAv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -630,6 +632,24 @@ pub struct Quality {
     pub maximum_error_threshold: Option<f64>,
     pub mean_error_threshold: Option<f64>,
     pub root_mean_square_error_threshold: Option<f64>,
+    pub audio: Option<AudioQuality>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioQuality {
+    pub result: QualityResult,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub sample_count: u64,
+    pub selected_pcm_sha256: String,
+    pub reference_pcm_sha256: String,
+    pub maximum_absolute_error: f64,
+    pub mean_absolute_error: f64,
+    pub root_mean_square_error: f64,
+    pub maximum_absolute_error_threshold: f64,
+    pub mean_absolute_error_threshold: f64,
+    pub root_mean_square_error_threshold: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1219,7 +1239,7 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
         .map(|(parent, _)| parent);
     if session.kind == SourceSessionKind::PhysicalMlx && session.outputs.len() != 3 {
         return Err(format!(
-            "{} physical MLX session requires exactly request, selected_rgb, and reference_rgb outputs",
+            "{} physical MLX session requires exactly request plus selected/reference RGB or A/V outputs",
             session.id
         ));
     }
@@ -1283,6 +1303,9 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
                 SourceOutputRole::SelectedRgb | SourceOutputRole::ReferenceRgb => {
                     physical_mlx_rgb_metadata(output)?;
                 }
+                SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv => {
+                    physical_mlx_av_metadata(output)?;
+                }
             }
         }
         if !is_sha256(&output.sha256) {
@@ -1292,16 +1315,22 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
             ));
         }
     }
+    let rgb_roles = BTreeSet::from([
+        SourceOutputRole::Request,
+        SourceOutputRole::SelectedRgb,
+        SourceOutputRole::ReferenceRgb,
+    ]);
+    let av_roles = BTreeSet::from([
+        SourceOutputRole::Request,
+        SourceOutputRole::SelectedAv,
+        SourceOutputRole::ReferenceAv,
+    ]);
     if session.kind == SourceSessionKind::PhysicalMlx
-        && physical_output_roles
-            != BTreeSet::from([
-                SourceOutputRole::Request,
-                SourceOutputRole::SelectedRgb,
-                SourceOutputRole::ReferenceRgb,
-            ])
+        && physical_output_roles != rgb_roles
+        && physical_output_roles != av_roles
     {
         return Err(format!(
-            "{} physical MLX session must contain request, selected_rgb, and reference_rgb outputs",
+            "{} physical MLX session must contain request plus an exact selected/reference RGB or A/V pair",
             session.id
         ));
     }
@@ -1369,10 +1398,76 @@ fn physical_mlx_rgb_metadata(output: &SourceOutput) -> Result<(String, u32, u32)
     Ok((logical_case_id, width, height))
 }
 
+fn physical_mlx_av_metadata(output: &SourceOutput) -> Result<(String, u32, u32, u32), String> {
+    let role = match output.role {
+        Some(SourceOutputRole::SelectedAv) => "selected_av",
+        Some(SourceOutputRole::ReferenceAv) => "reference_av",
+        _ => return Err("physical MLX A/V receipt has a non-A/V role".to_owned()),
+    };
+    let file_name = output.path.rsplit('/').next().unwrap_or_default();
+    let stem = file_name
+        .strip_suffix(".avbin")
+        .ok_or_else(|| format!("physical MLX {role} receipt must end in .avbin"))?;
+    if stem.len() < 27 || !has_prefixed_hex(&stem[..27], "implan-", 20) {
+        return Err(format!(
+            "physical MLX {role} receipt must begin with its logical case id"
+        ));
+    }
+    let logical_case_id = stem[..27].to_owned();
+    let remainder = stem[27..]
+        .strip_prefix(&format!("-{role}-"))
+        .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
+    let (dimensions, framed_digest) = remainder
+        .split_once('-')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing geometry"))?;
+    let (width, height) = dimensions
+        .split_once('x')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing dimensions"))?;
+    let (frames, content_sha256) = framed_digest
+        .strip_prefix('f')
+        .and_then(|value| value.split_once('-'))
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing frames or digest"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt width is invalid"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt height is invalid"))?;
+    let frames = frames
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt frame count is invalid"))?;
+    if width == 0 || height == 0 || frames == 0 || output.bytes == Some(0) {
+        return Err(format!(
+            "physical MLX {role} receipt dimensions are invalid"
+        ));
+    }
+    if !is_sha256(content_sha256) || content_sha256 != output.sha256 {
+        return Err(format!(
+            "physical MLX {role} receipt digest does not match its content-addressed path"
+        ));
+    }
+    Ok((logical_case_id, width, height, frames))
+}
+
 fn validate_physical_mlx_outputs_against_record(
     record: &EvidenceRecord,
     session: &SourceSession,
 ) -> Result<(), String> {
+    let has_av = session.outputs.iter().any(|output| {
+        matches!(
+            output.role,
+            Some(SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv)
+        )
+    });
+    if has_av != record.quality.audio.is_some() {
+        return Err(format!(
+            "{} physical MLX A/V receipts and typed audio quality must be present together",
+            record.id
+        ));
+    }
+    if let Some(audio) = &record.quality.audio {
+        validate_audio_quality(audio, &record.id)?;
+    }
     for output in &session.outputs {
         if matches!(
             output.role,
@@ -1389,6 +1484,49 @@ fn validate_physical_mlx_outputs_against_record(
                 ));
             }
         }
+        if matches!(
+            output.role,
+            Some(SourceOutputRole::SelectedAv | SourceOutputRole::ReferenceAv)
+        ) {
+            let (logical_case_id, width, height, frames) = physical_mlx_av_metadata(output)?;
+            if logical_case_id != record.logical_case_id
+                || width != record.target.geometry.width
+                || height != record.target.geometry.height
+                || frames != record.target.geometry.frames
+            {
+                return Err(format!(
+                    "{} physical MLX A/V receipt does not match its logical case geometry",
+                    record.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_audio_quality(audio: &AudioQuality, id: &str) -> Result<(), String> {
+    let finite_nonnegative = [
+        audio.maximum_absolute_error,
+        audio.mean_absolute_error,
+        audio.root_mean_square_error,
+        audio.maximum_absolute_error_threshold,
+        audio.mean_absolute_error_threshold,
+        audio.root_mean_square_error_threshold,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && value >= 0.0);
+    if audio.result != QualityResult::Passed
+        || audio.sample_rate_hz == 0
+        || audio.channels == 0
+        || audio.sample_count == 0
+        || !is_sha256(&audio.selected_pcm_sha256)
+        || !is_sha256(&audio.reference_pcm_sha256)
+        || !finite_nonnegative
+        || audio.maximum_absolute_error > audio.maximum_absolute_error_threshold
+        || audio.mean_absolute_error > audio.mean_absolute_error_threshold
+        || audio.root_mean_square_error > audio.root_mean_square_error_threshold
+    {
+        return Err(format!("{id} audio quality evidence is invalid"));
     }
     Ok(())
 }
@@ -1479,16 +1617,32 @@ fn validate_derivation(
                     requires_qwen_mlx_provenance,
                 )?;
             }
-            if let Some(target) = &session.target {
-                if record.target.model_id == "ltx_2_5"
-                    && (target.transformer_variant != record.target.transformer_variant
-                        || target.decoder != record.target.decoder)
+            if record.target.model_id.starts_with("ltx_") {
+                let target = session.target.as_ref().ok_or_else(|| {
+                    format!(
+                        "{} LTX derivation source {id} has no target identity",
+                        record.id
+                    )
+                })?;
+                let exact_identity = target.tier == record.target.tier
+                    && target.mode == record.target.mode
+                    && target.overlay == record.target.overlay
+                    && target.rung == record.strategy.rung
+                    && target.transformer_variant == record.target.transformer_variant
+                    && target.decoder == record.target.decoder;
+                if !exact_identity
+                    || target.transformer_variant.is_none()
+                    || target.decoder.is_none()
+                    || record.target.transformer_variant.is_none()
+                    || record.target.decoder.is_none()
                 {
                     return Err(format!(
-                        "{} source {id} has the wrong LTX-2.5 transformer or decoder identity",
+                        "{} source {id} does not exactly match the complete LTX pipeline identity",
                         record.id
                     ));
                 }
+            }
+            if let Some(target) = &session.target {
                 if matches!(
                     claim,
                     SourceClaim::Memory | SourceClaim::Quality | SourceClaim::Overlay
@@ -1550,6 +1704,16 @@ fn validate_derivation(
             .get(session_id)
             .expect("physical MLX derivation session was resolved above");
         validate_physical_mlx_outputs_against_record(record, session)?;
+    }
+    if record.target.model_id.starts_with("ltx_") {
+        for session_id in derivation_session_ids {
+            let session = sessions
+                .get(session_id)
+                .expect("all derivation sessions were resolved above");
+            if session.kind == SourceSessionKind::PhysicalMlx {
+                validate_physical_mlx_outputs_against_record(record, session)?;
+            }
+        }
     }
     if !matches!(
         derivation.memory.kind,
@@ -2765,6 +2929,101 @@ mod tests {
             SourceSessionKind::PhysicalMlx
         );
 
+        let mut av_document = document.clone();
+        av_document["records"][0]["quality"]["audio"] = json!({
+            "result": "passed",
+            "sampleRateHz": 24000,
+            "channels": 2,
+            "sampleCount": 48000,
+            "selectedPcmSha256": "a".repeat(64),
+            "referencePcmSha256": "b".repeat(64),
+            "maximumAbsoluteError": 0.001,
+            "meanAbsoluteError": 0.0001,
+            "rootMeanSquareError": 0.0002,
+            "maximumAbsoluteErrorThreshold": 0.01,
+            "meanAbsoluteErrorThreshold": 0.01,
+            "rootMeanSquareErrorThreshold": 0.01
+        });
+        for (index, role) in ["selected_av", "reference_av"].into_iter().enumerate() {
+            let output = &mut av_document["sourceSessions"][0]["outputs"][index + 1];
+            output["role"] = json!(role);
+            output["path"] = json!(format!(
+                "docs/calibration/sc-test/{logical_case_id}-{role}-1024x1024-f1-{}.avbin",
+                output["sha256"].as_str().expect("output digest")
+            ));
+            output["bytes"] = json!(16);
+        }
+        assert!(matches!(
+            load_bundle(&av_document.to_string()),
+            Ok(BundleLoad::Ready(_))
+        ));
+        let mut crossed_av = av_document.clone();
+        crossed_av["sourceSessions"][0]["outputs"][2]["role"] = json!("reference_rgb");
+        assert!(matches!(
+            load_bundle(&crossed_av.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+        let mut failed_audio = av_document.clone();
+        failed_audio["records"][0]["quality"]["audio"]["maximumAbsoluteError"] = json!(0.02);
+        assert!(matches!(
+            load_bundle(&failed_audio.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("audio quality")
+        ));
+
+        let mut ltx_document = document.clone();
+        let ltx_record = &mut ltx_document["records"][0];
+        ltx_record
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        ltx_record["target"]["modelId"] = json!("ltx_2_5");
+        ltx_record["target"]["provider"] = json!("ltx_2_5");
+        ltx_record["target"]["transformerVariant"] = json!("distilled");
+        ltx_record["target"]["decoder"] = json!("conv");
+        ltx_document["sourceSessions"][0]["target"] = json!({
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "transformerVariant": "distilled",
+            "decoder": "conv",
+            "rung": "bounded_decode"
+        });
+        assert!(matches!(
+            load_bundle(&ltx_document.to_string()),
+            Ok(BundleLoad::Ready(_))
+        ));
+        for (field, value) in [
+            ("tier", "q8"),
+            ("mode", "image_to_video"),
+            ("overlay", "crossed"),
+            ("rung", "resident"),
+            ("transformerVariant", "dev"),
+            ("decoder", "diffvae"),
+        ] {
+            let mut crossed = ltx_document.clone();
+            crossed["sourceSessions"][0]["target"][field] = json!(value);
+            if field == "tier" {
+                crossed["sourceSessions"][0]["inputs"][0]["variant"] = json!(value);
+            }
+            assert!(
+                matches!(
+                    load_bundle(&crossed.to_string()),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("complete LTX pipeline identity")
+                ),
+                "LTX source target field {field} must match exactly"
+            );
+        }
+        let mut missing_ltx_target = ltx_document.clone();
+        missing_ltx_target["sourceSessions"][0]
+            .as_object_mut()
+            .expect("source session")
+            .remove("target");
+        assert!(matches!(
+            load_bundle(&missing_ltx_target.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("has no target identity")
+        ));
+
         let mut missing_receipts = document.clone();
         missing_receipts["sourceSessions"][0]["outputs"] = json!([]);
         assert!(matches!(
@@ -3685,7 +3944,7 @@ mod tests {
             BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(2) })
         );
         assert_eq!(
-            load_bundle(r#"{"schemaVersion":5,"harnessVersion":"old","records":[]}"#)
+            load_bundle(r#"{"schemaVersion":6,"harnessVersion":"old","records":[]}"#)
                 .expect("harness drift is not a parse failure"),
             BundleLoad::Stale(StaleBundleReason::HarnessVersion {
                 found: Some("old".to_owned())

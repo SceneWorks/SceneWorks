@@ -441,6 +441,8 @@ fn select_once(
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -512,6 +514,8 @@ fn selector_with_curves<'a>(
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: FITTED_CURVE_CLOSURE,
         },
@@ -652,6 +656,8 @@ fn inputs<'a>(
         overlay: None,
         lane: VideoLane::Mlx,
         tier: tier(),
+        transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+        decoder: Some(Ltx25Decoder::Conv),
         width: 1280,
         height: 704,
         frames,
@@ -1611,6 +1617,8 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
             overlay: None,
             lane: VideoLane::Mlx,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -1848,6 +1856,8 @@ fn an_unrouted_family_never_reaches_the_shared_selector() {
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -1967,6 +1977,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -2004,6 +2016,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
                 overlay: None,
                 lane: VideoLane::Candle,
                 tier: tier(),
+                transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+                decoder: Some(Ltx25Decoder::Conv),
                 calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
                 expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
             },
@@ -2032,6 +2046,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             overlay: None,
             lane: VideoLane::Candle,
             tier: tier(),
+            transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+            decoder: Some(Ltx25Decoder::Conv),
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
@@ -2074,6 +2090,8 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
                 overlay: None,
                 lane,
                 tier: tier(),
+                transformer_variant: Some(Ltx25TransformerVariant::Distilled),
+                decoder: Some(Ltx25Decoder::Conv),
                 calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
                 expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
             },
@@ -2315,7 +2333,7 @@ fn fitted_phase_laws_bind_by_exact_geometry_and_reduce_by_max() {
     assert_eq!(closure, FITTED_CURVE_CLOSURE);
     assert_eq!(
         curve_id,
-        Some("ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
+        Some("ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:distilled:conv:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1")
     );
     assert_eq!(small_peaks.binding_phase(), VideoBindingPhase::Conditioning);
     assert_eq!(small_peaks.peak_bytes(), small_peaks.conditioning_bytes);
@@ -2607,6 +2625,26 @@ fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
     assert_curve_mismatch_falls_back("unsupported tier", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
+    curves.curves[0].transformer_variant = Ltx25TransformerVariant::Dev;
+    assert_curve_mismatch_falls_back("crossed transformer pipeline", &contract, &curves, inside);
+
+    let mut curves = fixture_curve_bundle();
+    curves.curves[0].decoder = Ltx25Decoder::DiffVae;
+    assert_curve_mismatch_falls_back("crossed decoder pipeline", &contract, &curves, inside);
+
+    let curves = fixture_curve_bundle();
+    let mut selector =
+        selector_with_curves(&contract, Some(&curves), budget(mlx_widened_gb(34, 0.5)));
+    selector.identity.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+    let crossed_request = selector.select(inside);
+    let mut no_curves = selector_with_curves(&contract, None, budget(mlx_widened_gb(34, 0.5)));
+    assert_eq!(
+        crossed_request,
+        no_curves.select(inside),
+        "runtime request identity must not borrow a fitted curve from another transformer pipeline",
+    );
+
+    let mut curves = fixture_curve_bundle();
     curves.curves[0].model_id = "ltx_2_3_eros".to_owned();
     assert_curve_mismatch_falls_back("unsupported model", &contract, &curves, inside);
 
@@ -2793,7 +2831,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     assert_eq!(context.geometry.height, 704);
     assert_eq!(
         context.evidence_revision,
-        "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
+        "ltx_2_3:ltx-video:ltx_2_3:ltx_2_3:mlx:q8:distilled:conv:text_to_video:refnone-0:fps30:none:staged_residency:eager_materialization:b1:abi3:single_pass:87a27d5dcab7:sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1"
     );
     assert!(outcome.refusal.is_none());
 }
