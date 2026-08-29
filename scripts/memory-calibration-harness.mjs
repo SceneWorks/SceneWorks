@@ -2,13 +2,14 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { providerClosureDigest } from "./inference-closure-digest.mjs";
+import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
@@ -32,6 +33,11 @@ const RUNG_SET = new Set(RUNGS);
 export const LOAD_SHAPES = ["eager_materialization", "deferred_materialization"];
 export const LTX25_TRANSFORMER_VARIANTS = ["distilled", "dev"];
 export const LTX25_DECODERS = ["conv", "diffvae"];
+// The public authority is intentionally fixed here as well as in the native adapter: the harness
+// must reject a merely SHA-shaped snapshot before it hashes hundreds of GiB or starts Metal work.
+// The focused selector test binds these literals back to config/download-pattern-evidence.json.
+export const LTX25_CAPTURE_REPOSITORY = "SceneWorks/ltx-2.5-mlx";
+export const LTX25_CAPTURE_REVISION = "791ef61731ad067bd13ebff8cc0f07532476d9ef";
 export const RUNG_REUSE_TOLERANCE = Object.freeze({
   absoluteBytes: 256 * 1024 * 1024,
   relative: 0.05,
@@ -1524,6 +1530,170 @@ export function expandPlan(config, completed = []) {
   return cases.sort((a, b) => a.logicalCaseId.localeCompare(b.logicalCaseId));
 }
 
+export function selectPlanProviders(config, { model, providerName, fixture } = {}) {
+  object(config, "plan config");
+  if (!Array.isArray(config.providers)) fail("plan config.providers must be an array");
+  if (model !== undefined) {
+    if (typeof model !== "string" || !model || model.trim() !== model) {
+      fail("--model must be one exact, non-empty modelId");
+    }
+    const modelIds = [...new Set(config.providers
+      .map((provider) => provider.target?.modelId)
+      .filter((modelId) => typeof modelId === "string" && modelId.length > 0))]
+      .sort();
+    if (!modelIds.includes(model)) {
+      fail(`unknown --model ${JSON.stringify(model)}; available modelIds: ${modelIds.join(", ") || "none"}`);
+    }
+  }
+  return config.providers.filter(
+    (provider) =>
+      (!model || provider.target?.modelId === model) &&
+      (!providerName || provider.name === providerName) &&
+      (!fixture || provider.fixture === fixture),
+  );
+}
+
+const LTX25_CAPTURE_TIERS = ["q4", "q8", "bf16"];
+
+function ltx25ArtifactKey(planned) {
+  const variant = planned?.target?.transformerVariant;
+  const tier = planned?.target?.tier;
+  if (!LTX25_TRANSFORMER_VARIANTS.includes(variant) || !LTX25_CAPTURE_TIERS.includes(tier)) {
+    fail(`LTX-2.5 capture target requires transformerVariant=${
+      LTX25_TRANSFORMER_VARIANTS.join("|")
+    } and tier=${LTX25_CAPTURE_TIERS.join("|")}`);
+  }
+  return `${variant}/${tier}`;
+}
+
+async function requireLtx25File(file, label) {
+  let metadata;
+  try {
+    metadata = await stat(file);
+  } catch (error) {
+    fail(`${label} is missing at ${file}: ${error.message}`);
+  }
+  if (!metadata.isFile() || metadata.size < 1) fail(`${label} must be one non-empty file at ${file}`);
+}
+
+export async function prepareLtx25CaptureArtifacts(
+  snapshotRoot,
+  plannedCases,
+  inventoryFor = hashArtifactInventory,
+) {
+  if (typeof snapshotRoot !== "string" || !snapshotRoot || !path.isAbsolute(snapshotRoot)) {
+    fail("--ltx25-snapshot-root must be one absolute path");
+  }
+  if (!Array.isArray(plannedCases) || plannedCases.length === 0) {
+    fail("LTX-2.5 snapshot preparation requires at least one selected case");
+  }
+  if (plannedCases.some((planned) =>
+    planned.backend !== "mlx" ||
+    planned.target?.modelId !== "ltx_2_5" ||
+    planned.target?.provider !== "ltx_2_5")) {
+    fail("--ltx25-snapshot-root is valid only for the mlx:ltx_2_5 plan");
+  }
+
+  const requested = path.resolve(snapshotRoot);
+  let resolved;
+  try {
+    resolved = await realpath(requested);
+  } catch (error) {
+    fail(`cannot canonicalize --ltx25-snapshot-root ${requested}: ${error.message}`);
+  }
+  if (resolved !== requested) {
+    fail(`--ltx25-snapshot-root must be the canonical snapshot path, got ${requested} -> ${resolved}`);
+  }
+  const snapshotsDirectory = path.dirname(resolved);
+  const repositoryDirectory = path.dirname(snapshotsDirectory);
+  const expectedRepositoryDirectory = `models--${LTX25_CAPTURE_REPOSITORY.replaceAll("/", "--")}`;
+  if (
+    path.basename(resolved) !== LTX25_CAPTURE_REVISION ||
+    path.basename(snapshotsDirectory) !== "snapshots" ||
+    path.basename(repositoryDirectory) !== expectedRepositoryDirectory
+  ) {
+    fail(
+      `--ltx25-snapshot-root must be ${expectedRepositoryDirectory}/snapshots/${LTX25_CAPTURE_REVISION}`,
+    );
+  }
+
+  const enhancer = path.join(resolved, "enhancer");
+  let enhancerEntries;
+  try {
+    enhancerEntries = await readdir(enhancer);
+  } catch (error) {
+    fail(`LTX-2.5 enhancer directory is missing at ${enhancer}: ${error.message}`);
+  }
+  if (enhancerEntries.length === 0) fail(`LTX-2.5 enhancer directory is empty at ${enhancer}`);
+  if (plannedCases.some((planned) => planned.target.transformerVariant === "dev")) {
+    await requireLtx25File(
+      path.join(resolved, "distilled_lora", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"),
+      "LTX-2.5 dev refinement adapter",
+    );
+  }
+
+  const artifacts = new Map();
+  const keys = [...new Set(plannedCases.map(ltx25ArtifactKey))].sort();
+  for (const key of keys) {
+    const root = path.join(resolved, ...key.split("/"));
+    let canonicalRoot;
+    try {
+      canonicalRoot = await realpath(root);
+    } catch (error) {
+      fail(`LTX-2.5 nested artifact root ${key} is missing at ${root}: ${error.message}`);
+    }
+    if (canonicalRoot !== root) fail(`LTX-2.5 nested artifact root ${key} must be canonical: ${root}`);
+    await requireLtx25File(path.join(root, "split_model.json"), `LTX-2.5 ${key} split manifest`);
+    const matching = plannedCases.filter((planned) => ltx25ArtifactKey(planned) === key);
+    if (matching.some((planned) => planned.target.decoder === "conv")) {
+      await requireLtx25File(path.join(root, "vae_decoder.safetensors"), `LTX-2.5 ${key} ConvVAE decoder`);
+    }
+    if (matching.some((planned) => planned.target.decoder === "diffvae")) {
+      await requireLtx25File(
+        path.join(root, "vae_diffusion_decoder.safetensors"),
+        `LTX-2.5 ${key} DiffVAE decoder`,
+      );
+    }
+    let inventory;
+    try {
+      inventory = await inventoryFor(root);
+    } catch (error) {
+      fail(`hash LTX-2.5 ${key} artifact inventory: ${error.message}`);
+    }
+    if (!Number.isSafeInteger(inventory.bytes) || inventory.bytes <= 0 ||
+        !/^[0-9a-f]{64}$/.test(inventory.sha256)) {
+      fail(`LTX-2.5 ${key} artifact inventory is malformed`);
+    }
+    artifacts.set(key, { root, bytes: inventory.bytes, sha256: inventory.sha256 });
+  }
+  return {
+    snapshotRoot: resolved,
+    repository: LTX25_CAPTURE_REPOSITORY,
+    revision: LTX25_CAPTURE_REVISION,
+    artifacts,
+  };
+}
+
+export function ltx25ProviderEnvironment(prepared, planned, baseEnvironment = process.env) {
+  const environment = { ...baseEnvironment };
+  for (const name of [
+    "SCENEWORKS_LTX25_ROOT",
+    "SCENEWORKS_MEMORY_MODEL_BYTES",
+    "SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256",
+  ]) delete environment[name];
+  environment.SCENEWORKS_LTX25_REPOSITORY = prepared.repository;
+  environment.SCENEWORKS_LTX25_REVISION = prepared.revision;
+  if (planned) {
+    const key = ltx25ArtifactKey(planned);
+    const artifact = prepared.artifacts.get(key);
+    if (!artifact) fail(`LTX-2.5 prepared snapshot has no inventory for ${key}`);
+    environment.SCENEWORKS_LTX25_ROOT = artifact.root;
+    environment.SCENEWORKS_MEMORY_MODEL_BYTES = String(artifact.bytes);
+    environment.SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256 = artifact.sha256;
+  }
+  return environment;
+}
+
 export async function assessProviderReuse({ config, providerCommand, backend, fixture }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   const planned = expandPlan(config).filter(
@@ -1548,12 +1718,13 @@ export async function assessProviderReuse({ config, providerCommand, backend, fi
   };
 }
 
-function execute(command, args, input) {
+function execute(command, args, input, { env } = {}) {
   return new Promise((resolve, reject) => {
     const hasInput = input !== undefined;
     const child = spawn(command, args, {
       stdio: [hasInput ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
+      ...(env ? { env } : {}),
     });
     let stdout = "";
     let stderr = "";
@@ -1581,9 +1752,9 @@ function execute(command, args, input) {
 }
 
 export async function runProviderPlan({
-  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
+  config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, model, providerName, fixture,
   onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
-  rawLogDir = null, sourcePathPrefix = null,
+  rawLogDir = null, sourcePathPrefix = null, ltx25SnapshotRoot = null,
   // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
@@ -1673,15 +1844,20 @@ export async function runProviderPlan({
     : { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
   const selectedConfig = {
     ...config,
-    providers: config.providers.filter(
-      (provider) => (!providerName || provider.name === providerName) && (!fixture || provider.fixture === fixture),
-    ),
+    providers: selectPlanProviders(config, { model, providerName, fixture }),
   };
   if (providerName && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider named ${providerName}`);
+    fail(`provider run selected no plan provider named ${providerName}${
+      model ? ` for model ${JSON.stringify(model)}` : ""
+    }`);
   }
   if (fixture && selectedConfig.providers.length === 0) {
-    fail(`provider run selected no plan provider with fixture ${fixture}`);
+    fail(`provider run selected no plan provider with fixture ${fixture}${
+      model ? ` for model ${JSON.stringify(model)}` : ""
+    }`);
+  }
+  if (model && selectedConfig.providers.length === 0) {
+    fail(`provider run selected no plan provider for model ${JSON.stringify(model)}`);
   }
   if (forceFreshPerCase && forceBatchRungs) fail("cannot force both fresh and batched provider execution");
   const applyExecutionPolicy = (plannedCases) => plannedCases.map((planned) => {
@@ -1697,16 +1873,42 @@ export async function runProviderPlan({
   });
   const allExpanded = applyExecutionPolicy(expandPlan(selectedConfig));
   const expanded = applyExecutionPolicy(expandPlan(selectedConfig, existing.records));
-  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
-  if (selectedCases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
-  const backends = new Set(selectedCases.map((planned) => planned.backend));
+  const allSelectedCases = backend
+    ? allExpanded.filter((planned) => planned.backend === backend)
+    : allExpanded;
+  if (allSelectedCases.length === 0) {
+    fail(`provider run selected no ${backend ?? "remaining"} cases${
+      model ? ` for model ${JSON.stringify(model)}` : ""
+    }`);
+  }
+  const backends = new Set(allSelectedCases.map((planned) => planned.backend));
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
+  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
+  const exactLtx25Selection = backend === "mlx" && model === "ltx_2_5" &&
+    allSelectedCases.every((planned) =>
+      planned.backend === "mlx" &&
+      planned.target.modelId === "ltx_2_5" &&
+      planned.target.provider === "ltx_2_5");
+  if (ltx25SnapshotRoot && !exactLtx25Selection) {
+    fail("--ltx25-snapshot-root requires --backend mlx --model ltx_2_5");
+  }
+  if (exactLtx25Selection && !ltx25SnapshotRoot) {
+    fail("--backend mlx --model ltx_2_5 requires --ltx25-snapshot-root for per-case artifact binding");
+  }
+  // Validate the selector against the complete plan above, then let a fully completed resume be a
+  // deterministic no-op. The untouched merge base is already schema-valid and identity-sorted, and
+  // there is no reason to probe hardware or start a provider when it contains every selected case.
+  if (selectedCases.length === 0) return existing;
+  const ltx25Artifacts = exactLtx25Selection
+    ? await prepareLtx25CaptureArtifacts(ltx25SnapshotRoot, selectedCases)
+    : null;
   const probe = JSON.parse(await executeProvider(
     providerCommand[0],
     providerCommand.slice(1),
     canonicalJson({ action: "probe", repositories }),
+    ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts) } : undefined,
   ));
   await assertRepositoriesStable();
   // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
@@ -1791,10 +1993,17 @@ export async function runProviderPlan({
       repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
       hardware: probe.hardware,
     });
+    if (ltx25Artifacts) {
+      const artifactKey = ltx25ArtifactKey(first);
+      if (invocation.some((planned) => ltx25ArtifactKey(planned) !== artifactKey)) {
+        fail(`LTX-2.5 provider invocation crosses nested artifact roots at ${artifactKey}`);
+      }
+    }
     const providerOutput = await executeProvider(
       providerCommand[0],
       providerCommand.slice(1),
       providerRequest,
+      ltx25Artifacts ? { env: ltx25ProviderEnvironment(ltx25Artifacts, first) } : undefined,
     );
     await assertRepositoriesStable();
     const response = JSON.parse(providerOutput);
@@ -2054,6 +2263,14 @@ async function main() {
     const index = args.indexOf(flag);
     return index < 0 ? undefined : args[index + 1];
   };
+  const singleValue = (flag) => {
+    const indexes = args.flatMap((arg, index) => arg === flag ? [index] : []);
+    if (indexes.length > 1) fail(`${flag} may be supplied only once`);
+    if (indexes.length === 0) return undefined;
+    const selected = args[indexes[0] + 1];
+    if (!selected || selected.startsWith("--")) fail(`${flag} requires one value`);
+    return selected;
+  };
   if (command === "check") {
     const closureDigests = await liveInferenceClosureDigests();
     return void await validateSourceSessionFiles(
@@ -2097,6 +2314,8 @@ async function main() {
     }));
   }
   if (command === "run") {
+    const model = singleValue("--model");
+    const ltx25SnapshotRoot = singleValue("--ltx25-snapshot-root");
     const outputPath = value("--output");
     const output = await runProviderPlan({
       config: await readJson(value("--config")),
@@ -2105,12 +2324,14 @@ async function main() {
       inferenceRepo: path.resolve(value("--inference-repo")),
       resume: value("--resume") ? await readJson(value("--resume")) : undefined,
       backend: value("--backend"),
+      model,
       providerName: value("--provider"),
       fixture: value("--fixture"),
       forceFreshPerCase: args.includes("--fresh-per-case"),
       forceBatchRungs: args.includes("--batch-rungs"),
       rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
       sourcePathPrefix: value("--source-path-prefix"),
+      ltx25SnapshotRoot,
       onProviderCheckpoint: (checkpoint) => atomicWrite(outputPath, checkpoint),
     });
     return void await atomicWrite(outputPath, output);

@@ -197,10 +197,29 @@ node scripts/memory-calibration-harness.mjs run \
 Use `--resume` only to make a capture RESUMABLE after an interrupted run of the same revision, never
 to re-capture staled evidence. Discard or bypass the prior bundle for that.
 
+The model-wide LTX-2.5 capture replaces the example's `--fixture` with both of these flags:
+
+```text
+  --model ltx_2_5 \
+  --ltx25-snapshot-root /absolute/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/791ef61731ad067bd13ebff8cc0f07532476d9ef \
+```
+
 One provider process probes one backend-specific hardware shape, so `--backend mlx|candle` is
 required when the config contains both backends. Omitting it from a mixed plan fails before starting
-the adapter. `--provider <plan-provider-name>` optionally selects one named provider block; use it
-to run the current Krea v1 production point separately from non-promotable v2 candidates.
+the adapter. `--model <modelId>` optionally selects every plan row with that exact canonical
+`target.modelId`; for example, `--backend mlx --model ltx_2_5` selects exactly the 84 checked-in
+LTX-2.5 rows. Unknown model IDs and model/backend, model/provider, or model/fixture combinations with
+no rows fail before capture. The model selector scopes new provider executions only: `--resume`
+remains a lossless merge base, its other-model records are retained in deterministic identity order,
+and they cannot suppress a selected model's distinct logical cases. `ingest` therefore keeps its
+existing deterministic merge semantics; a resume that already completes every selected case returns
+that merge base without probing hardware or invoking the provider. For the LTX-2.5 model selector,
+`--ltx25-snapshot-root` is mandatory and valid only with `--backend mlx --model ltx_2_5`. The harness
+requires the canonical public repository/revision suffix, checks the shared enhancer and dev adapter,
+checks every selected `<transformerVariant>/<tier>` layout, and hashes each selected nested root once.
+It then replaces any inherited root/inventory variables per provider invocation while preserving the
+capture-directory and raw-provenance environment. `--provider <plan-provider-name>` optionally selects one named
+provider block; use it to run the current Krea v1 production point separately from non-promotable v2 candidates.
 `--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
 way to execute a multi-rung reference ladder as one reproducible capture.
 `--fresh-per-case` overrides scheduling for an oracle capture; `--batch-rungs` forces one target's

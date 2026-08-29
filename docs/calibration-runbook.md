@@ -685,6 +685,16 @@ Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
 
 - `--backend` is **required** whenever the plan contains both backends; one provider process probes
   one backend-specific hardware shape.
+- `--model` selects every plan row whose canonical `target.modelId` exactly matches. In particular,
+  `--backend mlx --model ltx_2_5` selects the 84 LTX-2.5 rows and no other MLX model. Unknown values
+  and incompatible selector combinations fail before capture. On resume, the selector scopes new
+  executions; the complete resume bundle remains the lossless, deterministically ordered ingest base,
+  and a fully completed selection returns it without probing hardware or invoking the provider.
+- `--backend mlx --model ltx_2_5` additionally requires
+  `--ltx25-snapshot-root /abs/cache/models--SceneWorks--ltx-2.5-mlx/snapshots/791ef61731ad067bd13ebff8cc0f07532476d9ef`.
+  The harness validates that exact public repository/revision and the selected nested layout, hashes
+  each required `<transformerVariant>/<tier>` root once, and sets its root, byte count, and inventory
+  digest independently on every provider invocation. A stale inherited tier root is never reused.
 - `--provider-command` is a **JSON argv array**, quoted as one shell word.
 - `--fresh-per-case` forces one fresh process per case (the oracle shape both CI lanes use);
   `--batch-rungs` forces one target's rungs into an experimental batch.
