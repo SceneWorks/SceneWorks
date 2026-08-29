@@ -21,7 +21,7 @@ glob = "0.3"
 # cross-platform (the image-job pipeline + its tests run everywhere; only real MLX inference
 # is macOS-gated). Feature set is the workspace union (sc-15052) — it always effectively was.
 image = { workspace = true }
-quick-xml = "0.37"
+quick-xml = "0.41"
 resvg = { version = "0.45", default-features = false }
 # CPU raster for DWPose skeleton rendering (epic 3018, sc-3028): filled polygons
 # (rotated-ellipse limbs), circles (joints/points), for the Z-Image strict-pose

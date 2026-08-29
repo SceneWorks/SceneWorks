@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use quick_xml::events::Event;
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 use resvg::usvg;
 use serde_json::json;
 
@@ -235,7 +235,10 @@ fn sanitize_svg(input: &str) -> WorkerResult<CanonicalSvg> {
             }
             Ok(Event::Comment(_)) | Ok(Event::Decl(_)) => {}
             Ok(Event::Eof) => break,
-            Ok(Event::CData(_)) | Ok(Event::DocType(_)) | Ok(Event::PI(_)) => {
+            Ok(Event::CData(_))
+            | Ok(Event::DocType(_))
+            | Ok(Event::PI(_))
+            | Ok(Event::GeneralRef(_)) => {
                 return Err(WorkerError::InvalidPayload(
                     "fixtureSvg contains a disallowed XML construct".to_owned(),
                 ));
@@ -292,7 +295,7 @@ fn canonical_element(
             })?
             .to_owned();
         let value = attribute
-            .decode_and_unescape_value(reader.decoder())
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|error| {
                 WorkerError::InvalidPayload(format!("fixtureSvg attribute is invalid: {error}"))
             })?
