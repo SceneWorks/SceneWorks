@@ -8631,85 +8631,10 @@ mod model_size_concurrency_tests {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value = serde_json::from_str(&crate::strip_jsonc_comments(raw))
             .expect("builtin manifest parses");
-        // macOS gains one over windows/linux for each mac-only entry; sc-8444 added
-        // `krea_realtime_14b` (macOS-only — there is no candle Krea Realtime engine), taking it
-        // from 81 to 82.
-        //
-        // sc-17627 then declared the three person-vision utilities that were previously job-time
-        // auto-downloads with no catalog entry at all: `sam3_person_segment` (both platforms),
-        // `sam2_person_segment` (macOS-only — `mod person_segment` is `#[cfg(target_os = "macos")]`)
-        // and `person_detector` (one platform-scoped row each, so exactly one survives
-        // `retain_downloads_for_os` per OS). macOS +3 → 85, windows/linux +2 → 82. `real_esrgan`
-        // swapped its repo rather than adding one, so it does not move these counts.
-        //
-        // sc-17632 then declared `seedvr2_upscaler`, the last of that same class: a job-time
-        // auto-download with no catalog entry, fetched TWICE into two `<data_dir>/cache` subtrees.
-        // One download row, no `platforms` scoping (both the image and video SeedVR2 lanes run on
-        // macOS and on the off-Mac candle lane), so every OS gains exactly one: macOS 85 → 86,
-        // windows/linux 82 → 83.
-        //
-        // sc-17634 declared `dwpose_pose_detector`, the LAST of that class and the only one that
-        // was not a Hugging Face download at all (two openmmlab `.zip` bundles, re-hosted at
-        // `SceneWorks/dwpose-onnx` so it can be installed like everything else). One download row
-        // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
-        // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
-        // 83 → 84.
-        //
-        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
-        // each gain its exact pinned download context while macOS keeps the same one.
-        //
-        // sc-18481 retired AuraSR from the installable catalog because every production backend
-        // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
-        // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
-        //
-        // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
-        // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
-        // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
-        // `(repo, files)` still separates them and macOS gains exactly two. Windows/Linux gained
-        // NOTHING at the time: every MiniMax-H3 download row was `platforms: ["macos"]`, so
-        // `retain_downloads_for_os` emptied both entries there and `model_download_context` yielded
-        // `None`. That asymmetry is the point of running this loop per OS.
-        //
-        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
-        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
-        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
-        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
-        // windows/linux gain exactly one at that point. SC-20756 later adds the distinct hosted
-        // `q4/transformer_ref/*` context for the reference partition.
-        //
-        // sc-20267 then widened `minimax_h3`'s q4/q8 tier rows to `["macos","windows","linux"]`. That
-        // SWAPS which key that +1 is off-Mac without changing the count: `model_download` prefers the
-        // `default: true` row, so the off-Mac context is now
-        // `(SceneWorks/minimax-h3-mlx, ["q4/transformer/*"])` rather than
-        // `(MiniMaxAI/MiniMax-H3, ["transformer/*"])`, and no other off-Mac entry contributes either
-        // key. Recorded because the arithmetic below is unchanged while the reason for one of its terms
-        // is not — a reader auditing this count off-Mac will find a repo the sc-19558 note says those
-        // platforms never fetch.
-        //
-        // SC-20756 then makes the already-hosted Ref2VA tiers installable off-Mac; the pinned
-        // provider has admitted that conditioning surface since sc-17157.
-        //
-        // SC-18902 (main) then removed Eros's failed Candle route and platform-scoped both of its
-        // download rows to macOS, so its primary context leaves Windows/Linux while macOS is
-        // unchanged. sc-19708 (main) declared `instantid_face_stack`: the SCRFD + ArcFace pair the
-        // face-analysis and identity lanes stage from `SceneWorks/instantid-mlx`, one unscoped
-        // download row, so every OS gains exactly one.
-        //
-        // THE NUMBERS BELOW ARE THE 2026-08-19 SYNC MERGE'S, not any single side's. Starting from
-        // the shared 87 / 84 / 84, six independent deltas all apply:
-        //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
-        //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
-        //   main  SC-18902 Eros rows macOS-scoped  +0 / −1 / −1
-        //   main  sc-19708 instantid_face_stack    +1 / +1 / +1   (unscoped row)
-        //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
-        //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
-        //   epic  sc-20756 H3 Ref2VA off-Mac tier  +0 / +1 / +1
-        // giving 89 / 86 / 86. Each side read only its own set and so read 87/84/84 (main) or
-        // 88/85/85 (epic, at the previous sync); neither is right once both land.
-        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
-        for (os, expected_distinct_contexts) in
-            [("macos", 89_usize), ("windows", 86), ("linux", 86)]
-        {
+        // The cache is keyed by `(repo, files)`, so shared model rows deliberately collapse to one
+        // entry. Assert the invariant the production scan needs instead of sealing today's catalog
+        // population: every platform's distinct contexts fit together and remain addressable.
+        for os in ["macos", "windows", "linux"] {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
                 .as_array()
@@ -8722,17 +8647,27 @@ mod model_size_concurrency_tests {
                     keys.insert((context.repo, context.files));
                 }
             }
-            assert_eq!(
-                keys.len(),
-                expected_distinct_contexts,
-                "{os} builtin download-context count changed; reconsider cache capacity"
-            );
+            assert!(!keys.is_empty(), "{os} has no builtin download contexts");
             assert!(
                 keys.len() <= MODEL_SIZE_CACHE_LIMIT,
                 "{os} builtin catalog has {} distinct download contexts but cache holds only {}",
                 keys.len(),
                 MODEL_SIZE_CACHE_LIMIT
             );
+
+            let keys: Vec<_> = keys.into_iter().collect();
+            let mut cache = ModelSizeCache::default();
+            for (index, key) in keys.iter().cloned().enumerate() {
+                cache.insert(key, index as u64 + 1);
+            }
+            assert_eq!(cache.entries.len(), keys.len());
+            for (index, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    cache.get(key),
+                    Some(Some(index as u64 + 1)),
+                    "{os} context {key:?} was evicted from a cache that should fit the catalog"
+                );
+            }
         }
     }
 
