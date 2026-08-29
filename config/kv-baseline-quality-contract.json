@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "thresholds": {
     "parityMaxError": 0.0001,
     "perplexityDelta": 0.01,
@@ -13,7 +13,8 @@
     "warmups": 2,
     "confidenceInterval": "95% bootstrap",
     "outlierPolicy": "report all samples; no silent deletion",
-    "variancePolicy": "dense baseline variance band is frozen before POC results"
+    "variancePolicy": "all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",
+    "maxCoefficientOfVariation": 0.05
   },
   "fixtures": ["kernel-fp32-reference", "structured-tool-call", "long-context-needle", "multi-turn-prompt-cache"]
 }
