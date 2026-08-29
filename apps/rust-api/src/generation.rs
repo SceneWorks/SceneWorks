@@ -564,6 +564,776 @@ pub(crate) async fn create_vector_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+const VECTOR_PROMPT_WORKFLOW_KIND: &str = "create_from_prompt";
+const VECTOR_WORKFLOW_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Copy)]
+enum VectorWorkflowReplayRelation<'a> {
+    Fresh,
+    Retry {
+        source_job_id: &'a str,
+        attempts: u32,
+    },
+    Duplicate {
+        duplicate_of_job_id: &'a str,
+    },
+}
+
+fn typed_vector_workflow_error(code: &'static str, detail: impl Into<String>) -> ApiError {
+    ApiError::typed(
+        StatusCode::CONFLICT,
+        detail.into(),
+        code,
+        json!({ "workflow": VECTOR_PROMPT_WORKFLOW_KIND }),
+    )
+}
+
+/// Exactly one immutable primary artifact identity is required. Imported/path-backed rows and
+/// multi-revision tier sets deliberately fail closed: a prompt workflow must be replayable without
+/// guessing which bytes the first stage meant.
+pub(crate) fn authoritative_workflow_revision(model: &Value) -> Result<String, ApiError> {
+    let primary_downloads = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| download.get("coRequisite").and_then(Value::as_bool) != Some(true))
+        .collect::<Vec<_>>();
+    let revisions = primary_downloads
+        .iter()
+        .filter_map(|download| download.get("revision").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    let every_revision_is_immutable = primary_downloads.iter().all(|download| {
+        download
+            .get("revision")
+            .and_then(Value::as_str)
+            .is_some_and(|revision| {
+                revision.len() == 40
+                    && revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+    });
+    if primary_downloads.is_empty() || !every_revision_is_immutable || revisions.len() != 1 {
+        return Err(typed_vector_workflow_error(
+            "vector_workflow_artifact_ambiguous",
+            "Create from Prompt requires one immutable authoritative revision for each stage.",
+        ));
+    }
+    Ok(revisions
+        .into_iter()
+        .next()
+        .expect("one immutable primary revision")
+        .to_owned())
+}
+
+fn validate_workflow_revision(
+    stage: &str,
+    actual: &str,
+    expected: Option<&str>,
+) -> Result<(), ApiError> {
+    if expected.is_some_and(|expected| expected != actual) {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            format!(
+                "The {stage} model revision changed since this workflow was recorded; replay was not queued."
+            ),
+            "vector_workflow_revision_drift",
+            json!({ "stage": stage, "expectedRevision": expected, "actualRevision": actual }),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raster_workflow_model(
+    state: &AppState,
+    model_id: &str,
+    model: &Value,
+) -> Result<String, ApiError> {
+    if model.get("type").and_then(Value::as_str) != Some("image")
+        || !model
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == Some("text_to_image"))
+            })
+    {
+        return Err(typed_vector_workflow_error(
+            "vector_workflow_raster_unsupported",
+            format!("Model {model_id} does not declare text_to_image."),
+        ));
+    }
+    let backend_support = if enqueue_backend(state) == "mlx" {
+        model.pointer("/macSupport/supported")
+    } else {
+        model.pointer("/candleSupport/supported")
+    };
+    if backend_support.and_then(Value::as_bool) != Some(true)
+        || model.get("usable").and_then(Value::as_bool) == Some(false)
+    {
+        return Err(typed_vector_workflow_error(
+            "vector_workflow_raster_unclaimable",
+            format!("Model {model_id} is not claimable by the current raster backend."),
+        ));
+    }
+    if model.get("installState").and_then(Value::as_str) != Some("installed")
+        || model.get("cacheState").and_then(Value::as_str) != Some("complete")
+    {
+        return Err(typed_vector_workflow_error(
+            "vector_workflow_raster_unavailable",
+            format!("Model {model_id} must be completely installed in Model Manager."),
+        ));
+    }
+    authoritative_workflow_revision(model)
+}
+
+fn workflow_stage<'a>(payload: &'a JsonObject, stage: &str) -> Result<&'a Value, ApiError> {
+    payload
+        .get("workflow")
+        .and_then(|workflow| workflow.get(stage))
+        .ok_or_else(|| ApiError::internal(format!("vector workflow is missing {stage}")))
+}
+
+async fn create_vector_prompt_workflow_internal(
+    state: AppState,
+    payload: VectorPromptWorkflowRequest,
+    relation: VectorWorkflowReplayRelation<'_>,
+) -> Result<JobSnapshot, ApiError> {
+    let raster_request: ImageJobRequest = serde_json::from_value(json!({
+        "projectId": payload.project_id,
+        "projectName": payload.project_name,
+        "mode": "text_to_image",
+        "prompt": payload.prompt,
+        "negativePrompt": payload.negative_prompt,
+        "model": payload.raster_model,
+        "count": 1,
+        "seed": payload.seed,
+        "width": payload.width,
+        "height": payload.height,
+        "requestedGpu": payload.requested_gpu,
+    }))
+    .map_err(|error| ApiError::bad_request(format!("Invalid raster stage: {error}")))?;
+    validate_image_job(&raster_request)?;
+
+    let catalog = crate::models::model_catalog(&state).await?;
+    let raster_model = catalog
+        .iter()
+        .find(|model| {
+            model.get("id").and_then(Value::as_str) == Some(payload.raster_model.as_str())
+        })
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let vector_model = catalog
+        .iter()
+        .find(|model| {
+            model.get("id").and_then(Value::as_str) == Some(payload.vector_model.as_str())
+        })
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let raster_revision =
+        validate_raster_workflow_model(&state, &payload.raster_model, &raster_model)?;
+    let vector_revision = authoritative_workflow_revision(&vector_model)?;
+    validate_workflow_revision(
+        "raster",
+        &raster_revision,
+        payload.expected_raster_revision.as_deref(),
+    )?;
+    validate_workflow_revision(
+        "vector",
+        &vector_revision,
+        payload.expected_vector_revision.as_deref(),
+    )?;
+    validate_vector_model_manifest(&payload.vector_model, VectorMode::ImageToSvg, &vector_model)?;
+    let pending_vector_request = VectorRequest {
+        project_id: payload.project_id.clone(),
+        project_name: payload.project_name.clone(),
+        mode: VectorMode::ImageToSvg,
+        model: payload.vector_model.clone(),
+        source_asset_id: Some("workflow_pending_source".to_owned()),
+        // StarVector-1B does not accept guidance. The disclosed prompt belongs only to the raster
+        // stage; forwarding it here would falsely turn the composition into native text-to-SVG.
+        prompt: String::new(),
+        sampling: payload.sampling.clone(),
+        detail_budget: payload.detail_budget.clone(),
+        requested_gpu: payload.requested_gpu.clone(),
+    };
+    validate_vector_request(&pending_vector_request)?;
+    validate_vector_provider_request(&pending_vector_request, &vector_model)?;
+    validate_vector_model_availability(
+        &payload.vector_model,
+        enqueue_backend(&state),
+        &vector_model,
+    )?;
+
+    let parent_id = format!("job_{}", uuid::Uuid::new_v4().simple());
+    let workflow_id = format!("vwf_{}", uuid::Uuid::new_v4().simple());
+    let mut parent_payload = to_json_object(&pending_vector_request)?;
+    parent_payload.remove("requestedGpu");
+    parent_payload.remove("sourceAssetId");
+    parent_payload.insert("modelManifestEntry".to_owned(), vector_model.clone());
+    parent_payload.insert(
+        "workflow".to_owned(),
+        json!({
+            "kind": VECTOR_PROMPT_WORKFLOW_KIND,
+            "disclosure": "raster_to_vector",
+            "id": workflow_id,
+            "parentJobId": parent_id,
+            "childJobId": Value::Null,
+            "intermediateAssetId": Value::Null,
+            "intermediateVisibility": "hidden_retained_on_success",
+            "rasterStage": {
+                "model": payload.raster_model,
+                "revision": raster_revision,
+                "prompt": payload.prompt,
+                "negativePrompt": payload.negative_prompt,
+                "seed": payload.seed,
+                "width": payload.width,
+                "height": payload.height,
+                "count": 1,
+            },
+            "vectorStage": {
+                "model": payload.vector_model,
+                "revision": vector_revision,
+                "mode": "image_to_svg",
+                "sampling": payload.sampling,
+                "detailBudget": payload.detail_budget,
+            },
+        }),
+    );
+    let (source_job_id, duplicate_of_job_id, attempts) = match relation {
+        VectorWorkflowReplayRelation::Fresh => (None, None, 1),
+        VectorWorkflowReplayRelation::Retry {
+            source_job_id,
+            attempts,
+        } => (Some(source_job_id.to_owned()), None, attempts),
+        VectorWorkflowReplayRelation::Duplicate {
+            duplicate_of_job_id,
+        } => (None, Some(duplicate_of_job_id.to_owned()), 1),
+    };
+    let parent = store_call(state.clone(), {
+        let parent_id = parent_id.clone();
+        let project_id = payload.project_id.clone();
+        let project_name = payload.project_name.clone();
+        let requested_gpu = payload.requested_gpu.clone();
+        let parent_payload = parent_payload.clone();
+        move |store, _timeout| {
+            store.create_job_with_id(
+                parent_id,
+                CreateJob {
+                    job_type: JobType::VectorGenerate,
+                    project_id: Some(project_id),
+                    project_name,
+                    payload: parent_payload,
+                    requested_gpu,
+                    source_job_id,
+                    duplicate_of_job_id,
+                    attempts,
+                    initial_status: Some(JobStatus::PendingWorkflow),
+                },
+            )
+        }
+    })
+    .await?;
+    publish(&state, "job.updated", &parent);
+    publish_queue(&state).await?;
+
+    let mut child_request = raster_request;
+    child_request.workflow_parent_id = Some(parent_id.clone());
+    child_request.workflow_id = Some(workflow_id.clone());
+    let child = match create_image_job(State(state.clone()), ApiJson(child_request)).await {
+        Ok((_status, Json(child))) => child,
+        Err(error) => {
+            let _ = store_call(state.clone(), {
+                let parent_id = parent_id.clone();
+                let detail = error.detail.clone();
+                move |store, _timeout| {
+                    store
+                        .terminate_pending_workflow_job(
+                            &parent_id,
+                            JobStatus::Failed,
+                            "Raster stage could not be queued.",
+                            Some(&detail),
+                        )
+                        .map(|transition| transition.job)
+                }
+            })
+            .await;
+            return Err(error);
+        }
+    };
+    let mut linked_payload = parent.payload.clone();
+    if let Some(workflow) = linked_payload
+        .get_mut("workflow")
+        .and_then(Value::as_object_mut)
+    {
+        workflow.insert("childJobId".to_owned(), Value::String(child.id.clone()));
+        if let Some(seed) = child
+            .payload
+            .get("seeds")
+            .and_then(Value::as_array)
+            .and_then(|seeds| seeds.first())
+            .cloned()
+        {
+            workflow
+                .get_mut("rasterStage")
+                .and_then(Value::as_object_mut)
+                .expect("raster stage object")
+                .insert("seed".to_owned(), seed);
+        }
+    }
+    let linked = store_call(state.clone(), {
+        let parent_id = parent_id.clone();
+        move |store, _timeout| store.update_pending_workflow_payload(&parent_id, linked_payload)
+    })
+    .await?;
+    if !linked.changed {
+        let _ = store_call(state.clone(), {
+            let child_id = child.id.clone();
+            move |store, _timeout| store.cancel_job(&child_id)
+        })
+        .await;
+        return Ok(linked.job);
+    }
+    publish(&state, "job.updated", &linked.job);
+    spawn_vector_prompt_workflow_coordinator(state, parent_id);
+    Ok(linked.job)
+}
+
+pub(crate) async fn create_vector_prompt_workflow(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<VectorPromptWorkflowRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let job =
+        create_vector_prompt_workflow_internal(state, payload, VectorWorkflowReplayRelation::Fresh)
+            .await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+fn vector_prompt_workflow(payload: &JsonObject) -> Option<&serde_json::Map<String, Value>> {
+    payload
+        .get("workflow")
+        .and_then(Value::as_object)
+        .filter(|workflow| {
+            workflow.get("kind").and_then(Value::as_str) == Some(VECTOR_PROMPT_WORKFLOW_KIND)
+        })
+}
+
+async fn cleanup_vector_prompt_intermediate(
+    state: &AppState,
+    parent: &JobSnapshot,
+) -> Result<bool, ApiError> {
+    let Some(workflow) = vector_prompt_workflow(&parent.payload) else {
+        return Ok(false);
+    };
+    let Some(asset_id) = workflow
+        .get("intermediateAssetId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Ok(false);
+    };
+    cleanup_named_vector_prompt_intermediate(state, parent, &asset_id).await
+}
+
+/// Cleanup by the asset id held by the coordinator, including the narrow race where the child
+/// asset has been ownership-stamped but cancel wins before that id is attached to the parent row.
+async fn cleanup_named_vector_prompt_intermediate(
+    state: &AppState,
+    parent: &JobSnapshot,
+    asset_id: &str,
+) -> Result<bool, ApiError> {
+    let Some(project_id) = parent.project_id.clone() else {
+        return Ok(false);
+    };
+    let Some(workflow_id) = vector_prompt_workflow(&parent.payload)
+        .and_then(|workflow| workflow.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Ok(false);
+    };
+    let parent_id = parent.id.clone();
+    let asset_id = asset_id.to_owned();
+    project_call(state.clone(), move |store| {
+        store.purge_vector_workflow_intermediate(&project_id, &asset_id, &workflow_id, &parent_id)
+    })
+    .await
+}
+
+/// Cancel the ordinary raster child when its composed parent is canceled. Cleanup remains
+/// ownership-checked and idempotent, so this is safe before, during, or after child publication.
+pub(crate) async fn cascade_cancel_vector_prompt_workflow(
+    state: &AppState,
+    parent: &JobSnapshot,
+) -> Result<(), ApiError> {
+    let Some(workflow) = vector_prompt_workflow(&parent.payload) else {
+        return Ok(());
+    };
+    if let Some(child_id) = workflow
+        .get("childJobId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
+        let child = store_call(state.clone(), move |store, _timeout| {
+            store.cancel_job(&child_id)
+        })
+        .await?;
+        publish(state, "job.updated", &child);
+    }
+    let _ = cleanup_vector_prompt_intermediate(state, parent).await?;
+    Ok(())
+}
+
+fn spawn_vector_prompt_workflow_coordinator(state: AppState, parent_id: String) {
+    tokio::spawn(async move {
+        if let Err(error) = run_vector_prompt_workflow_coordinator(&state, &parent_id).await {
+            tracing::error!(
+                event = "vector_prompt_workflow_coordinator_failed",
+                %parent_id,
+                error = %error.detail,
+                "prompt-to-vector workflow coordinator stopped"
+            );
+        }
+    });
+}
+
+/// Resume every disclosed workflow visible in the retained jobs window. Pending parents continue
+/// their child watch; queued/active parents continue terminal cleanup; terminal failures get one
+/// idempotent ownership-checked cleanup attempt.
+pub(crate) fn spawn_vector_prompt_workflow_recovery(state: AppState) {
+    tokio::spawn(async move {
+        let jobs = match store_call(state.clone(), |store, _timeout| {
+            store.list_vector_prompt_workflow_jobs_for_recovery()
+        })
+        .await
+        {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                tracing::error!(event = "vector_workflow_recovery_scan_failed", error = %error.detail);
+                return;
+            }
+        };
+        for job in jobs {
+            if vector_prompt_workflow(&job.payload).is_some() {
+                spawn_vector_prompt_workflow_coordinator(state.clone(), job.id);
+            }
+        }
+    });
+}
+
+async fn terminate_vector_prompt_parent(
+    state: &AppState,
+    parent: &JobSnapshot,
+    status: JobStatus,
+    message: &str,
+    error: &str,
+) -> Result<JobSnapshot, ApiError> {
+    let transition = store_call(state.clone(), {
+        let parent_id = parent.id.clone();
+        let message = message.to_owned();
+        let error = error.to_owned();
+        move |store, _timeout| {
+            store.terminate_pending_workflow_job(&parent_id, status, &message, Some(&error))
+        }
+    })
+    .await?;
+    if transition.changed {
+        publish(state, "job.updated", &transition.job);
+        publish_queue(state).await?;
+    }
+    Ok(transition.job)
+}
+
+async fn prepare_vector_parent_from_intermediate(
+    state: &AppState,
+    parent: &JobSnapshot,
+    child: &JobSnapshot,
+    asset_id: &str,
+) -> Result<JsonObject, ApiError> {
+    let project_id = parent
+        .project_id
+        .clone()
+        .ok_or_else(|| ApiError::internal("vector workflow parent has no project"))?;
+    let workflow = vector_prompt_workflow(&parent.payload)
+        .ok_or_else(|| ApiError::internal("vector workflow metadata is missing"))?;
+    let workflow_id = workflow
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("vector workflow id is missing"))?
+        .to_owned();
+    let vector_stage = workflow_stage(&parent.payload, "vectorStage")?;
+    let vector_model_id = vector_stage
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("vector workflow model is missing"))?
+        .to_owned();
+    let expected_revision = vector_stage
+        .get("revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("vector workflow revision is missing"))?
+        .to_owned();
+    let model = crate::models::model_catalog(state)
+        .await?
+        .into_iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(vector_model_id.as_str()))
+        .unwrap_or_else(|| json!({}));
+    let actual_revision = authoritative_workflow_revision(&model)?;
+    validate_workflow_revision("vector", &actual_revision, Some(&expected_revision))?;
+    validate_vector_model_manifest(&vector_model_id, VectorMode::ImageToSvg, &model)?;
+    validate_vector_model_availability(&vector_model_id, enqueue_backend(state), &model)?;
+    validate_vector_source_asset(state.clone(), project_id.clone(), asset_id.to_owned()).await?;
+
+    let child_id = child.id.clone();
+    let marked = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let asset_id = asset_id.to_owned();
+        let parent_id = parent.id.clone();
+        let workflow_id = workflow_id.clone();
+        move |store| {
+            store.mark_vector_workflow_intermediate(
+                &project_id,
+                &asset_id,
+                &workflow_id,
+                &parent_id,
+                &child_id,
+            )
+        }
+    })
+    .await?;
+    if marked.get("type").and_then(Value::as_str) != Some("image") {
+        return Err(ApiError::internal(
+            "workflow intermediate changed type while being retained",
+        ));
+    }
+
+    let mut resolved = parent.payload.clone();
+    resolved.insert(
+        "sourceAssetId".to_owned(),
+        Value::String(asset_id.to_owned()),
+    );
+    resolved.insert("modelManifestEntry".to_owned(), model);
+    let workflow = resolved
+        .get_mut("workflow")
+        .and_then(Value::as_object_mut)
+        .expect("workflow object");
+    workflow.insert(
+        "intermediateAssetId".to_owned(),
+        Value::String(asset_id.to_owned()),
+    );
+    workflow
+        .get_mut("rasterStage")
+        .and_then(Value::as_object_mut)
+        .expect("raster stage")
+        .insert("jobId".to_owned(), Value::String(child.id.clone()));
+    Ok(resolved)
+}
+
+async fn run_vector_prompt_workflow_coordinator(
+    state: &AppState,
+    parent_id: &str,
+) -> Result<(), ApiError> {
+    let mut completed_without_asset_polls = 0u32;
+    loop {
+        let parent = store_call(state.clone(), {
+            let parent_id = parent_id.to_owned();
+            move |store, _timeout| store.get_job(&parent_id)
+        })
+        .await?;
+        if vector_prompt_workflow(&parent.payload).is_none() {
+            return Ok(());
+        }
+        if matches!(parent.status, JobStatus::Completed) {
+            return Ok(());
+        }
+        if matches!(
+            parent.status,
+            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+        ) {
+            let _ = cleanup_vector_prompt_intermediate(state, &parent).await?;
+            return Ok(());
+        }
+        if parent.status != JobStatus::PendingWorkflow {
+            tokio::time::sleep(VECTOR_WORKFLOW_POLL_INTERVAL).await;
+            continue;
+        }
+        let child_id = vector_prompt_workflow(&parent.payload)
+            .and_then(|workflow| workflow.get("childJobId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let Some(child_id) = child_id else {
+            tokio::time::sleep(VECTOR_WORKFLOW_POLL_INTERVAL).await;
+            continue;
+        };
+        let child = store_call(state.clone(), {
+            let child_id = child_id.clone();
+            move |store, _timeout| store.get_job(&child_id)
+        })
+        .await?;
+        match child.status {
+            JobStatus::Completed => {
+                let asset_id = child
+                    .result
+                    .get("assetIds")
+                    .and_then(Value::as_array)
+                    .and_then(|ids| ids.first())
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let Some(asset_id) = asset_id else {
+                    // Terminal progress is accepted before its durable asset side effect completes.
+                    // Give that idempotent recovery handoff time to publish the child sidecar.
+                    completed_without_asset_polls += 1;
+                    if completed_without_asset_polls < 300 {
+                        tokio::time::sleep(VECTOR_WORKFLOW_POLL_INTERVAL).await;
+                        continue;
+                    }
+                    let terminal = terminate_vector_prompt_parent(
+                        state,
+                        &parent,
+                        JobStatus::Failed,
+                        "Raster stage completed without a publishable asset.",
+                        "vector_workflow_raster_asset_missing",
+                    )
+                    .await?;
+                    let _ = cleanup_vector_prompt_intermediate(state, &terminal).await?;
+                    return Ok(());
+                };
+                match prepare_vector_parent_from_intermediate(state, &parent, &child, &asset_id)
+                    .await
+                {
+                    Ok(payload) => {
+                        let transition = store_call(state.clone(), {
+                            let parent_id = parent.id.clone();
+                            move |store, _timeout| {
+                                store.promote_pending_workflow_job(&parent_id, payload)
+                            }
+                        })
+                        .await?;
+                        if transition.changed {
+                            publish(state, "job.updated", &transition.job);
+                            publish_queue(state).await?;
+                        } else {
+                            let _ = cleanup_named_vector_prompt_intermediate(
+                                state,
+                                &transition.job,
+                                &asset_id,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    }
+                    Err(error) => {
+                        let terminal = terminate_vector_prompt_parent(
+                            state,
+                            &parent,
+                            JobStatus::Failed,
+                            "Vector stage became unavailable before dispatch.",
+                            &error.detail,
+                        )
+                        .await?;
+                        let _ = cleanup_vector_prompt_intermediate(state, &terminal).await?;
+                        return Ok(());
+                    }
+                }
+            }
+            JobStatus::Failed | JobStatus::Interrupted => {
+                let terminal = terminate_vector_prompt_parent(
+                    state,
+                    &parent,
+                    JobStatus::Failed,
+                    "Raster stage failed; vectorization was not dispatched.",
+                    child
+                        .error
+                        .as_deref()
+                        .unwrap_or("vector_workflow_raster_failed"),
+                )
+                .await?;
+                let _ = cleanup_vector_prompt_intermediate(state, &terminal).await?;
+                return Ok(());
+            }
+            JobStatus::Canceled => {
+                let terminal = terminate_vector_prompt_parent(
+                    state,
+                    &parent,
+                    JobStatus::Canceled,
+                    "Raster stage was canceled; vectorization was not dispatched.",
+                    "vector_workflow_raster_canceled",
+                )
+                .await?;
+                let _ = cleanup_vector_prompt_intermediate(state, &terminal).await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+        tokio::time::sleep(VECTOR_WORKFLOW_POLL_INTERVAL).await;
+    }
+}
+
+pub(crate) async fn replay_vector_prompt_workflow(
+    state: AppState,
+    job_id: &str,
+    duplicate: bool,
+    requested_gpu: Option<String>,
+    has_payload_changes: bool,
+) -> Result<Option<JobSnapshot>, ApiError> {
+    let original = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    let Some(workflow) = vector_prompt_workflow(&original.payload) else {
+        return Ok(None);
+    };
+    if has_payload_changes {
+        let operation = if duplicate { "duplicate" } else { "retry" };
+        return Err(ApiError::bad_request(format!(
+            "Create-from-Prompt {operation} does not accept payloadChanges; replay the recorded two-stage recipe."
+        )));
+    }
+    let raster = workflow
+        .get("rasterStage")
+        .ok_or_else(|| ApiError::internal("workflow raster stage is missing"))?;
+    let vector = workflow
+        .get("vectorStage")
+        .ok_or_else(|| ApiError::internal("workflow vector stage is missing"))?;
+    let request: VectorPromptWorkflowRequest = serde_json::from_value(json!({
+        "projectId": original.project_id,
+        "projectName": original.project_name,
+        "prompt": raster.get("prompt"),
+        "negativePrompt": raster.get("negativePrompt"),
+        "rasterModel": raster.get("model"),
+        "vectorModel": vector.get("model"),
+        "seed": raster.get("seed"),
+        "width": raster.get("width"),
+        "height": raster.get("height"),
+        "sampling": vector.get("sampling"),
+        "detailBudget": vector.get("detailBudget"),
+        "requestedGpu": requested_gpu.unwrap_or(original.requested_gpu.clone()),
+        "expectedRasterRevision": raster.get("revision"),
+        "expectedVectorRevision": vector.get("revision"),
+    }))
+    .map_err(|error| {
+        ApiError::internal(format!("stored vector workflow cannot replay: {error}"))
+    })?;
+    let relation = if duplicate {
+        VectorWorkflowReplayRelation::Duplicate {
+            duplicate_of_job_id: &original.id,
+        }
+    } else {
+        if original.attempts >= sceneworks_core::jobs_store::MAX_JOB_ATTEMPTS {
+            return Err(ApiError::bad_request("Job retry limit reached."));
+        }
+        VectorWorkflowReplayRelation::Retry {
+            source_job_id: &original.id,
+            attempts: original.attempts + 1,
+        }
+    };
+    create_vector_prompt_workflow_internal(state, request, relation)
+        .await
+        .map(Some)
+}
+
 /// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
 /// source shape and operation select one provider registration; family identity alone never admits
 /// a request. Builtins retain their id-keyed routing and are out of this family gate.

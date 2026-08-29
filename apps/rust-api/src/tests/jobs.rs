@@ -318,6 +318,7 @@ fn write_vector_test_manifest_with_provider_state(
                 "downloads": [{
                     "provider": "huggingface",
                     "repo": "SceneWorks/starvector-test",
+                    "revision": "2222222222222222222222222222222222222222",
                     "files": ["config.json", "model.safetensors"]
                 }],
             }],
@@ -336,6 +337,373 @@ fn write_vector_test_manifest_with_provider_state(
         .expect("test vector receipt writes");
     std::fs::write(installed.join("config.json"), b"{}").expect("test config writes");
     std::fs::write(installed.join("model.safetensors"), b"weights").expect("test weights write");
+}
+
+fn write_vector_workflow_test_manifest(
+    config_dir: &std::path::Path,
+    raster_revision: &str,
+    vector_revision: &str,
+) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "models": [
+                {
+                    "id": "flux_schnell",
+                    "name": "Raster test",
+                    "type": "image",
+                    "family": "flux",
+                    "adapter": "flux_diffusers",
+                    "capabilities": ["text_to_image"],
+                    "defaults": { "count": 1, "resolution": { "width": 512, "height": 512 } },
+                    "downloads": [{
+                        "provider": "huggingface",
+                        "repo": "SceneWorks/raster-workflow-test",
+                        "revision": raster_revision,
+                        "files": ["config.json", "model.safetensors"]
+                    }]
+                },
+                {
+                    "id": "starvector_test",
+                    "name": "Vector test",
+                    "type": "vector",
+                    "family": "starvector",
+                    "adapter": "starvector",
+                    "capabilities": ["image_to_svg"],
+                    "vector": {
+                        "acceptsTextGuidance": false,
+                        "providers": {
+                            "mlx": { "id": "mlx-starvector-test", "available": true },
+                            "candle": { "id": "candle-starvector-test", "available": true }
+                        }
+                    },
+                    "downloads": [{
+                        "provider": "huggingface",
+                        "repo": "SceneWorks/vector-workflow-test",
+                        "revision": vector_revision,
+                        "files": ["config.json", "model.safetensors"]
+                    }]
+                }
+            ]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models write");
+    write_empty_sibling_manifests(config_dir);
+    let root = config_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("test root");
+    for repo in [
+        "SceneWorks__raster-workflow-test",
+        "SceneWorks__vector-workflow-test",
+    ] {
+        let installed = root.join("data/models").join(repo);
+        std::fs::create_dir_all(&installed).expect("workflow install dir creates");
+        std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
+            .expect("workflow receipt writes");
+        std::fs::write(installed.join("config.json"), b"{}").expect("config writes");
+        std::fs::write(installed.join("model.safetensors"), b"weights").expect("weights write");
+    }
+}
+
+#[test]
+fn prompt_vector_revision_identity_rejects_mutable_missing_and_conflicting_primaries() {
+    let revision = "1111111111111111111111111111111111111111";
+    assert_eq!(
+        crate::generation::authoritative_workflow_revision(&json!({
+            "downloads": [{ "revision": revision }]
+        }))
+        .expect("one immutable revision"),
+        revision
+    );
+    for downloads in [
+        json!([]),
+        json!([{ "revision": "main" }]),
+        json!([{ "revision": revision }, { "revision": "main" }]),
+        json!([
+            { "revision": revision },
+            { "revision": "2222222222222222222222222222222222222222" }
+        ]),
+    ] {
+        let error = crate::generation::authoritative_workflow_revision(&json!({
+            "downloads": downloads
+        }))
+        .expect_err("ambiguous identity refuses");
+        assert_eq!(error.code, Some("vector_workflow_artifact_ambiguous"));
+    }
+}
+
+#[test]
+fn prompt_vector_intermediate_ownership_is_server_authored_and_worker_facts_are_replaced() {
+    let public_request: crate::dto::ImageJobRequest = serde_json::from_value(json!({
+        "projectId": "project-1",
+        "prompt": "ordinary image",
+        "workflowParentId": "job_forged",
+        "workflowId": "vwf_forged"
+    }))
+    .expect("image request parses");
+    assert!(public_request.workflow_parent_id.is_none());
+    assert!(public_request.workflow_id.is_none());
+
+    let payload = json!({
+        "workflowParentId": "job_parent1",
+        "workflowId": "vwf_workflow1"
+    })
+    .as_object()
+    .expect("payload object")
+    .clone();
+    let mut writes = vec![json!({
+        "assetId": "asset-1",
+        "vectorWorkflowOwnership": {
+            "workflowId": "vwf_worker_forgery",
+            "parentJobId": "job_worker_forgery"
+        }
+    })];
+    crate::jobs::stamp_vector_workflow_asset_writes(
+        &crate::JobType::ImageGenerate,
+        &payload,
+        "job_child1",
+        &mut writes,
+    );
+    assert_eq!(
+        writes[0]["vectorWorkflowOwnership"],
+        json!({
+            "role": "retained_intermediate",
+            "publication": "unpublished",
+            "workflowId": "vwf_workflow1",
+            "parentJobId": "job_parent1",
+            "childJobId": "job_child1",
+            "hidden": true,
+        })
+    );
+
+    crate::jobs::stamp_vector_workflow_asset_writes(
+        &crate::JobType::VideoGenerate,
+        &payload,
+        "job_child1",
+        &mut writes,
+    );
+    assert!(writes[0].get("vectorWorkflowOwnership").is_none());
+}
+
+#[tokio::test]
+async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascades() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_workflow_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Prompt vectors" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, parent) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "a geometric fox mark",
+            "negativePrompt": "photographic texture",
+            "rasterModel": "flux_schnell",
+            "vectorModel": "starvector_test",
+            "seed": 17,
+            "detailBudget": {
+                "maxNewTokens": 2048,
+                "maxSvgBytes": 131072,
+                "maxWallTimeMs": 60000
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{parent}");
+    assert_eq!(parent["type"], "vector_generate");
+    assert_eq!(parent["status"], "pending_workflow");
+    assert_eq!(parent["stage"], "pending_workflow");
+    assert!(parent["payload"]["sourceAssetId"].is_null());
+    let workflow = &parent["payload"]["workflow"];
+    assert_eq!(workflow["kind"], "create_from_prompt");
+    assert_eq!(workflow["disclosure"], "raster_to_vector");
+    assert_eq!(
+        workflow["intermediateVisibility"],
+        "hidden_retained_on_success"
+    );
+    assert_eq!(
+        workflow["rasterStage"]["revision"],
+        "1111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        workflow["vectorStage"]["revision"],
+        "2222222222222222222222222222222222222222"
+    );
+    assert_eq!(workflow["vectorStage"]["mode"], "image_to_svg");
+    let parent_id = parent["id"].as_str().expect("parent id");
+    let child_id = workflow["childJobId"].as_str().expect("child id");
+
+    let (_, child) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{child_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(child["type"], "image_generate");
+    assert_eq!(child["status"], "queued");
+    assert_eq!(child["payload"]["workflowParentId"], parent_id);
+    assert_eq!(child["payload"]["workflowId"], workflow["id"]);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{parent_id}/cancel"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["status"], "canceled");
+    let (_, child) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{child_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(child["status"], "canceled");
+    let (_, assets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    assert!(assets.as_array().expect("assets").is_empty());
+
+    let (_, bulk_parent) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "a monoline heron",
+            "rasterModel": "flux_schnell",
+            "vectorModel": "starvector_test"
+        }),
+    )
+    .await;
+    let bulk_parent_id = bulk_parent["id"].as_str().expect("bulk parent id");
+    let bulk_child_id = bulk_parent["payload"]["workflow"]["childJobId"]
+        .as_str()
+        .expect("bulk child id");
+    let (status, bulk) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel-pending",
+        json!({ "projectId": project_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bulk}");
+    assert_eq!(bulk["canceled"], 2);
+    for id in [bulk_parent_id, bulk_child_id] {
+        let (_, canceled) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(canceled["status"], "canceled");
+    }
+}
+
+#[tokio::test]
+async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typed() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_workflow_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Prompt replay" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let body = json!({
+        "projectId": project_id,
+        "prompt": "a single-line owl",
+        "rasterModel": "flux_schnell",
+        "vectorModel": "starvector_test",
+        "seed": 23
+    });
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().expect("original id");
+    let original_child = original["payload"]["workflow"]["childJobId"]
+        .as_str()
+        .expect("original child");
+
+    let (status, replay) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(replay["sourceJobId"], original_id);
+    assert_eq!(replay["attempts"], 2);
+    assert_ne!(replay["id"], original["id"]);
+    assert_ne!(
+        replay["payload"]["workflow"]["id"],
+        original["payload"]["workflow"]["id"]
+    );
+    assert_ne!(replay["payload"]["workflow"]["childJobId"], original_child);
+    assert_eq!(
+        replay["payload"]["workflow"]["rasterStage"]["revision"],
+        original["payload"]["workflow"]["rasterStage"]["revision"]
+    );
+    assert_eq!(
+        replay["payload"]["workflow"]["vectorStage"]["revision"],
+        original["payload"]["workflow"]["vectorStage"]["revision"]
+    );
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(before.as_array().expect("jobs").len(), 4);
+    let mut drifted = body;
+    drifted["expectedRasterRevision"] = json!("3333333333333333333333333333333333333333");
+    drifted["expectedVectorRevision"] = json!("2222222222222222222222222222222222222222");
+    let (status, drift) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        drifted,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{drift}");
+    assert_eq!(drift["code"], "vector_workflow_revision_drift");
+    assert_eq!(drift["context"]["stage"], "raster");
+    let (_, after) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(after.as_array().expect("jobs").len(), 4);
 }
 
 #[tokio::test]

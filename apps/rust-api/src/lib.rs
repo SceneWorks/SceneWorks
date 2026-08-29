@@ -152,8 +152,9 @@ use training::{
 };
 mod generation;
 use generation::{
-    create_audio_job, create_image_job, create_interleave_job, create_vector_job, create_video_job,
-    create_vqa_job, parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
+    create_audio_job, create_image_job, create_interleave_job, create_vector_job,
+    create_vector_prompt_workflow, create_video_job, create_vqa_job,
+    parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
 use generation::{validate_interleave_job, validate_vqa_job};
@@ -191,7 +192,7 @@ use dto::{
     PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
     SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
     TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VectorMode,
-    VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    VectorPromptWorkflowRequest, VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
@@ -1372,6 +1373,7 @@ fn create_app_with_state_mode(
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
+    generation::spawn_vector_prompt_workflow_recovery(state.clone());
 
     // MCP server (epic 10231, sc-10233): the rmcp streamable-HTTP service is
     // nested at `/mcp` INSIDE this router, so the `access_control` layer below
@@ -1707,6 +1709,10 @@ fn create_app_with_state_mode(
         )
         .route("/api/v1/image/jobs", post(create_image_job))
         .route("/api/v1/image/vectorize/jobs", post(create_vector_job))
+        .route(
+            "/api/v1/image/vectorize/prompt/jobs",
+            post(create_vector_prompt_workflow),
+        )
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
