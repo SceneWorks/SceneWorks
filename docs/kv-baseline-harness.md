@@ -10,13 +10,15 @@ file at record time, any non-nominal thermal state, failed cleanup, and any
 detected full-cache temporary.
 
 The receipt shape is described by
-`packages/schemas/kv-baseline-receipt.schema.json`. Producers should write
-receipts atomically under `docs/calibration/` with `record`; comparison reports
-are generated with `compare`:
+`packages/schemas/kv-baseline-receipt.schema.json`. Producers write each receipt
+as an atomically renamed **directory** under `docs/calibration/`; a set contains
+`receipt.json`, `receipt.md`, and both exact-byte sidecars. The Markdown embeds
+the JSON semantic hash, so an interrupted or mixed-generation set is rejected.
+Comparison reports are generated with `compare`:
 
 ```text
-node scripts/kv-baseline-harness.mjs record input.json receipt.json
-node scripts/kv-baseline-harness.mjs compare dense.json compressed.json comparison.json
+node scripts/kv-baseline-harness.mjs record input.json dense-receipt
+node scripts/kv-baseline-harness.mjs compare dense-receipt compressed-receipt comparison.json
 ```
 
 `record` requires the local-only `provenance.modelFilePath` input and verifies
@@ -24,8 +26,8 @@ either that exact file or every resolved file in a sharded snapshot directory;
 directory identity is the sorted path/byte-count/content-hash aggregate used by
 the inference producer. It then verifies
 its byte count and SHA-256 before removing the path from the portable receipt.
-Both `record` and `compare` atomically generate the JSON artifact, a Markdown
-human receipt with the same basename, and exact-byte SHA-256 sidecars. The
+`record` atomically generates the complete receipt set; `compare` generates its
+JSON artifact, Markdown report, and exact-byte SHA-256 sidecars. The
 checked-in quality contract is itself verified against its exact-byte sidecar
 before the module accepts any receipt.
 

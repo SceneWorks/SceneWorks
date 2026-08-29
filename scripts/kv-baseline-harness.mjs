@@ -5,7 +5,7 @@ import addFormats from "ajv-formats";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
-import { readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -844,6 +844,12 @@ export function renderReceiptMarkdown(receipt) {
     + (fallbackLifecycle.length ? `- Explicit dense fallbacks: ${fallbackLifecycle.join("; ")}\n` : "");
 }
 
+function assertMarkdownBound(markdown, receipt) {
+  if (!markdown.includes(`- Receipt hash: ${receipt.receiptSha256}\n`)) {
+    fail("human receipt is not bound to the sealed JSON receipt");
+  }
+}
+
 export function renderComparisonMarkdown(comparison) {
   return `# Dense/compressed KV comparison\n\n`
     + `- Dense run: ${comparison.denseRunId}\n`
@@ -869,6 +875,37 @@ async function readSealedText(file) {
   const expected = parseSidecar(await readFile(`${file}.sha256`, "utf8"), path.basename(file));
   if (sha256(bytes) !== expected) fail(`sidecar hash mismatch for ${file}`);
   return bytes;
+}
+
+/** Publish JSON, human receipt, and both sidecars as one directory rename. */
+export async function writeReceiptSet(directory, receipt) {
+  validateReceipt(receipt);
+  const parent = path.dirname(directory);
+  const base = path.basename(directory);
+  const staging = path.join(parent, `.${base}.staging-${process.pid}-${randomUUID()}`);
+  try {
+    await mkdir(staging, { recursive: false });
+    const json = `${canonicalJson(receipt)}\n`;
+    const markdown = `${renderReceiptMarkdown(receipt)}\n`;
+    assertMarkdownBound(markdown, receipt);
+    await Promise.all([
+      writeFile(path.join(staging, "receipt.json"), json, { flag: "wx" }),
+      writeFile(path.join(staging, "receipt.md"), markdown, { flag: "wx" }),
+      writeFile(path.join(staging, "receipt.json.sha256"), `${sha256(json)}  receipt.json\n`, { flag: "wx" }),
+      writeFile(path.join(staging, "receipt.md.sha256"), `${sha256(markdown)}  receipt.md\n`, { flag: "wx" }),
+    ]);
+    await rename(staging, directory);
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function readReceiptSet(directory) {
+  const receipt = await readSealedJson(path.join(directory, "receipt.json"));
+  const markdown = await readSealedText(path.join(directory, "receipt.md"));
+  assertMarkdownBound(markdown, receipt);
+  return receipt;
 }
 
 function phaseByName(receipt, phase) {
@@ -979,8 +1016,8 @@ export async function cancellationSafe(work, cleanup, signal) {
 
 function usage() {
   console.error(
-    "usage: kv-baseline-harness.mjs record <input> <receipt> | "
-      + "compare <dense> <compressed> <comparison> | campaign <receipt-directory> <manifest>",
+    "usage: kv-baseline-harness.mjs record <input> <receipt-set-directory> | "
+      + "compare <dense-set> <compressed-set> <comparison> | campaign <receipt-set-directory> <manifest>",
   );
 }
 
@@ -990,25 +1027,21 @@ async function main() {
   if (command === "record" && first && second && !third) {
     const input = JSON.parse(await readFile(first, "utf8"));
     const receipt = await buildVerifiedReceipt(input);
-    await writeSealedText(humanPath(second), `${renderReceiptMarkdown(receipt)}\n`);
-    await writeSealedJson(second, receipt);
+    await writeReceiptSet(second, receipt);
     return;
   }
   if (command === "compare" && first && second && third) {
-    const dense = await readSealedJson(first);
-    const compressed = await readSealedJson(second);
+    const dense = await readReceiptSet(first);
+    const compressed = await readReceiptSet(second);
     const comparison = compareReceipts(dense, compressed);
     await writeSealedText(humanPath(third), `${renderComparisonMarkdown(comparison)}\n`);
     await writeSealedJson(third, comparison);
     return;
   }
   if (command === "campaign" && first && second && !third) {
-    const files = (await readdir(first)).filter((file) => file.endsWith(".receipt.json")).sort();
-    const receipts = await Promise.all(files.map(async (file) => {
-      const receiptPath = path.join(first, file);
-      await readSealedText(humanPath(receiptPath));
-      return readSealedJson(receiptPath);
-    }));
+    const entries = await readdir(first, { withFileTypes: true });
+    const sets = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    const receipts = await Promise.all(sets.map((name) => readReceiptSet(path.join(first, name))));
     await writeSealedJson(second, validateCampaign(receipts));
     return;
   }
