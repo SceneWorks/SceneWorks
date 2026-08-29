@@ -346,7 +346,7 @@ export const viewTitles = {
   Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
   Editor: { title: "Video Editor", blurb: "Cut, sequence and export your timeline." },
   ImageEditor: { title: "Image Editor", blurb: "Crop, upscale and refine a single image on a canvas." },
-  VectorStudio: { title: "Vector Studio", blurb: "Convert a project raster image into a clean SVG." },
+  VectorStudio: { title: "Vector Studio", blurb: "Convert a project raster image or create one through a disclosed raster-to-vector workflow." },
   Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
@@ -2527,6 +2527,10 @@ export function App() {
     () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vector, token, project: activeProject, requestedGpu, setJobs, setError }),
     [token, activeProject, requestedGpu, setError],
   );
+  const createVectorPromptWorkflow = useMemo(
+    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vectorPrompt, token, project: activeProject, requestedGpu, setJobs, setError }),
+    [token, activeProject, requestedGpu, setError],
+  );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
   // on the generic /api/v1/jobs endpoint (like image_upscale), not the generation video
@@ -3587,6 +3591,7 @@ export function App() {
     createVideoUpscaleJob,
     createImageJob,
     createVectorJob,
+    createVectorPromptWorkflow,
     createAudioJob,
     refinePrompt,
     magicPrompt,
@@ -3733,7 +3738,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
-    createVideoJob, createVideoUpscaleJob, createImageJob, createVectorJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,

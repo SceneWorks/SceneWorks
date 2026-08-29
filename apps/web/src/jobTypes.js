@@ -59,7 +59,7 @@ export const terminalStatuses = new Set(["completed", "failed", "canceled", "int
 // queue). These are exactly the jobs the bulk "Cancel pending" action terminates
 // immediately — mirrors the backend cancel fast path / PENDING_STATUSES
 // (queued + pending_caption).
-export const pendingStatuses = new Set(["queued", "pending_caption"]);
+export const pendingStatuses = new Set(["queued", "pending_caption", "pending_workflow"]);
 
 // Statuses that surface job actions (retry/repeat/cancel) in the queue.
 export const actionStatuses = new Set(["failed", "canceled", "interrupted", "completed"]);

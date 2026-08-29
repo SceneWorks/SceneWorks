@@ -334,6 +334,10 @@ string_enum! {
         // stranded row to `queued` (see jobs_store::mark_interrupted_on_startup), so it can
         // never sit un-claimable forever.
         PendingCaption => "pending_caption",
+        // Accepted but not worker-claimable while an API-owned multi-job workflow waits for its
+        // prerequisite asset. Unlike pending_caption, restart recovery resumes the coordinator and
+        // never degrades this row directly to queued.
+        PendingWorkflow => "pending_workflow",
         Preparing => "preparing",
         Downloading => "downloading",
         LoadingModel => "loading_model",
@@ -352,6 +356,7 @@ string_enum! {
         // Stage twin of JobStatus::PendingCaption (sc-9120): the job is awaiting the
         // API-side async payload rewrite (Ideogram 4 auto-caption) before it becomes queued.
         PendingCaption => "pending_caption",
+        PendingWorkflow => "pending_workflow",
         Preparing => "preparing",
         Downloading => "downloading",
         Importing => "importing",

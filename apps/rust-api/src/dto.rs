@@ -791,6 +791,12 @@ pub(crate) struct ImageJobRequest {
     pub(crate) upscale: ImageUpscaleRequest,
     #[serde(default)]
     pub(crate) advanced: JsonObject,
+    /// Server-authored link for a disclosed composed workflow. Public callers cannot use this to
+    /// influence routing; the workflow route creates it after selecting the parent id.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_parent_id: Option<String>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -872,6 +878,40 @@ pub(crate) struct VectorRequest {
     pub(crate) detail_budget: VectorDetailBudget,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+}
+
+/// Disclosed prompt-to-vector composition. This never means native text-to-SVG: the prompt is
+/// rendered by an ordinary text-to-image model and the resulting retained raster is submitted to
+/// the vector model in image_to_svg mode.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VectorPromptWorkflowRequest {
+    pub(crate) project_id: String,
+    #[serde(default)]
+    pub(crate) project_name: Option<String>,
+    pub(crate) prompt: String,
+    #[serde(default)]
+    pub(crate) negative_prompt: String,
+    pub(crate) raster_model: String,
+    pub(crate) vector_model: String,
+    #[serde(default)]
+    pub(crate) seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) height: Option<u32>,
+    #[serde(default)]
+    pub(crate) sampling: VectorSampling,
+    #[serde(default)]
+    pub(crate) detail_budget: VectorDetailBudget,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Optional immutable identities used only by replay. Fresh requests omit them; the API stamps
+    /// authoritative revisions. Replay supplies them and fails typed if the catalog has moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_raster_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_vector_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

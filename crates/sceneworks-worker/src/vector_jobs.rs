@@ -74,6 +74,8 @@ struct VectorJobPayload {
     sampling: VectorSampling,
     detail_budget: VectorDetailBudget,
     model_manifest_entry: Value,
+    #[serde(default)]
+    workflow: Option<Value>,
 }
 
 /// Backend-neutral input for the later runtime bridge. The adapter deliberately owns multimodal
@@ -427,6 +429,7 @@ pub(crate) async fn run_vector_job_with_provider(
         "detailBudget": payload.detail_budget,
         "sanitizerVersion": VECTOR_SANITIZER_VERSION,
         "rendererVersion": VECTOR_RENDERER_VERSION,
+        "workflow": payload.workflow,
         "count": 1,
         "normalizedWidth": canonical.width,
         "normalizedHeight": canonical.height,
