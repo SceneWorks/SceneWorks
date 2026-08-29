@@ -425,7 +425,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [
       "sceneWorksRevision", "inferenceRevision", "mlxRevision", "dependencyLockSha256",
       "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
-      "thermalState", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion",
+      "thermalState", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
     ],
     "provenance",
   );
@@ -440,6 +440,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   digest(receipt.provenance.dependencyLockSha256, "provenance.dependencyLockSha256");
   digest(receipt.provenance.modelFileSha256, "provenance.modelFileSha256");
   digest(receipt.provenance.campaignSessionId, "provenance.campaignSessionId");
+  digest(receipt.provenance.coordinateOperationSha256, "provenance.coordinateOperationSha256");
   positiveInteger(receipt.provenance.modelFileBytes, "provenance.modelFileBytes");
   positiveInteger(receipt.provenance.campaignCacheStateVersion, "provenance.campaignCacheStateVersion");
   if (receipt.provenance.thermalState !== "nominal") {
