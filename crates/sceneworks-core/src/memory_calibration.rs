@@ -180,7 +180,24 @@ pub struct SourceTarget {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
     pub rung: StrategyRung,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ltx25TransformerVariant {
+    Distilled,
+    Dev,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ltx25Decoder {
+    Conv,
+    #[serde(rename = "diffvae")]
+    DiffVae,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -360,6 +377,12 @@ pub struct Target {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    /// LTX-2.5's two transformer checkpoints are different memory workloads. Required for
+    /// `ltx_2_5` records; absent for older families whose target identity predates this axis.
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    /// LTX-2.5's ConvVAE and DiffVAE have different decode paths and ladder compositions.
+    /// Required for `ltx_2_5` records; absent for unrelated families.
+    pub decoder: Option<Ltx25Decoder>,
     pub geometry: Geometry,
 }
 
@@ -806,6 +829,8 @@ pub struct EvidenceQuery {
     pub tier: String,
     pub mode: String,
     pub overlay: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
     pub geometry: Geometry,
     pub rung: StrategyRung,
     pub parameters: Map<String, Value>,
@@ -864,6 +889,8 @@ impl EvidenceBundle {
                     && record.target.tier == query.tier
                     && record.target.mode == query.mode
                     && record.target.overlay == query.overlay
+                    && record.target.transformer_variant == query.transformer_variant
+                    && record.target.decoder == query.decoder
                     && record.strategy.rung == query.rung
             })
             .peekable();
@@ -1453,6 +1480,15 @@ fn validate_derivation(
                 )?;
             }
             if let Some(target) = &session.target {
+                if record.target.model_id == "ltx_2_5"
+                    && (target.transformer_variant != record.target.transformer_variant
+                        || target.decoder != record.target.decoder)
+                {
+                    return Err(format!(
+                        "{} source {id} has the wrong LTX-2.5 transformer or decoder identity",
+                        record.id
+                    ));
+                }
                 if matches!(
                     claim,
                     SourceClaim::Memory | SourceClaim::Quality | SourceClaim::Overlay
@@ -1666,6 +1702,14 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
     }
     if !is_rfc3339_datetime(&record.captured_at) {
         return Err(format!("{} capturedAt is not RFC 3339", record.id));
+    }
+    if record.target.model_id == "ltx_2_5"
+        && (record.target.transformer_variant.is_none() || record.target.decoder.is_none())
+    {
+        return Err(format!(
+            "{} LTX-2.5 target must identify transformerVariant and decoder",
+            record.id
+        ));
     }
     if record
         .quality
@@ -2469,10 +2513,10 @@ mod tests {
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable,
-        SourceSessionKind, StaleBundleReason, StaleEvidenceReason, StrategyRung,
-        MEMORY_CALIBRATION_ABI, MEMORY_CALIBRATION_SCHEMA_VERSION,
-        PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        Ltx25Decoder, Ltx25TransformerVariant, MlxAdmissionEnvelope, ObservedMemory,
+        PredictedPeakBytes, RecordStatus, RequiredNullable, SourceSessionKind, StaleBundleReason,
+        StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
+        MEMORY_CALIBRATION_SCHEMA_VERSION, PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
     fn phase(value: u64) -> Value {
@@ -2905,6 +2949,8 @@ mod tests {
             tier: "q4".to_owned(),
             mode: "text_to_image".to_owned(),
             overlay: "none".to_owned(),
+            transformer_variant: None,
+            decoder: None,
             geometry: Geometry {
                 width: 1024,
                 height: 1024,
@@ -3705,6 +3751,81 @@ mod tests {
             Err(BundleLoadError::Json(_))
         ));
         assert!(matches!(load_bundle("{"), Err(BundleLoadError::Json(_))));
+    }
+
+    #[test]
+    fn ltx25_records_require_typed_transformer_and_decoder_identity() {
+        let mut ltx = complete_record();
+        ltx["target"]["modelId"] = json!("ltx_2_5");
+        ltx["target"]["provider"] = json!("ltx_2_5");
+        ltx["target"]["transformerVariant"] = json!("distilled");
+        ltx["target"]["decoder"] = json!("diffvae");
+
+        let loaded = match load_bundle(&bundle(ltx.clone())).expect("typed LTX-2.5 record parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("typed LTX-2.5 record is current: {reason:?}"),
+        };
+        assert_eq!(
+            loaded.records[0].target.transformer_variant,
+            Some(Ltx25TransformerVariant::Distilled)
+        );
+        assert_eq!(
+            loaded.records[0].target.decoder,
+            Some(Ltx25Decoder::DiffVae)
+        );
+
+        for field in ["transformerVariant", "decoder"] {
+            let mut missing = ltx.clone();
+            missing["target"]
+                .as_object_mut()
+                .expect("target object")
+                .remove(field);
+            assert!(
+                matches!(
+                    load_bundle(&bundle(missing)),
+                    Err(BundleLoadError::Invalid(message))
+                        if message.contains("must identify transformerVariant and decoder")
+                ),
+                "{field} must be required for LTX-2.5"
+            );
+        }
+
+        let mut invalid = ltx;
+        invalid["target"]["decoder"] = json!("native");
+        assert!(matches!(
+            load_bundle(&bundle(invalid)),
+            Err(BundleLoadError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn ltx25_queries_match_the_typed_pipeline_identity() {
+        let mut ltx = complete_record();
+        ltx["target"]["modelId"] = json!("ltx_2_5");
+        ltx["target"]["provider"] = json!("ltx_2_5");
+        ltx["target"]["transformerVariant"] = json!("distilled");
+        ltx["target"]["decoder"] = json!("conv");
+        let bundle = match load_bundle(&bundle(ltx)).expect("typed LTX-2.5 record parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("typed LTX-2.5 record is current: {reason:?}"),
+        };
+        let mut query = exact_query();
+        query.model_id = "ltx_2_5".to_owned();
+        query.provider = "ltx_2_5".to_owned();
+        query.transformer_variant = Some(Ltx25TransformerVariant::Distilled);
+        query.decoder = Some(Ltx25Decoder::Conv);
+        assert!(matches!(
+            bundle.evidence_for(&query),
+            EvidenceVerdict::Verified(_)
+        ));
+
+        query.decoder = Some(Ltx25Decoder::DiffVae);
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
+        query.decoder = None;
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
+        query.decoder = Some(Ltx25Decoder::Conv);
+        query.transformer_variant = Some(Ltx25TransformerVariant::Dev);
+        assert_eq!(bundle.evidence_for(&query), EvidenceVerdict::Unknown);
     }
 
     #[test]

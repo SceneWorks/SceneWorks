@@ -1021,6 +1021,8 @@ fn verified_candidates(
             tier: tier.to_owned(),
             mode: mode.calibration_key.clone(),
             overlay: overlay.to_owned(),
+            transformer_variant: None,
+            decoder: None,
             geometry: calibration_geometry,
             rung,
             parameters,

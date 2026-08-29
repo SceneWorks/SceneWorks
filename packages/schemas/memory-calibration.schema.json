@@ -95,6 +95,8 @@
         "tier": { "type": "string", "minLength": 1 },
         "mode": { "type": "string", "minLength": 1 },
         "overlay": { "type": "string", "minLength": 1 },
+        "transformerVariant": { "enum": ["distilled", "dev"] },
+        "decoder": { "enum": ["conv", "diffvae"] },
         "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] }
       }
     },
@@ -355,10 +357,22 @@
         "target": {
           "type": "object", "additionalProperties": false,
           "required": ["modelId", "provider", "tier", "mode", "overlay", "geometry"],
+          "allOf": [
+            {
+              "$comment": "SC-18783: LTX-2.5 transformer and decoder choices change both the executed pipeline and its memory profile, so neither may be inferred from provider, tier, or fixture text.",
+              "if": {
+                "properties": { "modelId": { "const": "ltx_2_5" } },
+                "required": ["modelId"]
+              },
+              "then": { "required": ["transformerVariant", "decoder"] }
+            }
+          ],
           "properties": {
             "modelId": { "type": "string", "minLength": 1 }, "provider": { "type": "string", "minLength": 1 },
             "tier": { "type": "string", "minLength": 1 }, "mode": { "type": "string", "minLength": 1 },
             "overlay": { "type": "string", "minLength": 1 },
+            "transformerVariant": { "enum": ["distilled", "dev"] },
+            "decoder": { "enum": ["conv", "diffvae"] },
             "geometry": {
               "type": "object", "additionalProperties": false, "required": ["width", "height", "batch", "frames"],
               "properties": {

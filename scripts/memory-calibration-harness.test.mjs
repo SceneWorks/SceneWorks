@@ -973,16 +973,18 @@ test("frame-aware matrix binding requires an exact planned temporal capture (sc-
   );
 });
 
-test("the exact evidence-plan matcher covers every capture-identity axis (sc-18817)", () => {
+test("the exact evidence-plan matcher covers every capture-identity axis including LTX-2.5 pipeline choices", () => {
   const record = complete({
     backend: "mlx",
     loadShape: "deferred_materialization",
     target: {
-      modelId: "ltx_2_3",
-      provider: "ltx_2_3",
+      modelId: "ltx_2_5",
+      provider: "ltx_2_5",
       tier: "q8",
       mode: "text_to_video",
       overlay: "none",
+      transformerVariant: "distilled",
+      decoder: "conv",
       geometry: { width: 768, height: 512, batch: 1, frames: 241 },
     },
     strategy: {
@@ -1007,6 +1009,8 @@ test("the exact evidence-plan matcher covers every capture-identity axis (sc-188
     ["tier", (candidate) => { candidate.target.tier = "q4"; }],
     ["mode", (candidate) => { candidate.target.mode = "image_to_video"; }],
     ["overlay", (candidate) => { candidate.target.overlay = "lora"; }],
+    ["transformer variant", (candidate) => { candidate.target.transformerVariant = "dev"; }],
+    ["decoder", (candidate) => { candidate.target.decoder = "diffvae"; }],
     ["rung", (candidate) => { candidate.rung = "resident"; }],
     ["width", (candidate) => { candidate.target.geometry.width = 1280; }],
     ["height", (candidate) => { candidate.target.geometry.height = 704; }],
@@ -1026,6 +1030,110 @@ test("the exact evidence-plan matcher covers every capture-identity axis (sc-188
       false,
       `${axis} mismatch must reject the plan entry`,
     );
+  }
+});
+
+test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes", () => {
+  const base = complete({
+    target: {
+      modelId: "ltx_2_5",
+      provider: "ltx_2_5_distilled",
+      tier: "q4",
+      mode: "text_to_video",
+      overlay: "none",
+      transformerVariant: "distilled",
+      decoder: "conv",
+      geometry: { width: 768, height: 512, batch: 1, frames: 145 },
+    },
+  });
+  assert.equal(validateRecord(base), base);
+  validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [base] });
+
+  const identities = new Set();
+  for (const transformerVariant of ["distilled", "dev"]) {
+    for (const decoder of ["conv", "diffvae"]) {
+      identities.add(logicalCaseId({
+        ...base,
+        target: { ...base.target, transformerVariant, decoder },
+      }));
+    }
+  }
+  assert.equal(identities.size, 4, "each transformer/decoder pair must have a distinct logical id");
+
+  for (const field of ["transformerVariant", "decoder"]) {
+    const missing = structuredClone(base);
+    delete missing.target[field];
+    missing.logicalCaseId = logicalCaseId(missing);
+    missing.id = recordId(missing);
+    assert.throws(
+      () => validateBundle({ schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, records: [missing] }),
+      /schema validation failed/,
+      `${field} is required by the persisted schema`,
+    );
+    assert.throws(() => validateRecord(missing), /must identify|must identify transformerVariant and decoder/);
+  }
+});
+
+test("the LTX-2.5 MLX terminal plan is the exact 60-case base plus 24-case max envelope", async () => {
+  const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  const rows = config.providers.filter(
+    (provider) => provider.backend === "mlx" && provider.target.modelId === "ltx_2_5",
+  );
+  const expanded = expandPlan({ providers: rows });
+
+  assert.equal(rows.length, 84);
+  assert.equal(expanded.length, 84);
+  assert.equal(new Set(rows.map((row) => row.name)).size, 84);
+  assert.equal(new Set(rows.map((row) => row.fixture)).size, 84);
+  assert.equal(new Set(expanded.map((row) => row.logicalCaseId)).size, 84);
+
+  const baseRows = rows.filter((row) => row.target.geometry.frames === 145);
+  const maxRows = rows.filter((row) => row.target.geometry.frames === 449);
+  assert.equal(baseRows.length, 60, "3 tiers x 2 transformers x 5 resolutions x 2 decoders");
+  assert.equal(maxRows.length, 24, "3 tiers x 2 transformers x 2 max orientations x 2 decoders");
+  assert.deepEqual(
+    [...new Set(baseRows.map(({ target }) => `${target.geometry.width}x${target.geometry.height}`))].sort(),
+    ["1280x704", "512x768", "640x640", "704x1280", "768x512"],
+  );
+  assert.deepEqual(
+    [...new Set(maxRows.map(({ target }) => `${target.geometry.width}x${target.geometry.height}`))].sort(),
+    ["1280x704", "704x1280"],
+  );
+  assert.ok(baseRows.every((row) => row.fixture.includes("-fps24-seed18755")));
+  assert.ok(maxRows.every((row) => row.fixture.includes("-fps30-seed18755")));
+
+  for (const row of rows) {
+    assert.ok(["q4", "q8", "bf16"].includes(row.target.tier));
+    assert.ok(["distilled", "dev"].includes(row.target.transformerVariant));
+    assert.ok(["conv", "diffvae"].includes(row.target.decoder));
+    assert.equal(row.target.mode, "text_to_video");
+    assert.equal(row.target.overlay, "none");
+    assert.equal(row.cases.length, 1);
+    assert.equal(row.cases[0].expectedResult, "passed");
+    if (row.target.decoder === "conv") {
+      assert.ok(row.engagedRungs.includes("bounded_decode"));
+      assert.equal(row.cases[0].parameters.decodeTileEdge, 192);
+      assert.equal(row.cases[0].parameters.decodeOverlap, 64);
+    } else {
+      assert.ok(!row.engagedRungs.includes("bounded_decode"));
+      assert.equal(row.cases[0].parameters.decodeTileEdge, undefined);
+      assert.equal(row.cases[0].parameters.decodeOverlap, undefined);
+    }
+    if (row.target.transformerVariant === "distilled") {
+      assert.equal(row.loadShape, "deferred_materialization");
+      assert.equal(row.rung, "bounded_transformer_residency");
+      assert.ok(row.engagedRungs.includes("bounded_transformer_residency"));
+    } else {
+      assert.equal(row.loadShape, "eager_materialization");
+      assert.equal(row.rung, "bounded_attention");
+      assert.ok(!row.engagedRungs.includes("bounded_transformer_residency"));
+    }
+  }
+
+  for (const field of ["transformerVariant", "decoder"]) {
+    const missing = structuredClone(rows[0]);
+    delete missing.target[field];
+    assert.throws(() => expandPlan({ providers: [missing] }), new RegExp(field));
   }
 });
 

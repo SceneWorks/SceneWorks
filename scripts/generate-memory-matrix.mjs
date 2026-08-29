@@ -836,18 +836,33 @@ export function calibrationBinding(
   { exactPlanEntries = [], modality = null } = {},
 ) {
   const reasons = [];
+  const exactPipelineEntries = exactPlanEntries.filter(
+    (entry) => entry.target.transformerVariant && entry.target.decoder,
+  );
   if (!["complete", "runtime_complete"].includes(record.status)) reasons.push("record-not-complete");
   if (record.quality.result !== "passed") reasons.push("quality-not-passed");
   if (record.sweep.rangeVerified !== true) reasons.push("range-not-verified");
   if (record.calibrationFingerprint !== cell.calibrationFingerprint) reasons.push("fingerprint-mismatch");
-  if (!Array.isArray(cell.engagedRungs)) {
+  if (!Array.isArray(cell.engagedRungs) && exactPipelineEntries.length === 0) {
     reasons.push("composition-unavailable");
-  } else if (JSON.stringify(record.strategy.engagedRungs) !== JSON.stringify(cell.engagedRungs)) {
+  } else if (
+    exactPipelineEntries.length === 0 &&
+    JSON.stringify(record.strategy.engagedRungs) !== JSON.stringify(cell.engagedRungs)
+  ) {
     reasons.push("composition-mismatch");
   }
-  if (
-    JSON.stringify(canonicalParameters(runtimeStrategyParameters(record.strategy.parameters))) !==
-    JSON.stringify(canonicalParameters((() => {
+  const recordParameters = JSON.stringify(
+    canonicalParameters(runtimeStrategyParameters(record.strategy.parameters)),
+  );
+  const parametersMatch = exactPipelineEntries.length > 0
+    ? exactPipelineEntries.some((entry) =>
+        entry.cases.some((captureCase) =>
+          captureCase.expectedResult === "passed" &&
+          JSON.stringify(canonicalParameters(runtimeStrategyParameters(captureCase.parameters))) ===
+            recordParameters,
+        ),
+      )
+    : recordParameters === JSON.stringify(canonicalParameters((() => {
       const parameters = runtimeStrategyParameters(cell.strategyParameters);
       // Older records predate this exact string axis. Preserve their historical binding behavior,
       // while new records that carry the component must match it exactly.
@@ -855,8 +870,8 @@ export function calibrationBinding(
         delete parameters.transformerWindowComponent;
       }
       return parameters;
-    })()))
-  ) reasons.push("strategy-parameters-mismatch");
+    })()));
+  if (!parametersMatch) reasons.push("strategy-parameters-mismatch");
   const resolution = `${record.target.geometry.width}x${record.target.geometry.height}`;
   if (!cell.geometryEnvelope.resolutions?.includes(resolution)) reasons.push("geometry-out-of-envelope");
   if (record.target.geometry.batch !== 1) reasons.push("batch-out-of-envelope");
@@ -1041,6 +1056,8 @@ export function planEntryMatchesEvidenceRecord(entry, record) {
     entry.target.tier === record.target.tier &&
     entry.target.mode === record.target.mode &&
     entry.target.overlay === record.target.overlay &&
+    entry.target.transformerVariant === record.target.transformerVariant &&
+    entry.target.decoder === record.target.decoder &&
     entry.rung === record.strategy.rung &&
     entry.target.geometry.width === record.target.geometry.width &&
     entry.target.geometry.height === record.target.geometry.height &&
@@ -1058,6 +1075,33 @@ function exactPlanEntriesForRecord(calibrationPlan, record) {
   );
 }
 
+function plannedEntriesForCoordinate(calibrationPlan, coordinate) {
+  return calibrationPlan.providers.filter((candidate) =>
+    planEntryTargetsCoordinate(candidate, coordinate),
+  );
+}
+
+export function plannedPipelineIdentities(calibrationPlan, coordinate) {
+  const identities = plannedEntriesForCoordinate(calibrationPlan, coordinate)
+    .filter((entry) => entry.target.transformerVariant || entry.target.decoder)
+    .map((entry) => {
+      if (!entry.target.transformerVariant || !entry.target.decoder) {
+        throw new Error(`${entry.name}: incomplete planned pipeline identity`);
+      }
+      return {
+        transformerVariant: entry.target.transformerVariant,
+        decoder: entry.target.decoder,
+      };
+    });
+  return [...new Map(
+    identities.map((identity) => [JSON.stringify(identity), identity]),
+  ).values()].sort((left, right) =>
+    `${left.transformerVariant}:${left.decoder}`.localeCompare(
+      `${right.transformerVariant}:${right.decoder}`,
+    ),
+  );
+}
+
 function expectedEngagedRungs({
   model,
   provider,
@@ -1071,22 +1115,42 @@ function expectedEngagedRungs({
 }) {
   if (Array.isArray(status.engagedRungs)) return status.engagedRungs;
   if (rung === "resident") return ["resident"];
-  const matches = calibrationPlan.providers
-    .filter((candidate) =>
-      planEntryTargetsCoordinate(candidate, {
-        modelId: model.id,
-        provider,
-        backend,
-        tier,
-        mode,
-        overlay,
-        rung,
-      }),
-    )
-    .map((candidate) => candidate.engagedRungs);
+  const coordinate = {
+    modelId: model.id,
+    provider,
+    backend,
+    tier,
+    mode,
+    overlay,
+    rung,
+  };
+  const entries = plannedEntriesForCoordinate(calibrationPlan, coordinate);
+  const matches = entries.map((candidate) => candidate.engagedRungs);
   if (matches.length === 0) return null;
   if (matches.some((candidate) => JSON.stringify(candidate) !== JSON.stringify(matches[0]))) {
-    throw new Error(`${model.id}:${provider}:${backend}:${tier}:${mode}:${overlay}:${rung}: conflicting planned compositions`);
+    const identities = plannedPipelineIdentities(calibrationPlan, coordinate);
+    const byIdentity = new Map();
+    for (const entry of entries) {
+      const identity = `${entry.target.transformerVariant}:${entry.target.decoder}`;
+      const composition = JSON.stringify(entry.engagedRungs);
+      if (byIdentity.has(identity) && byIdentity.get(identity) !== composition) {
+        throw new Error(`${model.id}:${provider}:${backend}:${tier}:${mode}:${overlay}:${rung}: conflicting planned compositions for ${identity}`);
+      }
+      byIdentity.set(identity, composition);
+    }
+    if (identities.length < 2) {
+      throw new Error(`${model.id}:${provider}:${backend}:${tier}:${mode}:${overlay}:${rung}: conflicting planned compositions`);
+    }
+    // A matrix cell predates the LTX-2.5 pipeline axes and intentionally remains the aggregate
+    // product coordinate. Publish only the rungs common to every explicitly named pipeline here;
+    // exact evidence still binds against its full plan entry in `calibrationBinding` above.
+    const shared = matches[0].filter((engaged) =>
+      matches.every((composition) => composition.includes(engaged)),
+    );
+    if (!shared.includes(rung)) {
+      throw new Error(`${model.id}:${provider}:${backend}:${tier}:${mode}:${overlay}:${rung}: no common planned composition engages the selected rung`);
+    }
+    return shared;
   }
   return matches[0];
 }
@@ -4700,6 +4764,15 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 status,
                 calibrationPlan,
               });
+              const pipelineIdentities = plannedPipelineIdentities(calibrationPlan, {
+                modelId: model.id,
+                provider,
+                backend,
+                tier,
+                mode,
+                overlay,
+                rung,
+              });
               const runSummary = (record) => {
                 const overall = observedPeakBytes(record);
                 const requiredHostBytes = mlxRequiredHostBytes(record);
@@ -4707,6 +4780,10 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                   source: `docs/generated/memory-calibration-evidence.json#${record.id}`,
                   hardware: record.backend === "candle" ? record.hardware.name : record.hardware.chip,
                   tier: record.target.tier,
+                  ...(record.target.transformerVariant
+                    ? { transformerVariant: record.target.transformerVariant }
+                    : {}),
+                  ...(record.target.decoder ? { decoder: record.target.decoder } : {}),
                   geometry: measuredGeometryKey(record.target.geometry),
                   capturedAt: record.capturedAt,
                   harnessVersion: record.harnessVersion,
@@ -4809,6 +4886,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                   : geometryFor(model, backend),
                 strategyParameters: status.parameters,
                 engagedRungs,
+                ...(pipelineIdentities.length > 0
+                  ? { plannedPipelineIdentities: pipelineIdentities }
+                  : {}),
                 state,
                 memoryCharacterization: characterization,
                 calibrationFingerprint: fingerprint,
@@ -5072,7 +5152,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     // `videoMlxStagedStaticCoverage`(+Denominator) and `rung4Survey.pendingFamilyBackends`. A
     // version-7 reader that took `owningModelStory` as an integer, or `imageModels` as the entry
     // count, is wrong on both — hence a version, not an additive bump.
-    schemaVersion: 8,
+    // 9 (SC-18783): LTX-2.5 plan/evidence bindings name transformer and decoder identities.
+    // Aggregate cells publish `plannedPipelineIdentities`; exact run summaries carry the same axes.
+    schemaVersion: 9,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,

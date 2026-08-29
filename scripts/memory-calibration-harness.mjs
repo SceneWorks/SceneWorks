@@ -30,6 +30,8 @@ const RUNG_SET = new Set(RUNGS);
 /// Persisted spellings of `gen_core::LoadShape`. Eager and deferred measurements are not
 /// interchangeable, so this is a receipt axis rather than a fingerprint naming convention.
 export const LOAD_SHAPES = ["eager_materialization", "deferred_materialization"];
+export const LTX25_TRANSFORMER_VARIANTS = ["distilled", "dev"];
+export const LTX25_DECODERS = ["conv", "diffvae"];
 export const RUNG_REUSE_TOLERANCE = Object.freeze({
   absoluteBytes: 256 * 1024 * 1024,
   relative: 0.05,
@@ -741,6 +743,20 @@ export function validateRecord(record) {
   }
   object(record.target, `${record.id}.target`);
   for (const key of ["modelId", "provider", "tier", "mode", "overlay"]) text(record.target[key], `${record.id}.target.${key}`);
+  if (record.target.modelId === "ltx_2_5") {
+    if (!LTX25_TRANSFORMER_VARIANTS.includes(record.target.transformerVariant)) {
+      fail(
+        `${record.id}.target.transformerVariant must identify an LTX-2.5 transformer ` +
+          `(${LTX25_TRANSFORMER_VARIANTS.join("|")})`,
+      );
+    }
+    if (!LTX25_DECODERS.includes(record.target.decoder)) {
+      fail(
+        `${record.id}.target.decoder must identify an LTX-2.5 decoder ` +
+          `(${LTX25_DECODERS.join("|")})`,
+      );
+    }
+  }
   for (const key of ["width", "height", "batch", "frames"]) number(record.target.geometry[key], `${record.id}.target.geometry.${key}`, true);
   object(record.strategy, `${record.id}.strategy`);
   if (!RUNG_SET.has(record.strategy.rung)) fail(`${record.id}: invalid rung`);
@@ -854,6 +870,11 @@ export function validateBundle(bundle) {
           }
           if (requiresDerivation) {
             validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy);
+          }
+          if (record.target.modelId === "ltx_2_5" && session.target
+              && (session.target.transformerVariant !== record.target.transformerVariant
+                || session.target.decoder !== record.target.decoder)) {
+            fail(`${record.id}: ${sessionId} has the wrong LTX-2.5 transformer or decoder identity`);
           }
           if (["memory", "quality", "overlay"].includes(claim)
               && session.target && session.target.tier !== record.target.tier) {
@@ -1017,6 +1038,10 @@ export async function validateSourceSessionFiles(
       tier: request.planned.target.tier,
       mode: request.planned.target.mode,
       overlay: request.planned.target.overlay,
+      ...(request.planned.target.transformerVariant
+        ? { transformerVariant: request.planned.target.transformerVariant }
+        : {}),
+      ...(request.planned.target.decoder ? { decoder: request.planned.target.decoder } : {}),
       rung: request.planned.strategy.rung,
     };
     if (!equal(request.repositories, record.repositories)
@@ -1269,6 +1294,20 @@ export function expandPlan(config, completed = []) {
   );
   const cases = [];
   for (const provider of config.providers) {
+    if (provider.target?.modelId === "ltx_2_5") {
+      if (!LTX25_TRANSFORMER_VARIANTS.includes(provider.target.transformerVariant)) {
+        fail(
+          `${provider.name ?? provider.target.provider}: LTX-2.5 plan target requires ` +
+            `transformerVariant=${LTX25_TRANSFORMER_VARIANTS.join("|")}`,
+        );
+      }
+      if (!LTX25_DECODERS.includes(provider.target.decoder)) {
+        fail(
+          `${provider.name ?? provider.target.provider}: LTX-2.5 plan target requires ` +
+            `decoder=${LTX25_DECODERS.join("|")}`,
+        );
+      }
+    }
     if (!["eager_materialization", "deferred_materialization"].includes(provider.loadShape)) {
       fail(`${provider.name ?? provider.target.provider}: plan provider requires an explicit loadShape`);
     }
@@ -1748,6 +1787,10 @@ export async function runProviderPlan({
             tier: planned.target.tier,
             mode: planned.target.mode,
             overlay: planned.target.overlay,
+            ...(planned.target.transformerVariant
+              ? { transformerVariant: planned.target.transformerVariant }
+              : {}),
+            ...(planned.target.decoder ? { decoder: planned.target.decoder } : {}),
             rung: planned.strategy.rung,
           },
           stdoutSha256,

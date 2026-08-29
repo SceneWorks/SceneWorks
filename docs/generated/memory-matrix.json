@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 8,
+  "schemaVersion": 9,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:cce96dd8563eb98bb854cba7bcb6787aed39980062d44f3fcf7edd3f316b25e3",
+    "sceneWorksRevision": "source-tree:7bffbefc205e26b1750edad26efb0e7b7ac9dc35bda59c011eec97b3761ad5e7",
     "inferenceRevision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a",
     "sources": {
       "manifest": {
@@ -58,7 +58,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "e63bad871acfeb0ffe20b0e41f04ef2db8e2bd5e79078dfc25ed95dd486c76f7"
+        "sha256": "456710c56462d69bad561fbd17e79bc0b61a8b90c8c0edad2ce24421c82252aa"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -82,7 +82,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "de3be0fbb63e045da732f481747eef23454a186f690aadc0448cffd276588c9b"
+        "sha256": "0f1062b9862b2cbf4002d9784ad6c484a881f720a75d78095b7ed78b86415b6c"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
@@ -177,10 +177,10 @@
       "video": 11
     },
     "cells": 9305,
-    "publishedCells": 597,
-    "elidedCells": 8708,
+    "publishedCells": 602,
+    "elidedCells": 8703,
     "elidedByState": {
-      "Implemented/unverified": 4219,
+      "Implemented/unverified": 4214,
       "Missing": 4489
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
@@ -11355,8 +11355,8 @@
       "backend": "mlx",
       "rung": "bounded_attention",
       "coordinates": 36,
-      "published": 0,
-      "elided": 36,
+      "published": 3,
+      "elided": 33,
       "implemented": 36,
       "states": {
         "Implemented/unverified": 36
@@ -11379,8 +11379,8 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 36,
-      "published": 1,
-      "elided": 35,
+      "published": 3,
+      "elided": 33,
       "implemented": 18,
       "states": {
         "Implemented/unverified": 18,
@@ -16547,6 +16547,30 @@
         }
       ]
     },
+    "ltx_2_5:mlx:bf16": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/minMemoryGb",
+          "tier": "bf16"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/memoryStrategyCapabilities",
+          "tier": "bf16"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "variant": "bf16"
+        },
+        {
+          "repository": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "variant": null
+        }
+      ]
+    },
     "ltx_2_5:mlx:q4": {
       "declaredCalibration": [
         {
@@ -16563,6 +16587,30 @@
           "repository": "SceneWorks/ltx-2.5-mlx",
           "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
           "variant": "q4"
+        },
+        {
+          "repository": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "variant": null
+        }
+      ]
+    },
+    "ltx_2_5:mlx:q8": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/minMemoryGb",
+          "tier": "q8"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/memoryStrategyCapabilities",
+          "tier": "q8"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/ltx-2.5-mlx",
+          "revision": "791ef61731ad067bd13ebff8cc0f07532476d9ef",
+          "variant": "q8"
         },
         {
           "repository": "SceneWorks/ltx-2.5-mlx",
@@ -23716,6 +23764,12 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
+      "plannedPipelineIdentities": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv"
+        }
+      ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
@@ -23744,6 +23798,244 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "ltx_2_5:candle:q4"
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5:mlx:bf16:text_to_video:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5",
+      "provider": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "plannedPipelineIdentities": [
+        {
+          "transformerVariant": "dev",
+          "decoder": "conv"
+        },
+        {
+          "transformerVariant": "dev",
+          "decoder": "diffvae"
+        }
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "dbdad4e7c822d8aa8368e741e9602c13848d527b6f75df961872ffc3f91d382c",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "ltx_2_5:mlx:bf16"
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5:mlx:bf16:text_to_video:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5",
+      "provider": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "plannedPipelineIdentities": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv"
+        },
+        {
+          "transformerVariant": "distilled",
+          "decoder": "diffvae"
+        }
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "ffcfa44f7993a19aff3a7f800dd1e5e043634dc9d8851306ffd36bf976b9fef3",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "rung4Survey": {
+        "story": 15969,
+        "surveyed": true,
+        "structuralApplicability": "full",
+        "requestPeak": "unmeasured",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "ltx_2_5:mlx:bf16"
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5:mlx:q4:text_to_video:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5",
+      "provider": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "plannedPipelineIdentities": [
+        {
+          "transformerVariant": "dev",
+          "decoder": "conv"
+        },
+        {
+          "transformerVariant": "dev",
+          "decoder": "diffvae"
+        }
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "551aea388d883b735a8105bb93efa7289a168dbe03e1cc8e27b045d9b0637529",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "ltx_2_5:mlx:q4"
       }
     },
     {
@@ -23789,9 +24081,18 @@
       "engagedRungs": [
         "resident",
         "staged_residency",
-        "bounded_decode",
         "bounded_attention",
         "bounded_transformer_residency"
+      ],
+      "plannedPipelineIdentities": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv"
+        },
+        {
+          "transformerVariant": "distilled",
+          "decoder": "diffvae"
+        }
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
@@ -23821,6 +24122,168 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "ltx_2_5:mlx:q4"
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5:mlx:q8:text_to_video:none:bounded_attention",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5",
+      "provider": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "attentionChunkSize": 16777216
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention"
+      ],
+      "plannedPipelineIdentities": [
+        {
+          "transformerVariant": "dev",
+          "decoder": "conv"
+        },
+        {
+          "transformerVariant": "dev",
+          "decoder": "diffvae"
+        }
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "510898099ec1d10bbc722cbf7d7d306c0736c07e126bbd7e6a5e8a010ba3314c",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/memoryStrategyCapabilities/bounded_attention"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "ltx_2_5:mlx:q8"
+      }
+    },
+    {
+      "id": "ltx_2_5:ltx_2_5:mlx:q8:text_to_video:none:bounded_transformer_residency",
+      "modelId": "ltx_2_5",
+      "resolvedRoute": "ltx_2_5",
+      "provider": "ltx_2_5",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "768x512",
+        "resolutions": [
+          "768x512",
+          "512x768",
+          "640x640",
+          "1280x704",
+          "704x1280"
+        ],
+        "defaultDuration": 6,
+        "durations": [
+          4,
+          6,
+          8,
+          10,
+          12,
+          15
+        ],
+        "hardMaxDuration": 15,
+        "defaultFps": 25,
+        "fps": [
+          24,
+          25,
+          30
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit"
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "plannedPipelineIdentities": [
+        {
+          "transformerVariant": "distilled",
+          "decoder": "conv"
+        },
+        {
+          "transformerVariant": "distilled",
+          "decoder": "diffvae"
+        }
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "44981ed604d8a5bcad7b06df4f2bbd88411686af6c772df04117876d0f9f83a7",
+      "owningFamilyStory": 18813,
+      "owningModelStory": null,
+      "rung4Survey": {
+        "story": 15969,
+        "surveyed": true,
+        "structuralApplicability": "full",
+        "requestPeak": "unmeasured",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "config/manifests/builtin.models.jsonc#models/ltx_2_5/mlx/memoryStrategyCapabilities/bounded_transformer_residency"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "ltx_2_5:mlx:q8"
       }
     },
     {
@@ -58835,7 +59298,12 @@
     "ltx_2_3_eros": [],
     "ltx_2_5": [
       "ltx_2_5:ltx_2_5_distilled:candle:q4:text_to_video:none:bounded_transformer_residency",
-      "ltx_2_5:ltx_2_5:mlx:q4:text_to_video:none:bounded_transformer_residency"
+      "ltx_2_5:ltx_2_5:mlx:bf16:text_to_video:none:bounded_attention",
+      "ltx_2_5:ltx_2_5:mlx:bf16:text_to_video:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5:mlx:q4:text_to_video:none:bounded_attention",
+      "ltx_2_5:ltx_2_5:mlx:q4:text_to_video:none:bounded_transformer_residency",
+      "ltx_2_5:ltx_2_5:mlx:q8:text_to_video:none:bounded_attention",
+      "ltx_2_5:ltx_2_5:mlx:q8:text_to_video:none:bounded_transformer_residency"
     ],
     "mage_flow": [
       "mage_flow:mage_flow:candle:bf16:text_to_image:lora:bounded_decode",

@@ -21,6 +21,7 @@ import {
   backendScopes,
   buildMatrix,
   buildStoryBackendScope,
+  calibrationBinding,
   catalogFamilyBackends,
   isImplemented,
   isPublishableCell,
@@ -478,7 +479,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix({ publish: false });
-  assert.equal(matrix.schemaVersion, 8);
+  assert.equal(matrix.schemaVersion, 9);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -5736,6 +5737,35 @@ test("LTX-2.5 selects every routed platform and exposes only its declared memory
   assert.deepEqual([...new Set(cells.map((cell) => cell.overlay))].sort(), ["lora", "none"]);
   assert.ok(cells.every((cell) => cell.memoryCharacterization.status === "unmeasured"));
 
+  const plannedPipelines = cells.filter((cell) => cell.plannedPipelineIdentities);
+  assert.equal(plannedPipelines.length, 7, "six MLX tier/rung cells plus one Candle cell are planned");
+  const mlxDev = plannedPipelines.filter(
+    (cell) => cell.backend === "mlx" && cell.rung === "bounded_attention",
+  );
+  assert.equal(mlxDev.length, 3);
+  assert.ok(mlxDev.every((cell) => {
+    assert.deepEqual(cell.plannedPipelineIdentities, [
+      { transformerVariant: "dev", decoder: "conv" },
+      { transformerVariant: "dev", decoder: "diffvae" },
+    ]);
+    return !cell.engagedRungs.includes("bounded_decode");
+  }), "the aggregate dev cell publishes only rungs common to conv and DiffVAE");
+  const mlxDistilled = plannedPipelines.filter(
+    (cell) => cell.backend === "mlx" && cell.rung === "bounded_transformer_residency",
+  );
+  assert.equal(mlxDistilled.length, 3);
+  assert.ok(mlxDistilled.every((cell) => {
+    assert.deepEqual(cell.plannedPipelineIdentities, [
+      { transformerVariant: "distilled", decoder: "conv" },
+      { transformerVariant: "distilled", decoder: "diffvae" },
+    ]);
+    return !cell.engagedRungs.includes("bounded_decode");
+  }), "the aggregate distilled cell publishes only rungs common to conv and DiffVAE");
+  assert.deepEqual(
+    plannedPipelines.find((cell) => cell.backend === "candle").plannedPipelineIdentities,
+    [{ transformerVariant: "distilled", decoder: "conv" }],
+  );
+
   const assertUniformState = (backend, rung, overlay, expected, tiers = ["bf16", "q4", "q8"]) => {
     const selected = cells.filter(
       (cell) => cell.backend === backend && cell.rung === rung && cell.overlay === overlay &&
@@ -5759,6 +5789,72 @@ test("LTX-2.5 selects every routed platform and exposes only its declared memory
   assertUniformState("candle", "bounded_transformer_residency", "none", "Implemented/unverified", ["bf16", "q4"]);
   assertUniformState("candle", "bounded_transformer_residency", "none", "Missing", ["q8"]);
   assertUniformState("candle", "bounded_transformer_residency", "lora", "Missing");
+});
+
+test("LTX-2.5 evidence binds to its exact pipeline plan rather than the aggregate cell", () => {
+  const entry = {
+    backend: "mlx",
+    loadShape: "deferred_materialization",
+    target: {
+      modelId: "ltx_2_5",
+      provider: "ltx_2_5",
+      tier: "q4",
+      mode: "text_to_video",
+      overlay: "none",
+      transformerVariant: "distilled",
+      decoder: "conv",
+      geometry: { width: 768, height: 512, batch: 1, frames: 145 },
+    },
+    rung: "bounded_transformer_residency",
+    engagedRungs: [
+      "resident",
+      "staged_residency",
+      "bounded_decode",
+      "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+    calibrationFingerprint: "ltx-test-v1",
+    cases: [{
+      expectedResult: "passed",
+      parameters: {
+        decodeTileEdge: 192,
+        decodeOverlap: 64,
+        attentionChunkSize: 16777216,
+        transformerWindowSize: 1,
+        transformerWindowComponent: "dit",
+      },
+    }],
+  };
+  const record = {
+    status: "complete",
+    backend: "mlx",
+    loadShape: entry.loadShape,
+    target: structuredClone(entry.target),
+    strategy: { rung: entry.rung, engagedRungs: entry.engagedRungs, parameters: entry.cases[0].parameters },
+    calibrationFingerprint: entry.calibrationFingerprint,
+    quality: { result: "passed" },
+    sweep: { rangeVerified: true },
+    artifact: { repository: "SceneWorks/ltx-2.5-mlx", resolvedRevision: "abc", variant: "q4" },
+    loadability: { result: "passed", resolvedPathFingerprint: "sha256:path" },
+  };
+  const aggregateCell = {
+    calibrationFingerprint: entry.calibrationFingerprint,
+    engagedRungs: ["resident", "staged_residency", "bounded_attention", "bounded_transformer_residency"],
+    strategyParameters: { attentionChunkSize: 16777216, transformerWindowSize: 1, transformerWindowComponent: "Dit" },
+    geometryEnvelope: { resolutions: ["768x512"], durations: [6], fps: [24] },
+    evidence: { loadability: [{ repository: record.artifact.repository, revision: "abc", variant: "q4" }] },
+  };
+
+  assert.deepEqual(
+    calibrationBinding(record, aggregateCell, { exactPlanEntries: [entry], modality: "video" }),
+    { eligible: true, reasons: [] },
+  );
+  const wrongParameters = structuredClone(record);
+  wrongParameters.strategy.parameters.decodeTileEdge = 256;
+  assert.ok(
+    calibrationBinding(wrongParameters, aggregateCell, { exactPlanEntries: [entry], modality: "video" })
+      .reasons.includes("strategy-parameters-mismatch"),
+  );
 });
 
 test("a video route parser handles every form the worker spells, consts included (sc-18815)", () => {

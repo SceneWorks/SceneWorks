@@ -120,6 +120,18 @@
           "type": "string",
           "minLength": 1
         },
+        "transformerVariant": {
+          "enum": [
+            "distilled",
+            "dev"
+          ]
+        },
+        "decoder": {
+          "enum": [
+            "conv",
+            "diffvae"
+          ]
+        },
         "geometry": {
           "type": "string",
           "description": "sc-18812. Same key vocabulary as `memoryCharacterization.measuredGeometries`, produced by the same `measuredGeometryKey`: `WxH` is one output frame, `WxHxfF` is F of them. Both forms are admitted here because an evidence record supporting a temporal curve must be able to STATE its frame count - a record forced into `WxH` would be characterized as a one-frame design point nobody measured.",
@@ -494,8 +506,8 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row. 8 (sc-18815): the model universe is MODALITY-AWARE rather than `type === \"image\"`. `summary.imageModels` was REMOVED and replaced by `catalogEntries` + `catalogEntriesByModality` \u2014 not additive, because a reader indexing `imageModels` now gets `undefined` rather than a wrong number, which is the point; `models[]` gained required `modality` and `resolvedRoutes` and its count moved 53 -> 63; `models[].backends` and `owningModelStories` may be EMPTY (an entry the routing catalog routes nowhere); `cells[].owningModelStory` may be `null` (video cells have no per-entry owner); `cells[].rung4Survey` gained a required `surveyed` discriminator and its three verdict fields became nullable; `rung4SurveyRows[].familyStory` may be a family NAME rather than a story id; `summary` gained `unroutedEntries`, `videoMlxStagedStaticCoverage`(+`Denominator`) and `rung4Survey.pendingFamilyBackends`.",
-      "const": 8
+      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row. 8 (sc-18815): the model universe is MODALITY-AWARE rather than `type === \"image\"`. `summary.imageModels` was REMOVED and replaced by `catalogEntries` + `catalogEntriesByModality` \u2014 not additive, because a reader indexing `imageModels` now gets `undefined` rather than a wrong number, which is the point; `models[]` gained required `modality` and `resolvedRoutes` and its count moved 53 -> 63; `models[].backends` and `owningModelStories` may be EMPTY (an entry the routing catalog routes nowhere); `cells[].owningModelStory` may be `null` (video cells have no per-entry owner); `cells[].rung4Survey` gained a required `surveyed` discriminator and its three verdict fields became nullable; `rung4SurveyRows[].familyStory` may be a family NAME rather than a story id; `summary` gained `unroutedEntries`, `videoMlxStagedStaticCoverage`(+`Denominator`) and `rung4Survey.pendingFamilyBackends`. 9 (SC-18783): LTX-2.5 planned pipeline identity and evidence summaries carry transformerVariant and decoder axes.",
+      "const": 9
     },
     "generatedFrom": {
       "type": "object"
@@ -1002,6 +1014,33 @@
           },
           "engagedRungs": {
             "$ref": "#/$defs/engagedRungs"
+          },
+          "plannedPipelineIdentities": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "transformerVariant",
+                "decoder"
+              ],
+              "properties": {
+                "transformerVariant": {
+                  "enum": [
+                    "distilled",
+                    "dev"
+                  ]
+                },
+                "decoder": {
+                  "enum": [
+                    "conv",
+                    "diffvae"
+                  ]
+                }
+              }
+            }
           },
           "state": {
             "enum": [
