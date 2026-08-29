@@ -32,6 +32,16 @@ campaign launcher passes `--sc20686-campaign --sc20686-events -` to the selected
 which emits JSONL for generation start/end, cross-KV creation/read, invalidation, and release. The
 default observer remains `None`; changing self-attention is never emitted as a reusable event.
 
+### FLUX.2 Klein route limitation
+
+The supported reference-image route is `Flux2Edit::generate_inner` at
+`crates/media/candle-gen/candle-gen-flux2/src/edit_provider.rs:580-647`: references are VAE-encoded,
+then concatenated into the joint `[target, refs]` stream at `:630` and re-concatenated for every
+denoise prediction at `:685-686`. It does not create a persistent reference-image K/V cache; the
+existing `ContiguousKvCache` hook in `text_encoder.rs` is caption-upsample self-attention and is
+not valid evidence for this story. The reference opportunity is blocked until a product-owned
+persistent cross-attention K/V boundary exists.
+
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
 
