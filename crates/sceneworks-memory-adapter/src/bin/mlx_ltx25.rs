@@ -10,7 +10,6 @@ use super::*;
 use mlx_gen::gen_core::AudioTrack;
 use mlx_gen::{AdapterKind, AdapterSpec};
 
-pub(super) const PROVIDER: &str = "ltx_2_5";
 const LABEL: &str = "MLX LTX-2.5";
 const EXECUTION_PATH: &str = "the MLX LTX-2.5 full-A/V text-to-video path";
 const FINGERPRINT: &str = "sc-18797-ltx-2-5-mlx-ladder-v1";
@@ -170,9 +169,9 @@ fn validate_target(request: &Value) -> Result<Target, String> {
         .ok_or_else(|| "planned.target must be an object".to_owned())?;
     for name in ["provider", "modelId"] {
         let actual = target_string(target, name)?;
-        if actual != PROVIDER {
+        if actual != LTX25_PROVIDER {
             return Err(format!(
-                "{LABEL} requires target.{name} {PROVIDER:?}, got {actual:?}"
+                "{LABEL} requires target.{name} {LTX25_PROVIDER:?}, got {actual:?}"
             ));
         }
     }
@@ -994,7 +993,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let registry = mlx_gen_ltx::provider_registry()
         .map_err(|error| format!("build LTX-2.5 registry: {error}"))?;
     let contract = registry
-        .memory_strategy_contract(PROVIDER, &artifact.spec)
+        .memory_strategy_contract(LTX25_PROVIDER, &artifact.spec)
         .map_err(|error| format!("resolve real LTX-2.5 memory contract: {error}"))?
         .ok_or_else(|| "registered LTX-2.5 provider exposed no memory contract".to_owned())?;
     contract
@@ -1017,9 +1016,10 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             calibration.fingerprint, calibration.load_shape
         ));
     }
-    let resolved_tier = mlx_gen_ltx::resolved_video_memory_numeric_tier(PROVIDER, &artifact.spec)
-        .map_err(|error| format!("resolve physical LTX-2.5 numeric tier: {error}"))?
-        .ok_or_else(|| "LTX-2.5 numeric tier resolver returned no tier".to_owned())?;
+    let resolved_tier =
+        mlx_gen_ltx::resolved_video_memory_numeric_tier(LTX25_PROVIDER, &artifact.spec)
+            .map_err(|error| format!("resolve physical LTX-2.5 numeric tier: {error}"))?
+            .ok_or_else(|| "LTX-2.5 numeric tier resolver returned no tier".to_owned())?;
     if resolved_tier != selection.tier {
         return Err(format!(
             "planned LTX-2.5 tier {:?} differs from physical split bundle {:?}",
@@ -1034,13 +1034,15 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         .pointer("/hardware/wiredLimitBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "run request.hardware.wiredLimitBytes must be an integer".to_owned())?;
-    let generator = registry.load(PROVIDER, &artifact.spec).map_err(|error| {
-        format!(
-            "load real LTX-2.5 {}/{tier} provider: {error}",
-            target.variant.id()
-        )
-    })?;
-    if generator.descriptor().id != PROVIDER {
+    let generator = registry
+        .load(LTX25_PROVIDER, &artifact.spec)
+        .map_err(|error| {
+            format!(
+                "load real LTX-2.5 {}/{tier} provider: {error}",
+                target.variant.id()
+            )
+        })?;
+    if generator.descriptor().id != LTX25_PROVIDER {
         return Err(format!(
             "loaded LTX-2.5 descriptor id changed to {:?}",
             generator.descriptor().id
@@ -1368,8 +1370,8 @@ mod tests {
         json!({
             "planned": {
                 "target": {
-                    "provider": PROVIDER,
-                    "modelId": PROVIDER,
+                    "provider": LTX25_PROVIDER,
+                    "modelId": LTX25_PROVIDER,
                     "tier": tier,
                     "transformerVariant": variant,
                     "decoder": decoder,

@@ -1294,6 +1294,7 @@ fn ltx25_load_spec(
 /// Candle's distinct INT8-ConvRot/NVFP4 evaluation selectors need an inference-owned producer and
 /// are never aliased to an ordinary bundle tier here.
 fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
+    protocol::validate_plain_overlay_target(request, LTX25_EXECUTION_PATH)?;
     let target = protocol::ltx25_candle_target(request)?;
     let Ltx25LoadPlan {
         repository,

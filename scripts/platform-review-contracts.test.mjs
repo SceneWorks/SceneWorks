@@ -1203,6 +1203,10 @@ test("memory adapters bind every emitted overlay verdict to the requested target
     candle.indexOf("fn run_five_rung_reference("),
     candle.indexOf("fn run(request:"),
   );
+  const candleLtx25 = candle.slice(
+    candle.indexOf("fn run_ltx25_capture("),
+    candle.indexOf("const FIVE_RUNG_FIXTURE_PREFIX"),
+  );
 
   assert.match(
     krea,
@@ -1235,7 +1239,16 @@ test("memory adapters bind every emitted overlay verdict to the requested target
       candleReference.lastIndexOf("load_five_rung_generator(&first_request)?"),
     "the Candle batch must validate every target before its one model load",
   );
-  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 3);
+  assert.match(
+    candleLtx25,
+    /validate_plain_overlay_target\(request, LTX25_EXECUTION_PATH\)\?/,
+  );
+  assert.ok(
+    candleLtx25.indexOf("validate_plain_overlay_target") <
+      candleLtx25.indexOf("runtime_cuda::catalog()"),
+    "LTX-2.5 must reject a mismatched overlay before provider work",
+  );
+  assert.equal(candle.match(/protocol::plain_gated_fragment\(/g)?.length, 4);
   assert.doesNotMatch(candle, /protocol::gated_fragment\(/);
 });
 

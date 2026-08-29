@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v3",
-  "inferenceRevision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a",
+  "inferenceRevision": "346dd4a82f11c3e85f144bb0d5a8a0aa756ae497",
   "providers": {
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
@@ -50,7 +50,7 @@
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "e91d92e9db94a769c2c8b9f7ee7ae0184927195d8ff910e5d4e93ed64ebc74d0",
+      "digest": "5b0457b11456bb26e95bab62c0be3750c0891b7c3a9a5ab99de44051b7a0aa5d",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -68,7 +68,7 @@
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "1f97c4d304f9ffb3d63a2985457fd5d047fa724a739fdd836f909a676189f38d",
+      "digest": "ddc1dd7d007ef413b8b93a498d837dce2b14092fa1b60c4d0824d5d7a4cd1481",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -86,7 +86,7 @@
     },
     "candle:ltx_2_5_distilled": {
       "crate": "crates/media/candle-gen/candle-gen-ltx",
-      "digest": "d67005f4723a7bd51e98773fd564aaef218cd48077cdf3c5decd82cc82be137d",
+      "digest": "6327433258dbf3db9cf5e602ed5bd5d146724c9cb14be8ce6fae5eb9f7db5187",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -95,7 +95,7 @@
         "crates/media/candle-gen/candle-gen-ltx",
         "crates/media/candle-gen/vendor/candle-kernels"
       ],
-      "sourceFileCount": 244,
+      "sourceFileCount": 248,
       "lockedPackageCount": 238
     },
     "candle:z_image": {

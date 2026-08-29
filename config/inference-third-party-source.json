@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Final LTX-2.5 pin 43c6cc8333511ffa33aea6ff2e917411ba7c724a contains 667 scanner-matched production Rust files across the explicitly classified 96-crate population. The candidate list, blob identities, normalized marker population, and audit digest were regenerated together from that immutable revision; this record makes no stale claim about an older pin's one-file delta. Existing report-only compliance worklist items remain non-gating under the sc-19751 gate teardown and are reported by check-license-coverage.mjs rather than restated here.",
-  "inferenceRevision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a",
-  "auditDigest": "6429794654fac7211e678d6cb43a88b48fce191b27d1de7bbc8abc5585e5be3e",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. The pinned revision contains 667 scanner-matched production Rust files across the explicitly classified 96-crate population. The candidate list, blob identities, normalized marker population, and audit digest were regenerated together from that immutable revision; this record makes no stale claim about an older pin's one-file delta. Existing report-only compliance worklist items remain non-gating under the sc-19751 gate teardown and are reported by check-license-coverage.mjs rather than restated here.",
+  "inferenceRevision": "346dd4a82f11c3e85f144bb0d5a8a0aa756ae497",
+  "auditDigest": "ff3615014cf9942ba060fbe14092236c90300089cdd5c8e64cf017474d0c8011",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a",
+    "revision": "346dd4a82f11c3e85f144bb0d5a8a0aa756ae497",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 667,
-    "populationSha256": "ec2d7338068adbfbd3ec766f782292e4f7c8e7c2775d79c1c93b2a1791ead109"
+    "populationSha256": "83eec82088760c0712954cf8f77c66aebdcb62d3b1637527bb94c176032c01fa"
   },
   "portedSourceAreas": [
     {
@@ -830,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "43c6cc8333511ffa33aea6ff2e917411ba7c724a",
+    "revision": "346dd4a82f11c3e85f144bb0d5a8a0aa756ae497",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 96,
     "cratePopulationSha256": "ab6f0f6f4c71a93339973ba3054d40b651b8db7f96ed219d5d152c3c624c49fc"
