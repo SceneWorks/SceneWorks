@@ -231,7 +231,7 @@ function validateAudioQuality(record) {
   }
 }
 
-function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
+export function validatePhysicalMlxAvContentsAgainstRecord(record, avContents, label) {
   if (avContents.size === 0) return;
   validateAudioQuality(record);
   const selected = avContents.get("selected_av");
@@ -905,6 +905,7 @@ export function validateRecord(record) {
   if (record.id !== recordId(record)) fail(`${record.id}: deterministic identity mismatch`);
   object(record.loadability, `${record.id}.loadability`);
   object(record.quality, `${record.id}.quality`);
+  if (record.quality.audio !== undefined) validateAudioQuality(record);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
   validateDiagnosticCeilingAgreesWithTypedField(record);
   if (record.status === "complete") validateComplete(record);
@@ -986,10 +987,14 @@ export function validateBundle(bundle) {
       ? "z_image"
       : requiresQwenMlxDerivation ? "qwen_image" : null;
     const requiresDerivation = provenancePolicy !== null;
+    const requiresAudioDerivation = record.quality.audio !== undefined;
     if (requiresQwenMlxDerivation && !record.artifact.inventorySha256) {
       fail(`${record.id}: authoritative Qwen MLX evidence requires an exact artifact inventory`);
     }
     if (requiresDerivation && !record.derivation) fail(`${record.id}: missing source-session derivation`);
+    if (requiresAudioDerivation && !record.derivation) {
+      fail(`${record.id}: typed audio quality requires physical source-session derivation`);
+    }
     if (record.derivation) {
       const derivationSessionIds = new Set();
       for (const [claim, reference] of Object.entries(record.derivation).filter(([key]) => key !== "justification")) {
@@ -1059,6 +1064,17 @@ export function validateBundle(bundle) {
       if (requiresQwenMlxDerivation) {
         const [sessionId] = derivationSessionIds;
         validatePhysicalMlxOutputsAgainstRecord(record, sessions.get(sessionId));
+      }
+      if (requiresAudioDerivation) {
+        const audioSourceIds = record.derivation.quality.sourceSessionIds;
+        if (audioSourceIds.length !== 1) {
+          fail(`${record.id}: typed audio quality must bind exactly one physical A/V source session`);
+        }
+        const audioSession = sessions.get(audioSourceIds[0]);
+        if (audioSession?.kind !== "physical_mlx") {
+          fail(`${record.id}: typed audio quality source must be physical_mlx`);
+        }
+        validatePhysicalMlxOutputsAgainstRecord(record, audioSession);
       }
       if (record.target.modelId.startsWith("ltx_")) {
         for (const sessionId of derivationSessionIds) {

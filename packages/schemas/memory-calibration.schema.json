@@ -44,6 +44,56 @@
           }
         }
       }
+    },
+    {
+      "$comment": "Any typed audio comparison must have a physical MLX source session carrying the canonical selected/reference A/V pair. JSON Schema proves that such a session exists; the JS and Rust validators bind the record's quality derivation to that exact session.",
+      "if": {
+        "properties": {
+          "records": {
+            "contains": {
+              "properties": {
+                "quality": {
+                  "required": ["audio"]
+                }
+              },
+              "required": ["quality"]
+            }
+          }
+        },
+        "required": ["records"]
+      },
+      "then": {
+        "required": ["sourceSessions"],
+        "properties": {
+          "sourceSessions": {
+            "contains": {
+              "type": "object",
+              "required": ["kind", "outputs"],
+              "properties": {
+                "kind": { "const": "physical_mlx" },
+                "outputs": {
+                  "allOf": [
+                    {
+                      "contains": {
+                        "type": "object",
+                        "required": ["role"],
+                        "properties": { "role": { "const": "selected_av" } }
+                      }
+                    },
+                    {
+                      "contains": {
+                        "type": "object",
+                        "required": ["role"],
+                        "properties": { "role": { "const": "reference_av" } }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -372,6 +422,16 @@
       ],
       "allOf": [
         {
+          "$comment": "Audio quality is admissible only as a source-derived physical A/V comparison. Bundle-level validators bind derivation.quality to the exact physical session.",
+          "if": {
+            "properties": {
+              "quality": { "required": ["audio"] }
+            },
+            "required": ["quality"]
+          },
+          "then": { "required": ["derivation"] }
+        },
+        {
           "$comment": "Every derived LTX record carries the two pipeline axes on the record itself. The JS and Rust validators additionally bind every referenced source-session target to all six exact identity fields.",
           "if": {
             "properties": {
@@ -589,7 +649,7 @@
                 "rootMeanSquareErrorThreshold"
               ],
               "properties": {
-                "result": { "enum": ["passed", "failed", "not_run"] },
+                "result": { "const": "passed" },
                 "sampleRateHz": { "type": "integer", "minimum": 1 },
                 "channels": { "type": "integer", "minimum": 1 },
                 "sampleCount": { "type": "integer", "minimum": 1 },

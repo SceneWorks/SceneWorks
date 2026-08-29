@@ -13,7 +13,7 @@ import {
   projectPhaseMetricsToSchemaV5,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
   parsePhysicalMlxAvContent, physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord,
-  validateSourceSessionFiles,
+  validatePhysicalMlxAvContentsAgainstRecord, validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import {
   calibrationBinding,
@@ -63,6 +63,22 @@ const phase = (value) => ({
   reclaimableBytes: 10,
 });
 
+const audioQuality = (overrides = {}) => ({
+  result: "passed",
+  sampleRateHz: 24000,
+  channels: 2,
+  sampleCount: 48000,
+  selectedPcmSha256: "a".repeat(64),
+  referencePcmSha256: "b".repeat(64),
+  maximumAbsoluteError: 0.001,
+  meanAbsoluteError: 0.0001,
+  rootMeanSquareError: 0.0002,
+  maximumAbsoluteErrorThreshold: 0.01,
+  meanAbsoluteErrorThreshold: 0.01,
+  rootMeanSquareErrorThreshold: 0.01,
+  ...overrides,
+});
+
 function canonicalAvFixture() {
   const magic = Buffer.from("SCENEWORKS_AV1\0", "ascii");
   const frame = Buffer.from([1, 2, 3, 4, 5, 6]);
@@ -86,7 +102,8 @@ function canonicalAvFixture() {
 
 test("canonical A/V parser binds the complete header, frame payload, and PCM bytes", () => {
   const { bytes, pcm } = canonicalAvFixture();
-  assert.deepEqual(parsePhysicalMlxAvContent(bytes), {
+  const content = parsePhysicalMlxAvContent(bytes);
+  assert.deepEqual(content, {
     width: 2,
     height: 1,
     frames: 1,
@@ -103,6 +120,33 @@ test("canonical A/V parser binds the complete header, frame payload, and PCM byt
   wrongFrameLength.writeBigUInt64LE(5n, Buffer.from("SCENEWORKS_AV1\0").length + 4 * 5 + 2 + 8 + 8);
   assert.throws(() => parsePhysicalMlxAvContent(wrongFrameLength), /canonical RGB geometry/);
   assert.throws(() => parsePhysicalMlxAvContent(bytes.subarray(0, -1)), /PCM payload length/);
+
+  const record = {
+    id: "imc-audio-content-binding",
+    target: { geometry: { width: 2, height: 1, frames: 1 } },
+    diagnostics: { measurements: [{ name: "outputFps", value: 24 }] },
+    quality: {
+      audio: audioQuality({
+        sampleCount: 4,
+        selectedPcmSha256: content.pcmSha256,
+        referencePcmSha256: content.pcmSha256,
+      }),
+    },
+  };
+  const avContents = new Map([["selected_av", content], ["reference_av", content]]);
+  validatePhysicalMlxAvContentsAgainstRecord(record, avContents, record.id);
+  const mismatchedMetadata = structuredClone(record);
+  mismatchedMetadata.quality.audio.sampleRateHz = 48000;
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(mismatchedMetadata, avContents, record.id),
+    /A\/V header differs from measured video\/audio identity/,
+  );
+  const mismatchedPcm = structuredClone(record);
+  mismatchedPcm.quality.audio.selectedPcmSha256 = "0".repeat(64);
+  assert.throws(
+    () => validatePhysicalMlxAvContentsAgainstRecord(mismatchedPcm, avContents, record.id),
+    /A\/V PCM hashes differ from quality.audio/,
+  );
 });
 
 function complete(overrides = {}) {
@@ -1158,6 +1202,19 @@ test("LTX-2.5 evidence identity requires and hashes transformer and decoder axes
     records: [derived],
   };
   validateBundle(derivedBundle);
+  const nonPhysicalAudio = structuredClone(derivedBundle);
+  nonPhysicalAudio.records[0].quality.audio = audioQuality();
+  assert.throws(
+    () => validateBundle(nonPhysicalAudio),
+    /schema validation|physical.*A\/V source session|source must be physical_mlx/,
+    "typed audio cannot be sourced from a non-physical derived record",
+  );
+  const failedAudio = structuredClone(derived);
+  failedAudio.quality.audio = audioQuality({ result: "failed" });
+  assert.throws(() => validateRecord(failedAudio), /audio quality did not pass/);
+  const overThresholdAudio = structuredClone(derived);
+  overThresholdAudio.quality.audio = audioQuality({ maximumAbsoluteError: 0.02 });
+  assert.throws(() => validateRecord(overThresholdAudio), /audio quality threshold exceeded/);
   for (const field of ["tier", "mode", "overlay", "rung", "transformerVariant", "decoder"]) {
     const crossed = structuredClone(derivedBundle);
     crossed.sourceSessions[0].target[field] = "wrong";
@@ -2117,20 +2174,7 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
 
   const av = structuredClone(authoritative);
   const avRecord = av.records[0];
-  avRecord.quality.audio = {
-    result: "passed",
-    sampleRateHz: 24000,
-    channels: 2,
-    sampleCount: 48000,
-    selectedPcmSha256: "a".repeat(64),
-    referencePcmSha256: "b".repeat(64),
-    maximumAbsoluteError: 0.001,
-    meanAbsoluteError: 0.0001,
-    rootMeanSquareError: 0.0002,
-    maximumAbsoluteErrorThreshold: 0.01,
-    meanAbsoluteErrorThreshold: 0.01,
-    rootMeanSquareErrorThreshold: 0.01,
-  };
+  avRecord.quality.audio = audioQuality();
   for (const output of av.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
     output.role = output.role === "selected_rgb" ? "selected_av" : "reference_av";
     output.path = `${sourcePathPrefix}/${avRecord.logicalCaseId}-${output.role}-1024x1024-f1-${output.sha256}.avbin`;
@@ -2152,6 +2196,18 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
     output.path = output.path.replace(priorAvLogicalCaseId, ltxAvRecord.logicalCaseId);
   }
   assert.equal(validateBundle(ltxAv), ltxAv, "LTX A/V provenance binds the complete typed source target");
+  const mismatchedAudioSource = structuredClone(ltxAv);
+  const nonPhysicalSession = structuredClone(mismatchedAudioSource.sourceSessions[0]);
+  nonPhysicalSession.id = `ims-${"f".repeat(20)}`;
+  nonPhysicalSession.kind = "unit_test";
+  nonPhysicalSession.sourcePath = "docs/calibration/sc-test/mismatched-audio-source.log";
+  mismatchedAudioSource.sourceSessions.push(nonPhysicalSession);
+  mismatchedAudioSource.records[0].derivation.quality.sourceSessionIds = [nonPhysicalSession.id];
+  assert.throws(
+    () => validateBundle(mismatchedAudioSource),
+    /typed audio quality source must be physical_mlx/,
+    "an unrelated physical A/V session cannot cover a non-physical quality derivation",
+  );
   const crossedAv = structuredClone(av);
   crossedAv.sourceSessions[0].outputs[2].role = "reference_rgb";
   assert.throws(() => validateBundle(crossedAv), /schema validation|selected\/reference RGB or A\/V pair/);
@@ -2159,8 +2215,11 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   badAudioHash.records[0].quality.audio.selectedPcmSha256 = "not-a-digest";
   assert.throws(() => validateBundle(badAudioHash), /schema validation|lowercase SHA-256/);
   const failedAudio = structuredClone(av);
-  failedAudio.records[0].quality.audio.maximumAbsoluteError = 0.02;
-  assert.throws(() => validateBundle(failedAudio), /audio quality threshold exceeded/);
+  failedAudio.records[0].quality.audio.result = "failed";
+  assert.throws(() => validateBundle(failedAudio), /schema validation|audio quality did not pass/);
+  const overThresholdAudio = structuredClone(av);
+  overThresholdAudio.records[0].quality.audio.maximumAbsoluteError = 0.02;
+  assert.throws(() => validateBundle(overThresholdAudio), /audio quality threshold exceeded/);
 
   const missingDerivation = structuredClone(authoritative);
   delete missingDerivation.records[0].derivation;

@@ -1560,6 +1560,7 @@ fn validate_derivation(
     let requires_qwen_mlx_provenance = is_authoritative_qwen_mlx
         && record.source_provenance == Some(SourceProvenance::PhysicalMlxV1);
     let requires_provenance = requires_z_image_provenance || requires_qwen_mlx_provenance;
+    let requires_audio_derivation = record.quality.audio.is_some();
     if requires_qwen_mlx_provenance && record.artifact.inventory_sha256.is_none() {
         return Err(format!(
             "{} authoritative Qwen MLX evidence requires an exact artifact inventory",
@@ -1569,6 +1570,11 @@ fn validate_derivation(
     let Some(derivation) = &record.derivation else {
         return if requires_provenance {
             Err(format!("{} requires source-session derivation", record.id))
+        } else if requires_audio_derivation {
+            Err(format!(
+                "{} typed audio quality requires physical source-session derivation",
+                record.id
+            ))
         } else {
             Ok(())
         };
@@ -1703,6 +1709,28 @@ fn validate_derivation(
         let session = sessions
             .get(session_id)
             .expect("physical MLX derivation session was resolved above");
+        validate_physical_mlx_outputs_against_record(record, session)?;
+    }
+    if record.quality.audio.is_some() {
+        if derivation.quality.source_session_ids.len() != 1 {
+            return Err(format!(
+                "{} typed audio quality must bind exactly one physical A/V source session",
+                record.id
+            ));
+        }
+        let session_id = &derivation.quality.source_session_ids[0];
+        let session = sessions.get(session_id.as_str()).ok_or_else(|| {
+            format!(
+                "{} references missing source session {session_id}",
+                record.id
+            )
+        })?;
+        if session.kind != SourceSessionKind::PhysicalMlx {
+            return Err(format!(
+                "{} typed audio quality source must be physical_mlx",
+                record.id
+            ));
+        }
         validate_physical_mlx_outputs_against_record(record, session)?;
     }
     if record.target.model_id.starts_with("ltx_") {
@@ -1893,6 +1921,9 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
         .any(|value| value < 0.0)
     {
         return Err(format!("{} quality fields violate the schema", record.id));
+    }
+    if let Some(audio) = &record.quality.audio {
+        validate_audio_quality(audio, &record.id)?;
     }
     if record
         .artifact
@@ -2968,6 +2999,59 @@ mod tests {
         assert!(matches!(
             load_bundle(&failed_audio.to_string()),
             Err(BundleLoadError::Invalid(message)) if message.contains("audio quality")
+        ));
+        let mut failed_audio_result = av_document.clone();
+        failed_audio_result["records"][0]["quality"]["audio"]["result"] = json!("failed");
+        assert!(matches!(
+            load_bundle(&failed_audio_result.to_string()),
+            Err(BundleLoadError::Invalid(message)) if message.contains("audio quality")
+        ));
+        let mut missing_audio_derivation = av_document.clone();
+        missing_audio_derivation["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        missing_audio_derivation["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("derivation");
+        assert!(matches!(
+            load_bundle(&missing_audio_derivation.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality requires physical source-session derivation")
+        ));
+        let mut non_physical_audio_source = av_document.clone();
+        non_physical_audio_source["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        non_physical_audio_source["sourceSessions"][0]["kind"] = json!("unit_test");
+        assert!(matches!(
+            load_bundle(&non_physical_audio_source.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality source must be physical_mlx")
+        ));
+        let mut mismatched_audio_source = av_document.clone();
+        mismatched_audio_source["records"][0]
+            .as_object_mut()
+            .expect("record")
+            .remove("sourceProvenance");
+        let mismatched_session_id = format!("ims-{}", "f".repeat(20));
+        let mut mismatched_session = mismatched_audio_source["sourceSessions"][0].clone();
+        mismatched_session["id"] = json!(mismatched_session_id.clone());
+        mismatched_session["kind"] = json!("unit_test");
+        mismatched_session["sourcePath"] =
+            json!("docs/calibration/sc-test/mismatched-audio-source.log");
+        mismatched_audio_source["sourceSessions"]
+            .as_array_mut()
+            .expect("source sessions")
+            .push(mismatched_session);
+        mismatched_audio_source["records"][0]["derivation"]["quality"]["sourceSessionIds"] =
+            json!([mismatched_session_id]);
+        assert!(matches!(
+            load_bundle(&mismatched_audio_source.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("typed audio quality source must be physical_mlx")
         ));
 
         let mut ltx_document = document.clone();
