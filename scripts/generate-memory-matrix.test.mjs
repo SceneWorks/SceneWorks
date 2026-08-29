@@ -3338,7 +3338,7 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // The pinned revision is the current committed inference-main head. Keep this literal
   // alongside the current generated receipt: the assertion below only means something while the
   // pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "8710a1d0d9fe21a3bbf25084f1d9e05f6b3972f6");
+  assert.equal(pin, "ec55763b3d958e29f04723e3eb268e12a63c4d09");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
