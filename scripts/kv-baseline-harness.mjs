@@ -1,125 +1,43 @@
 #!/usr/bin/env node
-
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
-export const SCHEMA_VERSION = 1;
-export const HARNESS_VERSION = "sc-20671-kv-baseline-v1";
-
-const fail = (message) => { throw new Error(`KV baseline receipt: ${message}`); };
-const object = (value, name) => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${name} must be an object`);
-  return value;
-};
-const positive = (value, name) => {
-  if (!Number.isSafeInteger(value) || value < 0) fail(`${name} must be a non-negative safe integer`);
-  return value;
-};
-const text = (value, name) => {
-  if (typeof value !== "string" || value.length === 0) fail(`${name} must be non-empty text`);
-  return value;
-};
-
-function stable(value) {
-  if (Array.isArray(value)) return value.map(stable);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
-  }
-  return value;
-}
-export function canonicalJson(value) { return JSON.stringify(stable(value), null, 2); }
-export function sha256(value) { return createHash("sha256").update(typeof value === "string" ? value : canonicalJson(value)).digest("hex"); }
-
-export function readDarwinMemory(pid = process.pid, runner = execFileSync) {
-  if (process.platform !== "darwin") return { supported: false, reason: "Darwin phys_footprint is unavailable on this platform" };
-  try {
-    const output = runner("footprint", ["-p", String(pid)], { encoding: "utf8" });
-    const match = output.match(/phys_footprint\s*:\s*([0-9]+)/i);
-    if (!match) fail("footprint output omitted phys_footprint");
-    return { supported: true, bytes: Number(match[1]), source: "footprint -p" };
-  } catch (error) { fail(`cannot read Darwin phys_footprint: ${error.message}`); }
-}
-
-export function detectFullCacheTemporary(events, denseCacheBytes) {
-  if (!Array.isArray(events)) fail("memoryEvents must be an array");
-  positive(denseCacheBytes, "denseCacheBytes");
-  const threshold = Math.max(1, Math.floor(denseCacheBytes * 0.9));
-  const witnesses = events.filter((event) => event?.kind === "dense_cache_temporary"
-    || event?.materializedFullCache === true
-    || (event?.kind === "allocation" && Number.isSafeInteger(event.bytes) && event.bytes >= threshold));
-  return { detected: witnesses.length > 0, thresholdBytes: threshold, witnesses };
-}
-
-export function validateReceipt(receipt) {
-  object(receipt, "receipt");
-  if (receipt.schemaVersion !== SCHEMA_VERSION) fail("unsupported schemaVersion");
-  if (receipt.harnessVersion !== HARNESS_VERSION) fail("unsupported harnessVersion");
-  for (const key of ["runId", "capturedAt", "mode", "status"]) text(receipt[key], `receipt.${key}`);
-  if (!["dense", "compressed"].includes(receipt.mode)) fail("mode must be dense or compressed");
-  if (receipt.status !== "complete") fail("incomplete runs are not ingestible");
-  object(receipt.provenance, "provenance");
-  for (const key of ["sceneWorksRevision", "inferenceRevision", "mlxRevision", "os", "xcode", "hardware", "modelId", "modelFileSha256", "powerMode", "thermalState", "command"]) text(receipt.provenance[key], `provenance.${key}`);
-  if (!/^[0-9a-f]{64}$/.test(receipt.provenance.modelFileSha256)) fail("provenance.modelFileSha256 must be SHA-256");
-  object(receipt.geometry, "geometry");
-  for (const key of ["batch", "queryHeads", "kvHeads", "headDimension", "queryLength", "kvLength"]) positive(receipt.geometry[key], `geometry.${key}`);
-  object(receipt.memory, "memory");
-  for (const key of ["modelWeightsBytes", "persistentKvBytes", "transientWorkspaceBytes", "denseTheoreticalKvBytes"]) positive(receipt.memory[key], `memory.${key}`);
-  object(receipt.memory.physFootprint, "memory.physFootprint");
-  positive(receipt.memory.physFootprint.beforeBytes, "physFootprint.beforeBytes");
-  positive(receipt.memory.physFootprint.afterBytes, "physFootprint.afterBytes");
-  object(receipt.memory.mlxAllocator, "memory.mlxAllocator");
-  for (const key of ["activeBytes", "cacheBytes", "peakBytes"]) positive(receipt.memory.mlxAllocator[key], `mlxAllocator.${key}`);
-  object(receipt.timings, "timings");
-  for (const key of ["loadMs", "prefillMs", "firstTokenMs", "decodeTokensPerSecond", "coldCompileMs", "warmCompileMs"]) positive(receipt.timings[key], `timings.${key}`);
-  object(receipt.quality, "quality");
-  for (const key of ["parityMaxError", "perplexityDelta", "greedyAgreement"])
-    if (typeof receipt.quality[key] !== "number" || receipt.quality[key] < 0) fail(`quality.${key} must be non-negative number`);
-  object(receipt.quality.contract, "quality.contract");
-  for (const key of ["parityMaxErrorThreshold", "perplexityDeltaThreshold", "greedyAgreementThreshold", "repeats", "warmups"])
-    positive(receipt.quality.contract[key], `quality.contract.${key}`);
-  if (!Array.isArray(receipt.lifecycle) || receipt.lifecycle.length === 0) fail("lifecycle checks are required");
-  if (receipt.fullCacheTemporary?.detected !== false) fail("full-cache temporary detection must be explicitly false");
-  if (receipt.cancellation?.cleanupVerified !== true) fail("cancellation cleanup must be verified");
-  return receipt;
-}
-
-export function buildReceipt(input) {
-  object(input, "input");
-  const receipt = { ...input, schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION };
-  receipt.fullCacheTemporary ??= detectFullCacheTemporary(input.memoryEvents ?? [], input.memory?.denseTheoreticalKvBytes ?? 0);
-  validateReceipt(receipt);
-  return { ...receipt, receiptSha256: sha256(receipt) };
-}
-
-export function compareReceipts(dense, compressed) {
-  validateReceipt(dense); validateReceipt(compressed);
-  if (dense.mode !== "dense" || compressed.mode !== "compressed") fail("comparison requires dense then compressed receipts");
-  if (dense.provenance.sceneWorksRevision !== compressed.provenance.sceneWorksRevision
-    || dense.provenance.inferenceRevision !== compressed.provenance.inferenceRevision
-    || JSON.stringify(dense.geometry) !== JSON.stringify(compressed.geometry)) fail("inputs or geometry differ");
-  const reduction = dense.memory.persistentKvBytes === 0 ? 0
-    : (dense.memory.persistentKvBytes - compressed.memory.persistentKvBytes) / dense.memory.persistentKvBytes;
-  return { schemaVersion: SCHEMA_VERSION, denseRunId: dense.runId, compressedRunId: compressed.runId,
-    persistentKvReduction: reduction, physFootprintDeltaBytes: compressed.memory.physFootprint.afterBytes - dense.memory.physFootprint.afterBytes,
-    decodeThroughputRatio: dense.timings.decodeTokensPerSecond === 0 ? 0 : compressed.timings.decodeTokensPerSecond / dense.timings.decodeTokensPerSecond,
-    quality: { parityMaxError: compressed.quality.parityMaxError, perplexityDelta: compressed.quality.perplexityDelta,
-      greedyAgreement: compressed.quality.greedyAgreement },
-    comparable: true, comparisonSha256: sha256({ denseRunId: dense.runId, compressedRunId: compressed.runId, reduction }) };
-}
-
-export async function cancellationSafe(work, cleanup, signal) {
-  if (signal?.aborted) fail("cancelled before start");
-  try { return await work(signal); }
-  finally { await cleanup(); }
-}
-
-function usage() { console.error("usage: kv-baseline-harness.mjs record <input.json> <receipt.json> | compare <dense.json> <compressed.json> <comparison.json>"); }
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const [command, first, second, third] = process.argv.slice(2);
-  if (!command) { usage(); process.exitCode = 2; }
-  else if (command === "record") writeFile(second, `${canonicalJson(buildReceipt(JSON.parse(await readFile(first, "utf8"))))}\n`);
-  else if (command === "compare") writeFile(third, `${canonicalJson(compareReceipts(JSON.parse(await readFile(first, "utf8")), JSON.parse(await readFile(second, "utf8"))))}\n`);
-  else { usage(); process.exitCode = 2; }
-}
+export const SCHEMA_VERSION = 2;
+export const HARNESS_VERSION = "sc-20671-kv-baseline-v2";
+export const CONTRACT_PATH = "config/kv-baseline-quality-contract.json";
+const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const CONTRACT = JSON.parse(readFileSync(path.join(ROOT, CONTRACT_PATH), "utf8"));
+const LIFE = ["append","chunkedPrefill","singleShotPrefill","promptCacheReuse","trim","rollback","clear","cancel","clone","batchSplit","batchMerge","prefixCopyOnWrite","pageImport","pageExport","serialization","restore","denseFallback","postRunRelease"];
+const BANDS = ["short","medium","memory-material","fit-boundary"];
+function stable(v) { if (Array.isArray(v)) return v.map(stable); if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map(k => [k, stable(v[k])])); return v; }
+export function canonicalJson(v) { return JSON.stringify(stable(v), null, 2); }
+export function sha256(v) { return createHash("sha256").update(typeof v === "string" ? v : canonicalJson(v)).digest("hex"); }
+const fail = m => { throw new Error(`KV baseline receipt: ${m}`); };
+const obj = (v,n) => { if (!v || typeof v !== "object" || Array.isArray(v)) fail(`${n} must be an object`); return v; };
+const txt = (v,n) => { if (typeof v !== "string" || !v) fail(`${n} must be non-empty text`); return v; };
+const num = (v,n) => { if (typeof v !== "number" || !Number.isFinite(v) || v < 0) fail(`${n} must be finite and non-negative`); return v; };
+const int = (v,n) => { if (!Number.isSafeInteger(v) || v < 0) fail(`${n} must be a non-negative integer`); return v; };
+function checkContract(c) { obj(c,"contract"); if (c.version !== 1) fail("unsupported quality contract"); obj(c.thresholds,"contract.thresholds"); for (const k of ["parityMaxError","perplexityDelta","greedyTokenAgreement","structuredToolAgreement","needleRetrieval","multiTurnPromptCache"]) num(c.thresholds[k],`contract.thresholds.${k}`); obj(c.statistics,"contract.statistics"); for (const k of ["repeats","warmups"]) int(c.statistics[k],`contract.statistics.${k}`); for (const k of ["confidenceInterval","outlierPolicy","variancePolicy"]) txt(c.statistics[k],`contract.statistics.${k}`); }
+checkContract(CONTRACT);
+export const QUALITY_CONTRACT_HASH = sha256(CONTRACT);
+function footprintBytes(v) { const m = String(v).trim().match(/^([0-9]+(?:[.][0-9]+)?)[ \t]*(B|KB|MB|GB)$/i); if (!m) fail(`invalid phys_footprint value ${v}`); const b = Number(m[1]) * ({B:1,KB:1024,MB:1024**2,GB:1024**3}[m[2].toUpperCase()]); if (!Number.isSafeInteger(b)) fail("phys_footprint exceeds safe integer"); return b; }
+export function readDarwinMemory(pid=process.pid, runner=execFileSync, phase="overall", timestamp=new Date().toISOString()) { if (process.platform !== "darwin") return { supported:false, reason:"Darwin unavailable" }; let out; try { out=runner("footprint",["-p",String(pid)],{encoding:"utf8"}); } catch(e) { fail(`cannot read footprint: ${e.message}`); } const m=String(out).match(/phys_footprint[ \t]*:[ \t]*([0-9]+(?:[.][0-9]+)?[ \t]*(?:KB|MB|GB|B)(?![A-Za-z]))/i); if (!m) fail("footprint output omitted units"); return { phase,pid,source:"footprint -p",timestamp,physFootprintBytes:footprintBytes(m[1]) }; }
+export function detectFullCacheTemporary(events,denseBytes) { if (!Array.isArray(events)||!events.length) fail("typed allocation events required"); int(denseBytes,"denseTheoreticalKvBytes"); const threshold=Math.max(1,Math.floor(denseBytes*.9)); const witnesses=events.filter((e,i)=>{obj(e,`allocationEvents[${i}]`); txt(e.kind,`allocationEvents[${i}].kind`); txt(e.phase,`allocationEvents[${i}].phase`); txt(e.timestamp,`allocationEvents[${i}].timestamp`); int(e.bytes,`allocationEvents[${i}].bytes`); return e.kind==="dense_cache_temporary"||e.kind==="full_cache_materialization"||e.bytes>=threshold;}); return {detected:witnesses.length>0,thresholdBytes:threshold,witnesses}; }
+function phase(s,i) { obj(s,`phaseSamples[${i}]`); for(const k of ["phase","source","timestamp"]) txt(s[k],`phaseSamples[${i}].${k}`); int(s.pid,`phaseSamples[${i}].pid`); int(s.physFootprintBytes,`phaseSamples[${i}].physFootprintBytes`); obj(s.mlx,`phaseSamples[${i}].mlx`); for(const k of ["activeBytes","cacheBytes","peakBytes"]) int(s.mlx[k],`phaseSamples[${i}].mlx.${k}`); }
+export function validateReceipt(r,{verifyHash=true}={}) { obj(r,"receipt"); if(r.schemaVersion!==SCHEMA_VERSION||r.harnessVersion!==HARNESS_VERSION) fail("unsupported schema/harness"); for(const k of ["runId","capturedAt","mode","status","contractHash"]) txt(r[k],`receipt.${k}`); if(!["dense","compressed"].includes(r.mode)||r.status!=="complete") fail("receipt must be complete dense/compressed"); if(r.contractHash!==QUALITY_CONTRACT_HASH) fail("quality contract hash mismatch"); if(verifyHash&&r.receiptSha256!==sha256(Object.fromEntries(Object.entries(r).filter(([k])=>k!=="receiptSha256")))) fail("receiptSha256 mismatch");
+ obj(r.provenance,"provenance"); for(const k of ["sceneWorksRevision","inferenceRevision","mlxRevision","os","xcode","hardware","modelId","modelFileSha256","powerMode","thermalState","command"]) txt(r.provenance[k],`provenance.${k}`); if(!/^[0-9a-f]{64}$/.test(r.provenance.modelFileSha256)) fail("modelFileSha256 must be SHA-256");
+ obj(r.matrix,"matrix"); if(!["llama","qwen"].includes(r.matrix.family)||!BANDS.includes(r.matrix.contextBand)||!["single","supported-batch"].includes(r.matrix.requestMode)||!["chunked","single-shot"].includes(r.matrix.prefillMode)||!["cold","warm"].includes(r.matrix.processTemperature)) fail("incomplete matrix coordinate");
+ obj(r.geometry,"geometry"); for(const k of ["batch","queryHeads","kvHeads","headDimension","queryLength","kvLength","layers","elementBytes","capacity"]) int(r.geometry[k],`geometry.${k}`);
+ obj(r.memory,"memory"); for(const k of ["modelWeightsBytes","persistentKvBytes","transientWorkspaceBytes","denseTheoreticalKvBytes"]) int(r.memory[k],`memory.${k}`); if(!Array.isArray(r.memory.phaseSamples)||r.memory.phaseSamples.length<2) fail("phase samples required"); r.memory.phaseSamples.forEach(phase); if(!Array.isArray(r.memory.allocationEvents)||!r.memory.allocationEvents.length) fail("allocation events required"); if(detectFullCacheTemporary(r.memory.allocationEvents,r.memory.denseTheoreticalKvBytes).detected) fail("full-cache temporary detected"); obj(r.memory.reconciliation,"memory.reconciliation"); for(const k of ["expectedDenseKvBytes","observedPersistentKvBytes","toleranceBytes"]) int(r.memory.reconciliation[k],`reconciliation.${k}`); const expected=r.geometry.layers*r.geometry.kvHeads*r.geometry.capacity*r.geometry.headDimension*r.geometry.elementBytes; if(Math.abs(r.memory.reconciliation.expectedDenseKvBytes-expected)>r.memory.reconciliation.toleranceBytes) fail("dense KV equation mismatch"); obj(r.memory.release,"memory.release"); if(r.memory.release.verified!==true) fail("post-run release unverified"); int(r.memory.release.afterBytes,"release.afterBytes");
+ obj(r.timings,"timings"); for(const k of ["loadMs","prefillMs","firstTokenMs","decodeTokensPerSecond","coldCompileMs","warmCompileMs"]) num(r.timings[k],`timings.${k}`); obj(r.quality,"quality"); for(const k of ["parityMaxError","perplexityDelta","greedyTokenAgreement","structuredToolAgreement","needleRetrieval","multiTurnPromptCache"]) num(r.quality[k],`quality.${k}`); obj(r.quality.statistics,"quality.statistics"); for(const k of ["repeats","warmups"]) int(r.quality.statistics[k],`quality.statistics.${k}`); for(const k of ["confidenceInterval","outlierPolicy","variancePolicy"]) txt(r.quality.statistics[k],`quality.statistics.${k}`); if(r.quality.statistics.repeats<CONTRACT.statistics.repeats||r.quality.statistics.warmups<CONTRACT.statistics.warmups) fail("repeat/warmup minimum not met"); for(const k of Object.keys(CONTRACT.thresholds)) if(r.quality[k]>CONTRACT.thresholds[k]) fail(`quality.${k} exceeds contract`);
+ obj(r.lifecycle,"lifecycle"); for(const k of LIFE) { if(typeof r.lifecycle[k]!=="boolean") fail(`lifecycle.${k} must be boolean`); if(!r.lifecycle[k]) txt(r.lifecycle[`${k}FallbackReason`],`lifecycle.${k}FallbackReason`); } obj(r.cancellation,"cancellation"); if(r.cancellation.cleanupVerified!==true) fail("cancellation cleanup unverified"); return r; }
+export function buildReceipt(input) { const r={...input,schemaVersion:SCHEMA_VERSION,harnessVersion:HARNESS_VERSION,contractHash:QUALITY_CONTRACT_HASH}; r.receiptSha256=sha256(r); return validateReceipt(r); }
+export async function writeSealedJson(file,value) { const body=canonicalJson(value), hash=sha256(JSON.parse(body)), temp=`${file}.tmp-${process.pid}`, side=`${file}.sha256`, st=`${side}.tmp-${process.pid}`; await writeFile(temp,`${body}\n`,{flag:"wx"}); await writeFile(st,`${hash}\n`,{flag:"wx"}); await rename(temp,file); await rename(st,side); return hash; }
+export async function readSealedJson(file) { const body=await readFile(file,"utf8"), expected=(await readFile(`${file}.sha256`,"utf8")).trim(), actual=sha256(JSON.parse(body)); if(expected!==actual) fail(`sidecar hash mismatch for ${file}`); return JSON.parse(body); }
+export function compareReceipts(d,c) { validateReceipt(d); validateReceipt(c); if(d.mode!=="dense"||c.mode!=="compressed") fail("comparison requires dense then compressed"); for(const k of ["sceneWorksRevision","inferenceRevision","mlxRevision","os","xcode","hardware","modelId","modelFileSha256","powerMode","thermalState"]) if(d.provenance[k]!==c.provenance[k]) fail(`identity differs at ${k}`); if(d.contractHash!==c.contractHash||canonicalJson(d.matrix)!==canonicalJson(c.matrix)||canonicalJson(d.geometry)!==canonicalJson(c.geometry)) fail("matrix/geometry/contract differs"); return {schemaVersion:SCHEMA_VERSION,denseRunId:d.runId,compressedRunId:c.runId,persistentKvReduction:d.memory.persistentKvBytes?(d.memory.persistentKvBytes-c.memory.persistentKvBytes)/d.memory.persistentKvBytes:0,physFootprintDeltaBytes:c.memory.phaseSamples.at(-1).physFootprintBytes-d.memory.phaseSamples.at(-1).physFootprintBytes,decodeThroughputRatio:d.timings.decodeTokensPerSecond?c.timings.decodeTokensPerSecond/d.timings.decodeTokensPerSecond:0,contractHash:d.contractHash}; }
+export function validateCampaign(receipts) { if(!Array.isArray(receipts)||!receipts.length) fail("campaign has no sealed receipts"); const keys=new Set(); for(const r of receipts){validateReceipt(r); keys.add([r.matrix.family,r.matrix.contextBand,r.matrix.requestMode,r.matrix.prefillMode,r.matrix.processTemperature].join("/"));} const missing=[]; for(const f of ["llama","qwen"]) for(const b of BANDS) for(const q of ["single","supported-batch"]) for(const p of ["chunked","single-shot"]) for(const t of ["cold","warm"]) {const k=[f,b,q,p,t].join("/"); if(!keys.has(k)) missing.push(k);} if(missing.length) fail(`campaign incomplete; missing ${missing.length} coordinates`); return {schemaVersion:SCHEMA_VERSION,receipts:receipts.length,coordinates:keys.size,complete:true}; }
+export async function cancellationSafe(work,cleanup,signal) { try { if(signal?.aborted) fail("cancelled before start"); return await work(signal); } finally { await cleanup(); } }
+if(import.meta.url===`file://${process.argv[1]}`) { const [cmd,a,b]=process.argv.slice(2); if(cmd==="record") writeSealedJson(b,buildReceipt(JSON.parse(await readFile(a,"utf8")))); else if(cmd==="compare") writeSealedJson(b,compareReceipts(await readSealedJson(a),await readSealedJson(process.argv[4]))); else if(cmd==="campaign") { const files=(await readdir(a)).filter(f=>f.endsWith(".json")&&!f.endsWith(".sha256")); await writeSealedJson(b,validateCampaign(await Promise.all(files.map(f=>readSealedJson(path.join(a,f)))))); } else process.exitCode=2; }
