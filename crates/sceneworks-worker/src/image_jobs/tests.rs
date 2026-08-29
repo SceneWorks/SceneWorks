@@ -26191,3 +26191,102 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
          so it compares against the strategy this request actually executes"
     );
 }
+
+/// sc-22329 — the guard-side resident-base table and the checkpoint-plan family tables are two
+/// spellings of one fact ("this family's imported checkpoints pair with an installed base
+/// model"), kept in different files because the plan tables live behind the macOS/candle cfg
+/// while the pre-loader guard compiles everywhere. This pins them together, in both directions,
+/// and pins each row's identity to the constants the family's own resolver reads — so a family
+/// added to the plan tables without a guard row (its imported loads would silently bypass the
+/// resolved cache again), or a guard row whose base model/tier drifts from what the resolver
+/// actually opens, reds here by name.
+///
+/// Failing mutations (run): delete the `krea_2` row from
+/// `PLAN_BACKED_RESIDENT_BASE_MODELS` (set inequality); change its `base_model_id` to
+/// `"krea_2_raw"` (repo mismatch vs `KREA_IMPORTED_BASE_REPO`); change its `tier` to `"q4"`
+/// (tier mismatch vs `KREA_IMPORTED_BASE_TIER`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
+    use crate::external_library_runtime::PLAN_BACKED_RESIDENT_BASE_MODELS;
+    use std::collections::BTreeSet;
+
+    let plan_families: BTreeSet<&str> = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
+        .iter()
+        .map(|(family, _)| *family)
+        .chain(
+            CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
+                .iter()
+                .map(|(family, _)| *family),
+        )
+        .collect();
+    let guard_families: BTreeSet<&str> = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .map(|row| row.family)
+        .collect();
+    assert_eq!(
+        plan_families, guard_families,
+        "every family with a checkpoint-plan resident-base/component resolver needs a \
+         PLAN_BACKED_RESIDENT_BASE_MODELS row (and vice versa), or its imported checkpoints \
+         load their base from the source library while the resolved cache holds it"
+    );
+
+    // Every row must name a real builtin catalog entry that carries a primary download for the
+    // row's tier — the closure the guard builds for it would otherwise be empty on every host
+    // and the row would be dead.
+    for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
+        let entry = crate::training_jobs::builtin_model_manifest_entry(row.base_model_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "resident-base row for family {:?} names {:?}, which is not a builtin model",
+                    row.family, row.base_model_id
+                )
+            });
+        assert!(
+            entry["downloads"].as_array().into_iter().flatten().any(|download| {
+                download.get("variant").and_then(serde_json::Value::as_str) == Some(row.tier)
+                    && !sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download(
+                        download,
+                    )
+            }),
+            "builtin entry {:?} declares no primary {:?}-tier download for family {:?}",
+            row.base_model_id,
+            row.tier,
+            row.family
+        );
+    }
+
+    // Identity pins against the family resolvers' own constants: the guard's synthetic closure
+    // must name the same repository/tier `resolve_krea_imported_base_tier` and
+    // `resolve_mage_finetuned_components` actually open.
+    let krea = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .find(|row| row.family == "krea_2")
+        .expect("krea_2 row");
+    let krea_entry = crate::training_jobs::builtin_model_manifest_entry(krea.base_model_id)
+        .expect("krea base entry");
+    assert_eq!(krea.tier, KREA_IMPORTED_BASE_TIER);
+    assert!(
+        krea_entry["downloads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|download| {
+                download.get("variant").and_then(serde_json::Value::as_str) == Some(krea.tier)
+                    && download.get("repo").and_then(serde_json::Value::as_str)
+                        == Some(KREA_IMPORTED_BASE_REPO)
+            }),
+        "the krea_2 guard row's base entry must download {KREA_IMPORTED_BASE_REPO} at tier \
+         {KREA_IMPORTED_BASE_TIER} — the repository the imported route's resolver reads"
+    );
+
+    let mage = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .find(|row| row.family == "mage-flow")
+        .expect("mage-flow row");
+    assert_eq!(mage.base_model_id, MAGE_FINETUNED_BASE_MODEL);
+    assert_eq!(mage.tier, MAGE_FINETUNED_COMPONENT_TIER);
+}

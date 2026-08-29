@@ -1630,10 +1630,10 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
 /// source of truth for a base model's pinned `coRequisite` downloads (the app seeds its live catalog
 /// from these bytes). The training plan carries the base model id, not its manifest entry, so the trainer
 /// resolves components off this. `None` when the id is not a builtin model.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// Compiled on every build (not just the macOS/candle trainer lanes): the pre-loader model-source
+/// guard resolves a plan-backed imported checkpoint's resident base model off this too
+/// (sc-22329), and the guard runs everywhere.
 pub(crate) fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
     let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
