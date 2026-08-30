@@ -16,6 +16,10 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const TUPLES = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
 const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+// Windows cannot create the validator's colon-bearing logical tuple paths. Raw
+// jobs therefore use a reversible portable spelling; the macOS sealing job
+// materializes the exact validator paths in its canonical evidence tree.
+const portableRelative = (relative) => relative.split("/").map((part) => part.replaceAll(":", "__colon__")).join("/");
 
 export async function inventory(root) {
   const entries = [];
@@ -100,18 +104,24 @@ export async function claimTupleMarker(leaseRoot, permanentPin, campaignRunId, t
 }
 
 export async function validateMetricsEnvironment(metricsRoot, metricsLockSha) {
-  const environment = await json(path.join(metricsRoot, "starvector-terminal-metrics-environment-v1.json"));
+  const environmentPath = path.join(metricsRoot, "starvector-terminal-metrics-environment-v1.json");
+  const environmentInfo = await lstat(environmentPath);
+  if (!environmentInfo.isFile() || environmentInfo.isSymbolicLink()) die("metric environment must be a regular non-symlink file");
+  const environment = await json(environmentPath);
   if (environment.metrics_lock_sha256 !== metricsLockSha || !Array.isArray(environment.packages)) die("metric environment lock identity missing");
   const required = new Map([["numpy", "2.2.6"], ["scikit-image", "0.25.2"], ["lpips", "0.1.4"], ["torch", "2.7.0"], ["torchvision", "0.22.0"], ["Pillow", "11.3.0"], ["open-clip-torch", "3.1.0"]]);
+  if (environment.packages.length !== required.size || new Set(environment.packages.map((entry) => entry?.name)).size !== required.size) die("metric package inventory is not exact");
   for (const [name, version] of required) if (!environment.packages.some((entry) => entry?.name === name && entry.version === version)) die(`metric package ${name} is not exactly pinned`);
+  const sources = {};
   for (const [key, expected] of [["lpips_linear", "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0"], ["alexnet", "7be5be791159472b1fbf3c69796f7cb30dca7ad8466c2df70058c37116cdee02"]]) {
     const weight = environment.weights?.[key];
-    if (!weight?.path || weight.sha256 !== expected || sha(await readFile(path.join(metricsRoot, weight.path))) !== expected) die(`official ${key} weight does not match fixed hash`);
+    if (!weight?.path || weight.sha256 !== expected) die(`official ${key} weight does not match fixed hash`);
+    sources[key] = await checkedArtifact(metricsRoot, weight.path, expected, `official ${key} weight`);
   }
-  if (!SHA256.test(environment.metric_transcript_sha256)) die("metric transcript identity missing");
   const clip = environment.clip;
-  if (!clip?.model || !clip.checkpoint?.path || !SHA256.test(clip.checkpoint.sha256) || sha(await readFile(path.join(metricsRoot, clip.checkpoint.path))) !== clip.checkpoint.sha256) die("pre-provisioned OpenCLIP checkpoint is missing or mismatched");
-  return { ...environment, root: metricsRoot };
+  if (clip?.provider_id !== "open-clip-torch" || !clip.model || !clip.revision || !clip.checkpoint?.path || !SHA256.test(clip.checkpoint.sha256)) die("pre-provisioned OpenCLIP identity is incomplete");
+  sources.clip = await checkedArtifact(metricsRoot, clip.checkpoint.path, clip.checkpoint.sha256, "pre-provisioned OpenCLIP checkpoint");
+  return { ...environment, root: metricsRoot, sources };
 }
 
 export async function validateWeightsEnvironment(weightsRoot, revisions) {
@@ -121,7 +131,10 @@ export async function validateWeightsEnvironment(weightsRoot, revisions) {
     if (!model?.relative_path || model.revision !== revision || !SHA256.test(model.inventory_sha256)) die(`${key} snapshot identity missing`);
     if ((await inventory(path.join(weightsRoot, model.relative_path))).aggregate_sha256 !== model.inventory_sha256) die(`${key} inventory drifted`);
   }
-  return environment;
+  const raster = environment.prompt_raster;
+  if (!raster?.provider_id || !raster.model || !raster.revision || !raster.inventory_path || !SHA256.test(raster.inventory_sha256)) die("prompt raster identity is missing from the sealed weights environment");
+  const inventorySource = await checkedArtifact(weightsRoot, raster.inventory_path, raster.inventory_sha256, "prompt raster inventory");
+  return { ...environment, prompt_raster: { ...raster, inventory_source: inventorySource } };
 }
 
 async function checkedArtifact(root, relative, digest, label) {
@@ -129,6 +142,39 @@ async function checkedArtifact(root, relative, digest, label) {
   const file = path.join(root, ...relative.split(/[\\/]/)); const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink() || sha(await readFile(file)) !== digest) die(`${label} artifact is missing or mismatched`);
   return file;
+}
+
+async function materializeCheckedArtifact(source, destination, digest, label) {
+  let info;
+  try { info = await lstat(source); } catch (error) { if (error.code === "ENOENT") die(`${label} source is missing`); throw error; }
+  if (!info.isFile() || info.isSymbolicLink()) die(`${label} source must be a regular non-symlink file`);
+  const bytes = await readFile(source);
+  if (sha(bytes) !== digest) die(`${label} source digest drifted before materialization`);
+  await mkdir(path.dirname(destination), { recursive: true });
+  try {
+    const existing = await lstat(destination);
+    if (!existing.isFile() || existing.isSymbolicLink() || sha(await readFile(destination)) !== digest) die(`${label} destination already exists with different bytes`);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    await writeFile(destination, bytes, { flag: "wx" });
+  }
+  const copied = await lstat(destination);
+  if (!copied.isFile() || copied.isSymbolicLink() || sha(await readFile(destination)) !== digest) die(`${label} materialized digest mismatched`);
+}
+
+async function materializeSharedArtifacts(output, pre, tuple) {
+  if (tuple !== "candle-cuda:8b") return;
+  const metricLock = path.join(pre.route.root, "release", "starvector-terminal-metrics-lock-v1.json");
+  for (const relative of ["metrics/0", "metrics/1"]) await materializeCheckedArtifact(metricLock, path.join(output, ...portableRelative(relative).split("/")), pre.metrics_lock_sha256, relative);
+  await materializeCheckedArtifact(pre.metrics.sources.lpips_linear, path.join(output, ...portableRelative("metrics/2").split("/")), pre.metrics.weights.lpips_linear.sha256, "metrics/2");
+  await materializeCheckedArtifact(pre.metrics.sources.alexnet, path.join(output, ...portableRelative("metrics/3").split("/")), pre.metrics.weights.alexnet.sha256, "metrics/3");
+  await materializeCheckedArtifact(pre.weights.prompt_raster.inventory_source, path.join(output, ...portableRelative("prompt/raster_inventory_sha256").split("/")), pre.weights.prompt_raster.inventory_sha256, "prompt raster inventory");
+  await materializeCheckedArtifact(pre.metrics.sources.clip, path.join(output, ...portableRelative("prompt/clip_inventory_sha256").split("/")), pre.metrics.clip.checkpoint.sha256, "prompt CLIP inventory");
+  for (const [relative, source] of Object.entries(pre.inference_preflight.sources)) {
+    const entry = relative.startsWith("preflight/inventory/") ? pre.inference_preflight.receipt.inventory_artifacts.find((item) => relative.endsWith(`/${item.tier}`)) : pre.inference_preflight.receipt.hook_logs.find((item) => relative.endsWith(`/${item.backend}:${item.tier}`));
+    if (!entry) die(`preflight artifact has no normalized receipt entry: ${relative}`);
+    await materializeCheckedArtifact(source, path.join(output, ...portableRelative(relative).split("/")), entry.sha256, relative);
+  }
 }
 
 // The inference native-provider preflight is supplied by the already-completed
@@ -176,7 +222,7 @@ export async function preflight({ sceneWorksRoot, planPath, inferenceRoot, weigh
   await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
   if (!weightsRoot || !metricsRoot) die("pre-provisioned weights and metrics roots required; network acquisition is forbidden");
   await stat(leaseHelper).catch(() => die("current-tree fs2 lease helper is missing"));
-  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin), route: await verifyRouteClosure(sceneWorksRoot, command) };
+  return { plan, metrics_lock_sha256, service: await verifyProductService(output, sceneWorksRoot, permanentPin), weights: await validateWeightsEnvironment(weightsRoot, plan.model_snapshot_revisions), metrics: await validateMetricsEnvironment(metricsRoot, metrics_lock_sha256), inference_preflight: await validateInferencePreflight(inferenceRoot, permanentPin), route: { ...(await verifyRouteClosure(sceneWorksRoot, command)), root: sceneWorksRoot } };
 }
 
 async function failureArtifact(output, context, error) {
@@ -197,11 +243,15 @@ export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, we
     await claimCampaignMarker(leaseRoot, permanentPin, campaignRunId);
     release = await acquireStableLease(leaseRoot, leaseHelper, permanentPin, campaignRunId);
     await claimTupleMarker(leaseRoot, permanentPin, campaignRunId, tuple);
-    await writeFile(path.join(output, "preflight-provenance.json"), JSON.stringify({ inference_revision: INFERENCE_REVISION, permanent_pin: permanentPin, service: pre.service, route: pre.route, inference_preflight: pre.inference_preflight.receipt, metric_transcript_sha256: pre.metrics.metric_transcript_sha256, model_revisions: pre.plan.model_snapshot_revisions }, null, 2) + "\n");
+    await materializeSharedArtifacts(output, pre, tuple);
+    const route = { ...pre.route }; delete route.root;
+    const controllerContext = { campaign_run_id: campaignRunId, inference_revision: INFERENCE_REVISION, permanent_pin: permanentPin, workflow_run_id: process.env.GITHUB_RUN_ID ?? null, workflow_run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT ?? 0) || null, service: pre.service, route, inference_preflight: pre.inference_preflight.receipt, metrics: { metrics_lock_sha256: pre.metrics_lock_sha256, packages: pre.metrics.packages, weights: pre.metrics.weights, clip: pre.metrics.clip }, prompt_raster: Object.fromEntries(Object.entries(pre.weights.prompt_raster).filter(([key]) => key !== "inventory_source")), model_revisions: pre.plan.model_snapshot_revisions, controller_started_at: new Date().toISOString() };
+    const contextPath = path.join(output, "preflight-provenance.json");
+    await writeFile(contextPath, JSON.stringify(controllerContext, null, 2) + "\n", { flag: "wx" });
     try {
       const linear = pre.metrics.weights.lpips_linear, alexnet = pre.metrics.weights.alexnet;
       const metricEnvironment = path.join(metricsRoot, "starvector-terminal-metrics-environment-v1.json");
-      const commandResult = await execFile(command, [], { env: { ...process.env, STARVECTOR_TERMINAL_RUN_ID: campaignRunId, STARVECTOR_TERMINAL_TUPLE: tuple, STARVECTOR_TERMINAL_OUTPUT: output, STARVECTOR_TERMINAL_PERMANENT_PIN: permanentPin, STARVECTOR_TERMINAL_ROUTE_CLOSURE_SHA256: pre.route.sha256, STARVECTOR_TERMINAL_METRICS_ENVIRONMENT: metricEnvironment, STARVECTOR_TERMINAL_LPIPS_LINEAR: path.join(metricsRoot, linear.path), STARVECTOR_TERMINAL_LPIPS_LINEAR_SHA256: linear.sha256, STARVECTOR_TERMINAL_ALEXNET: path.join(metricsRoot, alexnet.path), STARVECTOR_TERMINAL_ALEXNET_SHA256: alexnet.sha256, TORCH_HOME: path.dirname(path.dirname(path.join(metricsRoot, alexnet.path))), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, maxBuffer: 1024 * 1024 });
+      const commandResult = await execFile(command, [], { env: { ...process.env, STARVECTOR_TERMINAL_RUN_ID: campaignRunId, STARVECTOR_TERMINAL_TUPLE: tuple, STARVECTOR_TERMINAL_OUTPUT: output, STARVECTOR_TERMINAL_PERMANENT_PIN: permanentPin, STARVECTOR_TERMINAL_ROUTE_CLOSURE_SHA256: pre.route.sha256, STARVECTOR_TERMINAL_CONTROLLER_CONTEXT: contextPath, STARVECTOR_TERMINAL_METRICS_ENVIRONMENT: metricEnvironment, STARVECTOR_TERMINAL_LPIPS_LINEAR: path.join(metricsRoot, linear.path), STARVECTOR_TERMINAL_LPIPS_LINEAR_SHA256: linear.sha256, STARVECTOR_TERMINAL_ALEXNET: path.join(metricsRoot, alexnet.path), STARVECTOR_TERMINAL_ALEXNET_SHA256: alexnet.sha256, TORCH_HOME: path.dirname(path.dirname(path.join(metricsRoot, alexnet.path))), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" }, maxBuffer: 1024 * 1024 });
       await writeFile(path.join(output, "route-command-transcript.json"), JSON.stringify({ stdout: commandResult.stdout, stderr: commandResult.stderr }, null, 2) + "\n");
     } catch (error) {
       await writeFile(path.join(output, "route-command-transcript.json"), JSON.stringify({ stdout: error.stdout ?? "", stderr: error.stderr ?? "", error: String(error.message ?? error) }, null, 2) + "\n");
@@ -243,16 +293,27 @@ async function validateSuiteProvenance(suites, sceneWorksRoot, route) {
   if (!producer || producer.command !== route.path || !SHA256.test(producer.transcript_sha256)) die("suite producer does not bind current-tree route closure");
 }
 
+export async function consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, suiteRoot) {
+  const expected = validator.buildArtifactManifest(receipt, corpus).entries;
+  for (const entry of expected) {
+    const match = entry.path.match(/^runs\/([^/]+:[^/]+)\//);
+    const sourceRoot = match ? tupleRoots.get(match[1]) : suiteRoot;
+    if (!sourceRoot) die(`canonical artifact has no owning tuple/suite root: ${entry.path}`);
+    await materializeCheckedArtifact(path.join(sourceRoot, ...portableRelative(entry.path).split("/")), path.join(canonicalRoot, ...entry.path.split("/")), entry.sha256, entry.path);
+  }
+}
+
 export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evidenceRoot, output, campaignRunId, permanentPin, syntheticFixture = false }) {
   const { plan } = await readPlanAndLock(planPath); await verifyInferenceCheckout(inferenceRoot); await verifyPermanentPin(sceneWorksRoot, permanentPin, plan.inference_contract.revision);
   const rows = await readdir(evidenceRoot, { recursive: true });
   const rawFiles = rows.filter((name) => name.endsWith("raw-results.json"));
   const suiteFiles = rows.filter((name) => name.endsWith("terminal-suites.json"));
   if (suiteFiles.length !== 1) die("downloaded evidence must contain exactly one nested terminal-suites.json");
-  const byTuple = new Map();
-  for (const entry of rawFiles) { const raw = await json(path.join(evidenceRoot, entry)); if (TUPLES.includes(raw.tuple)) { if (byTuple.has(raw.tuple)) die(`duplicate raw tuple ${raw.tuple}`); byTuple.set(raw.tuple, canonicalRun(raw, raw.tuple)); } }
+  const byTuple = new Map(), tupleRoots = new Map();
+  for (const entry of rawFiles) { const raw = await json(path.join(evidenceRoot, entry)); if (TUPLES.includes(raw.tuple)) { if (byTuple.has(raw.tuple)) die(`duplicate raw tuple ${raw.tuple}`); byTuple.set(raw.tuple, canonicalRun(raw, raw.tuple)); tupleRoots.set(raw.tuple, path.dirname(path.join(evidenceRoot, entry))); } }
   if (byTuple.size !== TUPLES.length) die("downloaded evidence must contain exactly four canonical tuple runs");
-  const suites = await json(path.join(evidenceRoot, suiteFiles[0])); const route = await verifyRouteClosure(sceneWorksRoot, path.join(sceneWorksRoot, "scripts", "starvector-terminal-route.mjs"));
+  const suitePath = path.join(evidenceRoot, suiteFiles[0]);
+  const suites = await json(suitePath); const route = await verifyRouteClosure(sceneWorksRoot, path.join(sceneWorksRoot, "scripts", "starvector-terminal-route.mjs"));
   await validateSuiteProvenance(suites, sceneWorksRoot, route);
   const validator = await canonicalModule(inferenceRoot);
   const corpus = await json(path.join(inferenceRoot, plan.inference_contract.corpus));
@@ -261,11 +322,18 @@ export async function sealReceipt({ sceneWorksRoot, planPath, inferenceRoot, evi
   receipt.execution.head_sha = sceneworksRevision;
   // Synthetic contract fixtures prove the canonical validator separately. Production callers
   // never set this flag and must bind each reference to a checked raw artifact file.
-  const manifest = syntheticFixture ? validator.buildArtifactManifest(receipt, corpus) : await artifactManifestFromFiles(receipt, corpus, evidenceRoot, validator); receipt.artifact_manifest = manifest; receipt.producer.artifact_manifest_sha256 = manifest.aggregate_sha256;
+  let manifest;
+  if (syntheticFixture) manifest = validator.buildArtifactManifest(receipt, corpus);
+  else {
+    const canonicalRoot = path.join(output, "canonical-evidence");
+    await consolidateCanonicalArtifacts(receipt, corpus, validator, canonicalRoot, tupleRoots, path.dirname(suitePath));
+    manifest = await artifactManifestFromFiles(receipt, corpus, canonicalRoot, validator);
+  }
+  receipt.artifact_manifest = manifest; receipt.producer.artifact_manifest_sha256 = manifest.aggregate_sha256;
   await mkdir(output, { recursive: true }); const receiptPath = path.join(output, "terminal-receipt.json"); await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
   const validatorPath = path.join(inferenceRoot, "scripts/release/starvector_terminal_evidence.mjs");
   await execFile(process.execPath, [validatorPath, "validate-receipt", "--corpus", path.join(inferenceRoot, plan.inference_contract.corpus), "--receipt", receiptPath, "--inference-revision", INFERENCE_REVISION, "--sceneworks-revision", sceneworksRevision]);
-  await writeFile(path.join(output, "terminal-artifacts.json"), JSON.stringify(await inventory(evidenceRoot), null, 2) + "\n");
+  await writeFile(path.join(output, "terminal-artifacts.json"), JSON.stringify(await inventory(syntheticFixture ? evidenceRoot : path.join(output, "canonical-evidence")), null, 2) + "\n");
   return receipt;
 }
 

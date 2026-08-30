@@ -14,6 +14,7 @@ const terminal = new Set(["completed", "failed", "cancelled", "canceled"]);
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 const finishReasons = new Set(["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"]);
+const portableRelative = (relative) => relative.split("/").map((part) => part.replaceAll(":", "__colon__")).join("/");
 
 export function vectorRequest(record) {
   if (!record?.projectId || !record.sourceAssetId || !record.model) die("each case requires projectId, sourceAssetId, and StarVector model");
@@ -112,7 +113,7 @@ async function runHostileSanitizer(records, output, transcript) {
       await materializeArtifact(output, `hostile/${record.case_index}/preview`, path.join(destination, "preview.png"), observed.preview_png_sha256);
     } else if (observed.outcome !== "rejected") die("production sanitizer returned an unknown hostile disposition");
     await appendFile(transcript, JSON.stringify({ phase: "production_sanitizer", case_id: record.case_id, input_sha256: record.input_sha256, observed }) + "\n");
-    results.push({ case_id: record.case_id, suite: "hostile_sanitizer", job: { terminal_evidence: observed } });
+    results.push({ case_id: record.case_id, suite: "hostile_sanitizer", job: { terminalEvidence: observed } });
   }
   return results;
 }
@@ -124,7 +125,7 @@ async function submitPromptWorkflow(baseUrl, record, transcript, fetchOptions) {
   const created = await request(new URL("/api/v1/image/vectorize/prompt/jobs", baseUrl), { method: "POST", headers: { "content-type": "application/json", ...fetchOptions.headers }, body: JSON.stringify(promptWorkflowRequest(record)) });
   if (created.type !== "vector_generate" || !created.id) die("prompt workflow did not create a vector_generate parent");
   await appendFile(transcript, JSON.stringify({ phase: "prompt_workflow_created", case_id: record.case_id, job: created }) + "\n");
-  for (let attempt = 0; attempt < 7200; attempt += 1) { const job = await request(new URL(`/api/v1/jobs/${created.id}`, baseUrl), { headers: fetchOptions.headers }); await appendFile(transcript, JSON.stringify({ phase: "prompt_workflow_polled", case_id: record.case_id, job }) + "\n"); if (terminal.has(job.status)) { const workflow = job?.result?.workflow ?? job?.workflow; if (workflow?.disclosure !== "raster_to_vector" || workflow?.rasterStage?.model !== record.raster_model || workflow?.vectorStage?.model !== record.vector_model) die("prompt workflow did not preserve disclosed raster-to-vector lineage"); return job; } await new Promise((resolve) => setTimeout(resolve, 1000)); }
+  for (let attempt = 0; attempt < 7200; attempt += 1) { const job = await request(new URL(`/api/v1/jobs/${created.id}`, baseUrl), { headers: fetchOptions.headers }); await appendFile(transcript, JSON.stringify({ phase: "prompt_workflow_polled", case_id: record.case_id, job }) + "\n"); if (terminal.has(job.status)) { const workflow = job?.result?.workflow ?? job?.workflow; if (workflow?.disclosure !== "raster_to_vector" || workflow?.rasterStage?.model !== record.raster_model || workflow?.vectorStage?.model !== record.vector_model) die("prompt workflow did not preserve disclosed raster-to-vector lineage"); const rasterJobId = workflow?.rasterStage?.jobId ?? workflow?.childJobId; if (!rasterJobId) die("prompt workflow did not retain its raster child identity"); const rasterJob = await request(new URL(`/api/v1/jobs/${rasterJobId}`, baseUrl), { headers: fetchOptions.headers }); const providerId = rasterJob?.result?.adapter ?? rasterJob?.adapter, model = rasterJob?.result?.model ?? rasterJob?.payload?.model; if (rasterJob.status !== "completed" || typeof providerId !== "string" || !providerId || model !== workflow.rasterStage.model) die("prompt raster child lacks an observed provider/model identity"); const terminalRasterObservation = { jobId: rasterJobId, providerId, model, revision: workflow.rasterStage.revision }; await appendFile(transcript, JSON.stringify({ phase: "prompt_raster_observed", case_id: record.case_id, raster: terminalRasterObservation }) + "\n"); return { ...job, terminalRasterObservation }; } await new Promise((resolve) => setTimeout(resolve, 1000)); }
   die(`prompt workflow ${created.id} did not finish within two hours`);
 }
 
@@ -142,7 +143,14 @@ async function materializeArtifact(evidenceRoot, relative, source, expected) {
   if (!source || !/^[a-f0-9]{64}$/.test(expected) || path.isAbsolute(relative) || relative.split("/").includes("..")) die(`unsafe canonical artifact ${relative}`);
   const input = await lstat(source); if (!input.isFile() || input.isSymbolicLink()) die(`canonical source is not a regular file: ${source}`);
   const bytes = await readFile(source); if (sha(bytes) !== expected) die(`canonical source hash mismatch: ${relative}`);
-  const destination = path.join(evidenceRoot, ...relative.split("/")); await mkdir(path.dirname(destination), { recursive: true }); await writeFile(destination, bytes);
+  const destination = path.join(evidenceRoot, ...portableRelative(relative).split("/")); await mkdir(path.dirname(destination), { recursive: true });
+  try {
+    const existing = await lstat(destination);
+    if (!existing.isFile() || existing.isSymbolicLink() || sha(await readFile(destination)) !== expected) die(`canonical destination already exists with different bytes: ${relative}`);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    await writeFile(destination, bytes, { flag: "wx" });
+  }
   const copied = await lstat(destination); if (!copied.isFile() || copied.isSymbolicLink() || sha(await readFile(destination)) !== expected) die(`canonical copy hash mismatch: ${relative}`);
 }
 
@@ -254,11 +262,37 @@ async function liveRuntime(output, tuple, events) {
   runtime.hardware.accelerator.raw_probe_sha256 = sha(await readFile(probePath));
   return runtime;
 }
-export function assembleSuites(bundle, events, metrics) {
-  if (!metrics.terminal_suites || !events.hostile_sanitizer || !events.prompt_composition) die("final tuple lacks source-owned hostile/prompt suite evidence");
-  // The metrics script returns raw cosine values; the product event remains the
-  // authority for attachment-only publication, no-inline-SVG, and staging facts.
-  return metrics.terminal_suites;
+function exactMetricIdentity(context, observation) {
+  const declared = context?.metrics, packages = observation?.packages;
+  if (!declared || !packages || observation.metrics_lock_sha256 !== declared.metrics_lock_sha256 || !/^[a-f0-9]{64}$/.test(observation.metric_transcript_sha256 ?? "") || !observation.metric_transcript_path) die("observed metric runtime does not bind the validated controller environment");
+  for (const item of declared.packages ?? []) if (packages[item.name] !== item.version) die(`observed metric package drifted: ${item.name}`);
+  if (observation.lpips_linear_sha256 !== declared.weights?.lpips_linear?.sha256 || observation.alexnet_sha256 !== declared.weights?.alexnet?.sha256) die("observed LPIPS weights drifted");
+  if (observation.clip?.provider_id !== declared.clip?.provider_id || observation.clip?.model !== declared.clip?.model || observation.clip?.revision !== declared.clip?.revision || observation.clip?.inventory_sha256 !== declared.clip?.checkpoint?.sha256) die("observed OpenCLIP identity drifted");
+  return { rasterizer: "resvg-0.45", canvas: { width: 512, height: 512, background: "white", colorspace: "srgb8" }, ssim: { implementation: "skimage.metrics.structural_similarity", package_version: packages["scikit-image"], lock_sha256: declared.metrics_lock_sha256, data_range: 255, channel_axis: 2, gaussian_weights: true, sigma: 1.5, use_sample_covariance: false }, lpips: { implementation: "richzhang/lpips", package_version: packages.lpips, version: "0.1", net: "alex", eval_mode: true, rgb_normalization: "[-1,1]", lock_sha256: declared.metrics_lock_sha256, linear_weights_sha256: observation.lpips_linear_sha256, alexnet_weights_sha256: observation.alexnet_sha256 }, metric_transcript_sha256: observation.metric_transcript_sha256 };
+}
+function workflowFor(event) { const job = event?.job; return job?.result?.workflow ?? job?.workflow; }
+export function assembleSuites(bundle, events, metrics, context, transcriptSha, completedAt, sanitizerVersion) {
+  const measured = metrics?.terminal_suite_measurements;
+  if (!measured || !events.hostile_sanitizer || !events.prompt_composition) die("final tuple lacks source-owned hostile/prompt suite evidence");
+  if (!context || context.campaign_run_id !== process.env.STARVECTOR_TERMINAL_RUN_ID || context.permanent_pin !== process.env.STARVECTOR_TERMINAL_PERMANENT_PIN || context.route?.sha256 !== process.env.STARVECTOR_TERMINAL_ROUTE_CLOSURE_SHA256) die("controller context does not bind this route execution");
+  if (!context.workflow_run_id || !Number.isInteger(context.workflow_run_attempt) || context.workflow_run_attempt < 1 || !context.service?.started_at || context.service.sceneworks_revision !== context.route.sceneworks_revision) die("same-run workflow execution identity is incomplete");
+  if (!/^[a-f0-9]{64}$/.test(transcriptSha ?? "") || !sanitizerVersion) die("producer transcript or sanitizer identity missing");
+  const promptRaster = context.prompt_raster;
+  if (!promptRaster?.provider_id || !promptRaster.model || !promptRaster.revision || !/^[a-f0-9]{64}$/.test(promptRaster.inventory_sha256 ?? "")) die("validated prompt raster identity is incomplete");
+  for (const [index, event] of events.prompt_composition.entries()) {
+    const workflow = workflowFor(event), source = bundle.prompt_composition[index], observed = event?.job?.terminalRasterObservation;
+    if (workflow?.disclosure !== "raster_to_vector" || workflow?.rasterStage?.model !== source.raster_model || workflow?.rasterStage?.revision !== source.expected_raster_revision || workflow.rasterStage.model !== promptRaster.model || workflow.rasterStage.revision !== promptRaster.revision || observed?.providerId !== promptRaster.provider_id || observed?.model !== promptRaster.model || observed?.revision !== promptRaster.revision) die("actual prompt workflow does not bind the validated raster provider/model identity");
+  }
+  const hostileCorpus = sha(bundle.hostile_sanitizer.map((item) => item.input_sha256).join("\n"));
+  const promptCorpus = sha(bundle.prompt_composition.map((item) => item.prompt_sha256).join("\n"));
+  return {
+    execution: { repository: "SceneWorks/SceneWorks", workflow_run_id: String(context.workflow_run_id), workflow_run_attempt: context.workflow_run_attempt, head_sha: context.service.sceneworks_revision, started_at: context.service.started_at, completed_at: completedAt, clean_tree: true },
+    producer: { command: context.route.path, artifact_name: `starvector-terminal-${context.campaign_run_id}`, transcript_sha256: transcriptSha, artifact_manifest_sha256: "0".repeat(64) },
+    metric_identity: exactMetricIdentity(context, measured.metric_observation),
+    inference_preflight: context.inference_preflight,
+    hostile_sanitizer: { corpus_sha256: hostileCorpus, sanitizer_version: sanitizerVersion, cases: measured.hostile_cases },
+    prompt_composition: { corpus_sha256: promptCorpus, raster_provider_id: promptRaster.provider_id, raster_model: promptRaster.model, raster_revision: promptRaster.revision, raster_inventory_sha256: promptRaster.inventory_sha256, clip_provider_id: measured.metric_observation.clip.provider_id, clip_model: measured.metric_observation.clip.model, clip_revision: measured.metric_observation.clip.revision, clip_inventory_sha256: measured.metric_observation.clip.inventory_sha256, metric_transcript_sha256: measured.metric_observation.metric_transcript_sha256, cases: measured.prompt_cases },
+  };
 }
 
 async function main() {
@@ -293,8 +327,15 @@ async function main() {
   await materializeArtifact(output, `runs/${tuple}/lifecycle-memory`, runtime.lifecycle_memory_transcript_path, run.lifecycle_memory_transcript_sha256);
   await writeFile(path.join(output, "raw-results.json"), JSON.stringify({ tuple, run }, null, 2) + "\n");
   if (tuple === "candle-cuda:8b") {
-    const suites = assembleSuites(bundle, events, metrics);
+    const contextPath = process.env.STARVECTOR_TERMINAL_CONTROLLER_CONTEXT;
+    if (!contextPath || !path.isAbsolute(contextPath)) die("source-owned controller context path is required");
+    const contextInfo = await lstat(contextPath); if (!contextInfo.isFile() || contextInfo.isSymbolicLink()) die("controller context must be a regular non-symlink file");
+    const sanitizer = process.env.STARVECTOR_TERMINAL_SANITIZER, sanitizerInfo = await lstat(sanitizer); if (!sanitizerInfo.isFile() || sanitizerInfo.isSymbolicLink()) die("source-built sanitizer identity is invalid");
+    const suites = assembleSuites(bundle, events, metrics, await json(contextPath), transcriptSha, new Date().toISOString(), `sha256:${sha(await readFile(sanitizer))}`);
     await materializePromptArtifacts(output, bundle, events, suites);
+    await materializeArtifact(output, "metrics/4", metrics.terminal_suite_measurements.metric_observation.metric_transcript_path, suites.metric_identity.metric_transcript_sha256);
+    await materializeArtifact(output, "prompt/metric_transcript_sha256", metrics.terminal_suite_measurements.metric_observation.metric_transcript_path, suites.prompt_composition.metric_transcript_sha256);
+    await materializeArtifact(output, "producer/transcript", transcript, suites.producer.transcript_sha256);
     await writeFile(path.join(output, "terminal-suites.json"), JSON.stringify(suites, null, 2) + "\n");
   }
   await stat(path.join(output, "raw-results.json"));

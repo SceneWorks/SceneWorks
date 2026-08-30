@@ -16,6 +16,8 @@ test("terminal metrics bind actual product attachments rather than corpus previe
   assert.match(metrics, /importlib\.metadata\.version/);
   assert.match(metrics, /STARVECTOR_TERMINAL_LPIPS_LINEAR/);
   assert.match(metrics, /HF_HUB_OFFLINE/);
+  assert.match(metrics, /metric-runtime-transcript\.json/);
+  assert.doesNotMatch(metrics, /STARVECTOR_TERMINAL_EXECUTION_IDENTITY/);
 });
 
 test("route seals worker-observed raster, lifecycle, and hardware artifacts", async () => {
@@ -25,6 +27,8 @@ test("route seals worker-observed raster, lifecycle, and hardware artifacts", as
   assert.match(route, /runs\/\$\{tuple\}\/hardware\/raw-probe/);
   assert.match(route, /runs\/\$\{tuple\}\/lifecycle-memory/);
   assert.match(route, /worker-owned peak accelerator memory observations/);
+  assert.match(route, /producer\/transcript/);
+  assert.match(route, /STARVECTOR_TERMINAL_CONTROLLER_CONTEXT/);
 });
 
 test("case bundle cannot predeclare observed provider, hardware, or receipt facts", async () => {

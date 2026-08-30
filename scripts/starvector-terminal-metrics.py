@@ -46,6 +46,7 @@ def verified_file(value, digest, label):
 
 
 def verify_runtime_packages():
+    observed = {}
     for package, expected in PACKAGES.items():
         try:
             actual = importlib.metadata.version(package)
@@ -53,6 +54,8 @@ def verify_runtime_packages():
             fail("metric package is not installed: " + package)
         if actual != expected:
             fail("metric package version mismatch: " + package)
+        observed[package] = actual
+    return observed
 
 
 def rgb512(item):
@@ -117,7 +120,22 @@ def prompt_cosine(prompt, image_path, clip):
     return float((image_features @ text_features.T).item())
 
 
-def terminal_suites(bundle, events, identity):
+def metric_environment():
+    source = os.environ.get("STARVECTOR_TERMINAL_METRICS_ENVIRONMENT")
+    if not source:
+        fail("validated metrics environment is required")
+    path = verified_file(source, sha256_file(source), "metrics environment")
+    value = json.loads(path.read_text())
+    if not isinstance(value.get("clip"), dict) or not isinstance(value.get("weights"), dict):
+        fail("metrics environment lacks CLIP or LPIPS identity")
+    clip = value["clip"]
+    checkpoint = verified_file(str(path.parent / clip.get("checkpoint", {}).get("path", "")), clip.get("checkpoint", {}).get("sha256"), "OpenCLIP checkpoint")
+    if clip.get("provider_id") != "open-clip-torch" or not isinstance(clip.get("model"), str) or not isinstance(clip.get("revision"), str):
+        fail("OpenCLIP identity is incomplete")
+    return value, checkpoint
+
+
+def terminal_suite_measurements(bundle, events, environment, packages, clip_checkpoint):
     hostile_cases = []
     for index, (case, event) in enumerate(zip(bundle["hostile_sanitizer"], events["hostile_sanitizer"])):
         observed = event_evidence(event, "hostile")
@@ -125,7 +143,8 @@ def terminal_suites(bundle, events, identity):
         # product worker, never inferred from an expected-disposition flag.
         hostile_cases.append({"case_index": index, "case_id": case["case_id"], "input_sha256": case["input_sha256"], "expected_policy": "reject_or_sanitize_inert", "outcome": observed["outcome"], "error_code": observed["error_code"], "canonical_svg_sha256": observed.get("canonical_svg_sha256"), "preview_png_sha256": observed.get("preview_png_sha256"), "published_paths": observed["published_paths"], "staging_residue": observed["staging_residue"], "result_contains_inline_svg": observed["result_contains_inline_svg"]})
     prompt_cases = []
-    clip = identity.get("clip")
+    clip_identity = environment["clip"]
+    clip = {"model": clip_identity["model"], "checkpoint": str(clip_checkpoint), "checkpoint_sha256": clip_identity["checkpoint"]["sha256"]}
     for index, (case, event) in enumerate(zip(bundle["prompt_composition"], events["prompt_composition"])):
         observed = event_evidence(event, "prompt")
         accepted = observed.get("accepted") is True
@@ -137,7 +156,7 @@ def terminal_suites(bundle, events, identity):
             preview_cosine = prompt_cosine(case["prompt"], preview, clip)
             loss = raster_cosine - preview_cosine
         prompt_cases.append({"case_index": index, "case_id": case["case_id"], "prompt_sha256": case["prompt_sha256"], "raster_png_sha256": observed.get("sourceRasterSha256"), "vector_provider_transcript_sha256": observed.get("providerTranscriptSha256"), "canonical_svg_sha256": observed.get("canonicalSvgSha256") if accepted else None, "preview_png_sha256": observed.get("previewPngSha256") if accepted else None, "accepted": accepted, "raster_prompt_cosine": raster_cosine, "preview_prompt_cosine": preview_cosine, "alignment_loss": loss})
-    return {"execution": identity["execution"], "producer": identity["producer"], "metric_identity": identity["metric_identity"], "inference_preflight": identity["inference_preflight"], "hostile_sanitizer": {"corpus_sha256": identity["hostile_corpus_sha256"], "sanitizer_version": identity["sanitizer_version"], "cases": hostile_cases}, "prompt_composition": {"raster_provider_id": identity["raster_provider_id"], "raster_model": identity["raster_model"], "raster_revision": identity["raster_revision"], "raster_inventory_sha256": identity["raster_inventory_sha256"], "clip_provider_id": identity["clip_provider_id"], "clip_model": identity["clip_model"], "clip_revision": identity["clip_revision"], "clip_inventory_sha256": identity["clip_inventory_sha256"], "metric_transcript_sha256": identity["metric_transcript_sha256"], "corpus_sha256": identity["prompt_corpus_sha256"], "cases": prompt_cases}}
+    return {"hostile_cases": hostile_cases, "prompt_cases": prompt_cases, "metric_observation": {"packages": packages, "metrics_lock_sha256": environment.get("metrics_lock_sha256"), "lpips_linear_sha256": environment.get("weights", {}).get("lpips_linear", {}).get("sha256"), "alexnet_sha256": environment.get("weights", {}).get("alexnet", {}).get("sha256"), "clip": {"provider_id": clip_identity["provider_id"], "model": clip_identity["model"], "revision": clip_identity["revision"], "inventory_sha256": sha256_file(clip_checkpoint)}}}
 
 
 def main():
@@ -154,7 +173,8 @@ def main():
         fail("no-job-downloads guard is required")
     if os.environ.get("HF_HUB_OFFLINE") != "1" or os.environ.get("TRANSFORMERS_OFFLINE") != "1":
         fail("metric process must be offline")
-    verify_runtime_packages()
+    packages = verify_runtime_packages()
+    environment, clip_checkpoint = metric_environment()
     bundle = json.loads(pathlib.Path(args.bundle).read_text())
     events = json.loads(pathlib.Path(args.events).read_text())
     runtime = json.loads(pathlib.Path(args.runtime).read_text())
@@ -204,10 +224,13 @@ def main():
     if args.tuple == "candle-cuda:8b":
         if len(events.get("hostile_sanitizer", [])) != 200 or len(events.get("prompt_composition", [])) != 60:
             fail("final tuple is missing a complete hostile or prompt suite")
-        identity_path = os.environ.get("STARVECTOR_TERMINAL_EXECUTION_IDENTITY")
-        if not identity_path:
-            fail("source-owned execution identity is required for terminal suites")
-        result["terminal_suites"] = terminal_suites(bundle, events, json.loads(pathlib.Path(identity_path).read_text()))
+        measurements = terminal_suite_measurements(bundle, events, environment, packages, clip_checkpoint)
+        transcript_path = pathlib.Path(args.output).with_name("metric-runtime-transcript.json")
+        transcript = {"schema_version": 1, "tuple": args.tuple, "route_transcript_sha256": args.transcript_sha256, "metrics_script_sha256": sha256_file(__file__), "packages": packages, "metrics_lock_sha256": environment.get("metrics_lock_sha256"), "lpips_linear_sha256": measurements["metric_observation"]["lpips_linear_sha256"], "alexnet_sha256": measurements["metric_observation"]["alexnet_sha256"], "clip": measurements["metric_observation"]["clip"], "quality_case_count": len(facts), "parity_case_count": len(parity_facts), "hostile_case_count": len(measurements["hostile_cases"]), "prompt_case_count": len(measurements["prompt_cases"])}
+        transcript_path.write_text(json.dumps(transcript, sort_keys=True, separators=(",", ":")) + "\n")
+        measurements["metric_observation"]["metric_transcript_path"] = str(transcript_path)
+        measurements["metric_observation"]["metric_transcript_sha256"] = sha256_file(transcript_path)
+        result["terminal_suite_measurements"] = measurements
     pathlib.Path(args.output).write_text(json.dumps(result, indent=2) + "\n")
 
 
