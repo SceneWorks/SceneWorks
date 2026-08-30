@@ -230,18 +230,18 @@ jobs:
   parity-scaffold:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT: ${{ runner.temp }}/starvector-pinned-inference
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Fetch the exact public inference terminal contract
         run: |
           set -euo pipefail
-          git init "$STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT"
-          git -C "$STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT" remote add origin https://github.com/SceneWorks/inference.git
-          git -C "$STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT" fetch --depth=1 origin 669f749b428ed65acfdfee917bcf601b8cf6db1c
-          git -C "$STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT" checkout --detach FETCH_HEAD
-          test "$(git -C "$STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT" rev-parse HEAD)" = 669f749b428ed65acfdfee917bcf601b8cf6db1c
+          inference_root="$RUNNER_TEMP/starvector-pinned-inference"
+          echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"
+          git init "$inference_root"
+          git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference.git
+          git -C "$inference_root" fetch --depth=1 origin c6eb6d8e9545193eac844f6fea2db79e4d14bf2a
+          git -C "$inference_root" checkout --detach FETCH_HEAD
+          test "$(git -C "$inference_root" rev-parse HEAD)" = c6eb6d8e9545193eac844f6fea2db79e4d14bf2a
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
